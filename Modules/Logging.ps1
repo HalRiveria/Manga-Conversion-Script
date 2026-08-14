@@ -29,6 +29,20 @@
     whichever runspace's own script-scope state was set, not the main
     thread's, when Write-Log is invoked from inside a worker.
 
+    Write-Log/Write-SummaryLog both go through the internal
+    Invoke-MutexGuardedWrite helper, which absorbs
+    AbandonedMutexException (a previous holder terminating without
+    releasing - e.g. a force-stopped worker mid-write - still results in
+    a successful acquire, not a failure) so every WaitOne() call site
+    doesn't need to repeat that handling itself.
+
+    Initialize-LogPaths's full-logging branch Recycle-Bins old log files
+    left over from previous runs against the same target, via
+    Move-ToRecycleBin - a FORWARD REFERENCE to the not-yet-built
+    FileDeletion module (see the comment at that call site). Callers that
+    dot-source Logging.ps1 standalone (as the harness does) must stub
+    that function out themselves until FileDeletion.ps1 exists for real.
+
 .NOTES
     Extracted from Conversion Script Main.ps1 - see
     Modules\_Reference\Logging.reference.ps1 for the verbatim source this
@@ -123,6 +137,32 @@ function Initialize-LogPaths {
         $script:logErrorFile   = $null
         $script:logWarnFile    = $null
         $script:SummaryFileEnabled = $true   # DisableSummaryFile is ignored in this mode - see param docs
+
+        # Clean up old full-logging files left over from previous runs
+        # against this same target (same $pathHashShort) - each run gets
+        # its own timestamped file and nothing ever deleted them before.
+        # Recycle-Bin'd, not permanently deleted, regardless of
+        # $PermanentDelete - these are the user's own log history, not a
+        # job-generated intermediate (see CLAUDE.md's deletion-semantics
+        # convention), so they get the safer default unconditionally.
+        #
+        # FORWARD REFERENCE: Move-ToRecycleBin isn't defined in this
+        # module - it's the FileDeletion module's function
+        # (Modules\_Reference\FileDeletion.reference.ps1), which does not
+        # exist as real code yet. Calling it here now, per explicit
+        # instruction, rather than duplicating its Recycle-Bin logic
+        # inline. TODO once Modules\FileDeletion.ps1 is actually built:
+        # come back here and confirm this call still matches its real
+        # signature (-ItemPath <string>, single file/dir path) and that
+        # dot-sourcing order (FileDeletion before Logging) is satisfied by
+        # every caller - Logging.Harness.ps1 stubs this function out in
+        # the meantime.
+        $oldLogPattern = "Conversion Log - * - " + $pathHashShort + ".log"
+        $oldLogs = Get-ChildItem -LiteralPath $ScriptDir -Filter $oldLogPattern -File -ErrorAction SilentlyContinue |
+                   Where-Object { $_.FullName -ne $script:logFile }
+        foreach ($oldLog in $oldLogs) {
+            try { Move-ToRecycleBin -ItemPath $oldLog.FullName } catch { }
+        }
     } else {
         $script:logFile            = $null
         $script:SummaryFileEnabled = -not $DisableSummaryFile
@@ -138,6 +178,36 @@ function Initialize-LogPaths {
     }
 }
 
+function Invoke-MutexGuardedWrite {
+    <#
+    .SYNOPSIS
+        Internal helper (not meant to be called from outside this module) -
+        runs $Action while holding $script:logMutex, if one is set.
+    .DESCRIPTION
+        Centralizes AbandonedMutexException handling in one place instead
+        of repeating it at every WaitOne() call site. WaitOne() throws
+        AbandonedMutexException when a previous holder terminated (e.g. a
+        force-stopped worker mid-write) without releasing - but the
+        calling thread still successfully acquires the mutex when that
+        happens, it's a warning wrapped in an exception, not a failure.
+        So: catch it and proceed as normal (do NOT skip $Action or skip
+        releasing - either would leave the mutex abandoned again for the
+        next caller, cascading the same exception forever).
+    #>
+    param([scriptblock]$Action)
+
+    $mtx = $script:logMutex
+    try {
+        if ($null -ne $mtx) {
+            try { $null = $mtx.WaitOne() }
+            catch [System.Threading.AbandonedMutexException] { }
+        }
+        & $Action
+    } finally {
+        if ($null -ne $mtx) { try { $mtx.ReleaseMutex() } catch { } }
+    }
+}
+
 function Write-Log {
     param(
         [string]$Message,
@@ -147,29 +217,15 @@ function Write-Log {
     $line = (Get-Date -Format "yyyy-MM-dd HHmmss") + " [" + $Level + "] " + $Message
     $safeLine = [System.Text.RegularExpressions.Regex]::Replace($line, "[^\x00-\x7F]", "?")
 
-    $mtx = $script:logMutex
-
     if ($script:FullLogging) {
         # Full-logging mode: every level goes to the single timestamped file
-        try   {
-            if ($null -ne $mtx) { $null = $mtx.WaitOne() }
-            $safeLine | Out-File -FilePath $script:logFile -Append -Encoding ASCII
-        }
-        finally { if ($null -ne $mtx) { $mtx.ReleaseMutex() } }
+        Invoke-MutexGuardedWrite { $safeLine | Out-File -FilePath $script:logFile -Append -Encoding ASCII }
     } else {
         # Split-log mode
         if ($Level -eq "Error") {
-            try   {
-                if ($null -ne $mtx) { $null = $mtx.WaitOne() }
-                $safeLine | Out-File -FilePath $script:logErrorFile -Append -Encoding ASCII
-            }
-            finally { if ($null -ne $mtx) { $mtx.ReleaseMutex() } }
+            Invoke-MutexGuardedWrite { $safeLine | Out-File -FilePath $script:logErrorFile -Append -Encoding ASCII }
         } elseif ($Level -eq "Warn") {
-            try   {
-                if ($null -ne $mtx) { $null = $mtx.WaitOne() }
-                $safeLine | Out-File -FilePath $script:logWarnFile -Append -Encoding ASCII
-            }
-            finally { if ($null -ne $mtx) { $mtx.ReleaseMutex() } }
+            Invoke-MutexGuardedWrite { $safeLine | Out-File -FilePath $script:logWarnFile -Append -Encoding ASCII }
         } elseif ($Level -eq "Summary") {
             # Summary is written later in block form; nothing to do per-line here
         }
@@ -216,9 +272,7 @@ function Write-SummaryLog {
         [System.Text.RegularExpressions.Regex]::Replace($_, "[^\x00-\x7F]", "?")
     }
 
-    $mtx = $script:logMutex
-    try {
-        if ($null -ne $mtx) { $null = $mtx.WaitOne() }
+    Invoke-MutexGuardedWrite {
         $existing = ""
         if (Test-Path -LiteralPath $script:logSummaryFile) {
             $existing = [System.IO.File]::ReadAllText($script:logSummaryFile)
@@ -226,7 +280,6 @@ function Write-SummaryLog {
         $newContent = ($safeBlock -join "`r`n") + "`r`n" + $existing
         [System.IO.File]::WriteAllText($script:logSummaryFile, $newContent, [System.Text.Encoding]::ASCII)
     }
-    finally { if ($null -ne $mtx) { $mtx.ReleaseMutex() } }
 }
 
 function Flush-ConsoleQueue {

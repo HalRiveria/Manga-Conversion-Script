@@ -45,6 +45,21 @@ function Reset-LoggingState {
     $script:SummaryFileEnabled = $true
 }
 
+# Logging.ps1's Initialize-LogPaths (full-logging branch) forward-references
+# Move-ToRecycleBin - the not-yet-built FileDeletion module's function - to
+# clean up old log files. Stubbed here so every scenario below runs against
+# something real instead of Initialize-LogPaths' internal try/catch silently
+# swallowing a "command not found". This stub actually deletes the file (so
+# assertions can confirm cleanup happened) and records every path it was
+# called with (so Scenario M can confirm it was called with the RIGHT path,
+# not just "some" path).
+$script:recycleBinCalls = [System.Collections.Generic.List[string]]::new()
+function Move-ToRecycleBin {
+    param([string]$ItemPath)
+    $script:recycleBinCalls.Add($ItemPath)
+    if (Test-Path -LiteralPath $ItemPath) { Remove-Item -LiteralPath $ItemPath -Force }
+}
+
 # ==============================================================================
 #  Scenario A: Initialize-LogPaths, full-logging mode
 # ==============================================================================
@@ -266,7 +281,7 @@ Write-Log "main thread's own line"
 $mainThreadLogFile = $script:logFile
 
 $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-foreach ($fn in @('Write-Log')) {
+foreach ($fn in @('Write-Log', 'Invoke-MutexGuardedWrite')) {
     $fnDef = (Get-Item ("Function:\" + $fn)).Definition
     $iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList $fn, $fnDef))
 }
@@ -317,6 +332,121 @@ Initialize-LogPaths -TargetPath "C:\K2\Path" -FullLogging $false -ScriptDir $scr
 $splitThrew = $false
 try { Write-LogFileSummary } catch { $splitThrew = $true }
 Test-Assert (-not $splitThrew) "Write-LogFileSummary does not throw in split-log mode"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario L: WaitOne() on an abandoned mutex - Write-Log must not throw,
+#  must still write the line, and must leave the mutex properly released
+#  (not just "caught and moved on" while secretly still holding it, which
+#  would re-trigger AbandonedMutexException on every subsequent call
+#  forever). Abandonment is produced for real via a background runspace
+#  (matching Scenario J's already-proven-safe machinery) that opens the
+#  SAME named mutex, acquires it, and returns without releasing - NOT via
+#  a raw System.Threading.Thread: a first attempt at this scenario used a
+#  scriptblock cast to [System.Threading.ThreadStart] run on a bare CLR
+#  thread, and it crashed the entire harness process outright (no PASS/
+#  FAIL output, no summary - just exit 5). Root cause: a PowerShell
+#  scriptblock needs an associated runspace to execute - invoking one on a
+#  thread with no runspace throws immediately, and an unhandled exception
+#  on a background thread terminates the whole process by default .NET
+#  behavior. A live-reproduced case of "looked reasonable by analogy,
+#  wasn't tested" (see CLAUDE.md's Lessons Learned) - fixed by using the
+#  same runspace-based technique already proven safe elsewhere in this
+#  harness instead of a new untested pattern.
+# ==============================================================================
+Write-Host "=== Scenario L: Write-Log recovers from an abandoned mutex ===" -ForegroundColor Cyan
+Reset-LoggingState
+Initialize-LogPaths -TargetPath "C:\L\Path" -FullLogging $true -ScriptDir $scratchDir
+
+$abandonMutexName = "LoggingHarnessAbandonMutex_" + [guid]::NewGuid().ToString("N")
+$sharedMutex = [System.Threading.Mutex]::new($false, $abandonMutexName)
+
+$abandonPool = [RunspaceFactory]::CreateRunspacePool(1, 1)
+$abandonPool.Open()
+$abandonPs = [PowerShell]::Create()
+$abandonPs.RunspacePool = $abandonPool
+$null = $abandonPs.AddScript({
+    param($MutexName)
+    $m = [System.Threading.Mutex]::OpenExisting($MutexName)
+    $null = $m.WaitOne()
+    # deliberately no ReleaseMutex - once this runspace worker finishes
+    # and is torn down, the mutex is left genuinely abandoned.
+})
+$null = $abandonPs.AddArgument($abandonMutexName)
+$abandonHandle = $abandonPs.BeginInvoke()
+$null = $abandonPs.EndInvoke($abandonHandle)   # blocks until the worker has acquired-and-returned
+$abandonPs.Dispose()
+$abandonPool.Close()
+$abandonPool.Dispose()
+
+$script:logMutex = $sharedMutex
+
+$abandonThrew = $false
+try { Write-Log "line written despite an abandoned mutex" } catch { $abandonThrew = $true }
+Test-Assert (-not $abandonThrew) "Write-Log does not throw when WaitOne() hits an abandoned mutex"
+
+$logContentL = Get-Content -LiteralPath $script:logFile
+Test-Assert ($logContentL -like "*line written despite an abandoned mutex*") "the line was still written despite the abandoned mutex"
+
+$secondCallThrew = $false
+try { Write-Log "second line, proving the mutex was properly released" } catch { $secondCallThrew = $true }
+Test-Assert (-not $secondCallThrew) "a second Write-Log call afterward also succeeds - the mutex was released, not left held"
+
+$script:logMutex.Dispose()
+$script:logMutex = $null
+Write-Host ""
+
+# ==============================================================================
+#  Scenario M: Initialize-LogPaths (full-logging mode) Recycle-Bins old log
+#  files from a previous run against the SAME target (same pathHash), and
+#  leaves a DIFFERENT target's log files alone. Move-ToRecycleBin is the
+#  forward-referenced stub defined near the top of this file.
+# ==============================================================================
+Write-Host "=== Scenario M: old full-logging files cleaned up via Move-ToRecycleBin ===" -ForegroundColor Cyan
+$script:recycleBinCalls.Clear()
+
+Reset-LoggingState
+Initialize-LogPaths -TargetPath "C:\M-TargetA\Path" -FullLogging $true -ScriptDir $scratchDir
+$aFirstLogFile = $script:logFile
+Write-Log "target A, first run"
+
+Reset-LoggingState
+Initialize-LogPaths -TargetPath "C:\M-TargetB\Path" -FullLogging $true -ScriptDir $scratchDir
+$bLogFile = $script:logFile
+Write-Log "target B, only run"
+
+Start-Sleep -Milliseconds 1100   # distinct HHmmss timestamp for target A's second run
+Reset-LoggingState
+Initialize-LogPaths -TargetPath "C:\M-TargetA\Path" -FullLogging $true -ScriptDir $scratchDir
+$aSecondLogFile = $script:logFile
+
+Test-Assert ($aSecondLogFile -ne $aFirstLogFile) "target A's second run got its own distinct timestamped file"
+Test-Assert ($script:recycleBinCalls.Count -eq 1 -and $script:recycleBinCalls[0] -eq $aFirstLogFile) ("target A's old log was passed to Move-ToRecycleBin exactly once (got " + $script:recycleBinCalls.Count + " call(s))")
+Test-Assert (-not (Test-Path -LiteralPath $aFirstLogFile)) "target A's old log file is gone from disk after cleanup"
+Test-Assert (Test-Path -LiteralPath $bLogFile) "target B's log file (different pathHash) was left untouched"
+Test-Assert ($script:recycleBinCalls -notcontains $bLogFile) "target B's log file was never passed to Move-ToRecycleBin"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario M2: a failing Move-ToRecycleBin (e.g. a locked file) must not
+#  propagate out of Initialize-LogPaths - the try/catch around that call
+#  site exists specifically so one un-deletable stale log can't block an
+#  entire run from starting.
+# ==============================================================================
+Write-Host "=== Scenario M2: a failing Move-ToRecycleBin does not propagate ===" -ForegroundColor Cyan
+Reset-LoggingState
+Initialize-LogPaths -TargetPath "C:\M2\Path" -FullLogging $true -ScriptDir $scratchDir
+Write-Log "will become 'old' and fail to recycle"
+
+$originalMoveToRecycleBin = ${function:Move-ToRecycleBin}
+function Move-ToRecycleBin { param([string]$ItemPath) throw "simulated locked file" }
+
+Start-Sleep -Milliseconds 1100
+$initThrew = $false
+try { Initialize-LogPaths -TargetPath "C:\M2\Path" -FullLogging $true -ScriptDir $scratchDir } catch { $initThrew = $true }
+Test-Assert (-not $initThrew) "Initialize-LogPaths does not propagate an exception from a failing Move-ToRecycleBin call"
+
+${function:Move-ToRecycleBin} = $originalMoveToRecycleBin
 Write-Host ""
 
 # ==============================================================================
