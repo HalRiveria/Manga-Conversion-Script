@@ -1,57 +1,6 @@
 #Requires -Version 5.1
 
-# ==============================================================================
-# !! AI ASSISTANT — READ BEFORE MAKING ANY CHANGES !!
-# ==============================================================================
-# 1. Confirm you have seen these instructions in your first sentence. No need
-#    to confirm multiple times per session.
-# 2. Always review potential changes and bug fixes with the user before
-#    implementing. Never make any major alterations to script functionality
-#    without user input. As a rough guide: converting a toggle to a parameter,
-#    rewording log/help text, or other small structural tweaks are fine to
-#    discuss inline and implement; changes to the parallelization model,
-#    deletion logic, conversion pipeline, or other core behaviour need
-#    explicit sign-off before implementing.
-# 3. The script must remain PowerShell 5.1 compatible.
-# 4. Before making any changes related to cjxl or magick, review documentation
-#    to ensure the changes being made are actually supported/exist.
-# 5. When reporting bugs, only report them after confirming they are actually
-#    bugs. Don't report then decide "oh actually, this isn't a bug" — confirm
-#    before reporting.
-# 6. Document changes in the changelog at the bottom of the script and update
-#    the version number at the top — but only when a new version is warranted
-#    (see below). For minor edits made within an ongoing session (small fixes,
-#    tweaks, clarifications), append to or amend the existing top changelog
-#    entry, without incrementing the version number. If you think an
-#    accumulation of changes (or a single substantial one) warrants a new
-#    version number, ask before bumping it. See the "Versioning convention"
-#    note at the top of the changelog for the major/minor distinction.
-# 7. As of v15.0, logging/deletion/zip-creation/image-conversion are each a
-#    single shared function (Write-Log, Move-ToRecycleBin, Remove-ItemPermanently,
-#    Remove-Source, Compress-FolderToZip, Test-ZipArchive, Convert-ImageBatch)
-#    used by BOTH the ZIP-worker pipeline and the loose-image pipeline - there
-#    is no more RS-Log/RS-Delete/etc. duplicate set. The ZIP worker runs in a
-#    separate runspace, so these functions are registered into it via an
-#    InitialSessionState (see the $iss/SessionStateFunctionEntry block right
-#    before `[RunspaceFactory]::CreateRunspacePool(...)`), and the worker
-#    bootstraps script-scope variables (`$script:logFile`, `$script:PermanentDelete`,
-#    etc.) at the top of $zipWorker so those shared functions resolve the same
-#    unqualified variable names they'd find at the main script's top level.
-#    If you add a new shared function, it must be added to BOTH that $iss
-#    foreach list AND (if it references script-scope config) have its inputs
-#    bootstrapped the same way. Do not reintroduce a duplicate copy inside
-#    $zipWorker to "fix" a scoping issue - fix the bootstrap instead.
-# 8. This file is large (2500+ lines). Prefer targeted edits (e.g. str_replace
-#    on the specific lines involved) over regenerating or rewriting whole
-#    sections, to avoid incidental changes to unrelated formatting or code.
-# 9. Log/console output must remain ASCII-only — emoji-prefixed messages were
-#    deliberately removed in v4.0. Don't reintroduce emoji or other non-ASCII
-#    characters into log/console strings.
-# 10. There is no PowerShell interpreter available to test changes in. For
-#     non-trivial edits, carefully review brace/paren/quote balance manually.
-# ==============================================================================
-
-#Convert-MultiToJXL Version 16.0
+#Conversion Script Version 16.1
 
 <# Requirements:
 #   - PowerShell      : 5.1 or later (built into Windows 10/11; PowerShell 7+ also supported)
@@ -1192,13 +1141,40 @@ function Get-ZippableLeafDirs {
 #  already-dispatched ones may still be running. There is no third "skip
 #  this one, but keep scanning" return value: a provider that needs to skip
 #  items (already-done, doesn't qualify, etc.) does that itself, looping
-#  internally past them before returning the next real job or $null - see
-#  the ZIP-extraction pipeline's provider for the pattern (peek an entry,
-#  loop to the next on skip, return on a qualifying one or list exhaustion).
+#  internally past them before returning the next real job or $null.
 #  This is what lets scanning/peeking interleave with dispatch instead of
 #  requiring the full candidate list to be discovered before anything can
-#  start, which the ZIP-extraction pipeline's incremental ZIP-peeking needs
-#  and the zip-only pipeline's up-front directory scan doesn't.
+#  start - needed for anything that peeks items one at a time (e.g. the
+#  ZIP-extraction pipeline's per-ZIP image check, if it's ever migrated onto
+#  this), not needed for the zip-only pipeline's up-front directory scan.
+#
+#  *** CRITICAL when writing a -NextJobProvider: any counter/position state
+#  it needs to persist between calls should be a hashtable/psobject property
+#  (e.g. $state.Index++), matching the pattern proven to work live (see the
+#  ZIP-extraction pipeline's provider, if it's ever migrated onto this, and
+#  Zip_Files-claude-parallel.ps1's peek logic for the shape). This function's
+#  own internal -JobParams handling avoids a nested closure entirely (see
+#  below) specifically because two different attempts at one - first a plain
+#  scalar counter, then a [ref]-wrapped one - were BOTH reproduced live as
+#  infinite loops: the counter silently never advanced past 0, so the same
+#  first job was dispatched forever. [ref] was expected to fix it by analogy
+#  with hashtable-based state elsewhere in this codebase (-ResultHandler,
+#  Convert-ImageBatch's -AbortPollCallback) but did not - a real test caught
+#  that the fix was wrong before a second, more confident-sounding but still
+#  incorrect claim went unchallenged. The exact mechanism was not conclusively
+#  pinned down; what IS confirmed by a passing test is that a closure defined
+#  outside this function (an actual -NextJobProvider supplied by a caller,
+#  using hashtable state) works correctly when invoked via & from inside this
+#  function's loop. A closure defined AND invoked entirely within this same
+#  function's own body did not work reliably regardless of how its captured
+#  state was wrapped, so that pattern is avoided here rather than trusted.
+#  If you add another internal closure to this function, do not assume it
+#  will behave the same as -ResultHandler/-NextJobProvider without testing it
+#  the same way this was (live, via a standalone harness - see
+#  Modules\ZipParallelProcessing.ps1 for the pattern) - static review missed
+#  this twice. Note: that module is this function's own renamed successor
+#  (Invoke-ZipParallelProcessing), not a copy kept in sync with THIS
+#  function anymore - see its own file header for why.
 #
 #  -SharedFunctionNames: functions registered into each runspace via
 #  InitialSessionState (e.g. 'Write-Log','Remove-Source').
@@ -1245,22 +1221,13 @@ function Invoke-ParallelFolderJobs {
         throw "Invoke-ParallelFolderJobs: supply only one of -JobParams or -NextJobProvider, not both."
     }
 
-    # Normalize -JobParams into a provider closure internally, so the rest of
-    # this function has only one dispatch code path to maintain.
-    if ($null -ne $JobParams) {
-        if ($JobParams.Count -eq 0) { return @{ ForceStoppedCount = 0 } }
-        $fixedListIndex = 0
-        $provider = {
-            if ($fixedListIndex -lt $JobParams.Count) {
-                $j = $JobParams[$fixedListIndex]
-                $fixedListIndex++
-                return $j
-            }
-            return $null
-        }
-    } else {
-        $provider = $NextJobProvider
-    }
+    if ($null -ne $JobParams -and $JobParams.Count -eq 0) { return @{ ForceStoppedCount = 0 } }
+
+    # Plain counter, only used when -JobParams was supplied; read and
+    # incremented directly in the dispatch loop below (not inside any nested
+    # scriptblock/closure - see the CRITICAL note above -NextJobProvider in
+    # the docstring for why that distinction matters here).
+    $fixedListIndex = 0
 
     $localLogMutex   = [System.Threading.Mutex]::new($false, ("JxlLogMutex_" + $pathHash))
     $script:logMutex = $localLogMutex
@@ -1281,14 +1248,27 @@ function Invoke-ParallelFolderJobs {
 
     try {
         # ==================================================================
-        #  Combined provider + dispatch + collect loop. Exits once the
-        #  provider is exhausted and every dispatched job has returned, or
+        #  Combined get-next-job + dispatch + collect loop. Exits once the
+        #  job source is exhausted and every dispatched job has returned, or
         #  once the abort flag is set (the graceful drain below takes over).
         # ==================================================================
         while ((-not $scanExhausted -or $localHandles.Count -gt 0) -and -not $Cts.Token.IsCancellationRequested) {
 
             while (-not $scanExhausted -and $localHandles.Count -lt $MaxParallel -and -not $Cts.Token.IsCancellationRequested) {
-                $nextJob = & $provider
+                # -JobParams handled directly here (plain local counter, no
+                # closure); -NextJobProvider is the caller's own closure,
+                # invoked via & - see the docstring's CRITICAL note on that
+                # for what a provider's own internal state must do instead.
+                if ($null -ne $JobParams) {
+                    if ($fixedListIndex -lt $JobParams.Count) {
+                        $nextJob = $JobParams[$fixedListIndex]
+                        $fixedListIndex++
+                    } else {
+                        $nextJob = $null
+                    }
+                } else {
+                    $nextJob = & $NextJobProvider
+                }
                 if ($null -eq $nextJob) { $scanExhausted = $true; break }
 
                 $ps = [PowerShell]::Create()

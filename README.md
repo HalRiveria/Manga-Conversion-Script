@@ -15,8 +15,22 @@ session (human or Claude Code), and `CHANGELOG.md` for full version history.
 
 | File | What it does |
 |---|---|
-| `Conversion Script Main.ps1` | Main conversion script (currently v16.0). Extracts ZIPs, converts images to `.jxl`, re-zips, handles loose files, zip-only archiving. Four modes: loose-only, loose+zip, zip-only, rezip-only. |
-| `Test-InvokeParallelFolderJobs.ps1` | Standalone test harness for `Invoke-ParallelFolderJobs`, the shared parallel-dispatch module. Copies the real function verbatim (not reimplemented) so it tests actual behavior, not a guess at it. |
+| `Conversion Script Main.ps1` | Main conversion script (currently v16.1). Extracts ZIPs, converts images to `.jxl`, re-zips, handles loose files, zip-only archiving. Four modes: loose-only, loose+zip, zip-only, rezip-only. |
+
+`Modules\` holds every standalone module built per the development process
+below - not yet merged into the main script, or (once merged) kept around
+as the canonical, independently-testable definition. Two are actually
+built and tested (`ZipParallelProcessing`, `AbortPipeline`); the other
+fourteen are empty placeholders with a corresponding extraction in
+`Modules\_Reference\` - see `Todo.md` for the current state of each:
+
+| File | What it does |
+|---|---|
+| `Modules\ZipParallelProcessing.ps1` | `Invoke-ZipParallelProcessing`, the parallel-dispatch engine for the zip-only pipeline (mode 3) - pure definitions, no top-level side effects, safe to dot-source. Renamed from `Invoke-ParallelFolderJobs`/`InvokeParallelFolderJobs.ps1` since it's currently zip-specific; the main script's own inline copy of the same algorithm still uses the older name until mode 3 (and eventually mode 4) migrates onto this module - see its file header. |
+| `Modules\ZipParallelProcessing.Harness.ps1` | Standalone test harness for `ZipParallelProcessing.ps1`. |
+| `Modules\AbortPipeline.ps1` | Standalone module (not yet merged into the main script): the Ctrl+C/window-close abort pipeline - `ConsoleCtrl`, abort-state tracking, a CTS registry, and a generalized graceful-drain/force-stop function - centralizing logic currently duplicated across modes 3/4 in the main script. |
+| `Modules\AbortPipeline.Harness.ps1` | Standalone test harness for `AbortPipeline.ps1`. |
+| `Modules\_Reference\*.reference.ps1` | Extracted-but-not-yet-built reference material for every module, including the two above - not working code, see `CLAUDE.md`'s "Modularization in progress" section. |
 
 Earlier working scripts, including the standalone `Zip_Files-claude-parallel.ps1`
 that the staleness-check and former-container-guard logic were ported from,
@@ -37,9 +51,16 @@ Conversion Script/
 ├── .gitignore
 ├── README.md
 ├── CLAUDE.md              <- persistent context for Claude Code sessions
-├── CHANGELOG.md           <- full version history (v1.0 → v16.0)
+├── CHANGELOG.md           <- full version history (v1.0 → v16.1)
+├── Todo.md                <- live modularization checklist
 ├── Conversion Script Main.ps1
-├── Test-InvokeParallelFolderJobs.ps1
+├── Modules/               <- every standalone module lives here
+│   ├── ZipParallelProcessing.ps1
+│   ├── ZipParallelProcessing.Harness.ps1
+│   ├── AbortPipeline.ps1
+│   ├── AbortPipeline.Harness.ps1
+│   ├── (14 more placeholder modules - see Todo.md)
+│   └── _Reference/        <- extracted reference material per module
 ├── Testing/               <- scratch copy scripts run against (gitignored)
 └── Backups/               <- original test media, never touched by scripts (gitignored)
     └── Old Scripts/       <- earlier working versions, kept for reference
@@ -54,23 +75,34 @@ current source; the latter is regenerated scratch content.
 ## Development approach
 
 New functionality is built as an independent module first (its own file,
-its own test harness), verified working in isolation, and only merged into
-the main script once proven. `Invoke-ParallelFolderJobs` / its test harness
-is the first example of this pattern - not a one-off, the intended process
-going forward.
+its own test harness, living in `Modules\`), verified working in isolation,
+and only merged into the main script once proven. `Invoke-ZipParallelProcessing`
+(`Modules\ZipParallelProcessing.ps1`) is the first example of this pattern -
+not a one-off, the intended process going forward.
 
-Testing is currently manual: standalone `Test-*.ps1` harnesses run directly
-(`.\Test-InvokeParallelFolderJobs.ps1 -RunSlowTest`), since there's no CI
-runner configured against this local-only repo yet.
+Testing is currently manual: standalone test harnesses run directly
+(`.\Modules\ZipParallelProcessing.Harness.ps1 -RunSlowTest`), since there's
+no CI runner configured against this local-only repo yet.
 
 ## Known open items
 
-- Mode 4 (rezip/ZIP-extraction pipeline) still uses its own inline parallel-
-  dispatch logic rather than `Invoke-ParallelFolderJobs` - migration planned,
-  not yet done.
-- A narrow race condition exists in `Invoke-ParallelFolderJobs`'s abort-drain
-  logic (a job finishing in the final ~250ms before the 60s force-stop
-  timeout can have its result silently dropped) - documented, not yet fixed.
+- Mode 3 (zip-only pipeline) still has its own inline copy of the parallel-
+  dispatch algorithm (under the name `Invoke-ParallelFolderJobs`) instead of
+  dot-sourcing `Modules\ZipParallelProcessing.ps1`'s `Invoke-ZipParallelProcessing` -
+  migration planned, not yet done. Mode 4 (rezip/ZIP-extraction pipeline)
+  has its own separate inline copy of the same kind of dispatch logic too -
+  also not yet migrated onto the module.
+- A narrow race condition exists in the main script's inline
+  `Invoke-ParallelFolderJobs` abort-drain logic (a job finishing in the
+  final ~250ms before the 60s force-stop timeout can have its result
+  silently dropped) - documented, and fixed in
+  `Modules\ZipParallelProcessing.ps1`'s rewrite of the same logic, but the
+  main script's copy hasn't been migrated to use it yet.
+- `Modules\AbortPipeline.ps1` centralizes the abort/graceful-drain logic
+  that's currently duplicated (with variations) across the main script's
+  inline `Invoke-ParallelFolderJobs`, the ZIP-extraction pipeline's inline
+  dispatch loop, and the loose-image pipeline. Built and verified
+  standalone; not yet wired into the main script.
 - AVIF→WebP conversion pipeline not yet integrated (separate existing script
   to be merged in).
 
