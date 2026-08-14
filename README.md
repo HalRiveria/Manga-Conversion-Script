@@ -19,16 +19,17 @@ session (human or Claude Code), and `CHANGELOG.md` for full version history.
 
 `Modules\` holds every standalone module built per the development process
 below - not yet merged into the main script, or (once merged) kept around
-as the canonical, independently-testable definition. Two are actually
-built and tested (`ZipParallelProcessing`, `AbortPipeline`); the other
-fourteen are empty placeholders with a corresponding extraction in
-`Modules\_Reference\` - see `Todo.md` for the current state of each:
+as the canonical, independently-testable definition. Three are actually
+built and tested (`ZipParallelProcessing`, `AbortPipeline`, `Logging`);
+the other thirteen are empty placeholders with a corresponding extraction
+in `Modules\_Reference\` - see `Todo.md` for the current state of each:
 
 | File | What it does |
 |---|---|
 | `Modules\ZipParallelProcessing.ps1` | `Invoke-ZipParallelProcessing`, the parallel-dispatch engine for the zip-only pipeline (mode 3) - pure definitions, no top-level side effects, safe to dot-source. Renamed from `Invoke-ParallelFolderJobs`/`InvokeParallelFolderJobs.ps1` since it's currently zip-specific; the main script's own inline copy of the same algorithm still uses the older name until mode 3 (and eventually mode 4) migrates onto this module - see its file header. |
 | `Modules\AbortPipeline.ps1` | Standalone module (not yet merged into the main script): the Ctrl+C/window-close abort pipeline - `ConsoleCtrl`, abort-state tracking, a CTS registry, and a generalized graceful-drain/force-stop function - centralizing logic currently duplicated across modes 3/4 in the main script. |
-| `Modules\_Harness\*.Harness.ps1` | Standalone test harness per built module (`ZipParallelProcessing.Harness.ps1`, `AbortPipeline.Harness.ps1` so far) - dot-sources the real module from `..\`. |
+| `Modules\Logging.ps1` | `Write-Log`, `Write-SummaryLog`, `Flush-ConsoleQueue`, plus `Initialize-LogPaths` (call once before anything logs). Includes a `-DisableSummaryFile` toggle (split-log mode only) that skips writing the Summary file to disk while leaving console output untouched. |
+| `Modules\_Harness\*.Harness.ps1` | Standalone test harness per built module (`ZipParallelProcessing.Harness.ps1`, `AbortPipeline.Harness.ps1`, `Logging.Harness.ps1` so far) - dot-sources the real module from `..\`. |
 | `Modules\_Reference\*.reference.ps1` | Extracted-but-not-yet-built reference material for every module, including the two above - not working code, see `CLAUDE.md`'s "Modularization in progress" section. |
 
 Earlier working scripts, including the standalone `Zip_Files-claude-parallel.ps1`
@@ -56,7 +57,8 @@ Conversion Script/
 ├── Modules/               <- every standalone module lives here
 │   ├── ZipParallelProcessing.ps1
 │   ├── AbortPipeline.ps1
-│   ├── (14 more placeholder modules - see Todo.md)
+│   ├── Logging.ps1
+│   ├── (13 more placeholder modules - see Todo.md)
 │   ├── _Harness/          <- test harness per built module
 │   └── _Reference/        <- extracted reference material per module
 ├── Testing/               <- scratch copy scripts run against (gitignored)
