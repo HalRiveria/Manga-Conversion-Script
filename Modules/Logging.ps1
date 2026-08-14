@@ -43,6 +43,20 @@
     dot-source Logging.ps1 standalone (as the harness does) must stub
     that function out themselves until FileDeletion.ps1 exists for real.
 
+    Log files are written UTF-8, not ASCII - the historical ASCII-only
+    rule (see CHANGELOG.md v3.0/v4.0) was about emoji/unicode literally
+    hardcoded into the script's own SOURCE causing problems, not about
+    runtime log content, so it doesn't apply to the log file's own
+    encoding. Non-ASCII message text (this project's manga-library domain
+    routinely has Japanese/Korean/Chinese filenames) is written through
+    as-is, not sanitized to "?" like the original extraction did.
+
+    Initialize-LogMutex centralizes the "JxlLogMutex_" + pathHash naming
+    convention, previously reimplemented independently at 3 call sites
+    (see its own header comment). Not yet adopted by those call sites -
+    this only makes the shared implementation available, migrating the
+    existing duplicates is separate, not-yet-authorized work.
+
 .NOTES
     Extracted from Conversion Script Main.ps1 - see
     Modules\_Reference\Logging.reference.ps1 for the verbatim source this
@@ -178,6 +192,41 @@ function Initialize-LogPaths {
     }
 }
 
+function Initialize-LogMutex {
+    <#
+    .SYNOPSIS
+        Creates/attaches $script:logMutex to the shared "JxlLogMutex_" +
+        pathHash named mutex, so every runspace synchronizing against the
+        same target's log files uses the SAME underlying OS mutex.
+    .DESCRIPTION
+        This naming convention ("JxlLogMutex_" + pathHash) used to be
+        independently reimplemented at every call site that needed it
+        (previously: Conversion Script Main.ps1 twice, and
+        ZipParallelProcessing.ps1 once - confirmed via grep, not just
+        suspected) rather than being this module's own responsibility.
+        Centralized here now. NOT YET adopted by those existing call
+        sites - see CLAUDE.md's "Known gaps" for why, and don't migrate
+        them without an explicit go-ahead first (they're already-built,
+        already-tested modules/script sections).
+    .PARAMETER PathHash
+        Defaults to $script:pathHash (set by Initialize-LogPaths) if not
+        supplied. Must be passed explicitly from a runspace worker that
+        hasn't called Initialize-LogPaths itself - the established
+        pattern elsewhere in this codebase (see the module header) is for
+        a worker to receive the values it needs as its own parameters,
+        since $script:pathHash inside a fresh runspace is independent
+        state, not inherited from the caller.
+    #>
+    param([string]$PathHash)
+
+    if ([string]::IsNullOrEmpty($PathHash)) { $PathHash = $script:pathHash }
+    if ([string]::IsNullOrEmpty($PathHash)) {
+        throw "Initialize-LogMutex: no -PathHash supplied and `$script:pathHash is not set - call Initialize-LogPaths first, or pass -PathHash explicitly (e.g. from a runspace worker's own parameters)."
+    }
+
+    $script:logMutex = [System.Threading.Mutex]::new($false, ("JxlLogMutex_" + $PathHash))
+}
+
 function Invoke-MutexGuardedWrite {
     <#
     .SYNOPSIS
@@ -215,17 +264,16 @@ function Write-Log {
     )
 
     $line = (Get-Date -Format "yyyy-MM-dd HHmmss") + " [" + $Level + "] " + $Message
-    $safeLine = [System.Text.RegularExpressions.Regex]::Replace($line, "[^\x00-\x7F]", "?")
 
     if ($script:FullLogging) {
         # Full-logging mode: every level goes to the single timestamped file
-        Invoke-MutexGuardedWrite { $safeLine | Out-File -FilePath $script:logFile -Append -Encoding ASCII }
+        Invoke-MutexGuardedWrite { $line | Out-File -FilePath $script:logFile -Append -Encoding UTF8 }
     } else {
         # Split-log mode
         if ($Level -eq "Error") {
-            Invoke-MutexGuardedWrite { $safeLine | Out-File -FilePath $script:logErrorFile -Append -Encoding ASCII }
+            Invoke-MutexGuardedWrite { $line | Out-File -FilePath $script:logErrorFile -Append -Encoding UTF8 }
         } elseif ($Level -eq "Warn") {
-            Invoke-MutexGuardedWrite { $safeLine | Out-File -FilePath $script:logWarnFile -Append -Encoding ASCII }
+            Invoke-MutexGuardedWrite { $line | Out-File -FilePath $script:logWarnFile -Append -Encoding UTF8 }
         } elseif ($Level -eq "Summary") {
             # Summary is written later in block form; nothing to do per-line here
         }
@@ -268,17 +316,13 @@ function Write-SummaryLog {
     $block += "=== End of run ==="
     $block += ""
 
-    $safeBlock = $block | ForEach-Object {
-        [System.Text.RegularExpressions.Regex]::Replace($_, "[^\x00-\x7F]", "?")
-    }
-
     Invoke-MutexGuardedWrite {
         $existing = ""
         if (Test-Path -LiteralPath $script:logSummaryFile) {
             $existing = [System.IO.File]::ReadAllText($script:logSummaryFile)
         }
-        $newContent = ($safeBlock -join "`r`n") + "`r`n" + $existing
-        [System.IO.File]::WriteAllText($script:logSummaryFile, $newContent, [System.Text.Encoding]::ASCII)
+        $newContent = ($block -join "`r`n") + "`r`n" + $existing
+        [System.IO.File]::WriteAllText($script:logSummaryFile, $newContent, [System.Text.Encoding]::UTF8)
     }
 }
 

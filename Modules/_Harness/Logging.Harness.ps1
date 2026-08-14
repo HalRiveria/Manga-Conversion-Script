@@ -121,7 +121,9 @@ Test-Assert ($hashA -ne $hashC) "different TargetPath produces a different pathH
 Write-Host ""
 
 # ==============================================================================
-#  Scenario D: Write-Log, full-logging mode - writes, appends, ASCII-safes
+#  Scenario D: Write-Log, full-logging mode - writes, appends, UTF-8 (not
+#  ASCII-sanitized - see CLAUDE.md on why the historical ASCII-only rule
+#  was about the script's own source, not log content).
 # ==============================================================================
 Write-Host "=== Scenario D: Write-Log, full-logging mode ===" -ForegroundColor Cyan
 Reset-LoggingState
@@ -135,8 +137,8 @@ $content = Get-Content -LiteralPath $script:logFile
 Test-Assert ($content.Count -eq 3) ("all 3 Write-Log calls appended (got " + $content.Count + " lines)")
 Test-Assert ($content[0] -like "*[Info]*first line*") "first line has Info level and correct message"
 Test-Assert ($content[1] -like "*[Warn]*second line*") "second line has Warn level and correct message"
-Test-Assert ($content[2] -notmatch 'caf.\s' -or $content[2] -match '\?') "non-ASCII characters were replaced (not passed through raw)"
-Test-Assert ($content[2] -notlike "*日本語*") "non-ASCII (Japanese) characters were not written raw"
+Test-Assert ($content[2] -like "*café*") "non-ASCII (accented) characters are written through as-is, not sanitized"
+Test-Assert ($content[2] -like "*日本語*") "non-ASCII (Japanese) characters are written through as-is, not sanitized"
 Write-Host ""
 
 # ==============================================================================
@@ -447,6 +449,71 @@ try { Initialize-LogPaths -TargetPath "C:\M2\Path" -FullLogging $true -ScriptDir
 Test-Assert (-not $initThrew) "Initialize-LogPaths does not propagate an exception from a failing Move-ToRecycleBin call"
 
 ${function:Move-ToRecycleBin} = $originalMoveToRecycleBin
+Write-Host ""
+
+# ==============================================================================
+#  Scenario N: Initialize-LogMutex creates a working mutex from
+#  $script:pathHash (set by a prior Initialize-LogPaths call).
+# ==============================================================================
+Write-Host "=== Scenario N: Initialize-LogMutex from `$script:pathHash ===" -ForegroundColor Cyan
+Reset-LoggingState
+Initialize-LogPaths -TargetPath "C:\N\Path" -FullLogging $true -ScriptDir $scratchDir
+Initialize-LogMutex
+
+Test-Assert ($null -ne $script:logMutex) "logMutex is set after Initialize-LogMutex"
+$mutexUsable = $false
+try {
+    $null = $script:logMutex.WaitOne()
+    $script:logMutex.ReleaseMutex()
+    $mutexUsable = $true
+} catch { }
+Test-Assert $mutexUsable "the created mutex can be waited on and released without throwing"
+$script:logMutex.Dispose()
+Write-Host ""
+
+# ==============================================================================
+#  Scenario N2: two separate Initialize-LogMutex calls with the same
+#  explicit -PathHash produce handles to the SAME underlying OS mutex -
+#  proven via real cross-thread contention (a worker runspace opening the
+#  mutex by its "JxlLogMutex_" + PathHash name cannot acquire it while the
+#  main thread holds it), not just "both didn't throw".
+# ==============================================================================
+Write-Host "=== Scenario N2: Initialize-LogMutex -PathHash is the same mutex across callers ===" -ForegroundColor Cyan
+$sharedHash = "N2TESTHASH0123456789"
+Reset-LoggingState
+Initialize-LogMutex -PathHash $sharedHash
+$null = $script:logMutex.WaitOne()   # acquire on the main (harness) thread
+
+$n2Pool = [RunspaceFactory]::CreateRunspacePool(1, 1)
+$n2Pool.Open()
+$n2Ps = [PowerShell]::Create()
+$n2Ps.RunspacePool = $n2Pool
+$null = $n2Ps.AddScript({
+    param($MutexName)
+    $m = [System.Threading.Mutex]::OpenExisting($MutexName)
+    return $m.WaitOne(500)
+})
+$null = $n2Ps.AddArgument("JxlLogMutex_" + $sharedHash)
+$n2Handle = $n2Ps.BeginInvoke()
+$n2Output = @($n2Ps.EndInvoke($n2Handle))
+$n2Ps.Dispose(); $n2Pool.Close(); $n2Pool.Dispose()
+
+$acquiredByWorker = [bool]$n2Output[0]
+Test-Assert (-not $acquiredByWorker) "a worker opening the mutex by its 'JxlLogMutex_' + PathHash name cannot acquire it while the main thread holds it (proves same underlying OS mutex)"
+
+$script:logMutex.ReleaseMutex()
+$script:logMutex.Dispose()
+Write-Host ""
+
+# ==============================================================================
+#  Scenario N3: Initialize-LogMutex throws a clear, actionable error when
+#  no -PathHash is supplied and $script:pathHash was never set.
+# ==============================================================================
+Write-Host "=== Scenario N3: Initialize-LogMutex with no PathHash available throws clearly ===" -ForegroundColor Cyan
+Reset-LoggingState
+$n3Threw = $false
+try { Initialize-LogMutex } catch { $n3Threw = ($_.Exception.Message -like "*Initialize-LogPaths*") }
+Test-Assert $n3Threw "Initialize-LogMutex throws a clear error pointing at Initialize-LogPaths when no PathHash is available"
 Write-Host ""
 
 # ==============================================================================
