@@ -16,12 +16,12 @@
     poll interval, not perfectly deterministic - see its comment.
 
 .EXAMPLE
-    .\Modules\AbortPipeline.Harness.ps1
+    .\Modules\_Harness\AbortPipeline.Harness.ps1
 #>
 
 $ErrorActionPreference = "Stop"
 
-. (Join-Path $PSScriptRoot "AbortPipeline.ps1")
+. (Join-Path $PSScriptRoot "..\AbortPipeline.ps1")
 
 function Flush-ConsoleQueue {
     param([System.Collections.Concurrent.ConcurrentQueue[object]]$Queue)

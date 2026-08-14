@@ -27,8 +27,8 @@
     (A, B, D - a few seconds total).
 
 .EXAMPLE
-    .\Modules\ZipParallelProcessing.Harness.ps1
-    .\Modules\ZipParallelProcessing.Harness.ps1 -RunSlowTest
+    .\Modules\_Harness\ZipParallelProcessing.Harness.ps1
+    .\Modules\_Harness\ZipParallelProcessing.Harness.ps1 -RunSlowTest
 #>
 
 param(
@@ -37,7 +37,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-. (Join-Path $PSScriptRoot "ZipParallelProcessing.ps1")
+. (Join-Path $PSScriptRoot "..\ZipParallelProcessing.ps1")
 
 # ==============================================================================
 #  Script-scope state Write-Log / Test-AbortSignal / Invoke-ZipParallelProcessing

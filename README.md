@@ -27,9 +27,8 @@ fourteen are empty placeholders with a corresponding extraction in
 | File | What it does |
 |---|---|
 | `Modules\ZipParallelProcessing.ps1` | `Invoke-ZipParallelProcessing`, the parallel-dispatch engine for the zip-only pipeline (mode 3) - pure definitions, no top-level side effects, safe to dot-source. Renamed from `Invoke-ParallelFolderJobs`/`InvokeParallelFolderJobs.ps1` since it's currently zip-specific; the main script's own inline copy of the same algorithm still uses the older name until mode 3 (and eventually mode 4) migrates onto this module - see its file header. |
-| `Modules\ZipParallelProcessing.Harness.ps1` | Standalone test harness for `ZipParallelProcessing.ps1`. |
 | `Modules\AbortPipeline.ps1` | Standalone module (not yet merged into the main script): the Ctrl+C/window-close abort pipeline - `ConsoleCtrl`, abort-state tracking, a CTS registry, and a generalized graceful-drain/force-stop function - centralizing logic currently duplicated across modes 3/4 in the main script. |
-| `Modules\AbortPipeline.Harness.ps1` | Standalone test harness for `AbortPipeline.ps1`. |
+| `Modules\_Harness\*.Harness.ps1` | Standalone test harness per built module (`ZipParallelProcessing.Harness.ps1`, `AbortPipeline.Harness.ps1` so far) - dot-sources the real module from `..\`. |
 | `Modules\_Reference\*.reference.ps1` | Extracted-but-not-yet-built reference material for every module, including the two above - not working code, see `CLAUDE.md`'s "Modularization in progress" section. |
 
 Earlier working scripts, including the standalone `Zip_Files-claude-parallel.ps1`
@@ -56,10 +55,9 @@ Conversion Script/
 ├── Conversion Script Main.ps1
 ├── Modules/               <- every standalone module lives here
 │   ├── ZipParallelProcessing.ps1
-│   ├── ZipParallelProcessing.Harness.ps1
 │   ├── AbortPipeline.ps1
-│   ├── AbortPipeline.Harness.ps1
 │   ├── (14 more placeholder modules - see Todo.md)
+│   ├── _Harness/          <- test harness per built module
 │   └── _Reference/        <- extracted reference material per module
 ├── Testing/               <- scratch copy scripts run against (gitignored)
 └── Backups/               <- original test media, never touched by scripts (gitignored)
@@ -81,7 +79,7 @@ and only merged into the main script once proven. `Invoke-ZipParallelProcessing`
 not a one-off, the intended process going forward.
 
 Testing is currently manual: standalone test harnesses run directly
-(`.\Modules\ZipParallelProcessing.Harness.ps1 -RunSlowTest`), since there's
+(`.\Modules\_Harness\ZipParallelProcessing.Harness.ps1 -RunSlowTest`), since there's
 no CI runner configured against this local-only repo yet.
 
 ## Known open items
