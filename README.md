@@ -19,12 +19,15 @@ session (human or Claude Code), and `CHANGELOG.md` for full version history.
 
 `Modules\` holds every standalone module built per the development process
 below - not yet merged into the main script, or (once merged) kept around
-as the canonical, independently-testable definition. Nine are actually
+as the canonical, independently-testable definition. Ten are actually
 built and tested (`ZipParallelProcessing`, `AbortPipeline`, `Logging`,
 `FileDeletion`, `DependencyDetection`, `ZipCreation`, `ZipValidation`,
-`LeafDirectoryDiscovery`, `ZipPipeline`); the other seven are empty
-placeholders with a corresponding extraction in `Modules\_Reference\` -
-see `Todo.md` for the current state of each:
+`LeafDirectoryDiscovery`, `ZipPipeline`, `CleanConsoleRendering`); the
+other six are empty placeholders with a corresponding extraction in
+`Modules\_Reference\` (`ImageConversionPipeline.ps1` is a third
+state - a real but untested/uncommitted draft, paused mid-build - see
+`CLAUDE.md`'s "Clean Console Output" section) - see `Todo.md` for the
+current state of each:
 
 | File | What it does |
 |---|---|
@@ -37,6 +40,7 @@ see `Todo.md` for the current state of each:
 | `Modules\ZipValidation.ps1` | `Test-ZipArchive` - post-creation sanity check (entry count, optional required `.jxl` presence). No cross-module dependencies. |
 | `Modules\LeafDirectoryDiscovery.ps1` | `Get-ZippableLeafDirs` - shared leaf-folder scan (mode 2/3) with staleness and former-container guards; its harness live-reproduces the historical "parent folder gets zipped" bug from `CHANGELOG.md` for the first time and confirms the fix works. Also `New-ZippableLeafDirProvider`, an incremental alternative that lets dispatch start on the first qualifying folder while a large tree is still being scanned, instead of the whole tree needing to finish first. |
 | `Modules\ZipPipeline.ps1` | `Invoke-ZipOnlyPipeline` (mode 3 end to end) and `Invoke-LooseFolderZip` (mode 2's per-folder zip step) - the first orchestration-tier module, tested as a real integration harness against the other six built modules together rather than stubs. |
+| `Modules\CleanConsoleRendering.ps1` | The "Clean Console Output" toggle's renderer - live per-series/chapter progress display, replacing default per-file console spam (log files unaffected). Zero forward references, like `DependencyDetection.ps1`. Falls back to plain sequential printing when real console cursor control isn't available (confirmed via a live probe that this throws in non-interactive/redirected contexts) rather than crashing a run. |
 | `Modules\_Harness\*.Harness.ps1` | Standalone test harness per built module - dot-sources the real module from `..\`. |
 | `Modules\_Reference\*.reference.ps1` | Extracted-but-not-yet-built reference material for every module, including the two above - not working code, see `CLAUDE.md`'s "Modularization in progress" section. |
 
@@ -72,7 +76,9 @@ Conversion Script/
 │   ├── ZipValidation.ps1
 │   ├── LeafDirectoryDiscovery.ps1
 │   ├── ZipPipeline.ps1
-│   ├── (7 more placeholder modules - see Todo.md)
+│   ├── CleanConsoleRendering.ps1
+│   ├── ImageConversionPipeline.ps1 (untested draft, paused mid-build)
+│   ├── (6 more placeholder modules - see Todo.md)
 │   ├── _Harness/          <- test harness per built module
 │   └── _Reference/        <- extracted reference material per module
 ├── Testing/               <- scratch copy scripts run against (gitignored)
