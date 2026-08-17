@@ -29,7 +29,9 @@
         (FileDeletion.ps1)
       - Compress-FolderToZip (ZipCreation.ps1)
       - Test-ZipArchive (ZipValidation.ps1)
-      - Get-ZippableLeafDirs (LeafDirectoryDiscovery.ps1)
+      - New-ZippableLeafDirProvider (LeafDirectoryDiscovery.ps1) -
+        incremental leaf discovery, not the full-scan Get-ZippableLeafDirs
+        (see "INCREMENTAL SCANNING" below)
       - Invoke-ZipParallelProcessing (ZipParallelProcessing.ps1) - mode 3
         is ZPP's one current caller; this is where that wiring lives.
     Modules\_Harness\ZipPipeline.Harness.ps1 dot-sources all of the above
@@ -55,6 +57,20 @@
     cancelled by ZPP's current abort check. Revisit once ZPP migrates onto
     AbortPipeline.ps1 - this is current-reality compatibility, not an
     endorsement of the old pattern.
+
+    INCREMENTAL SCANNING (2026-08-17): Invoke-ZipOnlyPipeline dispatches
+    via LeafDirectoryDiscovery.ps1's New-ZippableLeafDirProvider +
+    Invoke-ZipParallelProcessing's -NextJobProvider, not
+    Get-ZippableLeafDirs's full-tree scan + -JobParams. The whole point
+    of -NextJobProvider (built for exactly this, see CHANGELOG.md v16.1,
+    never wired up anywhere until now) is that dispatch can begin on the
+    first qualifying folder while the rest of a large library is still
+    being walked - scanning the ENTIRE tree before doing any work at all
+    is what actually caused the "hangs while it searches every folder at
+    once" symptom on large libraries. One real consequence: this
+    function's own CandidateCount is no longer known before dispatch
+    starts, so the old "found N folder(s), running..." log line before
+    dispatch is gone - the total only exists once the whole run finishes.
 
 .NOTES
     Extracted from Conversion Script Main.ps1 - see
@@ -162,6 +178,16 @@ function Invoke-ZipOnlyPipeline {
         not a mutation of an external $stats hashtable (unlike the
         original main-script code this was extracted from) - the caller
         folds this into whatever stats shape it uses.
+    .NOTES
+        Discovers and dispatches INCREMENTALLY (LeafDirectoryDiscovery.ps1's
+        New-ZippableLeafDirProvider + Invoke-ZipParallelProcessing's
+        -NextJobProvider), not via a full up-front scan - work starts on
+        the first qualifying folder while the rest of a large library is
+        still being walked. CandidateCount therefore isn't known until
+        the whole run finishes (it's a running count of what was actually
+        found and dispatched, not a pre-scan total) - the "N folder(s)
+        found, running..." log line this function used to print before
+        dispatch started no longer applies for the same reason.
     #>
     param(
         [Parameter(Mandatory)]
@@ -193,30 +219,38 @@ function Invoke-ZipOnlyPipeline {
     }
 
     try {
-        Write-Log "Zip-only: scanning for leaf directories..."
-        $zoCandidates = Get-ZippableLeafDirs -ScanPath $Path -QualifyingExtensions $QualifyingExtensions -ForceRezip $false
-        $totals.CandidateCount = $zoCandidates.Count
+        Write-Log ("Zip-only: scanning and zipping leaf directories incrementally (up to " + $MaxParallel + " in parallel)...")
 
-        if ($zoCandidates.Count -eq 0) {
-            Write-Log "Zip-only: no qualifying leaf directories found." -Level Warn
-            return $totals
-        }
+        # Incremental discovery (LeafDirectoryDiscovery.ps1's
+        # New-ZippableLeafDirProvider), not Get-ZippableLeafDirs's full
+        # up-front scan - lets dispatch start on the first qualifying
+        # folder while the rest of a large library is still being walked,
+        # instead of the whole tree needing to finish scanning first (see
+        # CLAUDE.md - this was the actual cause of the "hangs while it
+        # searches every folder at once" symptom on large libraries).
+        $leafProvider = New-ZippableLeafDirProvider -ScanPath $Path -QualifyingExtensions $QualifyingExtensions -ForceRezip $false
 
-        Write-Log ("Zip-only: found " + $zoCandidates.Count + " folder(s) to zip. Running up to " + $MaxParallel + " in parallel.")
-
-        $zoJobParams = [System.Collections.Generic.List[hashtable]]::new()
-        foreach ($cand in $zoCandidates) {
-            $zoJobParams.Add(@{
-                FolderPath        = $cand.Dir.FullName
-                ZipOutPath        = $cand.ZipOut
+        # Translates the leaf provider's @{ Dir; ZipOut } shape into
+        # $script:zipOnlyWorker's own bound parameter names, and counts
+        # how many candidates were actually found - with incremental
+        # discovery the total isn't known upfront the way it was with the
+        # old full-scan-then-dispatch approach, so this is the only place
+        # left to count it.
+        $zoJobProvider = {
+            $next = & $leafProvider
+            if ($null -eq $next) { return $null }
+            $totals.CandidateCount++
+            return @{
+                FolderPath        = $next.Dir.FullName
+                ZipOutPath        = $next.ZipOut
                 LogFile           = $LogFile
                 LogErrorFile      = $LogErrorFile
                 LogWarnFile       = $LogWarnFile
                 DoFullLogging     = $FullLogging
                 DeleteFolders     = $DeleteFolders
                 DoPermanentDelete = $PermanentDelete
-            })
-        }
+            }
+        }.GetNewClosure()
 
         # See this module's own header ("ABORT WIRING NOTE") for why this
         # is the old hardcoded-variable pattern rather than
@@ -231,7 +265,7 @@ function Invoke-ZipOnlyPipeline {
                 $totals.FolderDeletedFail    += $r.FolderDeleteFailed
             }.GetNewClosure()
 
-            $zoOutcome = Invoke-ZipParallelProcessing -WorkerScript $script:zipOnlyWorker -JobParams $zoJobParams `
+            $zoOutcome = Invoke-ZipParallelProcessing -WorkerScript $script:zipOnlyWorker -NextJobProvider $zoJobProvider `
                 -SharedFunctionNames @('Write-Log', 'Move-ToRecycleBin', 'Remove-ItemPermanently', 'Remove-Source', 'Compress-FolderToZip', 'Test-ZipArchive') `
                 -MaxParallel $MaxParallel -Cts $script:zipOnlyCts -ResultHandler $zoResultHandler
 
@@ -239,6 +273,11 @@ function Invoke-ZipOnlyPipeline {
         } finally {
             $script:zipOnlyCts.Dispose()
             $script:zipOnlyCts = $null
+        }
+
+        if ($totals.CandidateCount -eq 0) {
+            Write-Log "Zip-only: no qualifying leaf directories found." -Level Warn
+            return $totals
         }
 
         $zoCompleteMsg = "Zip-only processing complete: " + $totals.ZippedSuccess + " zipped, " + $totals.ZippedFail + " failed."

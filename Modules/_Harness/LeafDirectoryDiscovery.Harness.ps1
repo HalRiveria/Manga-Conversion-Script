@@ -26,6 +26,11 @@
 
 $ErrorActionPreference = "Stop"
 
+# Dot-sourced BEFORE the Write-Log stub below, so ours wins over ZPP's own
+# stale inline copy - same ordering concern documented in ZipPipeline.ps1's
+# harness. Needed here for Scenario O's real end-to-end dispatch test.
+. (Join-Path $PSScriptRoot "..\ZipParallelProcessing.ps1")
+
 $script:logMessages = [System.Collections.Generic.List[string]]::new()
 function Write-Log {
     param([string]$Message, [string]$Level = "Info")
@@ -278,6 +283,152 @@ $script:logMessages.Clear()
 $resultL = Get-ZippableLeafDirs -ScanPath $rootL -QualifyingExtensions $imgExts
 Test-Assert ($resultL.Count -eq 1) ("exactly the 1 still-pending chapter was found (got " + $resultL.Count + ")")
 Test-Assert ($resultL[0].Dir.FullName -eq $pendingChapterL) "the found leaf is the pending chapter, not 'Only Images' itself"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario M: a nonexistent -ScanPath throws a clear error immediately,
+#  instead of silently returning an empty list indistinguishable from a
+#  genuinely-empty valid directory.
+# ==============================================================================
+Write-Host "=== Scenario M: nonexistent -ScanPath throws ===" -ForegroundColor Cyan
+$missingScanPathM = Join-Path $scratchDir "this-path-does-not-exist-at-all"
+$threwM = $false
+$errorMessageM = $null
+try {
+    Get-ZippableLeafDirs -ScanPath $missingScanPathM -QualifyingExtensions $imgExts
+} catch {
+    $threwM = $true
+    $errorMessageM = $_.Exception.Message
+}
+Test-Assert $threwM "a nonexistent -ScanPath throws instead of silently returning an empty list"
+Test-Assert ($errorMessageM -like "*does not exist*") "the error message is clear about what went wrong"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario N (user-requested): New-ZippableLeafDirProvider - repeated
+#  calls to the returned scriptblock correctly advance and find every
+#  qualifying leaf exactly once, matching Get-ZippableLeafDirs's batch
+#  result on the SAME tree (including a former-container case, proving
+#  guard parity via the shared Test-ZippableLeafDirCandidate helper), then
+#  consistently returns $null once exhausted. This is the closure/state-
+#  persistence-across-calls risk this project has documented failures
+#  with before (CLAUDE.md "Lessons learned") - verified live, not assumed
+#  safe by analogy to the pattern that already worked elsewhere.
+# ==============================================================================
+Write-Host "=== Scenario N: New-ZippableLeafDirProvider matches batch results, advances correctly ===" -ForegroundColor Cyan
+$rootN = New-Dir "scenario-n"
+$leaf1N = New-Dir "scenario-n\Chapter 1"
+New-FileIn -DirPath $leaf1N -Name "page1.jpg" | Out-Null
+$leaf2N = New-Dir "scenario-n\Chapter 2"
+New-FileIn -DirPath $leaf2N -Name "page1.jpg" | Out-Null
+$leaf3N = New-Dir "scenario-n\Chapter 3"
+New-FileIn -DirPath $leaf3N -Name "page1.jpg" | Out-Null
+# A former-container case mixed into the same tree, to prove the
+# incremental path applies the SAME guard as the batch path.
+$formerContainerN = New-Dir "scenario-n\Only Images"
+New-FileIn -DirPath $formerContainerN -Name "01 - Chapter 1.zip" | Out-Null
+
+$batchResultN = @(Get-ZippableLeafDirs -ScanPath $rootN -QualifyingExtensions $imgExts)
+$batchPathsN  = @($batchResultN | ForEach-Object { $_.Dir.FullName } | Sort-Object)
+
+$provider = New-ZippableLeafDirProvider -ScanPath $rootN -QualifyingExtensions $imgExts
+$incrementalPathsN = [System.Collections.Generic.List[string]]::new()
+$callCountN = 0
+while ($true) {
+    $callCountN++
+    $next = & $provider
+    if ($null -eq $next) { break }
+    $incrementalPathsN.Add($next.Dir.FullName)
+    if ($callCountN -gt 100) { throw "Scenario N: provider did not terminate after 100 calls - possible infinite loop." }
+}
+$incrementalPathsN = @($incrementalPathsN | Sort-Object)
+
+Test-Assert ($batchPathsN.Count -eq 3) ("sanity check: batch path found the expected 3 leaves (got " + $batchPathsN.Count + ")")
+Test-Assert ($incrementalPathsN.Count -eq 3) ("incremental provider found the same count (got " + $incrementalPathsN.Count + ")")
+Test-Assert (($incrementalPathsN -join "|") -eq ($batchPathsN -join "|")) "incremental provider's result set exactly matches the batch function's (same guards, same tree)"
+Test-Assert ($incrementalPathsN -notcontains $formerContainerN) "'Only Images' (former-container) was correctly excluded by the incremental path too"
+
+# Exhaustion: further calls after the tree is exhausted keep returning
+# $null, not an error and not a repeated/stale result.
+$postExhaustion1 = & $provider
+$postExhaustion2 = & $provider
+Test-Assert ($null -eq $postExhaustion1 -and $null -eq $postExhaustion2) "calling the exhausted provider again keeps returning `$null, not an error or a repeat"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario O: real end-to-end dispatch - New-ZippableLeafDirProvider
+#  passed directly as -NextJobProvider to the REAL
+#  Invoke-ZipParallelProcessing (dot-sourced for real, not stubbed),
+#  proving the wiring actually works through genuine runspace dispatch,
+#  not just structural correctness of the provider in isolation.
+# ==============================================================================
+Write-Host "=== Scenario O: New-ZippableLeafDirProvider dispatched through real Invoke-ZipParallelProcessing ===" -ForegroundColor Cyan
+$rootO = New-Dir "scenario-o"
+$leaf1O = New-Dir "scenario-o\Chapter 1"
+New-FileIn -DirPath $leaf1O -Name "page1.jpg" | Out-Null
+$leaf2O = New-Dir "scenario-o\Chapter 2"
+New-FileIn -DirPath $leaf2O -Name "page1.jpg" | Out-Null
+
+$providerO = New-ZippableLeafDirProvider -ScanPath $rootO -QualifyingExtensions $imgExts
+$touchedO = [System.Collections.Generic.List[string]]::new()
+$workerO = {
+    param($Dir, $ZipOut, [System.Threading.CancellationToken]$CancelToken, $LogMutex, $ConsoleQueue)
+    return @{ Touched = $Dir }
+}
+$ctsO = [System.Threading.CancellationTokenSource]::new()
+$resultHandlerO = { param($r) $touchedO.Add($r.Touched) }.GetNewClosure()
+
+# NextJobProvider yields @{ Dir; ZipOut } - map to the worker's own bound
+# parameter names via a thin translating closure, since
+# Invoke-ZipParallelProcessing calls -NextJobProvider with no arguments
+# and expects a hashtable of the WORKER's parameter names back.
+$translatingProviderO = {
+    $next = & $providerO
+    if ($null -eq $next) { return $null }
+    return @{ Dir = $next.Dir.FullName; ZipOut = $next.ZipOut }
+}.GetNewClosure()
+
+$outcomeO = Invoke-ZipParallelProcessing -WorkerScript $workerO -NextJobProvider $translatingProviderO `
+    -SharedFunctionNames @() -MaxParallel 2 -Cts $ctsO -ResultHandler $resultHandlerO
+$ctsO.Dispose()
+
+Test-Assert ($outcomeO.ForceStoppedCount -eq 0) "no jobs were force-stopped in a normal run"
+Test-Assert ($touchedO.Count -eq 2) ("both leaf directories were actually dispatched and processed through real runspaces (got " + $touchedO.Count + ")")
+Test-Assert ($touchedO -contains $leaf1O -and $touchedO -contains $leaf2O) "both the specific expected directories were dispatched"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario P: lightweight empirical signal (not a strict proof) that the
+#  incremental provider's first call returns without needing to finish
+#  scanning the whole tree first, unlike Get-ZippableLeafDirs. Relies on
+#  [System.IO.Directory]::EnumerateDirectories's documented lazy-
+#  enumeration contract (a well-established .NET API guarantee, not a
+#  PowerShell closure/pipeline quirk like the bugs this project has
+#  actually been burned by before) - this timing check is supporting
+#  evidence on top of that documented contract, not the sole basis for
+#  trusting it.
+# ==============================================================================
+Write-Host "=== Scenario P: incremental first-result is faster than a full batch scan on a larger tree ===" -ForegroundColor Cyan
+$rootP = New-Dir "scenario-p"
+$firstLeafP = New-Dir "scenario-p\AAA-First-Chapter"
+New-FileIn -DirPath $firstLeafP -Name "page1.jpg" | Out-Null
+for ($i = 1; $i -le 40; $i++) {
+    $paddingDir = New-Dir ("scenario-p\padding-{0:D3}" -f $i)
+    New-FileIn -DirPath $paddingDir -Name ("file{0}.txt" -f $i) | Out-Null
+}
+
+$swBatchP = [System.Diagnostics.Stopwatch]::StartNew()
+$null = @(Get-ZippableLeafDirs -ScanPath $rootP -QualifyingExtensions $imgExts)
+$swBatchP.Stop()
+
+$providerP = New-ZippableLeafDirProvider -ScanPath $rootP -QualifyingExtensions $imgExts
+$swIncrementalP = [System.Diagnostics.Stopwatch]::StartNew()
+$firstResultP = & $providerP
+$swIncrementalP.Stop()
+
+Write-Host ("  (batch scan: " + $swBatchP.ElapsedMilliseconds + "ms, incremental first result: " + $swIncrementalP.ElapsedMilliseconds + "ms)") -ForegroundColor DarkGray
+Test-Assert ($null -ne $firstResultP) "the incremental provider found a first result"
+Test-Assert ($swIncrementalP.ElapsedMilliseconds -le $swBatchP.ElapsedMilliseconds) "the incremental provider's first result arrived no slower than the full batch scan (consistent with lazy enumeration, not proof alone)"
 Write-Host ""
 
 # ==============================================================================
