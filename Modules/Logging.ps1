@@ -38,10 +38,11 @@
 
     Initialize-LogPaths's full-logging branch Recycle-Bins old log files
     left over from previous runs against the same target, via
-    Move-ToRecycleBin - a FORWARD REFERENCE to the not-yet-built
-    FileDeletion module (see the comment at that call site). Callers that
-    dot-source Logging.ps1 standalone (as the harness does) must stub
-    that function out themselves until FileDeletion.ps1 exists for real.
+    Move-ToRecycleBin - now a real function in Modules\FileDeletion.ps1
+    (confirmed matching signature, see the comment at that call site).
+    Callers that dot-source Logging.ps1 standalone (as the harness does)
+    still need to stub that function out, or dot-source FileDeletion.ps1
+    too.
 
     Log files are written UTF-8, not ASCII - the historical ASCII-only
     rule (see CHANGELOG.md v3.0/v4.0) was about emoji/unicode literally
@@ -161,16 +162,16 @@ function Initialize-LogPaths {
         # convention), so they get the safer default unconditionally.
         #
         # FORWARD REFERENCE: Move-ToRecycleBin isn't defined in this
-        # module - it's the FileDeletion module's function
-        # (Modules\_Reference\FileDeletion.reference.ps1), which does not
-        # exist as real code yet. Calling it here now, per explicit
-        # instruction, rather than duplicating its Recycle-Bin logic
-        # inline. TODO once Modules\FileDeletion.ps1 is actually built:
-        # come back here and confirm this call still matches its real
-        # signature (-ItemPath <string>, single file/dir path) and that
-        # dot-sourcing order (FileDeletion before Logging) is satisfied by
-        # every caller - Logging.Harness.ps1 stubs this function out in
-        # the meantime.
+        # module - it's Modules\FileDeletion.ps1's function. RESOLVED
+        # (2026-08-14): FileDeletion.ps1 is now built for real, and its
+        # Move-ToRecycleBin signature (-ItemPath <string>, single
+        # file/dir path) matches this call exactly - no changes needed
+        # here. Callers must dot-source FileDeletion.ps1 (in either order
+        # relative to this file, just before Initialize-LogPaths's
+        # full-logging branch actually runs) for this to resolve.
+        # Logging.Harness.ps1 still stubs this function out, since
+        # Logging must stay standalone-testable without a real dependency
+        # on FileDeletion.
         $oldLogPattern = "Conversion Log - * - " + $pathHashShort + ".log"
         $oldLogs = Get-ChildItem -LiteralPath $ScriptDir -Filter $oldLogPattern -File -ErrorAction SilentlyContinue |
                    Where-Object { $_.FullName -ne $script:logFile }

@@ -19,17 +19,19 @@ session (human or Claude Code), and `CHANGELOG.md` for full version history.
 
 `Modules\` holds every standalone module built per the development process
 below - not yet merged into the main script, or (once merged) kept around
-as the canonical, independently-testable definition. Three are actually
-built and tested (`ZipParallelProcessing`, `AbortPipeline`, `Logging`);
-the other thirteen are empty placeholders with a corresponding extraction
-in `Modules\_Reference\` - see `Todo.md` for the current state of each:
+as the canonical, independently-testable definition. Four are actually
+built and tested (`ZipParallelProcessing`, `AbortPipeline`, `Logging`,
+`FileDeletion`); the other twelve are empty placeholders with a
+corresponding extraction in `Modules\_Reference\` - see `Todo.md` for the
+current state of each:
 
 | File | What it does |
 |---|---|
-| `Modules\ZipParallelProcessing.ps1` | `Invoke-ZipParallelProcessing`, the parallel-dispatch engine for the zip-only pipeline (mode 3) - pure definitions, no top-level side effects, safe to dot-source. Renamed from `Invoke-ParallelFolderJobs`/`InvokeParallelFolderJobs.ps1` since it's currently zip-specific; the main script's own inline copy of the same algorithm still uses the older name until mode 3 (and eventually mode 4) migrates onto this module - see its file header. |
+| `Modules\ZipParallelProcessing.ps1` | `Invoke-ZipParallelProcessing`, the parallel-dispatch engine for the zip-only pipeline (mode 3) - pure definitions, no top-level side effects, safe to dot-source. Renamed from `Invoke-ParallelFolderJobs`/`InvokeParallelFolderJobs.ps1` since it's currently zip-specific; the main script's own inline copy of the same algorithm still uses the older name until mode 3 (and eventually mode 4) migrates onto this module - see its file header. Has its own inline (and partly stale) copies of logic `Logging`/`AbortPipeline` now own - see `CLAUDE.md`'s "Known gaps". |
 | `Modules\AbortPipeline.ps1` | Standalone module (not yet merged into the main script): the Ctrl+C/window-close abort pipeline - `ConsoleCtrl`, abort-state tracking, a CTS registry, and a generalized graceful-drain/force-stop function - centralizing logic currently duplicated across modes 3/4 in the main script. |
-| `Modules\Logging.ps1` | `Write-Log`, `Write-SummaryLog`, `Flush-ConsoleQueue`, plus `Initialize-LogPaths` (call once before anything logs). Includes a `-DisableSummaryFile` toggle (split-log mode only), abandoned-mutex recovery, and Recycle-Bin cleanup of old full-logging-mode log files. |
-| `Modules\_Harness\*.Harness.ps1` | Standalone test harness per built module (`ZipParallelProcessing.Harness.ps1`, `AbortPipeline.Harness.ps1`, `Logging.Harness.ps1` so far) - dot-sources the real module from `..\`. |
+| `Modules\Logging.ps1` | `Write-Log`, `Write-SummaryLog`, `Flush-ConsoleQueue`, plus `Initialize-LogPaths` (call once before anything logs). Includes a `-DisableSummaryFile` toggle (split-log mode only), abandoned-mutex recovery, UTF-8 log encoding, Recycle-Bin cleanup of old full-logging-mode log files, and `Initialize-LogMutex` for the shared log-mutex naming convention. |
+| `Modules\FileDeletion.ps1` | `Move-ToRecycleBin`, `Remove-ItemPermanently`, and `Remove-Source` (the wrapper every mode calls, routing based on `Initialize-FileDeletion -PermanentDelete`). |
+| `Modules\_Harness\*.Harness.ps1` | Standalone test harness per built module (`ZipParallelProcessing.Harness.ps1`, `AbortPipeline.Harness.ps1`, `Logging.Harness.ps1`, `FileDeletion.Harness.ps1` so far) - dot-sources the real module from `..\`. |
 | `Modules\_Reference\*.reference.ps1` | Extracted-but-not-yet-built reference material for every module, including the two above - not working code, see `CLAUDE.md`'s "Modularization in progress" section. |
 
 Earlier working scripts, including the standalone `Zip_Files-claude-parallel.ps1`
