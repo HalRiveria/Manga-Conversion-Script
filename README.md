@@ -19,9 +19,10 @@ session (human or Claude Code), and `CHANGELOG.md` for full version history.
 
 `Modules\` holds every standalone module built per the development process
 below - not yet merged into the main script, or (once merged) kept around
-as the canonical, independently-testable definition. Four are actually
+as the canonical, independently-testable definition. Eight are actually
 built and tested (`ZipParallelProcessing`, `AbortPipeline`, `Logging`,
-`FileDeletion`); the other twelve are empty placeholders with a
+`FileDeletion`, `DependencyDetection`, `ZipCreation`, `ZipValidation`,
+`LeafDirectoryDiscovery`); the other eight are empty placeholders with a
 corresponding extraction in `Modules\_Reference\` - see `Todo.md` for the
 current state of each:
 
@@ -31,7 +32,11 @@ current state of each:
 | `Modules\AbortPipeline.ps1` | Standalone module (not yet merged into the main script): the Ctrl+C/window-close abort pipeline - `ConsoleCtrl`, abort-state tracking, a CTS registry, and a generalized graceful-drain/force-stop function - centralizing logic currently duplicated across modes 3/4 in the main script. |
 | `Modules\Logging.ps1` | `Write-Log`, `Write-SummaryLog`, `Flush-ConsoleQueue`, plus `Initialize-LogPaths` (call once before anything logs). Includes a `-DisableSummaryFile` toggle (split-log mode only), abandoned-mutex recovery, UTF-8 log encoding, Recycle-Bin cleanup of old full-logging-mode log files, and `Initialize-LogMutex` for the shared log-mutex naming convention. |
 | `Modules\FileDeletion.ps1` | `Move-ToRecycleBin`, `Remove-ItemPermanently`, and `Remove-Source` (the wrapper every mode calls, routing based on `Initialize-FileDeletion -PermanentDelete`). |
-| `Modules\_Harness\*.Harness.ps1` | Standalone test harness per built module (`ZipParallelProcessing.Harness.ps1`, `AbortPipeline.Harness.ps1`, `Logging.Harness.ps1`, `FileDeletion.Harness.ps1` so far) - dot-sources the real module from `..\`. |
+| `Modules\DependencyDetection.ps1` | `Find-Exe` - generalized cjxl/magick/ffmpeg executable locator (`-UserPath` > PATH > `-Candidates`), not separate per-tool wrapper functions. |
+| `Modules\ZipCreation.ps1` | `Compress-FolderToZip` - creates a ZIP from a folder, clearing any pre-existing same-name ZIP first and cleaning up stray output if creation fails partway through. |
+| `Modules\ZipValidation.ps1` | `Test-ZipArchive` - post-creation sanity check (entry count, optional required `.jxl` presence). No cross-module dependencies. |
+| `Modules\LeafDirectoryDiscovery.ps1` | `Get-ZippableLeafDirs` - shared leaf-folder scan (mode 2/3) with staleness and former-container guards; its harness live-reproduces the historical "parent folder gets zipped" bug from `CHANGELOG.md` for the first time and confirms the fix works. |
+| `Modules\_Harness\*.Harness.ps1` | Standalone test harness per built module - dot-sources the real module from `..\`. |
 | `Modules\_Reference\*.reference.ps1` | Extracted-but-not-yet-built reference material for every module, including the two above - not working code, see `CLAUDE.md`'s "Modularization in progress" section. |
 
 Earlier working scripts, including the standalone `Zip_Files-claude-parallel.ps1`
@@ -60,7 +65,12 @@ Conversion Script/
 │   ├── ZipParallelProcessing.ps1
 │   ├── AbortPipeline.ps1
 │   ├── Logging.ps1
-│   ├── (13 more placeholder modules - see Todo.md)
+│   ├── FileDeletion.ps1
+│   ├── DependencyDetection.ps1
+│   ├── ZipCreation.ps1
+│   ├── ZipValidation.ps1
+│   ├── LeafDirectoryDiscovery.ps1
+│   ├── (8 more placeholder modules - see Todo.md)
 │   ├── _Harness/          <- test harness per built module
 │   └── _Reference/        <- extracted reference material per module
 ├── Testing/               <- scratch copy scripts run against (gitignored)
