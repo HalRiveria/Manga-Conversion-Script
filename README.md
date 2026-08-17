@@ -23,7 +23,7 @@ as the canonical, independently-testable definition. Ten are actually
 built and tested (`ZipParallelProcessing`, `AbortPipeline`, `Logging`,
 `FileDeletion`, `DependencyDetection`, `ZipCreation`, `ZipValidation`,
 `LeafDirectoryDiscovery`, `ZipPipeline`, `CleanConsoleRendering`); the
-other six are empty placeholders with a corresponding extraction in
+other seven are empty placeholders with a corresponding extraction in
 `Modules\_Reference\` (`ImageConversionPipeline.ps1` is a third
 state - a real but untested/uncommitted draft, paused mid-build - see
 `CLAUDE.md`'s "Clean Console Output" section) - see `Todo.md` for the
@@ -78,7 +78,7 @@ Conversion Script/
 │   ├── ZipPipeline.ps1
 │   ├── CleanConsoleRendering.ps1
 │   ├── ImageConversionPipeline.ps1 (untested draft, paused mid-build)
-│   ├── (6 more placeholder modules - see Todo.md)
+│   ├── (7 more placeholder modules - see Todo.md)
 │   ├── _Harness/          <- test harness per built module
 │   └── _Reference/        <- extracted reference material per module
 ├── Testing/               <- scratch copy scripts run against (gitignored)
