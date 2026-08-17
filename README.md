@@ -25,8 +25,9 @@ built and tested (`ZipParallelProcessing`, `AbortPipeline`, `Logging`,
 `LeafDirectoryDiscovery`, `ZipPipeline`, `CleanConsoleRendering`); the
 other seven are empty placeholders with a corresponding extraction in
 `Modules\_Reference\` (`ImageConversionPipeline.ps1` is a third
-state - a real but untested/uncommitted draft, paused mid-build - see
-`CLAUDE.md`'s "Clean Console Output" section) - see `Todo.md` for the
+state - a real but untested draft, committed but explicitly flagged as
+unverified, paused mid-build - see `CLAUDE.md`'s "Clean Console Output"
+section) - see `Todo.md` for the
 current state of each:
 
 | File | What it does |
