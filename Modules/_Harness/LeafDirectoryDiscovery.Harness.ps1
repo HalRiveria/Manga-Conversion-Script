@@ -432,6 +432,131 @@ Test-Assert ($swIncrementalP.ElapsedMilliseconds -le $swBatchP.ElapsedMillisecon
 Write-Host ""
 
 # ==============================================================================
+#  Scenario Q: New-SeriesProvider - lazy, single-level series enumeration
+#  across a library. Repeated calls yield every series exactly once, then
+#  consistently $null - the same closure/state-persistence risk already
+#  proven safe for New-ZippableLeafDirProvider, verified again here since
+#  this is a genuinely separate function/closure, not a reuse of that one.
+# ==============================================================================
+Write-Host "=== Scenario Q: New-SeriesProvider - lazy series enumeration ===" -ForegroundColor Cyan
+$libraryQ = New-Dir "scenario-q-library"
+$null = New-Dir "scenario-q-library\Series A"
+$null = New-Dir "scenario-q-library\Series B"
+$null = New-Dir "scenario-q-library\Series C"
+
+$seriesProviderQ = New-SeriesProvider -LibraryPath $libraryQ
+$foundSeriesQ = [System.Collections.Generic.List[string]]::new()
+$callCountQ = 0
+while ($true) {
+    $callCountQ++
+    $next = & $seriesProviderQ
+    if ($null -eq $next) { break }
+    $foundSeriesQ.Add($next.Name)
+    if ($callCountQ -gt 20) { throw "Scenario Q: provider did not terminate after 20 calls - possible infinite loop." }
+}
+$foundSeriesQ = @($foundSeriesQ | Sort-Object)
+
+Test-Assert ($foundSeriesQ.Count -eq 3) ("all 3 series were found (got " + $foundSeriesQ.Count + ")")
+Test-Assert (($foundSeriesQ -join "|") -eq "Series A|Series B|Series C") "the correct 3 series were found, by name"
+
+$postExhaustionQ1 = & $seriesProviderQ
+$postExhaustionQ2 = & $seriesProviderQ
+Test-Assert ($null -eq $postExhaustionQ1 -and $null -eq $postExhaustionQ2) "calling the exhausted provider again keeps returning `$null, not an error or a repeat"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario R: New-SeriesProvider edge cases - nonexistent library throws;
+#  an empty (0-series) library returns $null immediately, not an error.
+# ==============================================================================
+Write-Host "=== Scenario R: New-SeriesProvider edge cases ===" -ForegroundColor Cyan
+$threwMissingLibraryR = $false
+try { New-SeriesProvider -LibraryPath (Join-Path $scratchDir "does-not-exist-library") } catch { $threwMissingLibraryR = $true }
+Test-Assert $threwMissingLibraryR "a nonexistent -LibraryPath throws immediately, at setup time"
+
+$emptyLibraryR = New-Dir "scenario-r-empty-library"
+$emptyProviderR = New-SeriesProvider -LibraryPath $emptyLibraryR
+$firstCallR = & $emptyProviderR
+Test-Assert ($null -eq $firstCallR) "an empty (0-series) library's first call returns `$null, not an error"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario S: Get-SeriesChapters - the critical comma/collapse check for
+#  0- and 1-chapter series, verifying by TYPE (not just .Count, which a
+#  collapsed bare Hashtable would also satisfy misleadingly for the
+#  1-chapter case) - same discipline as Scenario I/J for the whole-library
+#  function, applied again here since this is this function's OWN return
+#  statement, a fresh opportunity for the same collapse.
+# ==============================================================================
+Write-Host "=== Scenario S: Get-SeriesChapters comma/collapse check ===" -ForegroundColor Cyan
+$seriesS0 = New-Dir "scenario-s-zero-chapters"
+$resultS0 = Get-SeriesChapters -SeriesPath $seriesS0 -QualifyingExtensions $imgExts
+Test-Assert ($null -ne $resultS0) "0-chapter series result is NOT `$null"
+Test-Assert ($resultS0 -is [System.Collections.Generic.List[hashtable]]) ("0-chapter series result is still a real List[hashtable] (actual type: " + $resultS0.GetType().FullName + ")")
+Test-Assert ($resultS0.Count -eq 0) "0-chapter series Count is 0"
+
+$seriesS1 = New-Dir "scenario-s-one-chapter"
+$chapterS1 = New-Dir "scenario-s-one-chapter\Chapter 1"
+New-FileIn -DirPath $chapterS1 -Name "page1.jpg" | Out-Null
+$resultS1 = Get-SeriesChapters -SeriesPath $seriesS1 -QualifyingExtensions $imgExts
+Test-Assert ($resultS1 -is [System.Collections.Generic.List[hashtable]]) ("1-chapter series result is still a real List[hashtable], not a bare Hashtable (actual type: " + $resultS1.GetType().FullName + ")")
+Test-Assert ($resultS1.Count -eq 1) "1-chapter series Count is 1 (not silently missing via collapse)"
+Test-Assert ($resultS1[0].Dir.FullName -eq $chapterS1) "indexing [0] on the 1-result list still works correctly"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario T: Get-SeriesChapters - multi-chapter scan, and confirms the
+#  SAME guards Get-ZippableLeafDirs applies (former-container guard) are
+#  genuinely in effect here too, not just in principle - reusing
+#  Get-ZippableLeafDirs internally means this should be automatic, but
+#  verified live rather than assumed.
+# ==============================================================================
+Write-Host "=== Scenario T: Get-SeriesChapters - multi-chapter scan + guard reuse ===" -ForegroundColor Cyan
+$seriesT = New-Dir "scenario-t-series"
+$chapter1T = New-Dir "scenario-t-series\Chapter 1"
+New-FileIn -DirPath $chapter1T -Name "page1.jpg" | Out-Null
+$chapter2T = New-Dir "scenario-t-series\Chapter 2"
+New-FileIn -DirPath $chapter2T -Name "page1.jpg" | Out-Null
+$formerContainerT = New-Dir "scenario-t-series\Old Chapter"
+New-FileIn -DirPath $formerContainerT -Name "Old Chapter.zip" | Out-Null
+
+$resultT = Get-SeriesChapters -SeriesPath $seriesT -QualifyingExtensions $imgExts
+Test-Assert ($resultT.Count -eq 2) ("exactly the 2 genuine chapters were found, former-container excluded (got " + $resultT.Count + ")")
+$foundNamesT = @($resultT | ForEach-Object { $_.Dir.Name } | Sort-Object)
+Test-Assert (($foundNamesT -join "|") -eq "Chapter 1|Chapter 2") "the correct 2 chapters were found, by name"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario U: integration - New-SeriesProvider + Get-SeriesChapters paired
+#  together across a small library, mimicking how a real caller (mode 1's
+#  restructured orchestration) would actually use the two-tier model: walk
+#  the library lazily series by series, and for each one, get its real
+#  chapter count via an eager per-series scan - exactly what
+#  Start-SeriesProgress's -TotalChapters needs.
+# ==============================================================================
+Write-Host "=== Scenario U: two-tier integration - series provider + per-series chapter scan ===" -ForegroundColor Cyan
+$libraryU = New-Dir "scenario-u-library"
+$seriesU1 = New-Dir "scenario-u-library\Series One"
+New-Dir "scenario-u-library\Series One\Chapter 1" | ForEach-Object { New-FileIn -DirPath $_ -Name "page1.jpg" | Out-Null }
+New-Dir "scenario-u-library\Series One\Chapter 2" | ForEach-Object { New-FileIn -DirPath $_ -Name "page1.jpg" | Out-Null }
+New-Dir "scenario-u-library\Series One\Chapter 3" | ForEach-Object { New-FileIn -DirPath $_ -Name "page1.jpg" | Out-Null }
+$seriesU2 = New-Dir "scenario-u-library\Series Two"
+New-Dir "scenario-u-library\Series Two\Chapter 1" | ForEach-Object { New-FileIn -DirPath $_ -Name "page1.jpg" | Out-Null }
+
+$seriesProviderU = New-SeriesProvider -LibraryPath $libraryU
+$perSeriesCountsU = @{}
+while ($true) {
+    $series = & $seriesProviderU
+    if ($null -eq $series) { break }
+    $chapters = Get-SeriesChapters -SeriesPath $series.FullName -QualifyingExtensions $imgExts
+    $perSeriesCountsU[$series.Name] = $chapters.Count
+}
+
+Test-Assert ($perSeriesCountsU.Count -eq 2) ("both series were walked and scanned (got " + $perSeriesCountsU.Count + ")")
+Test-Assert ($perSeriesCountsU["Series One"] -eq 3) ("Series One's real chapter total is 3 (got " + $perSeriesCountsU["Series One"] + ") - exactly what Start-SeriesProgress -TotalChapters needs")
+Test-Assert ($perSeriesCountsU["Series Two"] -eq 1) ("Series Two's real chapter total is 1 (got " + $perSeriesCountsU["Series Two"] + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

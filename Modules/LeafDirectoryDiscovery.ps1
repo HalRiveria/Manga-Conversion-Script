@@ -4,7 +4,9 @@
     scan used by mode 2 loose+zip and mode 3 zip-only), plus
     New-ZippableLeafDirProvider, an incremental alternative for callers
     that want to start zipping already-found folders while the rest of a
-    large tree is still being scanned.
+    large tree is still being scanned - and New-SeriesProvider +
+    Get-SeriesChapters, the two-tier series/chapter discovery Clean
+    Console Output needs (lazy across series, eager within one series).
 
 .DESCRIPTION
     Pure definitions only - no top-level side effects, safe to dot-source
@@ -55,7 +57,30 @@
     the rest of a huge tree is still being walked. Both functions share
     the exact same per-directory guard logic via the internal
     Test-ZippableLeafDirCandidate helper below, so the incremental path can never
-    silently drift from the batch path's behavior.
+    silently drift from the batch path's behavior. Purely additive to
+    this module's existing, already-tested surface - ZipPipeline.ps1's
+    current use of New-ZippableLeafDirProvider is untouched by any of this.
+
+    TWO-TIER SERIES/CHAPTER DISCOVERY (2026-08-18, for Clean Console
+    Output - see CLAUDE.md's section of that name): under the FIXED
+    Library > Series > Chapter > Images layout (decided, not a
+    heuristic), a series' chapter COUNT needs to be known before
+    Start-SeriesProgress can report real progress - but scanning the
+    whole library up front to get every series' count is exactly the
+    hang this module already fixed once. The split: New-SeriesProvider
+    walks the LIBRARY lazily, one series at a time (same anti-hang
+    property as New-ZippableLeafDirProvider, just one level up - series
+    are always exactly one level below the library root under the fixed
+    layout, so no recursion or per-item guard/filter logic is even needed
+    there). Get-SeriesChapters then does an EAGER, full scan bounded to
+    ONE series' chapters - small enough not to reintroduce the hang - and
+    is a thin wrapper around Get-ZippableLeafDirs itself: rooting a
+    RECURSIVE scan at one series folder finds exactly the same chapters a
+    single-level scan would, since chapters never nest deeper under the
+    fixed layout (they contain only images), so reusing
+    Get-ZippableLeafDirs directly here means the guard logic can never
+    drift between the whole-library and per-series scan paths - there is
+    only the one implementation.
 
 .NOTES
     Extracted from Conversion Script Main.ps1 - see
@@ -259,4 +284,100 @@ function New-ZippableLeafDirProvider {
             if ($null -ne $candidate) { return $candidate }
         }
     }.GetNewClosure()
+}
+
+function New-SeriesProvider {
+    <#
+    .SYNOPSIS
+        Returns a scriptblock: each call yields the next SERIES (an
+        immediate subdirectory of $LibraryPath - the fixed
+        Library > Series > Chapter > Images layout, not a heuristic - see
+        this module's header and CLAUDE.md's "Clean Console Output"
+        section) as a [System.IO.DirectoryInfo], or $null once the
+        library is exhausted.
+    .PARAMETER LibraryPath
+        The library root (top-level -Path). Validated to exist at the
+        time THIS function is called, not re-checked on every subsequent
+        scriptblock invocation.
+    .OUTPUTS
+        [scriptblock] - call repeatedly; returns the next series'
+        DirectoryInfo, or $null once exhausted.
+    .NOTES
+        Uses [System.IO.Directory]::EnumerateDirectories - single level
+        only (no -Recurse/AllDirectories, unlike
+        New-ZippableLeafDirProvider - series are always exactly one level
+        below the library root under the fixed layout) - genuinely lazy,
+        same reasoning as New-ZippableLeafDirProvider's own NOTES.
+        Simpler than that function in one respect: every immediate
+        subdirectory of the library root IS a series by definition, so
+        there is no per-item guard/filter loop needed here the way
+        Test-ZippableLeafDirCandidate provides for chapters - this
+        function can only find the next series or run out, never "skip"
+        one.
+
+        Pair this with Get-SeriesChapters (below): call this to get the
+        next series, then Get-SeriesChapters to get ITS chapters and a
+        real total count before dispatching any of them - see this
+        module's header for the full two-tier reasoning.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$LibraryPath
+    )
+    if (-not (Test-Path -LiteralPath $LibraryPath -PathType Container)) {
+        throw ("New-SeriesProvider: -LibraryPath does not exist or is not a directory: '" + $LibraryPath + "'")
+    }
+
+    $enumerator = [System.IO.Directory]::EnumerateDirectories($LibraryPath).GetEnumerator()
+
+    return {
+        try {
+            if ($enumerator.MoveNext()) {
+                return [System.IO.DirectoryInfo]::new($enumerator.Current)
+            }
+        } catch {
+            Write-Log ("Series scan stopped early: " + $_) -Level Error
+        }
+        return $null
+    }.GetNewClosure()
+}
+
+function Get-SeriesChapters {
+    <#
+    .SYNOPSIS
+        Eagerly scans ONE series folder for its qualifying chapters - the
+        second half of the two-tier model (see New-SeriesProvider). Thin
+        wrapper around Get-ZippableLeafDirs - see this module's header
+        for why rooting a recursive scan at one series folder is
+        equivalent to a single-level scan under the fixed layout, and why
+        that means reusing Get-ZippableLeafDirs directly here (rather
+        than writing separate scan logic) keeps the guard behavior from
+        ever drifting between the whole-library and per-series paths.
+        Bounded to one series' worth of filesystem work, not the whole
+        library, so calling this per series doesn't reintroduce the hang
+        Get-ZippableLeafDirs's own whole-library use already caused.
+    .OUTPUTS
+        List[hashtable] of @{ Dir; ZipOut } - same shape as
+        Get-ZippableLeafDirs. .Count is the real per-series chapter total
+        (Start-SeriesProgress's -TotalChapters).
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$SeriesPath,
+        [Parameter(Mandatory)]
+        [string[]]$QualifyingExtensions,
+        [System.Collections.Generic.HashSet[string]]$ExcludeStagingDirs = $null,
+        [bool]$ForceRezip = $false
+    )
+    $result = Get-ZippableLeafDirs -ScanPath $SeriesPath -QualifyingExtensions $QualifyingExtensions `
+        -ExcludeStagingDirs $ExcludeStagingDirs -ForceRezip $ForceRezip
+
+    # Leading comma needed HERE too, at this function's own return, even
+    # though $result already came from a comma-protected return one level
+    # down (Get-ZippableLeafDirs's own) - each function boundary is its
+    # own fresh opportunity for pipeline enumeration to collapse a 0- or
+    # 1-element collection. Verified live (Harness Scenario Q/R) that
+    # this comma is genuinely required here, not just copied out of
+    # caution - same discipline as everywhere else in this project.
+    return ,$result
 }
