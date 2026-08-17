@@ -29,7 +29,12 @@
         to cover.
     Write-Host output is captured via the Information stream (6>&1,
     available since PS5) for content assertions - verified live that this
-    works before relying on it.
+    works before relying on it. Also verified live that a captured
+    InformationRecord's .MessageData carries the actual -ForegroundColor
+    value used (a real System.Management.Automation.HostInformationMessage
+    object, not just the text) - used in Scenario K to prove color is
+    genuinely applied through a real redraw, not just correct in the
+    content-generation functions considered alone.
 
 .EXAMPLE
     .\Modules\_Harness\CleanConsoleRendering.Harness.ps1
@@ -98,26 +103,36 @@ Test-Assert ($emptySplit.Count -eq 1 -and $emptySplit[0] -eq "") "empty text ret
 Write-Host ""
 
 # ==============================================================================
-#  Scenario D: Format-SeriesLines
+#  Scenario D: Format-SeriesLines - now returns @{ Text; Color } objects,
+#  not bare strings, so colors can be verified directly here.
 # ==============================================================================
 Write-Host "=== Scenario D: Format-SeriesLines ===" -ForegroundColor Cyan
 $entryD1 = @{ TotalChapters = 8; SuccessCount = 3; ActiveChapters = [System.Collections.Generic.List[string]]::new(); IssueChapters = [System.Collections.Generic.List[hashtable]]::new() }
 $entryD1.ActiveChapters.Add("Chapter 4")
 $entryD1.ActiveChapters.Add("Chapter 5")
 $linesD1 = @(Format-SeriesLines -SeriesName "Only Images" -Entry $entryD1)
-Test-Assert ($linesD1[0] -eq "Only Images") "first line is the series name"
-Test-Assert ($linesD1[1] -like "*3/8 chapters*") "second line shows SuccessCount/TotalChapters"
-Test-Assert (($linesD1 | Where-Object { $_ -like "*Chapter 4*in progress*" }).Count -eq 1) "active chapter 4 is listed as in progress"
-Test-Assert (($linesD1 | Where-Object { $_ -like "*Chapter 5*in progress*" }).Count -eq 1) "active chapter 5 is listed as in progress"
+Test-Assert ($linesD1[0].Text -eq "Only Images") "first line is the series name"
+Test-Assert ($null -eq $linesD1[0].Color) "series name line is uncolored"
+Test-Assert ($linesD1[1].Text -like "*3/8 chapters*") "second line shows SuccessCount/TotalChapters"
+Test-Assert ($null -eq $linesD1[1].Color) "bar+count line is uncolored when there are no issue chapters"
+Test-Assert (@($linesD1 | Where-Object { $_.Text -like "*Chapter 4*in progress*" }).Count -eq 1) "active chapter 4 is listed as in progress"
+Test-Assert (@($linesD1 | Where-Object { $_.Text -like "*Chapter 5*in progress*" -and $null -eq $_.Color }).Count -eq 1) "active chapter lines are uncolored"
 
 $entryD2 = @{ TotalChapters = 8; SuccessCount = 6; ActiveChapters = [System.Collections.Generic.List[string]]::new(); IssueChapters = [System.Collections.Generic.List[hashtable]]::new() }
 $entryD2.IssueChapters.Add(@{ ChapterName = "Chapter 3"; Status = "Warning"; Detail = "2 files skipped" })
 $entryD2.IssueChapters.Add(@{ ChapterName = "Chapter 7"; Status = "Error"; Detail = "1 file failed" })
 $linesD2 = @(Format-SeriesLines -SeriesName "Only Images" -Entry $entryD2)
-Test-Assert ($linesD2[1] -like "*6/8 chapters*") "bar numerator is SuccessCount (6), NOT resolved-count (8) - issues don't count toward it"
-Test-Assert (($linesD2 | Where-Object { $_ -eq "    Chapter 3 - Warning: 2 files skipped" }).Count -eq 1) "warning chapter persists with its detail text"
-Test-Assert (($linesD2 | Where-Object { $_ -eq "    Chapter 7 - Error: 1 file failed" }).Count -eq 1) "error chapter persists with its detail text"
+Test-Assert ($linesD2[1].Text -like "*6/8 chapters*") "bar numerator is SuccessCount (6), NOT resolved-count (8) - issues don't count toward it"
+Test-Assert ($linesD2[1].Color -eq "Red") "bar+count line takes the WORST severity present (Red, because at least one Error exists)"
+Test-Assert (@($linesD2 | Where-Object { $_.Text -eq "    Chapter 3 - Warning: 2 files skipped" -and $_.Color -eq "Yellow" }).Count -eq 1) "warning chapter persists with its detail text, colored Yellow"
+Test-Assert (@($linesD2 | Where-Object { $_.Text -eq "    Chapter 7 - Error: 1 file failed" -and $_.Color -eq "Red" }).Count -eq 1) "error chapter persists with its detail text, colored Red"
 Test-Assert ($linesD2.Count -eq 4) "no active-chapter lines when ActiveChapters is empty (this is what a FROZEN series' lines look like too - same function, no separate frozen formatter needed)"
+
+$entryD3 = @{ TotalChapters = 2; SuccessCount = 1; ActiveChapters = [System.Collections.Generic.List[string]]::new(); IssueChapters = [System.Collections.Generic.List[hashtable]]::new() }
+$entryD3.IssueChapters.Add(@{ ChapterName = "Chapter 2"; Status = "Warning"; Detail = "" })
+$linesD3 = @(Format-SeriesLines -SeriesName "Series C" -Entry $entryD3)
+Test-Assert (@($linesD3 | Where-Object { $_.Text -eq "    Chapter 2 - Warning" }).Count -eq 1) "empty -Detail renders with no dangling ': ' suffix"
+Test-Assert ($linesD3[1].Color -eq "Yellow") "bar+count line is Yellow (not Red) when only Warning issues are present, no Error"
 Write-Host ""
 
 # ==============================================================================
@@ -215,6 +230,58 @@ $outputTextI = ($outputI | ForEach-Object { $_.ToString() }) -join "`n"
 
 Test-Assert ($script:ccrActiveSeries.Contains("Series A") -and $script:ccrActiveSeries.Contains("Series B")) "both series remain tracked as active simultaneously"
 Test-Assert ($outputTextI -like "*Series A*" -and $outputTextI -like "*Series B*") "both series' blocks appear together in the same redraw"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario J: Start-SeriesProgress rejects a negative -TotalChapters
+#  instead of silently treating it the same as the legitimate 0-chapter
+#  case.
+# ==============================================================================
+Write-Host "=== Scenario J: negative -TotalChapters throws ===" -ForegroundColor Cyan
+Reset-CCRState
+$threwNegativeJ = $false
+try { Start-SeriesProgress -SeriesName "Bad Series" -TotalChapters -5 } catch { $threwNegativeJ = $true }
+Test-Assert $threwNegativeJ "a negative -TotalChapters throws rather than being treated as an empty series"
+Test-Assert (-not $script:ccrActiveSeries.Contains("Bad Series")) "the bad series was never registered"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario K: Complete-AllActiveSeriesProgress - force-resolves every
+#  still-active series (the abort/shutdown finalization path). Chapters
+#  still running get moved into the persistent issue list with -Status
+#  Aborted, exactly like Warning/Error - not left dangling forever.
+# ==============================================================================
+Write-Host "=== Scenario K: Complete-AllActiveSeriesProgress ===" -ForegroundColor Cyan
+Reset-CCRState
+$noopK = $false
+try { Complete-AllActiveSeriesProgress } catch { $noopK = $true }
+Test-Assert (-not $noopK) "calling it with nothing active at all is a clean no-op, not an error"
+
+Reset-CCRState
+Start-SeriesProgress -SeriesName "Series A" -TotalChapters 3
+Start-ChapterProgress -SeriesName "Series A" -ChapterName "Chapter 1"
+$null = Complete-ChapterProgress -SeriesName "Series A" -ChapterName "Chapter 1" -Status Success
+Start-ChapterProgress -SeriesName "Series A" -ChapterName "Chapter 2"
+Start-ChapterProgress -SeriesName "Series A" -ChapterName "Chapter 3"
+Start-SeriesProgress -SeriesName "Series B" -TotalChapters 1
+Start-ChapterProgress -SeriesName "Series B" -ChapterName "B-Chapter 1"
+
+$outputK = & { Complete-AllActiveSeriesProgress } 6>&1
+$outputTextK = ($outputK | ForEach-Object { $_.ToString() }) -join "`n"
+
+Test-Assert ($script:ccrActiveSeries.Count -eq 0) "every series is removed from the active registry - nothing left live"
+Test-Assert ($outputTextK -like "*Series A*" -and $outputTextK -like "*Series B*") "both series' final content was printed as permanent output"
+Test-Assert ($outputTextK -like "*Chapter 2 - Aborted*" -and $outputTextK -like "*Chapter 3 - Aborted*") "Series A's two still-running chapters are marked Aborted, not silently dropped"
+Test-Assert ($outputTextK -like "*B-Chapter 1 - Aborted*") "Series B's still-running chapter is marked Aborted too"
+Test-Assert ($outputTextK -like "*1/3 chapters*") "Series A's bar numerator stays at 1 (the 1 real success) - Aborted chapters don't count toward it either"
+
+$colorFoundK = $false
+foreach ($rec in $outputK) {
+    if ($rec.MessageData -and $rec.MessageData.PSObject.Properties['ForegroundColor'] -and $rec.MessageData.ForegroundColor -eq "Yellow" -and $rec.ToString() -like "*Aborted*") {
+        $colorFoundK = $true
+    }
+}
+Test-Assert $colorFoundK "an Aborted chapter line is actually printed in Yellow via a real captured Write-Host call, not just correct in the abstract content-generation functions"
 Write-Host ""
 
 # ==============================================================================

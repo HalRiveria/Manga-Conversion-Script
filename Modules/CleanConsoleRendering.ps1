@@ -57,6 +57,31 @@
     a real console - see Modules\_Harness\CleanConsoleRendering.Harness.ps1's
     own header for what is and isn't actually verifiable that way.
 
+    COLOR: persisted issue lines and the bar+count line are colored to
+    match this project's existing Warn/Error console conventions -
+    Yellow for Warning/Aborted, Red for Error (the bar+count line itself
+    takes the worst severity present: Red if any Error, else Yellow if
+    any Warning/Aborted, else uncolored). Series name and active-chapter
+    lines are always uncolored.
+
+    THREAD SAFETY / CALLING CONTEXT - IMPORTANT: every public function in
+    this module MUST be called from the main/orchestrating thread only -
+    NEVER from within a runspace worker script. $script:ccrActiveSeries is
+    per-runspace state, exactly like every other $script:-prefixed module
+    state in this project (verified live for Logging.ps1 in its own
+    harness, Scenario J) - a worker calling these functions would be
+    mutating its OWN isolated copy, invisible to the main thread's actual
+    live display. This is a silent failure mode (nothing crashes, nothing
+    errors, the display just never updates for that chapter) rather than
+    an obvious one, so it's called out here prominently rather than left
+    for whoever wires ImageConversionPipeline.ps1/ZipPipeline.ps1 up to
+    discover the hard way. The correct call sites are the dispatch loop's
+    own pre-dispatch code (Start-ChapterProgress) and its -ResultHandler
+    callback (Complete-ChapterProgress) - both already run on the main
+    thread in this project's established runspace-pool pattern, same as
+    Write-Log's own $script:workerConsoleQueue/Flush-ConsoleQueue split
+    exists to solve the identical problem for console output.
+
 .NOTES
     Brand new module - no reference extraction exists for this (the
     feature didn't exist when the original reference-extraction pass was
@@ -165,6 +190,22 @@ function Split-TextToWidth {
     return $chunks
 }
 
+function Get-IssueStatusColor {
+    <#
+    .SYNOPSIS
+        Internal helper - the console color for a given issue -Status.
+        Yellow for Warning/Aborted (not necessarily a hard failure), Red
+        for Error. $null (no color / console default) for anything else.
+    #>
+    param([string]$Status)
+    switch ($Status) {
+        "Error"    { return "Red" }
+        "Warning"  { return "Yellow" }
+        "Aborted"  { return "Yellow" }
+        default    { return $null }
+    }
+}
+
 function Format-SeriesLines {
     <#
     .SYNOPSIS
@@ -174,10 +215,12 @@ function Format-SeriesLines {
         empty by the time a series resolves, so this naturally produces
         the correct "frozen" look with no separate function needed):
         series name, progress bar + "X/Y chapters", then persisted issue
-        chapters (Warning/Error, always shown), then currently-active
-        chapters (only present while still live).
+        chapters (Warning/Error/Aborted, always shown), then currently-
+        active chapters (only present while still live).
     .OUTPUTS
-        string[] - logical lines, NOT yet wrapped/padded to console width.
+        Array of @{ Text = <string>; Color = <string or $null> } - logical
+        lines, NOT yet wrapped/padded to console width. Color is $null
+        for uncolored (console-default) lines.
     #>
     param(
         [Parameter(Mandatory)]
@@ -185,17 +228,27 @@ function Format-SeriesLines {
         [Parameter(Mandatory)]
         [hashtable]$Entry
     )
-    $lines = [System.Collections.Generic.List[string]]::new()
-    $lines.Add($SeriesName)
+    $lines = [System.Collections.Generic.List[hashtable]]::new()
+    $lines.Add(@{ Text = $SeriesName; Color = $null })
+
+    # Bar+count line takes the worst severity present among this
+    # series' issue chapters (Red beats Yellow beats uncolored) - a
+    # second, cheaper-to-spot signal on top of the bar itself already
+    # stalling short of full.
+    $barColor = $null
+    foreach ($issue in $Entry.IssueChapters) {
+        if ($issue.Status -eq "Error") { $barColor = "Red"; break }
+        if ($null -eq $barColor) { $barColor = "Yellow" }
+    }
     $bar = Get-ProgressBarString -Completed $Entry.SuccessCount -Total $Entry.TotalChapters
-    $lines.Add($bar + " " + $Entry.SuccessCount + "/" + $Entry.TotalChapters + " chapters")
+    $lines.Add(@{ Text = ($bar + " " + $Entry.SuccessCount + "/" + $Entry.TotalChapters + " chapters"); Color = $barColor })
 
     foreach ($issue in $Entry.IssueChapters) {
         $detailSuffix = if ($issue.Detail) { ": " + $issue.Detail } else { "" }
-        $lines.Add("    " + $issue.ChapterName + " - " + $issue.Status + $detailSuffix)
+        $lines.Add(@{ Text = ("    " + $issue.ChapterName + " - " + $issue.Status + $detailSuffix); Color = (Get-IssueStatusColor -Status $issue.Status) })
     }
     foreach ($active in $Entry.ActiveChapters) {
-        $lines.Add("    " + $active + " (in progress)")
+        $lines.Add(@{ Text = ("    " + $active + " (in progress)"); Color = $null })
     }
 
     # No leading comma - see Split-TextToWidth's comment for why: the
@@ -231,23 +284,30 @@ function Update-CleanConsoleDisplay {
         } catch { $script:ccrCursorAvailable = $false; $cursorOk = $false }
     }
 
-    $frozenRows = [System.Collections.Generic.List[string]]::new()
+    # Rows carry their inherited color forward from the logical line they
+    # were split from - @{ Text; Color }, same shape Format-SeriesLines
+    # itself uses.
+    $frozenRows = [System.Collections.Generic.List[hashtable]]::new()
     if ($NewlyFrozen) {
         foreach ($f in $NewlyFrozen) {
             foreach ($logicalLine in (Format-SeriesLines -SeriesName $f.Name -Entry $f.Entry)) {
-                foreach ($row in (Split-TextToWidth -Text $logicalLine -Width $effectiveWidth)) { $frozenRows.Add($row) }
+                foreach ($chunk in (Split-TextToWidth -Text $logicalLine.Text -Width $effectiveWidth)) {
+                    $frozenRows.Add(@{ Text = $chunk; Color = $logicalLine.Color })
+                }
             }
         }
     }
 
-    $liveRows = [System.Collections.Generic.List[string]]::new()
+    $liveRows = [System.Collections.Generic.List[hashtable]]::new()
     foreach ($seriesName in @($script:ccrActiveSeries.Keys)) {
         foreach ($logicalLine in (Format-SeriesLines -SeriesName $seriesName -Entry $script:ccrActiveSeries[$seriesName])) {
-            foreach ($row in (Split-TextToWidth -Text $logicalLine -Width $effectiveWidth)) { $liveRows.Add($row) }
+            foreach ($chunk in (Split-TextToWidth -Text $logicalLine.Text -Width $effectiveWidth)) {
+                $liveRows.Add(@{ Text = $chunk; Color = $logicalLine.Color })
+            }
         }
     }
 
-    $newContentRows = [System.Collections.Generic.List[string]]::new()
+    $newContentRows = [System.Collections.Generic.List[hashtable]]::new()
     $newContentRows.AddRange($frozenRows)
     $newContentRows.AddRange($liveRows)
 
@@ -258,7 +318,7 @@ function Update-CleanConsoleDisplay {
             if ($oldCount -gt 0) {
                 [Console]::SetCursorPosition(0, [Console]::CursorTop - $oldCount)
             }
-            foreach ($row in $newContentRows) { Write-Host $row.PadRight($effectiveWidth) }
+            foreach ($row in $newContentRows) { Write-ColoredConsoleRow -Text $row.Text.PadRight($effectiveWidth) -Color $row.Color }
             if ($newContentRows.Count -lt $oldCount) {
                 $blankRowsNeeded = $oldCount - $newContentRows.Count
                 for ($i = 0; $i -lt $blankRowsNeeded; $i++) { Write-Host ("".PadRight($effectiveWidth)) }
@@ -273,13 +333,33 @@ function Update-CleanConsoleDisplay {
             # accepted as a narrow, one-time cosmetic edge case rather
             # than engineered away.
             $script:ccrCursorAvailable = $false
-            foreach ($row in $newContentRows) { Write-Host $row }
+            foreach ($row in $newContentRows) { Write-ColoredConsoleRow -Text $row.Text -Color $row.Color }
         }
     } else {
-        foreach ($row in $newContentRows) { Write-Host $row }
+        foreach ($row in $newContentRows) { Write-ColoredConsoleRow -Text $row.Text -Color $row.Color }
     }
 
     $script:ccrLiveRegionLineCount = $liveRows.Count
+}
+
+function Write-ColoredConsoleRow {
+    <#
+    .SYNOPSIS
+        Internal helper - Write-Host with -ForegroundColor only when a
+        color is actually specified, since passing -ForegroundColor $null
+        is not the same as omitting the parameter entirely.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Text,
+        [string]$Color
+    )
+    if ($Color) {
+        Write-Host $Text -ForegroundColor $Color
+    } else {
+        Write-Host $Text
+    }
 }
 
 function Start-SeriesProgress {
@@ -288,7 +368,10 @@ function Start-SeriesProgress {
         Registers a new active series. -TotalChapters must already be
         known (from a per-series eager scan - see this module's header)
         - a 0-chapter series is rendered as an immediately-frozen "0/0"
-        line and never enters the active registry at all.
+        line and never enters the active registry at all. A NEGATIVE
+        -TotalChapters throws rather than being silently treated the
+        same as the legitimate 0-chapter case - that would mask a real
+        caller bug instead of surfacing it.
     #>
     param(
         [Parameter(Mandatory)]
@@ -298,6 +381,9 @@ function Start-SeriesProgress {
     )
     if ($script:ccrActiveSeries.Contains($SeriesName)) {
         throw ("Start-SeriesProgress: '" + $SeriesName + "' is already active - every chapter must be completed (Complete-ChapterProgress) before starting the same series name again.")
+    }
+    if ($TotalChapters -lt 0) {
+        throw ("Start-SeriesProgress: -TotalChapters cannot be negative (got " + $TotalChapters + ") - a genuinely empty series should pass 0, not a negative count.")
     }
 
     $entry = @{
@@ -343,7 +429,12 @@ function Complete-ChapterProgress {
         the display entirely. -Status Warning/Error instead moves it
         into a persistent list (with optional -Detail) that stays
         visible even after the series freezes - and does NOT count
-        toward the series' progress-bar numerator.
+        toward the series' progress-bar numerator. ("Aborted" is a third
+        persistent status, used only internally by
+        Complete-AllActiveSeriesProgress for chapters still running when
+        a series gets force-resolved - not a value this function accepts
+        directly, since a caller reporting a chapter's outcome always
+        knows whether it succeeded, warned, or errored.)
     .OUTPUTS
         @{ SeriesCompleted = <bool> } - whether this call was the one
         that resolved the whole series (nothing left running).
@@ -385,4 +476,38 @@ function Complete-ChapterProgress {
     }
 
     return @{ SeriesCompleted = $seriesCompleted }
+}
+
+function Complete-AllActiveSeriesProgress {
+    <#
+    .SYNOPSIS
+        Force-resolves every still-active series - for shutdown/abort,
+        when the run is ending with series/chapters genuinely still in
+        progress (a live region would otherwise be left stuck forever,
+        since nothing else would ever call Complete-ChapterProgress for
+        those remaining chapters). Any chapter still active is treated
+        exactly like a Warning/Error chapter - moved into the persistent
+        issue list (so it stays visible, does not count toward the bar's
+        numerator) - just with -Status "Aborted" instead. No -Detail is
+        set; the status itself already says what happened.
+    .OUTPUTS
+        None. No-ops cleanly if nothing is currently active.
+    #>
+    param()
+
+    if ($script:ccrActiveSeries.Count -eq 0) { return }
+
+    $seriesNames = @($script:ccrActiveSeries.Keys)
+    $frozen = [System.Collections.Generic.List[hashtable]]::new()
+    foreach ($seriesName in $seriesNames) {
+        $entry = $script:ccrActiveSeries[$seriesName]
+        foreach ($chapterName in @($entry.ActiveChapters)) {
+            $entry.IssueChapters.Add(@{ ChapterName = $chapterName; Status = "Aborted"; Detail = "" })
+        }
+        $entry.ActiveChapters.Clear()
+        $frozen.Add(@{ Name = $seriesName; Entry = $entry })
+        $null = $script:ccrActiveSeries.Remove($seriesName)
+    }
+
+    Update-CleanConsoleDisplay -NewlyFrozen $frozen
 }
