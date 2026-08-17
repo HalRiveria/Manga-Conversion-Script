@@ -19,12 +19,12 @@ session (human or Claude Code), and `CHANGELOG.md` for full version history.
 
 `Modules\` holds every standalone module built per the development process
 below - not yet merged into the main script, or (once merged) kept around
-as the canonical, independently-testable definition. Eight are actually
+as the canonical, independently-testable definition. Nine are actually
 built and tested (`ZipParallelProcessing`, `AbortPipeline`, `Logging`,
 `FileDeletion`, `DependencyDetection`, `ZipCreation`, `ZipValidation`,
-`LeafDirectoryDiscovery`); the other eight are empty placeholders with a
-corresponding extraction in `Modules\_Reference\` - see `Todo.md` for the
-current state of each:
+`LeafDirectoryDiscovery`, `ZipPipeline`); the other seven are empty
+placeholders with a corresponding extraction in `Modules\_Reference\` -
+see `Todo.md` for the current state of each:
 
 | File | What it does |
 |---|---|
@@ -36,6 +36,7 @@ current state of each:
 | `Modules\ZipCreation.ps1` | `Compress-FolderToZip` - creates a ZIP from a folder, clearing any pre-existing same-name ZIP first and cleaning up stray output if creation fails partway through. |
 | `Modules\ZipValidation.ps1` | `Test-ZipArchive` - post-creation sanity check (entry count, optional required `.jxl` presence). No cross-module dependencies. |
 | `Modules\LeafDirectoryDiscovery.ps1` | `Get-ZippableLeafDirs` - shared leaf-folder scan (mode 2/3) with staleness and former-container guards; its harness live-reproduces the historical "parent folder gets zipped" bug from `CHANGELOG.md` for the first time and confirms the fix works. |
+| `Modules\ZipPipeline.ps1` | `Invoke-ZipOnlyPipeline` (mode 3 end to end) and `Invoke-LooseFolderZip` (mode 2's per-folder zip step) - the first orchestration-tier module, tested as a real integration harness against the other six built modules together rather than stubs. |
 | `Modules\_Harness\*.Harness.ps1` | Standalone test harness per built module - dot-sources the real module from `..\`. |
 | `Modules\_Reference\*.reference.ps1` | Extracted-but-not-yet-built reference material for every module, including the two above - not working code, see `CLAUDE.md`'s "Modularization in progress" section. |
 
@@ -70,7 +71,8 @@ Conversion Script/
 │   ├── ZipCreation.ps1
 │   ├── ZipValidation.ps1
 │   ├── LeafDirectoryDiscovery.ps1
-│   ├── (8 more placeholder modules - see Todo.md)
+│   ├── ZipPipeline.ps1
+│   ├── (7 more placeholder modules - see Todo.md)
 │   ├── _Harness/          <- test harness per built module
 │   └── _Reference/        <- extracted reference material per module
 ├── Testing/               <- scratch copy scripts run against (gitignored)
