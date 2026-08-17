@@ -39,6 +39,22 @@
     before Initialize-LogPaths's full-logging branch actually runs) so
     Move-ToRecycleBin resolves when that cleanup code executes.
 
+    All three deletion functions return $true if ItemPath existed and was
+    processed, $false if it didn't exist (nothing to do) - lets a caller
+    log "skipped, already gone" vs. "deleted" instead of assuming the
+    latter. This is beyond the original reference extraction, which was
+    void.
+
+    Remove-ItemPermanently special-cases directory reparse points
+    (junctions/symlinks): a plain recursive Directory.Delete on a reparse
+    point is a known .NET footgun that can delete through the link into
+    the real target's contents instead of just unlinking it, so that path
+    uses a non-recursive delete instead. Verified live against a real
+    NTFS junction (Harness Scenarios K/L) that both this and
+    Move-ToRecycleBin (via the Shell-based VB FileIO Recycle Bin API,
+    which turned out to already be junction-safe without any change)
+    correctly unlink only, leaving the real target's contents untouched.
+
 .NOTES
     Extracted from Conversion Script Main.ps1 - see
     Modules\_Reference\FileDeletion.reference.ps1 for the verbatim source
@@ -81,27 +97,37 @@ function Move-ToRecycleBin {
         callers that want a best-effort "clean up if possible" call
         (e.g. Logging.ps1's old-log-file cleanup) wrap this in their own
         try/catch; this function does not swallow errors itself.
+    .OUTPUTS
+        $true if ItemPath existed and was sent to the Recycle Bin; $false
+        if it didn't exist (nothing to do) - lets a caller log "skipped,
+        already gone" vs. "deleted" instead of always assuming the latter.
     #>
     param(
         [Parameter(Mandatory)]
         [string]$ItemPath
     )
-    if (Test-Path -LiteralPath $ItemPath) {
-        $attr = (Get-Item -LiteralPath $ItemPath).Attributes
-        if ($attr -band [System.IO.FileAttributes]::Directory) {
-            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory(
-                $ItemPath,
-                [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs,
-                [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin
-            ) | Out-Null
-        } else {
-            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(
-                $ItemPath,
-                [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs,
-                [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin
-            ) | Out-Null
-        }
+    if (-not (Test-Path -LiteralPath $ItemPath)) { return $false }
+
+    $attr = (Get-Item -LiteralPath $ItemPath).Attributes
+    if ($attr -band [System.IO.FileAttributes]::Directory) {
+        # Verified live (Harness Scenario L) against a real NTFS directory
+        # junction: the Shell-based Recycle Bin operation this VB API goes
+        # through recycles the junction/link itself, not the target it
+        # points at - unlike System.IO.Directory.Delete's recursive=$true
+        # footgun below, this one doesn't need a reparse-point special case.
+        [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory(
+            $ItemPath,
+            [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs,
+            [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin
+        ) | Out-Null
+    } else {
+        [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(
+            $ItemPath,
+            [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs,
+            [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin
+        ) | Out-Null
     }
+    return $true
 }
 
 function Remove-ItemPermanently {
@@ -112,19 +138,39 @@ function Remove-ItemPermanently {
         (regardless of $PermanentDelete) for job-generated intermediates
         that are never "original" files - see this module's own header
         and CLAUDE.md's deletion-semantics convention.
+    .OUTPUTS
+        $true if ItemPath existed and was deleted; $false if it didn't
+        exist (nothing to do).
     #>
     param(
         [Parameter(Mandatory)]
         [string]$ItemPath
     )
-    if (Test-Path -LiteralPath $ItemPath) {
-        $attr = (Get-Item -LiteralPath $ItemPath).Attributes
-        if ($attr -band [System.IO.FileAttributes]::Directory) {
-            [System.IO.Directory]::Delete($ItemPath, $true)
-        } else {
-            [System.IO.File]::Delete($ItemPath)
-        }
+    if (-not (Test-Path -LiteralPath $ItemPath)) { return $false }
+
+    $attr           = (Get-Item -LiteralPath $ItemPath).Attributes
+    $isDirectory    = [bool]($attr -band [System.IO.FileAttributes]::Directory)
+    $isReparsePoint = [bool]($attr -band [System.IO.FileAttributes]::ReparsePoint)
+
+    if ($isDirectory -and $isReparsePoint) {
+        # Directory junction/symlink - unlink the link itself only, do NOT
+        # recurse into whatever it points at. Directory.Delete(path, $true)
+        # on a reparse point is a known .NET footgun: recursive=$true can
+        # delete through the link into the real target's contents instead
+        # of just removing the link - non-recursive delete correctly
+        # removes just the link. Verified live against a real NTFS junction
+        # (Harness Scenario K): the target directory and its contents
+        # survive untouched.
+        [System.IO.Directory]::Delete($ItemPath, $false)
+    } elseif ($isDirectory) {
+        [System.IO.Directory]::Delete($ItemPath, $true)
+    } else {
+        # A file symlink also carries ReparsePoint, but not Directory, so
+        # it lands here - File.Delete on a file symlink already correctly
+        # removes just the link, no special case needed.
+        [System.IO.File]::Delete($ItemPath)
     }
+    return $true
 }
 
 function Remove-Source {
@@ -136,14 +182,17 @@ function Remove-Source {
         Initialize-FileDeletion). Not meant to be bypassed in favor of
         calling the two branches directly, except for the "always
         permanent" intermediate-cleanup case noted above.
+    .OUTPUTS
+        Whatever the chosen branch returns - $true if ItemPath existed and
+        was processed, $false if it didn't exist.
     #>
     param(
         [Parameter(Mandatory)]
         [string]$ItemPath
     )
     if ($script:PermanentDelete) {
-        Remove-ItemPermanently -ItemPath $ItemPath
+        return Remove-ItemPermanently -ItemPath $ItemPath
     } else {
-        Move-ToRecycleBin -ItemPath $ItemPath
+        return Move-ToRecycleBin -ItemPath $ItemPath
     }
 }

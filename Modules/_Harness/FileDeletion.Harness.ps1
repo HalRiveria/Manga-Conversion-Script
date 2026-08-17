@@ -78,8 +78,9 @@ function Test-ItemInRecycleBin {
 Write-Host "=== Scenario A: Move-ToRecycleBin removes a file ===" -ForegroundColor Cyan
 $fileA = New-ScratchFile -Name "scenario-a.txt"
 Test-Assert (Test-Path -LiteralPath $fileA) "file exists before Move-ToRecycleBin"
-Move-ToRecycleBin -ItemPath $fileA
+$resultA = Move-ToRecycleBin -ItemPath $fileA
 Test-Assert (-not (Test-Path -LiteralPath $fileA)) "file is gone from its original location after Move-ToRecycleBin"
+Test-Assert ($resultA -eq $true) "Move-ToRecycleBin returns `$true when it actually processed an existing item"
 Write-Host ""
 
 # ==============================================================================
@@ -88,8 +89,9 @@ Write-Host ""
 Write-Host "=== Scenario B: Move-ToRecycleBin removes a directory ===" -ForegroundColor Cyan
 $dirB = New-ScratchDir -Name "scenario-b-dir"
 Test-Assert (Test-Path -LiteralPath $dirB) "directory exists before Move-ToRecycleBin"
-Move-ToRecycleBin -ItemPath $dirB
+$resultB = Move-ToRecycleBin -ItemPath $dirB
 Test-Assert (-not (Test-Path -LiteralPath $dirB)) "directory (with nested contents) is gone after Move-ToRecycleBin"
+Test-Assert ($resultB -eq $true) "Move-ToRecycleBin returns `$true when it actually processed an existing directory"
 Write-Host ""
 
 # ==============================================================================
@@ -98,8 +100,10 @@ Write-Host ""
 Write-Host "=== Scenario C: Move-ToRecycleBin on a nonexistent path ===" -ForegroundColor Cyan
 $missingC = Join-Path $scratchDir "does-not-exist.txt"
 $threwC = $false
-try { Move-ToRecycleBin -ItemPath $missingC } catch { $threwC = $true }
+$resultC = $null
+try { $resultC = Move-ToRecycleBin -ItemPath $missingC } catch { $threwC = $true }
 Test-Assert (-not $threwC) "Move-ToRecycleBin on a nonexistent path does not throw"
+Test-Assert ($resultC -eq $false) "Move-ToRecycleBin returns `$false for a nonexistent path"
 Write-Host ""
 
 # ==============================================================================
@@ -108,8 +112,9 @@ Write-Host ""
 Write-Host "=== Scenario D: Remove-ItemPermanently removes a file ===" -ForegroundColor Cyan
 $fileD = New-ScratchFile -Name "scenario-d.txt"
 Test-Assert (Test-Path -LiteralPath $fileD) "file exists before Remove-ItemPermanently"
-Remove-ItemPermanently -ItemPath $fileD
+$resultD = Remove-ItemPermanently -ItemPath $fileD
 Test-Assert (-not (Test-Path -LiteralPath $fileD)) "file is gone from its original location after Remove-ItemPermanently"
+Test-Assert ($resultD -eq $true) "Remove-ItemPermanently returns `$true when it actually processed an existing item"
 Write-Host ""
 
 # ==============================================================================
@@ -118,8 +123,9 @@ Write-Host ""
 Write-Host "=== Scenario E: Remove-ItemPermanently removes a directory ===" -ForegroundColor Cyan
 $dirE = New-ScratchDir -Name "scenario-e-dir"
 Test-Assert (Test-Path -LiteralPath $dirE) "directory exists before Remove-ItemPermanently"
-Remove-ItemPermanently -ItemPath $dirE
+$resultE = Remove-ItemPermanently -ItemPath $dirE
 Test-Assert (-not (Test-Path -LiteralPath $dirE)) "directory (with nested contents) is gone after Remove-ItemPermanently"
+Test-Assert ($resultE -eq $true) "Remove-ItemPermanently returns `$true when it actually processed an existing directory"
 Write-Host ""
 
 # ==============================================================================
@@ -128,8 +134,10 @@ Write-Host ""
 Write-Host "=== Scenario F: Remove-ItemPermanently on a nonexistent path ===" -ForegroundColor Cyan
 $missingF = Join-Path $scratchDir "also-does-not-exist.txt"
 $threwF = $false
-try { Remove-ItemPermanently -ItemPath $missingF } catch { $threwF = $true }
+$resultF = $null
+try { $resultF = Remove-ItemPermanently -ItemPath $missingF } catch { $threwF = $true }
 Test-Assert (-not $threwF) "Remove-ItemPermanently on a nonexistent path does not throw"
+Test-Assert ($resultF -eq $false) "Remove-ItemPermanently returns `$false for a nonexistent path"
 Write-Host ""
 
 # ==============================================================================
@@ -142,7 +150,7 @@ Write-Host ""
 Write-Host "=== Scenario G: Move-ToRecycleBin target actually lands in the Recycle Bin ===" -ForegroundColor Cyan
 $uniqueNameG = "filedeletion-harness-" + [guid]::NewGuid().ToString("N") + ".txt"
 $fileG = New-ScratchFile -Name $uniqueNameG
-Move-ToRecycleBin -ItemPath $fileG
+$null = Move-ToRecycleBin -ItemPath $fileG
 $foundInBinG = Test-ItemInRecycleBin -FileName $uniqueNameG
 Test-Assert $foundInBinG "Move-ToRecycleBin's target is found in the real Windows Recycle Bin (genuinely recoverable, not just deleted)"
 Write-Host ""
@@ -160,13 +168,14 @@ $script:moveCallsH = [System.Collections.Generic.List[string]]::new()
 $script:permCallsH = [System.Collections.Generic.List[string]]::new()
 $originalMove = ${function:Move-ToRecycleBin}
 $originalPerm = ${function:Remove-ItemPermanently}
-function Move-ToRecycleBin     { param([string]$ItemPath) $script:moveCallsH.Add($ItemPath) }
-function Remove-ItemPermanently { param([string]$ItemPath) $script:permCallsH.Add($ItemPath) }
+function Move-ToRecycleBin     { param([string]$ItemPath) $script:moveCallsH.Add($ItemPath); return $true }
+function Remove-ItemPermanently { param([string]$ItemPath) $script:permCallsH.Add($ItemPath); return $true }
 
-Remove-Source -ItemPath "C:\Fake\Path\For\Routing\Test.txt"
+$resultH = Remove-Source -ItemPath "C:\Fake\Path\For\Routing\Test.txt"
 
 Test-Assert ($script:moveCallsH.Count -eq 1) "Remove-Source called Move-ToRecycleBin exactly once when PermanentDelete=`$false"
 Test-Assert ($script:permCallsH.Count -eq 0) "Remove-Source did NOT call Remove-ItemPermanently when PermanentDelete=`$false"
+Test-Assert ($resultH -eq $true) "Remove-Source propagates the chosen branch's return value"
 
 ${function:Move-ToRecycleBin}     = $originalMove
 ${function:Remove-ItemPermanently} = $originalPerm
@@ -183,13 +192,14 @@ $script:moveCallsI = [System.Collections.Generic.List[string]]::new()
 $script:permCallsI = [System.Collections.Generic.List[string]]::new()
 $originalMove = ${function:Move-ToRecycleBin}
 $originalPerm = ${function:Remove-ItemPermanently}
-function Move-ToRecycleBin     { param([string]$ItemPath) $script:moveCallsI.Add($ItemPath) }
-function Remove-ItemPermanently { param([string]$ItemPath) $script:permCallsI.Add($ItemPath) }
+function Move-ToRecycleBin     { param([string]$ItemPath) $script:moveCallsI.Add($ItemPath); return $true }
+function Remove-ItemPermanently { param([string]$ItemPath) $script:permCallsI.Add($ItemPath); return $true }
 
-Remove-Source -ItemPath "C:\Fake\Path\For\Routing\Test2.txt"
+$resultI = Remove-Source -ItemPath "C:\Fake\Path\For\Routing\Test2.txt"
 
 Test-Assert ($script:permCallsI.Count -eq 1) "Remove-Source called Remove-ItemPermanently exactly once when PermanentDelete=`$true"
 Test-Assert ($script:moveCallsI.Count -eq 0) "Remove-Source did NOT call Move-ToRecycleBin when PermanentDelete=`$true"
+Test-Assert ($resultI -eq $true) "Remove-Source propagates the chosen branch's return value"
 
 ${function:Move-ToRecycleBin}     = $originalMove
 ${function:Remove-ItemPermanently} = $originalPerm
@@ -213,6 +223,55 @@ Test-Assert $threwPermJ "Remove-ItemPermanently without -ItemPath throws (Mandat
 $threwSourceJ = $false
 try { Remove-Source } catch { $threwSourceJ = $true }
 Test-Assert $threwSourceJ "Remove-Source without -ItemPath throws (Mandatory parameter)"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario K: Remove-ItemPermanently on a directory junction (a reparse
+#  point) must unlink the junction itself, NOT recurse into the real
+#  target's contents. Directory.Delete(path, $true) on a reparse point is
+#  a known .NET footgun - recursive=$true can delete through the link
+#  into the target instead of just removing the link. Verified live with
+#  a real NTFS junction (New-Item -ItemType Junction, no elevation
+#  needed), not reasoned about from documentation - per this project's
+#  "test, don't assume" philosophy, especially given this exact category
+#  of bug (a plausible-sounding assumption about filesystem/.NET behavior
+#  turning out wrong) has bitten this codebase before.
+# ==============================================================================
+Write-Host "=== Scenario K: Remove-ItemPermanently on a directory junction unlinks only ===" -ForegroundColor Cyan
+$targetK  = New-ScratchDir -Name "scenario-k-real-target"
+$canaryK  = Join-Path $targetK "canary.txt"
+"do not delete me" | Out-File -FilePath $canaryK -Encoding UTF8
+$junctionK = Join-Path $scratchDir "scenario-k-junction"
+New-Item -ItemType Junction -Path $junctionK -Target $targetK | Out-Null
+Test-Assert (Test-Path -LiteralPath $junctionK) "junction was created"
+
+$null = Remove-ItemPermanently -ItemPath $junctionK
+
+Test-Assert (-not (Test-Path -LiteralPath $junctionK)) "the junction itself is gone"
+Test-Assert (Test-Path -LiteralPath $targetK) "the REAL target directory still exists (was not recursed into)"
+Test-Assert (Test-Path -LiteralPath $canaryK) "the canary file inside the real target survives (proves this wasn't a recursive delete through the link)"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario L: same concern, checked against Move-ToRecycleBin. Unlike
+#  Remove-ItemPermanently's raw Directory.Delete, this goes through the
+#  Shell-based VB FileIO Recycle Bin API - untested assumption otherwise,
+#  so checked live rather than assumed safe just because the API is
+#  different.
+# ==============================================================================
+Write-Host "=== Scenario L: Move-ToRecycleBin on a directory junction ===" -ForegroundColor Cyan
+$targetL  = New-ScratchDir -Name "scenario-l-real-target"
+$canaryL  = Join-Path $targetL "canary.txt"
+"do not delete me either" | Out-File -FilePath $canaryL -Encoding UTF8
+$junctionL = Join-Path $scratchDir "scenario-l-junction"
+New-Item -ItemType Junction -Path $junctionL -Target $targetL | Out-Null
+Test-Assert (Test-Path -LiteralPath $junctionL) "junction was created"
+
+$null = Move-ToRecycleBin -ItemPath $junctionL
+
+Test-Assert (-not (Test-Path -LiteralPath $junctionL)) "the junction itself is gone"
+Test-Assert (Test-Path -LiteralPath $targetL) "the REAL target directory still exists (was not recursed into)"
+Test-Assert (Test-Path -LiteralPath $canaryL) "the canary file inside the real target survives"
 Write-Host ""
 
 # ==============================================================================
