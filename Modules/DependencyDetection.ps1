@@ -73,7 +73,7 @@ function Find-Exe {
     if ($inPath) { return $inPath.Source }
 
     foreach ($c in $Candidates) {
-        if (Test-Path $c) { return $c }
+        if (Test-Path -LiteralPath $c) { return $c }
     }
 
     return $null

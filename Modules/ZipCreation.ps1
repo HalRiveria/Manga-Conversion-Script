@@ -45,10 +45,12 @@ function Compress-FolderToZip {
     .OUTPUTS
         The resulting ZIP's size in bytes (Int64).
     .NOTES
-        Propagates whatever CreateFromDirectory itself throws (e.g.
-        $SourceDir doesn't exist) - not caught here. Also throws directly
-        if, against expectation, the ZIP doesn't exist or is 0 bytes
-        immediately after creation.
+        Whatever CreateFromDirectory itself throws (e.g. $SourceDir
+        doesn't exist) propagates to the caller - it IS caught here, but
+        only to clean up a stray broken ZIP file before re-throwing the
+        original exception unchanged (see the try/catch below). Also
+        throws directly if, against expectation, the ZIP doesn't exist or
+        is 0 bytes immediately after creation.
     #>
     param(
         [Parameter(Mandatory)]
