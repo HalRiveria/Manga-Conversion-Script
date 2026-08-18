@@ -43,6 +43,7 @@ function Reset-LoggingState {
     $script:logWarnFile        = $null
     $script:pathHash           = $null
     $script:SummaryFileEnabled = $true
+    $script:CleanConsoleOutputEnabled = $false
 }
 
 # Logging.ps1's Initialize-LogPaths (full-logging branch) forward-references
@@ -514,6 +515,38 @@ Reset-LoggingState
 $n3Threw = $false
 try { Initialize-LogMutex } catch { $n3Threw = ($_.Exception.Message -like "*Initialize-LogPaths*") }
 Test-Assert $n3Threw "Initialize-LogMutex throws a clear error pointing at Initialize-LogPaths when no PathHash is available"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario O: Initialize-CleanConsoleOutput - Write-Log's console echo is
+#  fully suppressed on the main thread's direct-Write-Host path when
+#  enabled, log file writes are completely unaffected, and disabling it
+#  again resumes normal echo. Captured via a real 6>&1 redirect (the same
+#  technique CleanConsoleRendering.Harness.ps1 uses), not by reasoning
+#  about the code - confirms nothing is actually printed, not just that
+#  the code "looks like" it wouldn't be.
+# ==============================================================================
+Write-Host "=== Scenario O: Initialize-CleanConsoleOutput suppresses console echo ===" -ForegroundColor Cyan
+Reset-LoggingState
+Initialize-LogPaths -TargetPath "C:\O\Path" -FullLogging $true -ScriptDir $scratchDir
+Initialize-CleanConsoleOutput -Enabled $true
+
+$outputO = & { Write-Log "should not print to console" -Level Warn } 6>&1
+Test-Assert ($outputO.Count -eq 0) ("no console output was produced while Clean Console Output is enabled (got " + $outputO.Count + " record(s))")
+
+$logContentO = Get-Content -LiteralPath $script:logFile
+Test-Assert ($logContentO -like "*should not print to console*") "the line was still written to the log FILE - only the console echo is suppressed"
+
+# also confirm the worker-queue path is suppressed (nothing gets enqueued,
+# so Flush-ConsoleQueue naturally has nothing to drain)
+$script:workerConsoleQueue = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+Write-Log "should not be queued either" -Level Warn
+Test-Assert ($script:workerConsoleQueue.Count -eq 0) "nothing was enqueued for the worker-console-queue path either while the toggle is on"
+$script:workerConsoleQueue = $null
+
+Initialize-CleanConsoleOutput -Enabled $false
+$outputO2 = & { Write-Log "should print again" -Level Warn } 6>&1
+Test-Assert ($outputO2.Count -gt 0) "disabling the toggle again resumes normal console echo"
 Write-Host ""
 
 # ==============================================================================

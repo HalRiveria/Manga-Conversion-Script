@@ -13,7 +13,23 @@
     module owns its own script-scope state, callers don't set it up):
       $script:logMutex, $script:workerConsoleQueue, $script:FullLogging,
       $script:logFile, $script:logSummaryFile, $script:logErrorFile,
-      $script:logWarnFile, $script:pathHash
+      $script:logWarnFile, $script:pathHash, $script:CleanConsoleOutputEnabled
+
+    Clean Console Output (2026-08-18): when
+    Initialize-CleanConsoleOutput -Enabled $true has been called,
+    Write-Log stops echoing to the console entirely (both the direct
+    Write-Host path and the worker-queue-then-Flush-ConsoleQueue path -
+    since nothing gets enqueued in the first place, Flush-ConsoleQueue
+    naturally has nothing to drain, no separate change needed there).
+    Log FILE writes are completely unaffected either way - this toggle
+    only ever controls the console echo, matching this feature's
+    project-wide rule (see CLAUDE.md's "Clean Console Output" section)
+    that log content is never touched by it. With the toggle on, all
+    user-facing console output becomes CleanConsoleRendering.ps1's job
+    (series/chapter/progress-bar display, including persisted
+    Warning/Error/Aborted chapter lines) instead of Write-Log's own
+    per-line echo - this module doesn't call into CCR itself, it just
+    gets out of the way.
 
     Runspace workers get their own independent copy of this state (a
     runspace doesn't share the parent scope) - the established pattern
@@ -87,6 +103,7 @@ $script:pathHash           = $null
 $script:SummaryFileEnabled = $true   # only meaningful when FullLogging = $false - see
                                       # Initialize-LogPaths -DisableSummaryFile and
                                       # Write-SummaryLog
+$script:CleanConsoleOutputEnabled = $false   # see Initialize-CleanConsoleOutput
 
 function Initialize-LogPaths {
     <#
@@ -228,6 +245,31 @@ function Initialize-LogMutex {
     $script:logMutex = [System.Threading.Mutex]::new($false, ("JxlLogMutex_" + $PathHash))
 }
 
+function Initialize-CleanConsoleOutput {
+    <#
+    .SYNOPSIS
+        Sets $script:CleanConsoleOutputEnabled once, matching the
+        Initialize-FileDeletion -PermanentDelete "call once, don't
+        re-pass every call" pattern. Call before anything calls
+        Write-Log, alongside Initialize-LogPaths.
+    .PARAMETER Enabled
+        $true: Write-Log stops echoing to the console (log files
+        unaffected) - the options-menu "Clean Console Output" toggle.
+        $false (default): current behavior, Write-Log echoes every line
+        to the console as it always has.
+    .DESCRIPTION
+        Like every other $script:-prefixed state this module owns, this
+        is per-runspace - a worker that calls Write-Log must call this
+        itself too (from its own dispatch-time parameters, the
+        established pattern elsewhere in this module), or it silently
+        keeps echoing to a console a background thread cannot safely
+        write to. Not enforced here; documented so whoever wires this
+        into a worker scriptblock doesn't miss it.
+    #>
+    param([Parameter(Mandatory)][bool]$Enabled)
+    $script:CleanConsoleOutputEnabled = $Enabled
+}
+
 function Invoke-MutexGuardedWrite {
     <#
     .SYNOPSIS
@@ -280,6 +322,13 @@ function Write-Log {
         }
         # Info lines are not written in split-log mode
     }
+
+    # Clean Console Output: skip console echo entirely (both paths below) -
+    # CleanConsoleRendering.ps1 owns all user-facing console output when
+    # this toggle is on. Nothing gets enqueued in this branch either, so
+    # Flush-ConsoleQueue naturally has nothing to drain - no change needed
+    # there.
+    if ($script:CleanConsoleOutputEnabled) { return }
 
     # Inside a runspace worker, $script:workerConsoleQueue is set and
     # cross-thread Write-Host is unsafe, so queue for the main thread to
