@@ -31,6 +31,24 @@ function Flush-ConsoleQueue {
     }
 }
 
+# AbortPipeline.ps1 forward-references $script:CleanConsoleOutputEnabled
+# (owned by Logging.ps1, deliberately NOT redeclared here - this harness
+# proves the module still works standalone with it simply absent/falsy)
+# and Write-CleanConsoleMessage (owned by CleanConsoleRendering.ps1).
+# Stubbed here with call tracking, same pattern as Flush-ConsoleQueue
+# above, so scenarios can assert WHICH path (raw Write-Host vs. this
+# stub) actually fired for a given $script:CleanConsoleOutputEnabled
+# value - not just that neither one threw.
+$script:cleanConsoleMessageCalls = [System.Collections.Generic.List[hashtable]]::new()
+function Write-CleanConsoleMessage {
+    param([string]$Text, [string]$Color)
+    $script:cleanConsoleMessageCalls.Add(@{ Text = $Text; Color = $Color })
+}
+$script:completeAllActiveSeriesProgressCallCount = 0
+function Complete-AllActiveSeriesProgress {
+    $script:completeAllActiveSeriesProgressCallCount++
+}
+
 $fakeWorkerOk = {
     param([int]$JobId, [int]$DelayMs)
     Start-Sleep -Milliseconds $DelayMs
@@ -78,6 +96,9 @@ function Reset-AbortState {
     $script:abortRequested = $false
     $script:ctrlCloseAbort = $false
     $script:abortCancellationSources.Clear()
+    $script:CleanConsoleOutputEnabled = $false
+    $script:cleanConsoleMessageCalls.Clear()
+    $script:completeAllActiveSeriesProgressCallCount = 0
 }
 
 # ==============================================================================
@@ -215,6 +236,146 @@ $fake.Pool.Close(); $fake.Pool.Dispose()
 
 Test-Assert ($outcomeG.ForceStoppedCount -eq 0) "a thrown worker is not counted as force-stopped"
 Test-Assert ($errorsG.Count -eq 1) ("the failure was reported via -ErrorHandler (got " + $errorsG.Count + " report(s))")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario H: Clean Console Output OFF (the default, $script:CleanConsole-
+#  OutputEnabled = $false) - Test-AbortSignal keeps using raw Write-Host,
+#  never calls the Write-CleanConsoleMessage stub. Captured via 6>&1 (the
+#  same technique CleanConsoleRendering.Harness.ps1 uses) so this proves
+#  real output was produced, not just that nothing threw.
+# ==============================================================================
+Write-Host "=== Scenario H: Clean Console Output off - unchanged raw Write-Host path ===" -ForegroundColor Cyan
+Reset-AbortState
+[ConsoleCtrl]::AbortRequested = $true
+[ConsoleCtrl]::IsCloseEvent   = $false
+$outputH = & { Test-AbortSignal } 6>&1
+$outputTextH = ($outputH | ForEach-Object { $_.ToString() }) -join "`n"
+Test-Assert ($outputTextH -match [regex]::Escape("[ABORT] Ctrl+C detected")) "the abort message was printed via the normal raw Write-Host path"
+Test-Assert ($script:cleanConsoleMessageCalls.Count -eq 0) "Write-CleanConsoleMessage was never called while the toggle is off"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario I: Clean Console Output ON - Test-AbortSignal routes its
+#  message through Write-CleanConsoleMessage instead of raw Write-Host.
+#  Confirms both that the stub WAS called with the right text/color, and
+#  that the raw-Write-Host path produced NO console output at all for
+#  this call (not just "also called the stub" alongside the old path).
+# ==============================================================================
+Write-Host "=== Scenario I: Clean Console Output on - Test-AbortSignal routes through CCR ===" -ForegroundColor Cyan
+Reset-AbortState
+$script:CleanConsoleOutputEnabled = $true
+[ConsoleCtrl]::AbortRequested = $true
+[ConsoleCtrl]::IsCloseEvent   = $true
+$outputI = & { Test-AbortSignal } 6>&1
+# 6>&1 merges the Information stream into Success output, but Test-AbortSignal
+# also legitimately returns $true on Success - that boolean rides along in
+# $outputI too and must not be mistaken for a raw Write-Host call. Filter to
+# actual InformationRecord objects (real Write-Host output) only.
+$rawHostRecordsI = @($outputI | Where-Object { $_ -is [System.Management.Automation.InformationRecord] })
+Test-Assert ($rawHostRecordsI.Count -eq 0) "no raw Write-Host output was produced - Test-AbortSignal did not fall through to the old path"
+Test-Assert ($script:cleanConsoleMessageCalls.Count -eq 1) ("Write-CleanConsoleMessage was called exactly once (got " + $script:cleanConsoleMessageCalls.Count + ")")
+Test-Assert ($script:cleanConsoleMessageCalls[0].Text -like "*Window close detected*") "the correct (window-close) message text was passed through"
+Test-Assert ($script:cleanConsoleMessageCalls[0].Color -eq "Yellow") "the message was passed through with -Color Yellow, matching the original Write-Host -ForegroundColor"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario J: Clean Console Output ON - Invoke-GracefulDrain's own two
+#  messages (the initial wait message, and the force-stop message once
+#  stragglers get force-stopped) also route through Write-CleanConsoleMessage.
+# ==============================================================================
+Write-Host "=== Scenario J: Clean Console Output on - Invoke-GracefulDrain messages route through CCR ===" -ForegroundColor Cyan
+Reset-AbortState
+$script:CleanConsoleOutputEnabled = $true
+
+$fakeJ = New-FakeHandles -DelaysMs @(30000)   # will never finish before the 1s timeout
+$outputJ = & { Invoke-GracefulDrain -Handles $fakeJ.Handles -TimeoutSeconds 1 } 6>&1
+$fakeJ.Pool.Close(); $fakeJ.Pool.Dispose()
+
+# Same 6>&1-merges-the-return-value caveat as Scenario I - Invoke-GracefulDrain
+# legitimately returns a @{ForceStoppedCount=...} hashtable, which is not a
+# raw Write-Host call. Filter to real InformationRecord objects only.
+$rawHostRecordsJ = @($outputJ | Where-Object { $_ -is [System.Management.Automation.InformationRecord] })
+Test-Assert ($rawHostRecordsJ.Count -eq 0) "no raw Write-Host output was produced for either drain message"
+Test-Assert ($script:cleanConsoleMessageCalls.Count -eq 2) ("both the wait message and the force-stop message went through Write-CleanConsoleMessage (got " + $script:cleanConsoleMessageCalls.Count + " call(s))")
+Test-Assert ($script:cleanConsoleMessageCalls[0].Text -like "*Waiting for current jobs*") "the first call is the wait message"
+Test-Assert ($script:cleanConsoleMessageCalls[1].Text -like "*Force-stopping 1 job(s)*") "the second call is the force-stop message, with the correct count"
+Test-Assert ($script:cleanConsoleMessageCalls[1].Color -eq "Red") "the force-stop message keeps its Red color (matching the original Write-Host -ForegroundColor Red)"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario K: Complete-AbortDrain finalizes the CCR display (via
+#  Complete-AllActiveSeriesProgress) when Clean Console Output is on -
+#  and does NOT call it at all when the toggle is off, so a caller that
+#  never dot-sourced CleanConsoleRendering.ps1 is never forced to have it
+#  loaded just because Complete-AbortDrain ran.
+# ==============================================================================
+Write-Host "=== Scenario K: Complete-AbortDrain finalizes CCR display when the toggle is on ===" -ForegroundColor Cyan
+Reset-AbortState
+$script:CleanConsoleOutputEnabled = $true
+Complete-AbortDrain
+Test-Assert ($script:completeAllActiveSeriesProgressCallCount -eq 1) "Complete-AllActiveSeriesProgress was called once when the toggle is on"
+Test-Assert ([ConsoleCtrl]::DrainComplete.IsSet) "DrainComplete is still signalled afterward"
+
+Reset-AbortState
+Complete-AbortDrain
+Test-Assert ($script:completeAllActiveSeriesProgressCallCount -eq 0) "Complete-AllActiveSeriesProgress is NOT called when the toggle is off"
+Test-Assert ([ConsoleCtrl]::DrainComplete.IsSet) "DrainComplete is still signalled either way"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario L: with $script:CleanConsoleOutputEnabled entirely UNDEFINED
+#  (not just $false) - e.g. a caller that never dot-sourced Logging.ps1 at
+#  all - Test-AbortSignal still falls through to the original raw
+#  Write-Host path cleanly, matching the module header's claim that this
+#  forward reference degrades gracefully rather than throwing.
+# ==============================================================================
+Write-Host "=== Scenario L: `$script:CleanConsoleOutputEnabled entirely undefined ===" -ForegroundColor Cyan
+Reset-AbortState
+Remove-Variable -Name CleanConsoleOutputEnabled -Scope script -ErrorAction SilentlyContinue
+[ConsoleCtrl]::AbortRequested = $true
+[ConsoleCtrl]::IsCloseEvent   = $false
+$undefinedThrew = $false
+$outputL = $null
+try { $outputL = & { Test-AbortSignal } 6>&1 } catch { $undefinedThrew = $true }
+Test-Assert (-not $undefinedThrew) "Test-AbortSignal does not throw when `$script:CleanConsoleOutputEnabled was never defined at all"
+$rawHostRecordsL = @($outputL | Where-Object { $_ -is [System.Management.Automation.InformationRecord] })
+Test-Assert ($rawHostRecordsL.Count -gt 0) "it still falls through to the original raw Write-Host path in that case"
+$script:CleanConsoleOutputEnabled = $false
+Write-Host ""
+
+# ==============================================================================
+#  Scenario M: regression test for a real, pre-existing bug found while
+#  writing Scenario J above (not introduced by the Clean Console Output
+#  work - present since this module was first written, just never
+#  covered by a test that checked the wait message's actual CONTENT
+#  before now). An omitted -AbortWaitMessage binds to "" in PowerShell,
+#  not $null - so the original "if ($null -eq $AbortWaitMessage)" default-
+#  message check never fired for ANY caller, ever, and the default
+#  "[ABORT] Waiting for current jobs..." message was silently never
+#  printed. Fixed by checking $PSBoundParameters instead. This scenario
+#  confirms both halves: the default message now genuinely appears when
+#  -AbortWaitMessage is omitted, AND passing "" explicitly still
+#  suppresses it (the one case that accidentally "worked" before, for
+#  the wrong reason - now works for the right one).
+# ==============================================================================
+Write-Host "=== Scenario M: default -AbortWaitMessage regression (was silently never printed) ===" -ForegroundColor Cyan
+Reset-AbortState
+$fakeM1 = New-FakeHandles -DelaysMs @(100)
+$outputM1 = & { Invoke-GracefulDrain -Handles $fakeM1.Handles -TimeoutSeconds 10 } 6>&1
+$fakeM1.Pool.Close(); $fakeM1.Pool.Dispose()
+$outputTextM1 = ($outputM1 | ForEach-Object { $_.ToString() }) -join "`n"
+Test-Assert ($outputTextM1 -match [regex]::Escape("[ABORT] Waiting for current jobs")) "omitting -AbortWaitMessage now prints the default wait message (previously never printed at all, for any caller)"
+
+Reset-AbortState
+$fakeM2 = New-FakeHandles -DelaysMs @(100)
+$outputM2 = & { Invoke-GracefulDrain -Handles $fakeM2.Handles -TimeoutSeconds 10 -AbortWaitMessage "" } 6>&1
+$fakeM2.Pool.Close(); $fakeM2.Pool.Dispose()
+# Same 6>&1-merges-the-return-value caveat as Scenario I/J - filter to real
+# InformationRecord objects, not Invoke-GracefulDrain's own legitimate
+# @{ForceStoppedCount=...} return value riding along in the same capture.
+$rawHostRecordsM2 = @($outputM2 | Where-Object { $_ -is [System.Management.Automation.InformationRecord] })
+Test-Assert ($rawHostRecordsM2.Count -eq 0) "explicitly passing -AbortWaitMessage '' still suppresses it entirely, as documented"
 Write-Host ""
 
 # ==============================================================================

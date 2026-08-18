@@ -35,6 +35,14 @@
         reaches TotalChapters. Multiple series can be active/live at
         once; each gets its own block. Only cleanly-successful chapters
         ever actually disappear from the display.
+      - Write-CleanConsoleMessage (2026-08-18): a 5th public function,
+        for one-off status lines from OTHER modules (currently
+        AbortPipeline.ps1's abort/drain messages) that aren't part of
+        the series/chapter model at all - printed as permanent content
+        above the live region without corrupting it, the same
+        erase-and-reprint mechanism Complete-ChapterProgress's
+        NewlyFrozen path already uses, just with raw text instead of a
+        formatted series.
 
     RENDERING: tries real in-place redraw via [Console]::SetCursorPosition
     (erase the previous live region, reprint - the actual "clean" part of
@@ -272,7 +280,8 @@ function Update-CleanConsoleDisplay {
         (possibly now-shorter) still-live region is reprinted below it.
     #>
     param(
-        [System.Collections.Generic.List[hashtable]]$NewlyFrozen = $null
+        [System.Collections.Generic.List[hashtable]]$NewlyFrozen = $null,
+        [System.Collections.Generic.List[hashtable]]$ExtraFrozenRows = $null
     )
 
     $cursorOk = Test-CleanConsoleCursorAvailable
@@ -288,6 +297,18 @@ function Update-CleanConsoleDisplay {
     # were split from - @{ Text; Color }, same shape Format-SeriesLines
     # itself uses.
     $frozenRows = [System.Collections.Generic.List[hashtable]]::new()
+
+    # Raw one-off rows (e.g. Write-CleanConsoleMessage's abort/drain text)
+    # that never went through Format-SeriesLines - printed first, still
+    # wrapped to the same $effectiveWidth as everything else so a long
+    # message can't desync the cursor math below.
+    if ($ExtraFrozenRows) {
+        foreach ($rawRow in $ExtraFrozenRows) {
+            foreach ($chunk in (Split-TextToWidth -Text $rawRow.Text -Width $effectiveWidth)) {
+                $frozenRows.Add(@{ Text = $chunk; Color = $rawRow.Color })
+            }
+        }
+    }
     if ($NewlyFrozen) {
         foreach ($f in $NewlyFrozen) {
             foreach ($logicalLine in (Format-SeriesLines -SeriesName $f.Name -Entry $f.Entry)) {
@@ -476,6 +497,47 @@ function Complete-ChapterProgress {
     }
 
     return @{ SeriesCompleted = $seriesCompleted }
+}
+
+function Write-CleanConsoleMessage {
+    <#
+    .SYNOPSIS
+        Prints a one-off status line (e.g. AbortPipeline.ps1's abort/
+        drain messages) as permanent console content without corrupting
+        the live progress region - the region is erased, the message
+        printed above it, then the live region is reprinted below,
+        exactly like a series freezing into permanent content. Added
+        (2026-08-18) specifically so out-of-band messages from other
+        modules have somewhere safe to land instead of a raw Write-Host
+        landing wherever the cursor happens to be mid-redraw (see
+        CLAUDE.md's "Clean Console Output" section, AbortPipeline touch
+        point).
+    .PARAMETER Text
+        The message to print. May contain "`n" - AbortPipeline.ps1's
+        existing abort messages lead with a blank line (e.g.
+        "`n[ABORT] Ctrl+C detected..."); each "`n"-separated segment
+        becomes its own row, independently width-wrapped like any other
+        displayed line.
+    .PARAMETER Color
+        Optional -ForegroundColor, same meaning as Write-Host's own
+        parameter. Applies to every row this message produces. Omit for
+        an uncolored (console-default) message.
+    .OUTPUTS
+        None. Safe to call whether or not any series is currently
+        active - with nothing active, this just prints the message and
+        leaves the (empty) live region as-is.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Text,
+        [string]$Color
+    )
+    $rows = [System.Collections.Generic.List[hashtable]]::new()
+    foreach ($segment in ($Text -split "`n")) {
+        $rows.Add(@{ Text = $segment; Color = $Color })
+    }
+    Update-CleanConsoleDisplay -ExtraFrozenRows $rows
 }
 
 function Complete-AllActiveSeriesProgress {

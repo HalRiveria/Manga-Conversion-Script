@@ -33,6 +33,38 @@
     pattern as Invoke-ParallelFolderJobs's -ResultHandler) to fold results
     into whatever shape the caller needs.
 
+    Clean Console Output touch point (2026-08-18): Test-AbortSignal's
+    abort message and Invoke-GracefulDrain's wait/force-stop messages
+    now route through CleanConsoleRendering.ps1's Write-CleanConsoleMessage
+    instead of a raw Write-Host, when the toggle is on - a raw Write-Host
+    firing while CCR's live region is mid-redraw would land wherever the
+    cursor happens to be and get mangled by the next redraw. Two forward
+    references this required, both FROM Logging.ps1/CleanConsoleRendering.ps1
+    (both already built and tested, so both are confirmed against real
+    signatures now, not stubbed-forward like Logging.ps1's original
+    Move-ToRecycleBin reference was):
+      - $script:CleanConsoleOutputEnabled - owned by Logging.ps1, NOT
+        redeclared here. Read directly via the shared script scope every
+        dot-sourced module lives in (the same pattern ZipCreation.ps1
+        already uses for FileDeletion.ps1's $script:PermanentDelete) -
+        deliberately not a second parallel toggle, so there's only ever
+        one on/off switch to keep in sync. Defaults to $null/falsy (same
+        as "off") if Logging.ps1 was never dot-sourced at all, so this
+        module still works completely standalone with its original
+        behavior - this harness proves that by never dot-sourcing
+        Logging.ps1 and getting the original raw-Write-Host behavior
+        throughout.
+      - Write-CleanConsoleMessage - owned by CleanConsoleRendering.ps1.
+        Only actually called when $script:CleanConsoleOutputEnabled is
+        true, so a caller that leaves the toggle off never needs
+        CleanConsoleRendering.ps1 dot-sourced at all.
+    Core abort mechanics (CTS registry, drain loop, force-kill) are
+    unchanged by any of this - only the console-output call sites.
+    Complete-AbortDrain also now finalizes the CCR display (force-
+    resolving any still-active series via Complete-AllActiveSeriesProgress,
+    same gating) before signalling DrainComplete - so a still-live
+    progress region isn't left stuck forever when a run ends mid-abort.
+
 .NOTES
     Extracted from Conversion Script Main.ps1's ConsoleCtrl type, script-scope
     abort state, Test-AbortSignal, and the graceful-drain loop that was
@@ -181,10 +213,15 @@ function Test-AbortSignal {
         foreach ($cts in @($script:abortCancellationSources)) {
             try { $cts.Cancel() } catch { }
         }
-        if (-not $script:ctrlCloseAbort) {
-            Write-Host "`n[ABORT] Ctrl+C detected - finishing current jobs, please wait..." -ForegroundColor Yellow
+        $abortMessage = if (-not $script:ctrlCloseAbort) {
+            "`n[ABORT] Ctrl+C detected - finishing current jobs, please wait..."
         } else {
-            Write-Host "`n[ABORT] Window close detected - finishing current jobs, please wait..." -ForegroundColor Yellow
+            "`n[ABORT] Window close detected - finishing current jobs, please wait..."
+        }
+        if ($script:CleanConsoleOutputEnabled) {
+            Write-CleanConsoleMessage -Text $abortMessage -Color Yellow
+        } else {
+            Write-Host $abortMessage -ForegroundColor Yellow
         }
     }
     return $script:abortRequested
@@ -210,7 +247,19 @@ function Complete-AbortDrain {
         that already called Invoke-GracefulDrain do not need to call this
         too; it's for paths that need to unblock the handler without going
         through a drain (e.g. abort detected before any job was dispatched).
+    .DESCRIPTION
+        When Clean Console Output is on, also finalizes CCR's display
+        (Complete-AllActiveSeriesProgress) BEFORE signalling DrainComplete -
+        deliberately in that order, since CTRL_CLOSE_EVENT gives the OS
+        license to force-kill the process shortly after DrainComplete
+        unblocks the native handler, and a still-live progress region left
+        stuck would otherwise never get finalized. No-ops cleanly (via
+        Complete-AllActiveSeriesProgress's own no-active-series no-op) when
+        there's nothing to finalize.
     #>
+    if ($script:CleanConsoleOutputEnabled) {
+        try { Complete-AllActiveSeriesProgress } catch { }
+    }
     try { [ConsoleCtrl]::DrainComplete.Set() } catch { }
 }
 
@@ -312,11 +361,31 @@ function Invoke-GracefulDrain {
         return @{ ForceStoppedCount = 0 }
     }
 
-    if ($null -eq $AbortWaitMessage) {
+    # A caller that never passes -AbortWaitMessage at all should get the
+    # default message; a caller that explicitly passes "" should get
+    # silence (per this parameter's own docs). Those are NOT the same
+    # thing PowerShell hands back for an unbound [string] parameter - an
+    # omitted [string] binds to "" (empty string), not $null, so the
+    # original "if ($null -eq $AbortWaitMessage)" check below never
+    # actually fired for any caller, ever: $AbortWaitMessage was already
+    # "" by the time this ran, so the default message was built and
+    # printed for nobody, silently, since the day this module was
+    # written - live-caught (not hypothetical) via Scenario J's stricter
+    # message-count assertions, which is the first test this module ever
+    # had that actually checked the WAIT message's content, not just
+    # that -TimeoutSeconds/force-stop counted correctly. Fixed by
+    # checking $PSBoundParameters instead of the value itself, which
+    # correctly distinguishes "never passed" from "passed empty on
+    # purpose".
+    if (-not $PSBoundParameters.ContainsKey('AbortWaitMessage')) {
         $AbortWaitMessage = "[ABORT] Waiting for current jobs to finish (up to " + $TimeoutSeconds + "s)..."
     }
     if ($AbortWaitMessage -ne "") {
-        Write-Host $AbortWaitMessage -ForegroundColor Yellow
+        if ($script:CleanConsoleOutputEnabled) {
+            Write-CleanConsoleMessage -Text $AbortWaitMessage -Color Yellow
+        } else {
+            Write-Host $AbortWaitMessage -ForegroundColor Yellow
+        }
     }
 
     $localHandles  = $Handles
@@ -341,7 +410,12 @@ function Invoke-GracefulDrain {
     $forceStoppedCount = 0
     if ($localHandles.Count -gt 0) {
         $forceStoppedCount = $localHandles.Count
-        Write-Host ("[ABORT] Force-stopping " + $forceStoppedCount + " job(s) that did not finish within " + $TimeoutSeconds + "s.") -ForegroundColor Red
+        $forceStopMessage = "[ABORT] Force-stopping " + $forceStoppedCount + " job(s) that did not finish within " + $TimeoutSeconds + "s."
+        if ($script:CleanConsoleOutputEnabled) {
+            Write-CleanConsoleMessage -Text $forceStopMessage -Color Red
+        } else {
+            Write-Host $forceStopMessage -ForegroundColor Red
+        }
         foreach ($h in $localHandles) {
             try { $h.PS.Stop() } catch { }
             try { $h.PS.Dispose() } catch { }

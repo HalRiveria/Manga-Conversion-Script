@@ -285,6 +285,51 @@ Test-Assert $colorFoundK "an Aborted chapter line is actually printed in Yellow 
 Write-Host ""
 
 # ==============================================================================
+#  Scenario L: Write-CleanConsoleMessage - the new one-off status line
+#  function built for AbortPipeline.ps1's abort/drain messages. Verifies
+#  it prints as real captured output (content + color), splits a "`n"-
+#  led message into separate rows instead of one row with a literal "n"
+#  embedded, and is safe to call with nothing active (the common case for
+#  most of AbortPipeline's messages, which fire whether or not any series
+#  happens to be mid-run).
+# ==============================================================================
+Write-Host "=== Scenario L: Write-CleanConsoleMessage ===" -ForegroundColor Cyan
+Reset-CCRState
+
+$outputL1 = & { Write-CleanConsoleMessage -Text "`n[ABORT] Ctrl+C detected - finishing current jobs, please wait..." -Color Yellow } 6>&1
+$outputTextL1 = ($outputL1 | ForEach-Object { $_.ToString() }) -join "`n"
+# -like's "[...]" is a wildcard character-class, not a literal bracket - use
+# -match (regex) with the brackets escaped so this genuinely checks for the
+# literal text "[ABORT]", not "one char from the set A/B/O/R/T".
+Test-Assert ($outputTextL1 -match [regex]::Escape("[ABORT] Ctrl+C detected")) "the message content is actually printed"
+Test-Assert ($outputL1.Count -ge 2) ("the leading `n produced its own separate (blank) row, not one row with a literal backtick-n embedded (got " + $outputL1.Count + " row(s))")
+
+$colorFoundL1 = $false
+foreach ($rec in $outputL1) {
+    if ($rec.MessageData -and $rec.MessageData.PSObject.Properties['ForegroundColor'] -and $rec.MessageData.ForegroundColor -eq "Yellow" -and $rec.ToString() -like "*ABORT*") {
+        $colorFoundL1 = $true
+    }
+}
+Test-Assert $colorFoundL1 "the message row is printed in the requested -Color (Yellow), via a real captured Write-Host call"
+
+$callThrewL1 = $false
+try { Write-CleanConsoleMessage -Text "no series active right now" } catch { $callThrewL1 = $true }
+Test-Assert (-not $callThrewL1) "calling Write-CleanConsoleMessage with zero active series does not throw"
+
+# Now with a live series in progress - confirm the message prints as
+# permanent content WITHOUT disturbing the still-active series (it's not
+# accidentally removed from the registry, resolved, or otherwise mutated).
+Reset-CCRState
+Start-SeriesProgress -SeriesName "Series L" -TotalChapters 2
+Start-ChapterProgress -SeriesName "Series L" -ChapterName "Chapter 1"
+$outputL2 = & { Write-CleanConsoleMessage -Text "[ABORT] Waiting for current jobs to finish..." -Color Yellow } 6>&1
+$outputTextL2 = ($outputL2 | ForEach-Object { $_.ToString() }) -join "`n"
+Test-Assert ($outputTextL2 -like "*Waiting for current jobs*") "the message prints correctly even while a series is actively in progress"
+Test-Assert ($script:ccrActiveSeries.Contains("Series L")) "the active series is untouched - still registered after the message was printed"
+Test-Assert ($script:ccrActiveSeries["Series L"].ActiveChapters -contains "Chapter 1") "the active series' in-progress chapter is untouched too"
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="
