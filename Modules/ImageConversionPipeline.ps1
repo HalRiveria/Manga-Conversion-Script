@@ -14,7 +14,7 @@
     "LooseConversionPipeline" module; don't recreate one):
       - Mode 1 (loose-only) IS this module, nothing else.
       - Mode 2 (loose+zip) is this module PLUS ZipPipeline.ps1's per-folder
-        zip step, wired in via -PostBatchCallback (see
+        zip step, wired in via -PostChapterCallback (see
         Invoke-LooseImageConversionPipeline) rather than this module
         calling into ZipPipeline.ps1 directly - keeps this module decoupled
         from zip-domain logic, matching Convert-ImageBatch's own existing
@@ -22,6 +22,32 @@
       - Mode 4 calls Convert-ImageBatch (PART 1) per-ZIP from inside its
         own worker - already the same shared function, nothing to change.
       - Mode 3 doesn't convert anything, not involved.
+
+    CLEAN CONSOLE OUTPUT REWORK (2026-08-26): PART 2 now walks the library
+    two-tier - New-SeriesProvider (lazy, one series at a time) then
+    Get-SeriesChapters (eager, one series' worth of chapters) - and always
+    batches per chapter, series by series. This replaced the old
+    -PerFolderBatching toggle (which no longer exists) and its flat
+    whole-library batch mode (mode 1's own worst hang case - it walked
+    every FILE up front, not just every directory). The restructuring is
+    unconditional, not gated behind the Clean Console Output toggle
+    itself (see CLAUDE.md) - only the actual CCR calls
+    (Start-SeriesProgress/Start-ChapterProgress/Complete-ChapterProgress/
+    Complete-AllActiveSeriesProgress) are gated on
+    $script:CleanConsoleOutputEnabled. Get-LooseImageCandidates is now
+    called once per series (bounded scan) rather than once for the whole
+    library, per CLAUDE.md's pre-flight note.
+
+    A real bug fixed along the way, found while wiring this up rather
+    than pre-existing in shipped behavior (this module was never merged
+    or exercised before): the old code created its own $looseCts but
+    never registered it with AbortPipeline.ps1's
+    Register-AbortCancellationSource, so Test-AbortSignal could never
+    actually cancel it - Convert-ImageBatch's own CancelToken check would
+    never have fired on a real Ctrl+C. Now registered once per pipeline
+    call and unregistered in the `finally` block, matching
+    Register-AbortCancellationSource's own "call once per pipeline phase"
+    contract.
 
     NOT owned here (see Summary.reference.ps1 instead): the mode 1/2
     abort-path summary text. This module's orchestration function returns
@@ -33,16 +59,28 @@
     FORWARD REFERENCES (not defined in this module - callers must
     dot-source the owning module(s) first):
       - Write-Log (Logging.ps1)
+      - $script:CleanConsoleOutputEnabled (Logging.ps1) - gates every CCR
+        call below, same pattern AbortPipeline.ps1 uses; Write-Log calls
+        themselves stay unconditional, since Logging.ps1 (not this
+        module) is what suppresses their console echo when the toggle
+        is on
       - Remove-Source, $script:PermanentDelete (FileDeletion.ps1)
-      - Test-AbortSignal (AbortPipeline.ps1)
-      - Get-ZippableLeafDirs (LeafDirectoryDiscovery.ps1) - only needed
-        when Invoke-LooseImageConversionPipeline is called with
-        -PerFolderBatching $true (mode 2's per-folder scoping)
+      - Test-AbortSignal, Register-AbortCancellationSource,
+        Unregister-AbortCancellationSource (AbortPipeline.ps1)
+      - New-SeriesProvider, Get-SeriesChapters
+        (LeafDirectoryDiscovery.ps1) - the two-tier discovery PART 2 now
+        drives unconditionally (see CLAUDE.md's "Clean Console Output" -
+        this replaced the old Get-ZippableLeafDirs + -PerFolderBatching
+        toggle)
+      - Start-SeriesProgress, Start-ChapterProgress,
+        Complete-ChapterProgress, Complete-AllActiveSeriesProgress
+        (CleanConsoleRendering.ps1)
     Modules\_Harness\ImageConversionPipeline.Harness.ps1 dot-sources the
     real Logging.ps1/FileDeletion.ps1/AbortPipeline.ps1/
-    LeafDirectoryDiscovery.ps1, and compiles a small real stand-in
-    executable (via Add-Type -OutputType ConsoleApplication) to serve as
-    $CjxlExe/$MagickExe - Convert-ImageBatch spawns real OS processes via
+    LeafDirectoryDiscovery.ps1/CleanConsoleRendering.ps1, and compiles a
+    small real stand-in executable (via Add-Type -OutputType
+    ConsoleApplication) to serve as $CjxlExe/$MagickExe -
+    Convert-ImageBatch spawns real OS processes via
     System.Diagnostics.Process, so a genuine (if fake) executable is used
     rather than mocking the process layer away.
 
@@ -564,23 +602,50 @@ function Remove-StaleLooseSources {
     return $result
 }
 
+function Get-ChapterProgressStatus {
+    <#
+    .SYNOPSIS
+        Maps a Convert-ImageBatch result to the Status/Detail pair
+        Complete-ChapterProgress expects. A $null $ChapterResult (the
+        chapter had nothing left to convert) always maps to a clean
+        Success with no detail text.
+    .OUTPUTS
+        Two values: Status ("Success"/"Warning"/"Error"), Detail (string,
+        or $null for a clean Success).
+    #>
+    param(
+        [hashtable]$ChapterResult
+    )
+    if ($null -eq $ChapterResult) { return "Success", $null }
+
+    if ($ChapterResult.FailedCount -gt 0 -or $ChapterResult.ForceKilledCount -gt 0 -or $ChapterResult.DeleteFailedCount -gt 0) {
+        $parts = [System.Collections.Generic.List[string]]::new()
+        if ($ChapterResult.FailedCount -gt 0)       { $parts.Add($ChapterResult.FailedCount.ToString() + " failed") }
+        if ($ChapterResult.ForceKilledCount -gt 0)  { $parts.Add($ChapterResult.ForceKilledCount.ToString() + " force-stopped") }
+        if ($ChapterResult.DeleteFailedCount -gt 0) { $parts.Add($ChapterResult.DeleteFailedCount.ToString() + " source delete(s) failed") }
+        return "Error", ($parts -join ", ")
+    }
+    if ($ChapterResult.SkippedCount -gt 0) {
+        return "Warning", ($ChapterResult.SkippedCount.ToString() + " image(s) skipped")
+    }
+    return "Success", $null
+}
+
 function Invoke-LooseImageConversionPipeline {
     <#
     .SYNOPSIS
-        Mode 1 end to end (or mode 1's conversion half of mode 2, when
-        -PerFolderBatching is used): discovers loose images, cleans up
-        stale ones, converts the rest in one or more batches, deleting
-        each source on success.
-    .PARAMETER PerFolderBatching
-        $false (mode 1): one flat batch across every discovered image.
-        $true (mode 2): one batch per leaf directory (via
-        Get-ZippableLeafDirs), so a caller can zip each folder right
-        after its own batch finishes via -PostBatchCallback.
-    .PARAMETER PostBatchCallback
-        Invoked once per batch with @{ Dir; BatchResult } - $Dir is $null
-        in flat-batching mode. Intentionally decoupled from ZipPipeline.ps1
-        (this module has no direct dependency on it) - a caller wanting
-        mode 2 behavior passes a closure that calls
+        Mode 1 end to end (and mode 1's conversion half of mode 2): walks
+        the library series by series (New-SeriesProvider), discovers each
+        series' chapters (Get-SeriesChapters), and converts each chapter's
+        loose images as its own batch - unconditional series/chapter
+        batching, not a mode-1-vs-mode-2 toggle (see this module's header
+        and CLAUDE.md's "Clean Console Output").
+    .PARAMETER PostChapterCallback
+        Invoked once per chapter with @{ SeriesName; ChapterName; Dir;
+        ChapterResult } - $ChapterResult is $null when the chapter had
+        nothing left to convert. Intentionally decoupled from
+        ZipPipeline.ps1 (this module has no direct dependency on it) - a
+        caller wanting mode 2 behavior passes a closure that calls
         ZipPipeline.ps1's Invoke-LooseFolderZip itself, matching
         Convert-ImageBatch's own -AbortPollCallback precedent for this
         kind of hook.
@@ -588,7 +653,8 @@ function Invoke-LooseImageConversionPipeline {
         @{ ConvertedSuccess; ConvertedFail; ConvertedSkipped;
            DeletedSuccess; DeletedFail; StaleCleanedSuccess;
            StaleCleanedFail; ForceKilledCount; LastCompletedPaths;
-           LastSkippedPaths; StillPendingPaths; BatchCount; Aborted }
+           LastSkippedPaths; StillPendingPaths; SeriesCount; ChapterCount;
+           Aborted }
     #>
     param(
         [Parameter(Mandatory)]
@@ -604,10 +670,9 @@ function Invoke-LooseImageConversionPipeline {
         [bool]$FullLogging,
         [string[]]$LooseImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif"),
         [string[]]$KnownZipPaths = @(),
-        [bool]$PerFolderBatching = $false,
         [string[]]$FolderQualifyingExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif"),
         [System.Collections.Generic.HashSet[string]]$FolderExcludeStagingDirs = $null,
-        [scriptblock]$PostBatchCallback = $null,
+        [scriptblock]$PostChapterCallback = $null,
         [int]$AbortTimeoutSeconds = 60
     )
 
@@ -623,99 +688,120 @@ function Invoke-LooseImageConversionPipeline {
         LastCompletedPaths  = [System.Collections.Generic.List[string]]::new()
         LastSkippedPaths    = [System.Collections.Generic.List[string]]::new()
         StillPendingPaths   = [System.Collections.Generic.List[string]]::new()
-        BatchCount          = 0
+        SeriesCount         = 0
+        ChapterCount        = 0
         Aborted             = $false
     }
 
-    $candidates = Get-LooseImageCandidates -ScanPath $Path -LooseImageExtensions $LooseImageExtensions -KnownZipPaths $KnownZipPaths
-
-    $staleResult = Remove-StaleLooseSources -StaleSources $candidates.StaleSources
-    $totals.StaleCleanedSuccess = $staleResult.Success
-    $totals.StaleCleanedFail    = $staleResult.Fail
-
-    # ------------------------------------------------------------------
-    #  Determine work batches: one flat batch (mode 1), or one per leaf
-    #  directory (mode 2's per-folder scoping).
-    # ------------------------------------------------------------------
-    $workBatches = [System.Collections.Generic.List[hashtable]]::new()
-    if ($PerFolderBatching) {
-        $folderQualifyingExtsWithJxl = @($FolderQualifyingExtensions) + @(".jxl")
-        $leafCandidates = Get-ZippableLeafDirs -ScanPath $Path -QualifyingExtensions $folderQualifyingExtsWithJxl `
-            -ExcludeStagingDirs $FolderExcludeStagingDirs -ForceRezip $false
-        if ($leafCandidates.Count -eq 0) {
-            Write-Log "Loose folder zip: no qualifying leaf directories found." -Level Warn
-        } else {
-            Write-Log ("Loose folder zip: found " + $leafCandidates.Count + " leaf director(ies) to process (convert then zip each).")
-        }
-        foreach ($cand in $leafCandidates) {
-            $folderImages = @($candidates.NeedsConversion | Where-Object { $_.DirectoryName.Equals($cand.Dir.FullName, [System.StringComparison]::OrdinalIgnoreCase) })
-            $workBatches.Add(@{ Images = $folderImages; Dir = $cand.Dir })
-        }
-    } else {
-        if ($candidates.NeedsConversion.Count -eq 0) {
-            Write-Log "No loose image files found outside ZIPs." -Level Info
-        } else {
-            Write-Log ("Found " + $candidates.NeedsConversion.Count + " loose image file(s) to convert.")
-        }
-        if ($candidates.NeedsConversion.Count -gt 0) {
-            $workBatches.Add(@{ Images = $candidates.NeedsConversion; Dir = $null })
-        }
-    }
-
+    # Registered for the whole pipeline call (one phase), not per-series/
+    # per-chapter - matches Register-AbortCancellationSource's own "call
+    # once per pipeline phase" contract. Without this, Test-AbortSignal
+    # would never actually cancel $looseCts, and Convert-ImageBatch's own
+    # CancelToken check would never fire on a real Ctrl+C - see this
+    # module's header for how that was caught.
     $looseCts = [System.Threading.CancellationTokenSource]::new()
+    Register-AbortCancellationSource -Cts $looseCts
     try {
-        foreach ($batch in $workBatches) {
+        $seriesProvider = New-SeriesProvider -LibraryPath $Path
+
+        while ($true) {
             if (Test-AbortSignal) { $totals.Aborted = $true; break }
 
-            $batchImages = $batch.Images
-            $batchDir    = $batch.Dir
-            $totals.BatchCount++
+            $series = & $seriesProvider
+            if ($null -eq $series) { break }
+            $totals.SeriesCount++
 
-            if ($batchDir) {
-                Write-Log ("=== Processing folder: '" + $batchDir.FullName + "' ===")
-                if ($batchImages.Count -eq 0) {
-                    Write-Log "  No unconverted images in this folder - skipping conversion, proceeding to zip check."
-                } else {
-                    Write-Log ("  Found " + $batchImages.Count + " image(s) to convert.")
+            $chapters = Get-SeriesChapters -SeriesPath $series.FullName -QualifyingExtensions $FolderQualifyingExtensions `
+                -ExcludeStagingDirs $FolderExcludeStagingDirs -ForceRezip $false
+
+            if ($script:CleanConsoleOutputEnabled) {
+                Start-SeriesProgress -SeriesName $series.Name -TotalChapters $chapters.Count
+            }
+
+            if ($chapters.Count -eq 0) {
+                Write-Log ("Series '" + $series.Name + "': no qualifying chapters found.") -Level Info
+                continue
+            }
+
+            Write-Log ("=== Series '" + $series.Name + "': " + $chapters.Count + " chapter(s) ===")
+
+            # Bounded to this one series, not the whole library - see this
+            # module's header and CLAUDE.md's pre-flight note.
+            $seriesCandidates = Get-LooseImageCandidates -ScanPath $series.FullName -LooseImageExtensions $LooseImageExtensions -KnownZipPaths $KnownZipPaths
+
+            $staleResult = Remove-StaleLooseSources -StaleSources $seriesCandidates.StaleSources
+            $totals.StaleCleanedSuccess += $staleResult.Success
+            $totals.StaleCleanedFail    += $staleResult.Fail
+
+            foreach ($chapter in $chapters) {
+                if (Test-AbortSignal) { $totals.Aborted = $true; break }
+
+                $chapterDir  = $chapter.Dir
+                $chapterName = $chapterDir.Name
+                $totals.ChapterCount++
+
+                if ($script:CleanConsoleOutputEnabled) {
+                    Start-ChapterProgress -SeriesName $series.Name -ChapterName $chapterName
                 }
-            }
 
-            $batchResult = $null
-            if ($batchImages.Count -gt 0) {
-                $localLastCompleted = $totals.LastCompletedPaths
-                $abortPoll = {
-                    param($InFlightPaths)
-                    $wasAbortedBefore = $script:abortRequested
-                    $null = Test-AbortSignal
-                    if ($script:abortRequested -and -not $wasAbortedBefore) {
-                        foreach ($p in $InFlightPaths) { $localLastCompleted.Add($p) }
-                    }
-                }.GetNewClosure()
+                $chapterImages = @($seriesCandidates.NeedsConversion | Where-Object { $_.DirectoryName.Equals($chapterDir.FullName, [System.StringComparison]::OrdinalIgnoreCase) })
 
-                $batchResult = Convert-ImageBatch -ImageFiles $batchImages -CjxlExe $CjxlExe -MagickExe $MagickExe `
-                    -DoJpegLossless $JpegLossless -DoJpegQuality $JpegQuality -MaxCjxlProcs $MaxCjxlProcs `
-                    -DoFullLogging $FullLogging -CancelToken $looseCts.Token -ItemNoun "loose image" `
-                    -SourceNoun "loose source image" -AbortPollCallback $abortPoll `
-                    -AbortWaitMessage "[ABORT] Waiting for current loose-image jobs to finish (up to $AbortTimeoutSeconds s)..." `
-                    -AbortTimeoutSeconds $AbortTimeoutSeconds
+                $chapterResult = $null
+                if ($chapterImages.Count -gt 0) {
+                    Write-Log ("Processing chapter: '" + $chapterDir.FullName + "' (" + $chapterImages.Count + " image(s))")
 
-                $totals.ConvertedSuccess += $batchResult.ConvertedCount
-                $totals.ConvertedFail    += $batchResult.FailedCount
-                $totals.ConvertedSkipped += $batchResult.SkippedCount
-                $totals.DeletedSuccess   += $batchResult.DeletedCount
-                $totals.DeletedFail      += $batchResult.DeleteFailedCount
-                $totals.ForceKilledCount += $batchResult.ForceKilledCount
-                foreach ($p in $batchResult.SkippedPaths) { $totals.LastSkippedPaths.Add($p) }
-                foreach ($p in $batchResult.PendingPaths) { $totals.StillPendingPaths.Add($p) }
-                if ($looseCts.Token.IsCancellationRequested) { $totals.Aborted = $true }
-            }
+                    $localLastCompleted = $totals.LastCompletedPaths
+                    $abortPoll = {
+                        param($InFlightPaths)
+                        $wasAbortedBefore = $script:abortRequested
+                        $null = Test-AbortSignal
+                        if ($script:abortRequested -and -not $wasAbortedBefore) {
+                            foreach ($p in $InFlightPaths) { $localLastCompleted.Add($p) }
+                        }
+                    }.GetNewClosure()
 
-            if ($null -ne $PostBatchCallback) {
-                & $PostBatchCallback @{ Dir = $batchDir; BatchResult = $batchResult }
+                    $chapterResult = Convert-ImageBatch -ImageFiles $chapterImages -CjxlExe $CjxlExe -MagickExe $MagickExe `
+                        -DoJpegLossless $JpegLossless -DoJpegQuality $JpegQuality -MaxCjxlProcs $MaxCjxlProcs `
+                        -DoFullLogging $FullLogging -CancelToken $looseCts.Token -ItemNoun "loose image" `
+                        -SourceNoun "loose source image" -AbortPollCallback $abortPoll `
+                        -AbortWaitMessage "[ABORT] Waiting for current loose-image jobs to finish (up to $AbortTimeoutSeconds s)..." `
+                        -AbortTimeoutSeconds $AbortTimeoutSeconds
+
+                    $totals.ConvertedSuccess += $chapterResult.ConvertedCount
+                    $totals.ConvertedFail    += $chapterResult.FailedCount
+                    $totals.ConvertedSkipped += $chapterResult.SkippedCount
+                    $totals.DeletedSuccess   += $chapterResult.DeletedCount
+                    $totals.DeletedFail      += $chapterResult.DeleteFailedCount
+                    $totals.ForceKilledCount += $chapterResult.ForceKilledCount
+                    foreach ($p in $chapterResult.SkippedPaths) { $totals.LastSkippedPaths.Add($p) }
+                    foreach ($p in $chapterResult.PendingPaths) { $totals.StillPendingPaths.Add($p) }
+                    if ($looseCts.Token.IsCancellationRequested) { $totals.Aborted = $true }
+                } else {
+                    Write-Log ("Chapter '" + $chapterDir.FullName + "': no unconverted images - skipping conversion.")
+                }
+
+                if ($script:CleanConsoleOutputEnabled) {
+                    $chapterStatus, $chapterDetail = Get-ChapterProgressStatus -ChapterResult $chapterResult
+                    $null = Complete-ChapterProgress -SeriesName $series.Name -ChapterName $chapterName -Status $chapterStatus -Detail $chapterDetail
+                }
+
+                if ($null -ne $PostChapterCallback) {
+                    & $PostChapterCallback @{ SeriesName = $series.Name; ChapterName = $chapterName; Dir = $chapterDir; ChapterResult = $chapterResult }
+                }
             }
         }
     } finally {
+        Unregister-AbortCancellationSource -Cts $looseCts
         $looseCts.Dispose()
+        # Safety net for the abort/shutdown path - a series left mid-flight
+        # (some chapters never reaching Complete-ChapterProgress) needs
+        # force-resolving so it doesn't sit open in CCR's registry forever.
+        # A no-op when nothing is still active (the common, non-aborted
+        # case - every series already resolved itself as its last chapter
+        # completed).
+        if ($script:CleanConsoleOutputEnabled) {
+            $null = Complete-AllActiveSeriesProgress
+        }
     }
 
     return $totals
