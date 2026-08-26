@@ -82,6 +82,9 @@ Conversion Script/
 │   ├── (7 more placeholder modules - see Todo.md)
 │   ├── _Harness/          <- test harness per built module
 │   └── _Reference/        <- extracted reference material per module
+├── Tools/
+│   └── Run-Harness.ps1    <- runs one or all harnesses, compresses output to
+│                              PASS/FAIL summaries instead of every assertion line
 ├── Testing/               <- scratch copy scripts run against (gitignored)
 └── Backups/               <- original test media, never touched by scripts (gitignored)
     └── Old Scripts/       <- earlier working versions, kept for reference
