@@ -29,6 +29,31 @@
     Initialize-CleanConsoleOutput -Enabled, Convert-ImageBatch
     -MaxCjxlProcs/-JpegLossless/-JpegQuality) so a future caller can
     splat the loaded hashtable straight in without a translation layer.
+    The five Animated* keys (AnimatedThreads/AnimatedQuality/
+    AnimatedLossless/AnimatedOverwrite/AnimatedDeleteSource) are added
+    ahead of AnimatedConversionPipeline.ps1 itself being built (added
+    2026-08-27 for the Menu module's options-menu draft) - defaults taken
+    from Backups\Old Scripts\Convert-AnimatedAvifToWebp.ps1's own CLI
+    defaults (Quality 90, Lossless/Overwrite off) and
+    Convert-AnimatedToJxl.ps1's KeepOriginals default (delete-on-success
+    by default, matching this project's other deletion toggles) -
+    AnimatedThreads has no real prior default to inherit (the old script
+    used [Environment]::ProcessorCount, not something a persisted static
+    setting can express) so it's set to a fixed 4.
+
+    ZipWithUnconvertedAnimated (added 2026-08-27 alongside the Menu
+    redesign in Todo.md) gates the "Image Conversion + Zip" mode, which
+    runs no animated-conversion pass of its own: default $false means a
+    folder still holding unconverted .avif files does NOT get zipped by
+    that mode, so animated content doesn't silently end up shipped
+    unconverted inside a ZIP. $true zips anyway.
+
+    TODO once AnimatedConversionPipeline.ps1 is actually built: re-check
+    these six keys (five Animated* plus ZipWithUnconvertedAnimated)
+    against its real functions' actual -Param names (the same "match the
+    consuming function's param names" rule every other key in this
+    schema follows) and check whether it needs any settings beyond these
+    - they were guessed/designed ahead of a built module, not from one.
 
     Real decisions made building this (not just extraction) - see
     CLAUDE.md/CHANGELOG.md for the full writeup:
@@ -99,6 +124,12 @@ function Get-DefaultScriptSettings {
         PermanentDelete                  = $false
         EnableModePrompt                 = $true
         DeleteExtractedFoldersAfterRezip = $true
+        AnimatedThreads                  = 4
+        AnimatedQuality                  = 90
+        AnimatedLossless                 = $false
+        AnimatedOverwrite                = $false
+        AnimatedDeleteSource             = $true
+        ZipWithUnconvertedAnimated       = $false
     }
 }
 
@@ -163,8 +194,10 @@ function Test-ScriptSettingValue {
         $intValue = [int]$Value
         switch ($Key) {
             'JpegQuality'        { return ($intValue -ge 1 -and $intValue -le 100) }
+            'AnimatedQuality'    { return ($intValue -ge 1 -and $intValue -le 100) }
             'ZipParallelThreads' { return ($intValue -ge 1) }
             'MaxCjxlProcs'       { return ($intValue -ge 1) }
+            'AnimatedThreads'    { return ($intValue -ge 1) }
             default              { return $true }
         }
     }

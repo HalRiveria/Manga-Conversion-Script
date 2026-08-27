@@ -51,6 +51,12 @@ $defA2 = Get-DefaultScriptSettings
 $defA1.JpegQuality = 12345
 Test-Assert ($defA2.JpegQuality -eq 90) "mutating one returned hashtable does not affect a second call's result"
 Test-Assert ($defA2.ContainsKey('ZipParallelThreads') -and $defA2.ContainsKey('DeleteExtractedFoldersAfterRezip')) "schema includes ZipParallelThreads and DeleteExtractedFoldersAfterRezip"
+Test-Assert (
+    $defA2.ContainsKey('AnimatedThreads') -and $defA2.ContainsKey('AnimatedQuality') -and
+    $defA2.ContainsKey('AnimatedLossless') -and $defA2.ContainsKey('AnimatedOverwrite') -and
+    $defA2.ContainsKey('AnimatedDeleteSource')
+) "schema includes all five Animated* keys"
+Test-Assert ($defA2.ContainsKey('ZipWithUnconvertedAnimated') -and $defA2.ZipWithUnconvertedAnimated -eq $false) "schema includes ZipWithUnconvertedAnimated, default `$false"
 Write-Host ""
 
 # ==============================================================================
@@ -151,6 +157,42 @@ Test-Assert ($settingsH.ZipParallelThreads -eq 1) "wrong-type ZipParallelThreads
 Test-Assert ($settingsH.PermanentDelete -eq $false) "wrong-type PermanentDelete fell back to default (`$false)"
 Test-Assert ($settingsH.CjxlPath -eq "C:\ok.exe") "a valid sibling key (CjxlPath) still loaded despite the other bad values"
 Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*" }).Count -eq 3) "exactly one warning per invalid key (3 bad keys -> 3 warnings)"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario H2: the Animated* keys round-trip and are range-validated the
+#  same way as their non-animated counterparts (JpegQuality/ZipParallelThreads)
+# ==============================================================================
+Write-Host "=== Scenario H2: Animated* keys round-trip and validate ===" -ForegroundColor Cyan
+$pathH2 = Join-Path $scratchDir "animated-settings.json"
+$toSaveH2 = Get-DefaultScriptSettings
+$toSaveH2.AnimatedThreads = 6
+$toSaveH2.AnimatedQuality = 80
+$toSaveH2.AnimatedLossless = $true
+$toSaveH2.AnimatedOverwrite = $true
+$toSaveH2.AnimatedDeleteSource = $false
+Export-ScriptSettings -Settings $toSaveH2 -Path $pathH2
+$loadedH2 = Import-ScriptSettings -Path $pathH2
+Test-Assert ($loadedH2.AnimatedThreads -eq 6 -and $loadedH2.AnimatedQuality -eq 80) "AnimatedThreads/AnimatedQuality round-tripped"
+Test-Assert ($loadedH2.AnimatedLossless -eq $true -and $loadedH2.AnimatedOverwrite -eq $true -and $loadedH2.AnimatedDeleteSource -eq $false) "the three Animated* bools round-tripped"
+
+$pathH3 = Join-Path $scratchDir "animated-bad-settings.json"
+'{ "AnimatedQuality": 0, "AnimatedThreads": -1 }' | Set-Content -LiteralPath $pathH3 -Encoding UTF8
+$settingsH3 = Import-ScriptSettings -Path $pathH3
+Test-Assert ($settingsH3.AnimatedQuality -eq 90) "out-of-range AnimatedQuality (0) fell back to default (90)"
+Test-Assert ($settingsH3.AnimatedThreads -eq 4) "out-of-range AnimatedThreads (-1) fell back to default (4)"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario H4: ZipWithUnconvertedAnimated round-trips as a real bool
+# ==============================================================================
+Write-Host "=== Scenario H4: ZipWithUnconvertedAnimated round-trips ===" -ForegroundColor Cyan
+$pathH4 = Join-Path $scratchDir "zip-unconverted-settings.json"
+$toSaveH4 = Get-DefaultScriptSettings
+$toSaveH4.ZipWithUnconvertedAnimated = $true
+Export-ScriptSettings -Settings $toSaveH4 -Path $pathH4
+$loadedH4 = Import-ScriptSettings -Path $pathH4
+Test-Assert ($loadedH4.ZipWithUnconvertedAnimated -eq $true) "ZipWithUnconvertedAnimated round-tripped as `$true"
 Write-Host ""
 
 # ==============================================================================
