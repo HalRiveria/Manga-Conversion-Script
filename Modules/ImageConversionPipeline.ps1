@@ -640,15 +640,36 @@ function Invoke-LooseImageConversionPipeline {
         loose images as its own batch - unconditional series/chapter
         batching, not a mode-1-vs-mode-2 toggle (see this module's header
         and CLAUDE.md's "Clean Console Output").
+
+        Get-SeriesChapters alone is NOT the full picture of what gets
+        converted: it's a thin wrapper on the zip-domain
+        Get-ZippableLeafDirs, whose former-container/zip-staleness guards
+        decide "is this worth re-zipping", not "does this need
+        converting". Any directory holding a needs-conversion image that
+        those guards excluded (a stray .zip alongside fresh loose images,
+        or images sitting directly in the series root) is folded in as an
+        extra chapter-equivalent entry BEFORE Start-SeriesProgress is
+        called, so the progress total already accounts for it and nothing
+        is ever silently skipped - see the in-line comment where
+        $chapterEntries is built.
     .PARAMETER PostChapterCallback
         Invoked once per chapter with @{ SeriesName; ChapterName; Dir;
-        ChapterResult } - $ChapterResult is $null when the chapter had
-        nothing left to convert. Intentionally decoupled from
-        ZipPipeline.ps1 (this module has no direct dependency on it) - a
-        caller wanting mode 2 behavior passes a closure that calls
-        ZipPipeline.ps1's Invoke-LooseFolderZip itself, matching
-        Convert-ImageBatch's own -AbortPollCallback precedent for this
-        kind of hook.
+        ChapterResult; ZipOut; IsZippable } - $ChapterResult is $null when
+        the chapter had nothing left to convert. IsZippable is $false (and
+        ZipOut is $null) for an "extra" entry the merge above added
+        because it held unconverted images but wasn't a real
+        Get-SeriesChapters result (a former-container/zip-staleness guard
+        exclusion, or a directory with no chapter subfolder at all, e.g.
+        the series root) - a caller MUST check IsZippable before zipping,
+        or an extra like the series root itself could get wrapper-zipped
+        once every real chapter around it is already zipped and deleted,
+        which is exactly the container-folder mess the former-container
+        guard exists to prevent (caught in review). Intentionally
+        decoupled from ZipPipeline.ps1 (this module has no direct
+        dependency on it) - a caller wanting mode 2 behavior passes a
+        closure that calls ZipPipeline.ps1's Invoke-LooseFolderZip itself
+        ONLY when IsZippable is true, matching Convert-ImageBatch's own
+        -AbortPollCallback precedent for this kind of hook.
     .OUTPUTS
         @{ ConvertedSuccess; ConvertedFail; ConvertedSkipped;
            DeletedSuccess; DeletedFail; StaleCleanedSuccess;
@@ -714,26 +735,93 @@ function Invoke-LooseImageConversionPipeline {
             $chapters = Get-SeriesChapters -SeriesPath $series.FullName -QualifyingExtensions $FolderQualifyingExtensions `
                 -ExcludeStagingDirs $FolderExcludeStagingDirs -ForceRezip $false
 
-            if ($script:CleanConsoleOutputEnabled) {
-                Start-SeriesProgress -SeriesName $series.Name -TotalChapters $chapters.Count
-            }
-
-            if ($chapters.Count -eq 0) {
-                Write-Log ("Series '" + $series.Name + "': no qualifying chapters found.") -Level Info
-                continue
-            }
-
-            Write-Log ("=== Series '" + $series.Name + "': " + $chapters.Count + " chapter(s) ===")
-
             # Bounded to this one series, not the whole library - see this
-            # module's header and CLAUDE.md's pre-flight note.
+            # module's header and CLAUDE.md's pre-flight note. Computed
+            # BEFORE Start-SeriesProgress (not after, as an earlier version
+            # of this rework had it) - see the $chapterEntries merge below
+            # for why the real per-series total needs this first.
             $seriesCandidates = Get-LooseImageCandidates -ScanPath $series.FullName -LooseImageExtensions $LooseImageExtensions -KnownZipPaths $KnownZipPaths
 
             $staleResult = Remove-StaleLooseSources -StaleSources $seriesCandidates.StaleSources
             $totals.StaleCleanedSuccess += $staleResult.Success
             $totals.StaleCleanedFail    += $staleResult.Fail
 
-            foreach ($chapter in $chapters) {
+            # Get-SeriesChapters is a thin wrapper on the zip-domain
+            # Get-ZippableLeafDirs (see LeafDirectoryDiscovery.ps1) - its
+            # former-container guard (skip a dir with a stray .zip inside)
+            # and zip-staleness guard (skip a dir whose same-named .zip is
+            # already newer than every image in it) exist to decide "is
+            # this worth re-zipping", not "does this need converting". Using
+            # $chapters alone to decide what gets converted would silently
+            # drop real unconverted images sitting in a directory those
+            # guards happen to exclude (a leftover .zip alongside fresh
+            # loose images, or images sitting directly in the series root
+            # rather than a chapter subfolder) - a real regression against
+            # the old flat whole-library scan, caught by review rather than
+            # by the harness (see CHANGELOG.md). Fix: still use $chapters
+            # for the declared per-chapter progress slots, but fold in any
+            # OTHER directory that actually holds a needs-conversion image,
+            # so conversion coverage can never silently regress just
+            # because a directory doesn't currently look "zip-worthy".
+            #
+            # Two things an EXTRA entry must NOT be treated as, both caught
+            # by a second review pass:
+            #  - Zippable. It carries IsZippable=$false / ZipOut=$null (a
+            #    real chapter keeps $c.ZipOut) - a caller wiring
+            #    -PostChapterCallback to ZipPipeline.ps1's
+            #    Invoke-LooseFolderZip (mode 2, exactly as this function's
+            #    own .PARAMETER text above describes) must check
+            #    IsZippable first. Without this, an extra like the series
+            #    root itself would get wrapper-zipped once every real
+            #    chapter around it is already zipped and deleted -
+            #    precisely the container-folder mess the former-container
+            #    guard exists to prevent in the first place, reached
+            #    through the back door.
+            #  - Exempt from -FolderExcludeStagingDirs. The merge only
+            #    checked $chapterDirSet, so a staging directory (mode 4's
+            #    in-progress extraction area) with a leftover unconverted
+            #    image would get silently re-added here even though
+            #    Get-SeriesChapters correctly excluded it - same
+            #    staging-prefix test Test-ZippableLeafDirCandidate uses,
+            #    duplicated here since that helper isn't exported.
+            $chapterDirSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $chapterEntries = [System.Collections.Generic.List[hashtable]]::new()
+            foreach ($c in $chapters) {
+                $null = $chapterDirSet.Add($c.Dir.FullName)
+                $chapterEntries.Add(@{ Dir = $c.Dir; ZipOut = $c.ZipOut; IsZippable = $true })
+            }
+            $extraGroups = @($seriesCandidates.NeedsConversion | Group-Object DirectoryName | Where-Object { -not $chapterDirSet.Contains($_.Name) })
+            foreach ($extraGroup in $extraGroups) {
+                $extraDirPath = $extraGroup.Name
+                $isStaging = $false
+                if ($FolderExcludeStagingDirs -and $FolderExcludeStagingDirs.Count -gt 0) {
+                    foreach ($stagingDir in $FolderExcludeStagingDirs) {
+                        if ($extraDirPath.Equals($stagingDir, [System.StringComparison]::OrdinalIgnoreCase) -or
+                            $extraDirPath.StartsWith($stagingDir + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+                            $isStaging = $true
+                            break
+                        }
+                    }
+                }
+                if ($isStaging) { continue }
+
+                $extraDir = [System.IO.DirectoryInfo]::new($extraDirPath)
+                $chapterEntries.Add(@{ Dir = $extraDir; ZipOut = $null; IsZippable = $false })
+                Write-Log ("Series '" + $series.Name + "': '" + $extraDir.Name + "' has unconverted image(s) but wasn't found by chapter discovery (e.g. a stray .zip sitting alongside it, or images outside a normal chapter folder) - converting it anyway, but NOT treating it as zippable.") -Level Warn
+            }
+
+            if ($script:CleanConsoleOutputEnabled) {
+                Start-SeriesProgress -SeriesName $series.Name -TotalChapters $chapterEntries.Count
+            }
+
+            if ($chapterEntries.Count -eq 0) {
+                Write-Log ("Series '" + $series.Name + "': no qualifying chapters found.") -Level Info
+                continue
+            }
+
+            Write-Log ("=== Series '" + $series.Name + "': " + $chapterEntries.Count + " chapter(s) ===")
+
+            foreach ($chapter in $chapterEntries) {
                 if (Test-AbortSignal) { $totals.Aborted = $true; break }
 
                 $chapterDir  = $chapter.Dir
@@ -751,13 +839,28 @@ function Invoke-LooseImageConversionPipeline {
                     Write-Log ("Processing chapter: '" + $chapterDir.FullName + "' (" + $chapterImages.Count + " image(s))")
 
                     $localLastCompleted = $totals.LastCompletedPaths
+                    # $alreadyAbortedBox (a hashtable, not a plain scalar) is
+                    # how "was it already aborted last poll" survives across
+                    # invocations of this closure - .GetNewClosure() puts the
+                    # scriptblock in its OWN dynamic module, so a direct
+                    # $script:abortRequested read/write here would silently
+                    # read/mutate a frozen, disconnected copy, never
+                    # AbortPipeline.ps1's real one (live-reproduced: read the
+                    # real, current state through Test-AbortSignal's RETURN
+                    # VALUE - a genuine function call, not a $script: access -
+                    # and track the previous poll's result in a captured
+                    # reference-type object instead, same discipline as the
+                    # "closures mutating state" entry in CLAUDE.md's Lessons
+                    # learned).
+                    $alreadyAbortedBox = @{ Value = $false }
                     $abortPoll = {
                         param($InFlightPaths)
-                        $wasAbortedBefore = $script:abortRequested
-                        $null = Test-AbortSignal
-                        if ($script:abortRequested -and -not $wasAbortedBefore) {
+                        $wasAbortedBefore = $alreadyAbortedBox.Value
+                        $isAbortedNow = Test-AbortSignal
+                        if ($isAbortedNow -and -not $wasAbortedBefore) {
                             foreach ($p in $InFlightPaths) { $localLastCompleted.Add($p) }
                         }
+                        $alreadyAbortedBox.Value = $isAbortedNow
                     }.GetNewClosure()
 
                     $chapterResult = Convert-ImageBatch -ImageFiles $chapterImages -CjxlExe $CjxlExe -MagickExe $MagickExe `
@@ -786,7 +889,7 @@ function Invoke-LooseImageConversionPipeline {
                 }
 
                 if ($null -ne $PostChapterCallback) {
-                    & $PostChapterCallback @{ SeriesName = $series.Name; ChapterName = $chapterName; Dir = $chapterDir; ChapterResult = $chapterResult }
+                    & $PostChapterCallback @{ SeriesName = $series.Name; ChapterName = $chapterName; Dir = $chapterDir; ChapterResult = $chapterResult; ZipOut = $chapter.ZipOut; IsZippable = $chapter.IsZippable }
                 }
             }
         }
