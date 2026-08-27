@@ -357,6 +357,35 @@ Test-Assert ($script:abortCancellationSources.Count -eq 0) "registry is empty ag
 Reset-AbortState
 
 # ==============================================================================
+#  Scenario H2: the immediate pre-fetch abort path - abort already set before
+#  New-SeriesProvider even returns its first series. Scenario H's rewrite
+#  moved coverage to a real mid-batch abort but dropped this simpler case
+#  entirely; restoring it here rather than folding it back into H, since H's
+#  own call-count trigger is specifically tuned for the mid-batch timing.
+# ==============================================================================
+Write-Host "=== Scenario H2: abort detected before the first series is even fetched ===" -ForegroundColor Cyan
+$rootH2 = New-Dir "scenario-h2"
+$chH2 = New-Dir "scenario-h2\Series\Chapter 1"
+New-FakeImage -DirPath $chH2 -Name "page1.jpg" | Out-Null
+
+[ConsoleCtrl]::AbortRequested = $true
+$totalsH2 = Invoke-LooseImageConversionPipeline -Path $rootH2 -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
+
+Test-Assert ($totalsH2.Aborted) "pipeline reports Aborted"
+Test-Assert ($totalsH2.SeriesCount -eq 0) "aborted before even fetching the first series"
+Test-Assert ($script:abortCancellationSources.Count -eq 0) "registry is empty again after the call (finally block ran)"
+Reset-AbortState
+
+# The spies are only needed for Scenarios H/H2 above - restore the real
+# originals now (matching the capture/redefine/restore idiom
+# FileDeletion.Harness.ps1/Logging.Harness.ps1 already use for the same
+# need) so every scenario below runs against AbortPipeline.ps1's real,
+# unwrapped functions like the rest of this suite.
+${function:Register-AbortCancellationSource}   = $originalRegisterAbortCts
+${function:Unregister-AbortCancellationSource} = $originalUnregisterAbortCts
+${function:Test-AbortSignal}                   = $originalTestAbortSignal
+
+# ==============================================================================
 #  Scenario I: KnownZipPaths exclusion still works, scoped per-series now
 #  instead of once for the whole library.
 # ==============================================================================
@@ -479,6 +508,31 @@ $totalsN = Invoke-LooseImageConversionPipeline -Path $rootN -CjxlExe $fakeCjxlEx
 Test-Assert ($totalsN.ChapterCount -eq 1) ("staging dir was NOT folded in as an extra chapter (got ChapterCount=" + $totalsN.ChapterCount + ")")
 Test-Assert ($totalsN.ConvertedSuccess -eq 1) "only Ch1's image was converted"
 Test-Assert (Test-Path -LiteralPath (Join-Path $stagingN "excluded.jpg")) "the staging dir's image was left untouched"
+
+# ==============================================================================
+#  Scenario O: -FolderExcludeStagingDirs must also protect a STALE source (one
+#  with an existing non-zero .jxl counterpart) from Remove-StaleLooseSources -
+#  a real second-review finding distinct from Scenario N (which only covers
+#  the NeedsConversion/extras path). Get-LooseImageCandidates previously had
+#  no concept of -FolderExcludeStagingDirs at all, so a stale source sitting in
+#  a directory the caller explicitly asked to leave alone (e.g. mode 4's
+#  in-progress extraction area) would get deleted anyway.
+# ==============================================================================
+Write-Host "=== Scenario O: FolderExcludeStagingDirs protects stale sources too ===" -ForegroundColor Cyan
+$rootO = New-Dir "scenario-o"
+$chO = New-Dir "scenario-o\Series\Ch1"
+New-FakeImage -DirPath $chO -Name "p1.jpg" | Out-Null
+$stagingO = New-Dir "scenario-o\Series\Staging"
+$staleSrcO = New-FakeImage -DirPath $stagingO -Name "already_done.jpg"
+[System.IO.File]::WriteAllText((Join-Path $stagingO "already_done.jxl"), "real jxl bytes")
+
+$excludeSetO = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$null = $excludeSetO.Add($stagingO)
+
+$totalsO = Invoke-LooseImageConversionPipeline -Path $rootO -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false -FolderExcludeStagingDirs $excludeSetO
+
+Test-Assert ($totalsO.StaleCleanedSuccess -eq 0) ("the staging dir's stale source was NOT cleaned up (got StaleCleanedSuccess=" + $totalsO.StaleCleanedSuccess + ")")
+Test-Assert (Test-Path -LiteralPath $staleSrcO) "the staging dir's stale source file still exists"
 
 Write-Host ""
 if ($script:failCount -eq 0) {

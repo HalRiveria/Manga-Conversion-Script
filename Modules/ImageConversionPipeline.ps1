@@ -519,6 +519,12 @@ function Get-LooseImageCandidates {
         Full paths of ZIPs whose extraction staging directory (same
         parent dir, same base name) should be excluded from the scan -
         those files are the ZIP worker's concern, not this pipeline's.
+    .PARAMETER ExcludeStagingDirs
+        Directories (and anything under them) to skip entirely - same
+        exclusion set Get-SeriesChapters/Get-ZippableLeafDirs apply, so a
+        staging/extraction area a caller asked to leave alone can't have
+        a "stale" source silently deleted out of it just because this
+        function has no other concept of it.
     .OUTPUTS
         @{ NeedsConversion = List[FileInfo]; StaleSources = List[FileInfo] }
     #>
@@ -526,7 +532,8 @@ function Get-LooseImageCandidates {
         [Parameter(Mandatory)]
         [string]$ScanPath,
         [string[]]$LooseImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif"),
-        [string[]]$KnownZipPaths = @()
+        [string[]]$KnownZipPaths = @(),
+        [System.Collections.Generic.HashSet[string]]$ExcludeStagingDirs = $null
     )
 
     $zipBaseDirs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -535,6 +542,9 @@ function Get-LooseImageCandidates {
             [System.IO.Path]::GetDirectoryName($zp),
             [System.IO.Path]::GetFileNameWithoutExtension($zp)
         ))
+    }
+    if ($ExcludeStagingDirs) {
+        foreach ($stagingDir in $ExcludeStagingDirs) { $null = $zipBaseDirs.Add($stagingDir) }
     }
 
     $allCandidates = @(Get-ChildItem -LiteralPath $ScanPath -Recurse -File -ErrorAction SilentlyContinue |
@@ -740,7 +750,7 @@ function Invoke-LooseImageConversionPipeline {
             # BEFORE Start-SeriesProgress (not after, as an earlier version
             # of this rework had it) - see the $chapterEntries merge below
             # for why the real per-series total needs this first.
-            $seriesCandidates = Get-LooseImageCandidates -ScanPath $series.FullName -LooseImageExtensions $LooseImageExtensions -KnownZipPaths $KnownZipPaths
+            $seriesCandidates = Get-LooseImageCandidates -ScanPath $series.FullName -LooseImageExtensions $LooseImageExtensions -KnownZipPaths $KnownZipPaths -ExcludeStagingDirs $FolderExcludeStagingDirs
 
             $staleResult = Remove-StaleLooseSources -StaleSources $seriesCandidates.StaleSources
             $totals.StaleCleanedSuccess += $staleResult.Success
@@ -764,48 +774,49 @@ function Invoke-LooseImageConversionPipeline {
             # so conversion coverage can never silently regress just
             # because a directory doesn't currently look "zip-worthy".
             #
-            # Two things an EXTRA entry must NOT be treated as, both caught
-            # by a second review pass:
-            #  - Zippable. It carries IsZippable=$false / ZipOut=$null (a
-            #    real chapter keeps $c.ZipOut) - a caller wiring
-            #    -PostChapterCallback to ZipPipeline.ps1's
-            #    Invoke-LooseFolderZip (mode 2, exactly as this function's
-            #    own .PARAMETER text above describes) must check
-            #    IsZippable first. Without this, an extra like the series
-            #    root itself would get wrapper-zipped once every real
-            #    chapter around it is already zipped and deleted -
-            #    precisely the container-folder mess the former-container
-            #    guard exists to prevent in the first place, reached
-            #    through the back door.
-            #  - Exempt from -FolderExcludeStagingDirs. The merge only
-            #    checked $chapterDirSet, so a staging directory (mode 4's
-            #    in-progress extraction area) with a leftover unconverted
-            #    image would get silently re-added here even though
-            #    Get-SeriesChapters correctly excluded it - same
-            #    staging-prefix test Test-ZippableLeafDirCandidate uses,
-            #    duplicated here since that helper isn't exported.
+            # An EXTRA entry must NOT be treated as zippable: it carries
+            # IsZippable=$false / ZipOut=$null (a real chapter keeps
+            # $c.ZipOut) - a caller wiring -PostChapterCallback to
+            # ZipPipeline.ps1's Invoke-LooseFolderZip (mode 2, exactly as
+            # this function's own .PARAMETER text above describes) must
+            # check IsZippable first. Without this, an extra like the
+            # series root itself would get wrapper-zipped once every real
+            # chapter around it is already zipped and deleted - precisely
+            # the container-folder mess the former-container guard exists
+            # to prevent in the first place, reached through the back door
+            # (caught in review).
+            #
+            # $imagesByDir groups $seriesCandidates.NeedsConversion by
+            # directory ONCE and is reused below both to find extras and to
+            # look up each real chapter's own images - avoids both a
+            # redundant Group-Object over every chapter's images just to
+            # discard most of the groups, and the O(chapters x
+            # images-in-series) rescan a separate per-chapter Where-Object
+            # would otherwise do (also caught in review). -ExcludeStagingDirs
+            # is now passed straight into Get-LooseImageCandidates above, so
+            # $seriesCandidates.NeedsConversion already never contains a
+            # staging-dir image in the first place - no second staging check
+            # is needed here (a caught-in-review duplicate of
+            # Test-ZippableLeafDirCandidate's own staging-prefix test used
+            # to live in this loop).
+            $imagesByDir = [System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[System.IO.FileInfo]]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($img in $seriesCandidates.NeedsConversion) {
+                if (-not $imagesByDir.ContainsKey($img.DirectoryName)) {
+                    $imagesByDir[$img.DirectoryName] = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+                }
+                $imagesByDir[$img.DirectoryName].Add($img)
+            }
+
             $chapterDirSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             $chapterEntries = [System.Collections.Generic.List[hashtable]]::new()
             foreach ($c in $chapters) {
                 $null = $chapterDirSet.Add($c.Dir.FullName)
                 $chapterEntries.Add(@{ Dir = $c.Dir; ZipOut = $c.ZipOut; IsZippable = $true })
             }
-            $extraGroups = @($seriesCandidates.NeedsConversion | Group-Object DirectoryName | Where-Object { -not $chapterDirSet.Contains($_.Name) })
-            foreach ($extraGroup in $extraGroups) {
-                $extraDirPath = $extraGroup.Name
-                $isStaging = $false
-                if ($FolderExcludeStagingDirs -and $FolderExcludeStagingDirs.Count -gt 0) {
-                    foreach ($stagingDir in $FolderExcludeStagingDirs) {
-                        if ($extraDirPath.Equals($stagingDir, [System.StringComparison]::OrdinalIgnoreCase) -or
-                            $extraDirPath.StartsWith($stagingDir + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
-                            $isStaging = $true
-                            break
-                        }
-                    }
-                }
-                if ($isStaging) { continue }
+            foreach ($extraDirPath in $imagesByDir.Keys) {
+                if ($chapterDirSet.Contains($extraDirPath)) { continue }
 
-                $extraDir = [System.IO.DirectoryInfo]::new($extraDirPath)
+                $extraDir = $imagesByDir[$extraDirPath][0].Directory
                 $chapterEntries.Add(@{ Dir = $extraDir; ZipOut = $null; IsZippable = $false })
                 Write-Log ("Series '" + $series.Name + "': '" + $extraDir.Name + "' has unconverted image(s) but wasn't found by chapter discovery (e.g. a stray .zip sitting alongside it, or images outside a normal chapter folder) - converting it anyway, but NOT treating it as zippable.") -Level Warn
             }
@@ -832,7 +843,8 @@ function Invoke-LooseImageConversionPipeline {
                     Start-ChapterProgress -SeriesName $series.Name -ChapterName $chapterName
                 }
 
-                $chapterImages = @($seriesCandidates.NeedsConversion | Where-Object { $_.DirectoryName.Equals($chapterDir.FullName, [System.StringComparison]::OrdinalIgnoreCase) })
+                $chapterImages = @()
+                if ($imagesByDir.ContainsKey($chapterDir.FullName)) { $chapterImages = @($imagesByDir[$chapterDir.FullName]) }
 
                 $chapterResult = $null
                 if ($chapterImages.Count -gt 0) {
