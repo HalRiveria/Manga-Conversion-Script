@@ -6,13 +6,14 @@
     Unlike prior harnesses (mostly stubbed dependencies), this one dot-
     sources the REAL already-built dependency modules - FileDeletion.ps1,
     ZipCreation.ps1, ZipValidation.ps1, LeafDirectoryDiscovery.ps1,
-    ZipParallelProcessing.ps1, and Logging.ps1 - since ZipPipeline.ps1 is
-    an orchestration-tier module that composes all of them for real. This
-    is closer to an integration test than the earlier pure-unit harnesses,
-    appropriate for this tier. Only the dot-source ORDER matters (see
-    ZipPipeline.ps1's own "IMPORTANT ordering note"): Logging.ps1 must be
-    dot-sourced AFTER ZipParallelProcessing.ps1, or ZPP's stale inline
-    Write-Log would silently win instead of Logging.ps1's real one.
+    ZipParallelProcessing.ps1, Logging.ps1, and CleanConsoleRendering.ps1
+    - since ZipPipeline.ps1 is an orchestration-tier module that composes
+    all of them for real. This is closer to an integration test than the
+    earlier pure-unit harnesses, appropriate for this tier. Only the
+    dot-source ORDER matters (see ZipPipeline.ps1's own "IMPORTANT
+    ordering note"): Logging.ps1 must be dot-sourced AFTER
+    ZipParallelProcessing.ps1, or ZPP's stale inline Write-Log would
+    silently win instead of Logging.ps1's real one.
 
 .EXAMPLE
     .\Modules\_Harness\ZipPipeline.Harness.ps1
@@ -27,6 +28,7 @@ $modulesDir = Join-Path $PSScriptRoot ".."
 . (Join-Path $modulesDir "LeafDirectoryDiscovery.ps1")
 . (Join-Path $modulesDir "ZipParallelProcessing.ps1")
 . (Join-Path $modulesDir "Logging.ps1")   # AFTER ZipParallelProcessing.ps1 - see header note
+. (Join-Path $modulesDir "CleanConsoleRendering.ps1")
 . (Join-Path $modulesDir "ZipPipeline.ps1")
 
 $script:passCount = 0
@@ -75,7 +77,7 @@ New-FileIn -DirPath $leaf1A -Name "page2.jpg" | Out-Null
 $leaf2A = New-Dir "scenario-a\Chapter 2"
 New-FileIn -DirPath $leaf2A -Name "page1.jpg" | Out-Null
 
-$totalsA = Invoke-ZipOnlyPipeline -Path $rootA -MaxParallel 2 -DeleteFolders $true -FullLogging $false -PermanentDelete $true
+$totalsA = Invoke-ZipOnlyPipeline -Path $rootA -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -DeleteFolders $true -FullLogging $false -PermanentDelete $true
 
 Test-Assert ($totalsA.CandidateCount -eq 2) ("2 candidates found (got " + $totalsA.CandidateCount + ")")
 Test-Assert ($totalsA.ZippedSuccess -eq 2) ("both zipped successfully (got " + $totalsA.ZippedSuccess + ")")
@@ -102,7 +104,7 @@ Write-Host ""
 Write-Host "=== Scenario B: no candidates found ===" -ForegroundColor Cyan
 $rootB = New-Dir "scenario-b-empty"
 
-$totalsB = Invoke-ZipOnlyPipeline -Path $rootB -MaxParallel 2 -FullLogging $false -PermanentDelete $true
+$totalsB = Invoke-ZipOnlyPipeline -Path $rootB -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -FullLogging $false -PermanentDelete $true
 Test-Assert ($totalsB.CandidateCount -eq 0) "0 candidates found in an empty tree"
 Test-Assert ($totalsB.ZippedSuccess -eq 0 -and $totalsB.ZippedFail -eq 0) "no zip attempts were made"
 Write-Host ""
@@ -116,7 +118,7 @@ $rootC = New-Dir "scenario-c"
 $leafC = New-Dir "scenario-c\Chapter 1"
 New-FileIn -DirPath $leafC -Name "page1.jpg" | Out-Null
 
-$totalsC = Invoke-ZipOnlyPipeline -Path $rootC -MaxParallel 2 -DeleteFolders $false -FullLogging $false -PermanentDelete $true
+$totalsC = Invoke-ZipOnlyPipeline -Path $rootC -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -DeleteFolders $false -FullLogging $false -PermanentDelete $true
 Test-Assert ($totalsC.ZippedSuccess -eq 1) "the folder was zipped"
 Test-Assert ($totalsC.FolderDeletedSuccess -eq 0 -and $totalsC.FolderDeletedFail -eq 0) "no delete was attempted at all"
 Test-Assert (Test-Path -LiteralPath $leafC) "the source folder still exists"
@@ -135,7 +137,7 @@ $zipOutD = Join-Path $rootD "Chapter 1.zip"
 "fake pre-existing zip" | Out-File -FilePath $zipOutD -Encoding UTF8
 (Get-Item -LiteralPath $zipOutD).LastWriteTimeUtc = (Get-Date).ToUniversalTime()   # newer than the source file
 
-$totalsD = Invoke-ZipOnlyPipeline -Path $rootD -MaxParallel 2 -FullLogging $false -PermanentDelete $true
+$totalsD = Invoke-ZipOnlyPipeline -Path $rootD -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -FullLogging $false -PermanentDelete $true
 Test-Assert ($totalsD.CandidateCount -eq 0) "the up-to-date leaf was excluded before even reaching the zip step"
 Write-Host ""
 
@@ -151,7 +153,7 @@ $onlyImagesE = New-Dir "scenario-e\Only Images"
 New-FileIn -DirPath $onlyImagesE -Name "08 - Chapter 8.zip" | Out-Null
 New-FileIn -DirPath $onlyImagesE -Name "09 - Chapter 9.zip" | Out-Null
 
-$totalsE = Invoke-ZipOnlyPipeline -Path $rootE -MaxParallel 2 -FullLogging $false -PermanentDelete $true
+$totalsE = Invoke-ZipOnlyPipeline -Path $rootE -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -FullLogging $false -PermanentDelete $true
 Test-Assert ($totalsE.CandidateCount -eq 0) "'Only Images' (zero subdirs, only .zip files) was never a zip candidate through the full pipeline"
 Test-Assert (Test-Path -LiteralPath (Join-Path $onlyImagesE "08 - Chapter 8.zip")) "the existing chapter zips were left completely untouched"
 Write-Host ""
@@ -206,6 +208,121 @@ $resultH = Invoke-LooseFolderZip -FolderPath $dirH -ZipOut $zipOutH -LooseImageE
 
 Test-Assert ($resultH.Status -eq "Fail") ("Status is Fail when the zip has no .jxl entries and RequireJxlEntry defaults true (got " + $resultH.Status + ")")
 Test-Assert (Test-Path -LiteralPath $dirH) "the source folder is left alone after a failed zip (not deleted)"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario I: mode 3 CCR wiring, real Series folder wrapping two chapters -
+#  Start-SeriesProgress gets the real bounded-scan TotalChapters (2), both
+#  chapters resolve Success, and the series ends up resolved (off the active
+#  registry) once both are done.
+# ==============================================================================
+Write-Host "=== Scenario I: mode 3 CCR wiring, nested Series/Chapter ===" -ForegroundColor Cyan
+$rootI  = New-Dir "scenario-i"
+$ch1I   = New-Dir "scenario-i\My Series\Chapter 1"
+$ch2I   = New-Dir "scenario-i\My Series\Chapter 2"
+New-FileIn -DirPath $ch1I -Name "page1.jpg" | Out-Null
+New-FileIn -DirPath $ch2I -Name "page1.jpg" | Out-Null
+
+$script:CleanConsoleOutputEnabled = $true
+try {
+    $totalsI = Invoke-ZipOnlyPipeline -Path $rootI -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -FullLogging $false -PermanentDelete $true
+} finally {
+    $script:CleanConsoleOutputEnabled = $false
+}
+
+Test-Assert ($totalsI.CandidateCount -eq 2) ("2 candidates found (got " + $totalsI.CandidateCount + ")")
+Test-Assert ($totalsI.ZippedSuccess -eq 2) "both chapters zipped"
+Test-Assert ($script:ccrActiveSeries.Count -eq 0) "the series resolved and left the active registry once both chapters completed"
+
+# ==============================================================================
+#  Scenario J: mode 3 CCR wiring, a FLAT leaf with no Series folder wrapping
+#  it (mode 3's own long-standing supported shape - see CLAUDE.md's Known
+#  gaps on why this isn't validated away) - degenerates to a one-chapter
+#  "series" named after the leaf itself, still resolves cleanly.
+# ==============================================================================
+Write-Host "=== Scenario J: mode 3 CCR wiring, flat leaf (no Series folder) ===" -ForegroundColor Cyan
+$rootJ = New-Dir "scenario-j"
+$leafJ = New-Dir "scenario-j\Lone Chapter"
+New-FileIn -DirPath $leafJ -Name "page1.jpg" | Out-Null
+
+$script:CleanConsoleOutputEnabled = $true
+try {
+    $totalsJ = Invoke-ZipOnlyPipeline -Path $rootJ -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -FullLogging $false -PermanentDelete $true
+} finally {
+    $script:CleanConsoleOutputEnabled = $false
+}
+
+Test-Assert ($totalsJ.ZippedSuccess -eq 1) "the flat leaf was still zipped successfully"
+Test-Assert ($script:ccrActiveSeries.Count -eq 0) "the degenerate one-chapter series resolved too"
+
+# ==============================================================================
+#  Scenario K: mode 3 CCR wiring, a real zip FAILURE - Complete-ChapterProgress
+#  gets called with Status Error, not silently skipped just because the job
+#  failed. Forced by holding an exclusive-lock FileStream open on the
+#  chapter's own image file, so ZipFile.CreateFromDirectory throws for real
+#  when it tries to read it (a pre-created blocking directory at the zip-out
+#  path doesn't work - Compress-FolderToZip's own Remove-Source call just
+#  deletes it first and zips successfully anyway).
+# ==============================================================================
+Write-Host "=== Scenario K: mode 3 CCR wiring, a real zip failure ===" -ForegroundColor Cyan
+$rootK  = New-Dir "scenario-k"
+$ch1K   = New-Dir "scenario-k\Series\Chapter 1"
+$imgK   = New-FileIn -DirPath $ch1K -Name "page1.jpg"
+$lockK  = [System.IO.File]::Open($imgK, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+
+$script:CleanConsoleOutputEnabled = $true
+try {
+    $totalsK = Invoke-ZipOnlyPipeline -Path $rootK -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -FullLogging $false -PermanentDelete $true
+} finally {
+    $script:CleanConsoleOutputEnabled = $false
+    $lockK.Dispose()
+}
+
+Test-Assert ($totalsK.ZippedFail -eq 1) ("the forced zip failure was counted (got ZippedFail=" + $totalsK.ZippedFail + ")")
+Test-Assert ($script:ccrActiveSeries.Count -eq 0) "the series still resolved (as an issue, not left hanging) after a real zip failure"
+
+# ==============================================================================
+#  Scenario L: Invoke-LooseFolderZip's own optional -SeriesName/-ChapterName
+#  CCR wiring - Success/Skipped/Fail all map to the right Status, and a
+#  caller that omits both params (the only wiring that exists in practice
+#  today - see this function's own .PARAMETER note) gets no CCR calls at all.
+#  Invoke-LooseFolderZip only calls Start-/Complete-ChapterProgress for
+#  ITSELF, not Start-SeriesProgress - a real caller (e.g. a future mode 2
+#  orchestrator) is assumed to already own that series' total, exactly like
+#  ImageConversionPipeline.ps1 already does when it walks a series' chapters
+#  - so each mock series here is started explicitly first, standing in for
+#  that caller.
+# ==============================================================================
+Write-Host "=== Scenario L: Invoke-LooseFolderZip's own CCR wiring ===" -ForegroundColor Cyan
+$script:CleanConsoleOutputEnabled = $true
+try {
+    Start-SeriesProgress -SeriesName "L Series" -TotalChapters 1
+    $dirL1 = New-Dir "scenario-l1"
+    New-FileIn -DirPath $dirL1 -Name "page1.jxl" | Out-Null
+    $null = Invoke-LooseFolderZip -FolderPath $dirL1 -ZipOut (Join-Path $scratchDir "scenario-l1.zip") -LooseImageExtensions @(".jpg") -SeriesName "L Series" -ChapterName "Ch Success"
+    Test-Assert ($script:ccrActiveSeries.Count -eq 0) "a Success zip resolves its own series immediately (1/1 total)"
+
+    Start-SeriesProgress -SeriesName "L Series 2" -TotalChapters 1
+    $dirL2 = New-Dir "scenario-l2"
+    New-FileIn -DirPath $dirL2 -Name "page1.jxl" | Out-Null
+    New-FileIn -DirPath $dirL2 -Name "page2.jpg" | Out-Null   # still-unconverted -> Skipped
+    $null = Invoke-LooseFolderZip -FolderPath $dirL2 -ZipOut (Join-Path $scratchDir "scenario-l2.zip") -LooseImageExtensions @(".jpg") -SeriesName "L Series 2" -ChapterName "Ch Skipped"
+    Test-Assert ($script:ccrActiveSeries.Count -eq 0) "a Skipped zip still resolves its series (mapped to Warning, not left hanging)"
+
+    Start-SeriesProgress -SeriesName "L Series 3" -TotalChapters 1
+    $dirL3 = New-Dir "scenario-l3"
+    New-FileIn -DirPath $dirL3 -Name "notes.txt" | Out-Null   # no .jxl entries -> Fail (RequireJxlEntry defaults true)
+    $null = Invoke-LooseFolderZip -FolderPath $dirL3 -ZipOut (Join-Path $scratchDir "scenario-l3.zip") -LooseImageExtensions @(".jpg") -SeriesName "L Series 3" -ChapterName "Ch Fail"
+    Test-Assert ($script:ccrActiveSeries.Count -eq 0) "a Fail zip resolves its series too (mapped to Error)"
+} finally {
+    $script:CleanConsoleOutputEnabled = $false
+}
+
+$dirL4 = New-Dir "scenario-l4"
+New-FileIn -DirPath $dirL4 -Name "page1.jxl" | Out-Null
+$resultL4 = Invoke-LooseFolderZip -FolderPath $dirL4 -ZipOut (Join-Path $scratchDir "scenario-l4.zip") -LooseImageExtensions @(".jpg")
+Test-Assert ($resultL4.Status -eq "Success") "omitting -SeriesName/-ChapterName still works normally (no CCR involvement)"
+
 Write-Host ""
 
 # ==============================================================================

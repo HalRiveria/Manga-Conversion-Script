@@ -49,6 +49,28 @@
     Logging.ps1/FileDeletion.ps1 after ZipParallelProcessing.ps1 (or not
     at all) means ZPP's own stale inline copies would silently win instead.
 
+    REAL BUG FOUND AND FIXED (2026-08-27, while adding CCR test coverage
+    for a real zip failure - Scenario K): -SharedFunctionNames was missing
+    'Invoke-MutexGuardedWrite', which Write-Log itself calls internally
+    for every Warn/Error-level line (and every line at all in full-logging
+    mode). Since that helper wasn't propagated into the worker runspace's
+    InitialSessionState, ANY Write-Log call at Warn/Error level from
+    inside $script:zipOnlyWorker (e.g. "FAILED to zip '...'") crashed the
+    entire worker with an unhandled "term not recognized" error - the
+    job's real result was never returned at all, silently miscounted as
+    neither a success nor a failure. Fully latent until now: no harness
+    scenario had ever exercised a real zip failure from inside the
+    worker before Scenario K. A second, compounding gap the same fix
+    exposed: this harness's own Invoke-ZipOnlyPipeline calls never
+    forwarded -LogFile/-LogErrorFile/-LogWarnFile at all (defaulting to
+    empty strings - PS 5.1 binds an omitted [string] parameter to "",
+    never $null, see Docs/lessons-learned.md), so even with the shared-
+    function fix, Write-Log's Out-File would still throw on an empty
+    -FilePath the first time an Error/Warn line was ever attempted from a
+    worker. Fixed in the harness too (now forwards the real
+    $script:logFile/logErrorFile/logWarnFile paths Initialize-LogPaths
+    already set up, matching what any real caller must do).
+
     ABORT WIRING NOTE: Invoke-ZipOnlyPipeline sets $script:zipOnlyCts (not
     AbortPipeline.ps1's Register-AbortCancellationSource registry) purely
     because ZipParallelProcessing.ps1's own Test-AbortSignal is still on
@@ -72,6 +94,38 @@
     starts, so the old "found N folder(s), running..." log line before
     dispatch is gone - the total only exists once the whole run finishes.
 
+    CLEAN CONSOLE OUTPUT (2026-08-27): mode 3 does NOT switch onto
+    New-SeriesProvider/Get-SeriesChapters the way ImageConversionPipeline.ps1
+    did - deliberately. Those two enforce the FIXED Library > Series >
+    Chapter > Images layout (series exactly one level below the root,
+    chapters found by a recursive scan bounded to one series). Mode 3's
+    OWN existing, already-tested behavior (ZipPipeline.Harness.ps1
+    Scenario A) has leaf directories sitting DIRECTLY under -Path with no
+    series folder at all - "zip-only handles arbitrary already-ready
+    content" per this function's own docstring, not necessarily a manga
+    library. Porting the strict two-tier model here would have silently
+    broken that. Instead: New-ZippableLeafDirProvider (unchanged,
+    arbitrary depth, still the real incremental job source) drives
+    dispatch exactly as before; for CCR display purposes only, each
+    discovered leaf's "series" is derived as its own top-level ancestor
+    directory name relative to -Path (falls back to the leaf's own name
+    when the leaf sits directly under -Path - a degenerate one-chapter
+    "series"). The first time a given top-level ancestor is seen, ONE
+    bounded Get-ZippableLeafDirs scan of just that top-level folder
+    (same guards as the incremental scan, via the same
+    Test-ZippableLeafDirCandidate helper) gets a real chapter count for
+    Start-SeriesProgress - bounded per series, not a whole-library
+    up-front scan, matching the exact principle that made the two-tier
+    approach safe elsewhere without requiring its strict layout
+    assumption here. CCR calls are gated on
+    $script:CleanConsoleOutputEnabled through small ordinary (non-
+    closure) wrapper functions below - reading that flag, or calling any
+    CCR function, directly inside a .GetNewClosure()'d scriptblock would
+    reproduce the exact frozen-scope bug ImageConversionPipeline.ps1's
+    Opus review caught (see CHANGELOG.md) - $script: inside a closure
+    resolves to that closure's own disconnected dynamic module, not
+    Logging.ps1's real one.
+
 .NOTES
     Extracted from Conversion Script Main.ps1 - see
     Modules\_Reference\ZipPipeline.reference.ps1 for the verbatim source
@@ -82,6 +136,48 @@
 #  PART 1 - mode 3 (zip-only pipeline)
 # ==============================================================================
 
+# ---- CCR helpers: plain functions, deliberately NOT closures - see this
+#      module's header ("CLEAN CONSOLE OUTPUT") for why $script:
+#      CleanConsoleOutputEnabled (owned by Logging.ps1) must only ever be
+#      read from an ordinary function, never inline inside a
+#      .GetNewClosure()'d scriptblock. Shared by both mode 3's dispatch
+#      loop and PART 2's Invoke-LooseFolderZip. ----
+function Start-CcrSeriesProgressIfEnabled {
+    param([string]$SeriesName, [int]$TotalChapters)
+    if ($script:CleanConsoleOutputEnabled) { Start-SeriesProgress -SeriesName $SeriesName -TotalChapters $TotalChapters }
+}
+function Start-CcrChapterProgressIfEnabled {
+    param([string]$SeriesName, [string]$ChapterName)
+    if ($script:CleanConsoleOutputEnabled) { Start-ChapterProgress -SeriesName $SeriesName -ChapterName $ChapterName }
+}
+function Complete-CcrChapterProgressIfEnabled {
+    param([string]$SeriesName, [string]$ChapterName, [string]$Status, [string]$Detail = $null)
+    if ($script:CleanConsoleOutputEnabled) { $null = Complete-ChapterProgress -SeriesName $SeriesName -ChapterName $ChapterName -Status $Status -Detail $Detail }
+}
+function Complete-CcrAllSeriesProgressIfEnabled {
+    if ($script:CleanConsoleOutputEnabled) { $null = Complete-AllActiveSeriesProgress }
+}
+
+function Get-ZipChapterProgressStatus {
+    <#
+    .SYNOPSIS
+        Maps $script:zipOnlyWorker's own result hashtable to CCR's
+        Status/Detail pair - same plain-language convention
+        ImageConversionPipeline.ps1's Get-ChapterProgressStatus already
+        established (see CLAUDE.md's "-Detail string shape" note), not a
+        different shape invented here.
+    .OUTPUTS
+        Two values: Status ("Success"/"Warning"/"Error"), Detail (string
+        or $null for a clean Success).
+    #>
+    param(
+        [hashtable]$ZipResult
+    )
+    if ($ZipResult.Failed -eq 1) { return "Error", "zip failed" }
+    if ($ZipResult.FolderDeleteFailed -eq 1) { return "Warning", "zipped OK, but source folder delete failed" }
+    return "Success", $null
+}
+
 # ---- Worker scriptblock, dispatched once per qualifying leaf folder via
 #      Invoke-ZipParallelProcessing. Must declare CancelToken/LogMutex/
 #      ConsoleQueue per ZPP's contract - see ZipParallelProcessing.ps1's
@@ -90,6 +186,7 @@ $script:zipOnlyWorker = {
     param(
         [string]$FolderPath,
         [string]$ZipOutPath,
+        [string]$SeriesName,
         [string]$LogFile,
         [string]$LogErrorFile,
         [string]$LogWarnFile,
@@ -116,9 +213,16 @@ $script:zipOnlyWorker = {
     $script:logWarnFile        = $LogWarnFile
     $script:PermanentDelete    = $DoPermanentDelete
 
+    # SeriesName is pass-through only - this runspace never touches CCR
+    # (every CCR call is main-thread-only, see this module's header) - it
+    # rides along in the result purely so the main thread's -ResultHandler
+    # can call Complete-ChapterProgress with the right SeriesName/
+    # ChapterName pair without having to keep its own FolderPath->Series
+    # lookup in sync with what actually got dispatched.
     $folderName = [System.IO.Path]::GetFileName($FolderPath)
     $result = @{
         FolderName         = $folderName
+        SeriesName         = $SeriesName
         Success            = 0
         Failed             = 0
         FolderDeleted      = 0
@@ -228,21 +332,50 @@ function Invoke-ZipOnlyPipeline {
         # instead of the whole tree needing to finish scanning first (see
         # CLAUDE.md - this was the actual cause of the "hangs while it
         # searches every folder at once" symptom on large libraries).
+        # UNCHANGED by Clean Console Output - see this module's header for
+        # why the strict two-tier series/chapter model isn't used here.
         $leafProvider = New-ZippableLeafDirProvider -ScanPath $Path -QualifyingExtensions $QualifyingExtensions -ForceRezip $false
+
+        # Tracks which top-level ancestor directories (this function's own
+        # notion of "series" for CCR display) have already had their
+        # bounded Get-ZippableLeafDirs side-scan run - see header.
+        $zoSeenSeriesNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $trimmedPath = $Path.TrimEnd([System.IO.Path]::DirectorySeparatorChar)
 
         # Translates the leaf provider's @{ Dir; ZipOut } shape into
         # $script:zipOnlyWorker's own bound parameter names, and counts
         # how many candidates were actually found - with incremental
         # discovery the total isn't known upfront the way it was with the
         # old full-scan-then-dispatch approach, so this is the only place
-        # left to count it.
+        # left to count it. Also derives/emits this leaf's CCR series and
+        # chapter events - both helper calls are ordinary functions (not
+        # inline $script: reads), safe from inside this .GetNewClosure()'d
+        # scriptblock - see header.
         $zoJobProvider = {
             $next = & $leafProvider
             if ($null -eq $next) { return $null }
             $totals.CandidateCount++
+
+            $relativePath = $next.Dir.FullName.Substring($trimmedPath.Length).TrimStart([System.IO.Path]::DirectorySeparatorChar)
+            $topLevelName = ($relativePath -split [regex]::Escape([System.IO.Path]::DirectorySeparatorChar))[0]
+            $seriesName = if ([string]::IsNullOrEmpty($topLevelName)) { $next.Dir.Name } else { $topLevelName }
+
+            if (-not $zoSeenSeriesNames.Contains($seriesName)) {
+                $null = $zoSeenSeriesNames.Add($seriesName)
+                $seriesRoot  = Join-Path $trimmedPath $seriesName
+                $seriesTotal = 1
+                if (Test-Path -LiteralPath $seriesRoot -PathType Container) {
+                    $seriesLeaves = Get-ZippableLeafDirs -ScanPath $seriesRoot -QualifyingExtensions $QualifyingExtensions -ForceRezip $false
+                    $seriesTotal  = [Math]::Max($seriesLeaves.Count, 1)
+                }
+                Start-CcrSeriesProgressIfEnabled -SeriesName $seriesName -TotalChapters $seriesTotal
+            }
+            Start-CcrChapterProgressIfEnabled -SeriesName $seriesName -ChapterName $next.Dir.Name
+
             return @{
                 FolderPath        = $next.Dir.FullName
                 ZipOutPath        = $next.ZipOut
+                SeriesName        = $seriesName
                 LogFile           = $LogFile
                 LogErrorFile      = $LogErrorFile
                 LogWarnFile       = $LogWarnFile
@@ -263,10 +396,12 @@ function Invoke-ZipOnlyPipeline {
                 $totals.ZippedFail           += $r.Failed
                 $totals.FolderDeletedSuccess += $r.FolderDeleted
                 $totals.FolderDeletedFail    += $r.FolderDeleteFailed
+                $zipStatus, $zipDetail = Get-ZipChapterProgressStatus -ZipResult $r
+                Complete-CcrChapterProgressIfEnabled -SeriesName $r.SeriesName -ChapterName $r.FolderName -Status $zipStatus -Detail $zipDetail
             }.GetNewClosure()
 
             $zoOutcome = Invoke-ZipParallelProcessing -WorkerScript $script:zipOnlyWorker -NextJobProvider $zoJobProvider `
-                -SharedFunctionNames @('Write-Log', 'Move-ToRecycleBin', 'Remove-ItemPermanently', 'Remove-Source', 'Compress-FolderToZip', 'Test-ZipArchive') `
+                -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite', 'Move-ToRecycleBin', 'Remove-ItemPermanently', 'Remove-Source', 'Compress-FolderToZip', 'Test-ZipArchive') `
                 -MaxParallel $MaxParallel -Cts $script:zipOnlyCts -ResultHandler $zoResultHandler
 
             $totals.ForceStoppedCount = $zoOutcome.ForceStoppedCount
@@ -287,6 +422,11 @@ function Invoke-ZipOnlyPipeline {
         Write-Log $zoCompleteMsg -Level Summary
     } catch {
         Write-Log ("Zip-only pipeline error: " + $_) -Level Error
+    } finally {
+        # Safety net for the abort/shutdown path, same as
+        # ImageConversionPipeline.ps1's own finally block - force-resolves
+        # any series left mid-flight. A no-op when nothing is still active.
+        Complete-CcrAllSeriesProgressIfEnabled
     }
 
     return $totals
@@ -308,6 +448,26 @@ function Invoke-LooseFolderZip {
     .PARAMETER LooseImageExtensions
         Extensions checked for "still unconverted" - typically the
         original source image extensions (not .jxl).
+    .PARAMETER SeriesName
+    .PARAMETER ChapterName
+        OPTIONAL - only pass both when THIS call is meant to be the
+        chapter's one and only CCR transition (Start-ChapterProgress here,
+        Complete-ChapterProgress on every exit path including Skipped).
+        This function does NOT call Start-SeriesProgress itself - it has
+        no way to know that series' real total chapter count, so the
+        CALLER must have already started that series (exactly like
+        ImageConversionPipeline.ps1 already does when it walks a series'
+        chapters) before passing -SeriesName here, or CCR throws ("not an
+        active series"). NOT wired to any real caller yet - mode 2's
+        actual orchestration (does ImageConversionPipeline.ps1's own
+        Complete-ChapterProgress, called on conversion outcome before
+        -PostChapterCallback ever runs, still "own" the chapter's CCR
+        lifecycle, or should this zip step's outcome be folded into that
+        same single transition instead of getting a second one here?) is
+        still an open question, deliberately not decided by this change -
+        see CLAUDE.md's Known gaps. Left optional and self-contained so a
+        future caller can use it either way once that's actually decided,
+        without another signature change.
     .OUTPUTS
         @{ Status = "Success"|"Fail"|"Skipped"; ZipSize; EntryCount;
            FolderDeleted; FolderDeleteFailed } - a plain result object,
@@ -320,7 +480,9 @@ function Invoke-LooseFolderZip {
         [string]$ZipOut,
         [Parameter(Mandatory)]
         [string[]]$LooseImageExtensions,
-        [bool]$RequireJxlEntry = $true
+        [bool]$RequireJxlEntry = $true,
+        [string]$SeriesName = $null,
+        [string]$ChapterName = $null
     )
 
     $result = @{
@@ -332,42 +494,60 @@ function Invoke-LooseFolderZip {
     }
 
     $folderName = Split-Path -Path $FolderPath -Leaf
-
-    $remainingSrcImages = @(Get-ChildItem -LiteralPath $FolderPath -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $LooseImageExtensions -icontains $_.Extension })
-
-    if ($remainingSrcImages.Count -gt 0) {
-        $nameList = ($remainingSrcImages | Select-Object -First 5 | ForEach-Object { $_.Name }) -join ", "
-        if ($remainingSrcImages.Count -gt 5) { $nameList += ", ..." }
-        Write-Log ("SKIPPING zip of '" + $folderName + "': " + $remainingSrcImages.Count + " unconverted source image(s) still present (" + $nameList + "). Resolve conversion failures before zipping.") -Level Warn
-        $result.Status = "Skipped"
-        return $result
-    }
+    $reportCcr  = ($null -ne $SeriesName -and $null -ne $ChapterName)
+    if ($reportCcr) { Start-CcrChapterProgressIfEnabled -SeriesName $SeriesName -ChapterName $ChapterName }
 
     try {
-        Write-Log ("Re-zipping '" + $FolderPath + "' -> '" + $ZipOut + "'")
+        $remainingSrcImages = @(Get-ChildItem -LiteralPath $FolderPath -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $LooseImageExtensions -icontains $_.Extension })
 
-        $zipSize = Compress-FolderToZip -SourceDir $FolderPath -ZipOut $ZipOut
-        $verify  = Test-ZipArchive -ZipPath $ZipOut -RequireJxlEntry $RequireJxlEntry
-
-        Write-Log ("ZIP OK: '" + $ZipOut + "' (" + $zipSize + " bytes, " + $verify.EntryCount + " entries)")
-        $result.Status     = "Success"
-        $result.ZipSize    = $zipSize
-        $result.EntryCount = $verify.EntryCount
+        if ($remainingSrcImages.Count -gt 0) {
+            $nameList = ($remainingSrcImages | Select-Object -First 5 | ForEach-Object { $_.Name }) -join ", "
+            if ($remainingSrcImages.Count -gt 5) { $nameList += ", ..." }
+            Write-Log ("SKIPPING zip of '" + $folderName + "': " + $remainingSrcImages.Count + " unconverted source image(s) still present (" + $nameList + "). Resolve conversion failures before zipping.") -Level Warn
+            $result.Status = "Skipped"
+            return $result
+        }
 
         try {
-            $null = Remove-Source -ItemPath $FolderPath
-            $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
-            Write-Log ("Deleted folder (" + $deleteDesc + "): '" + $FolderPath + "'")
-            $result.FolderDeleted = $true
-        } catch {
-            Write-Log ("FAILED to delete folder '" + $FolderPath + "': " + $_) -Level Error
-            $result.FolderDeleteFailed = $true
-        }
-    } catch {
-        Write-Log ("FAILED to zip folder '" + $FolderPath + "': " + $_) -Level Error
-        $result.Status = "Fail"
-    }
+            Write-Log ("Re-zipping '" + $FolderPath + "' -> '" + $ZipOut + "'")
 
-    return $result
+            $zipSize = Compress-FolderToZip -SourceDir $FolderPath -ZipOut $ZipOut
+            $verify  = Test-ZipArchive -ZipPath $ZipOut -RequireJxlEntry $RequireJxlEntry
+
+            Write-Log ("ZIP OK: '" + $ZipOut + "' (" + $zipSize + " bytes, " + $verify.EntryCount + " entries)")
+            $result.Status     = "Success"
+            $result.ZipSize    = $zipSize
+            $result.EntryCount = $verify.EntryCount
+
+            try {
+                $null = Remove-Source -ItemPath $FolderPath
+                $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
+                Write-Log ("Deleted folder (" + $deleteDesc + "): '" + $FolderPath + "'")
+                $result.FolderDeleted = $true
+            } catch {
+                Write-Log ("FAILED to delete folder '" + $FolderPath + "': " + $_) -Level Error
+                $result.FolderDeleteFailed = $true
+            }
+        } catch {
+            Write-Log ("FAILED to zip folder '" + $FolderPath + "': " + $_) -Level Error
+            $result.Status = "Fail"
+        }
+
+        return $result
+    } finally {
+        if ($reportCcr) {
+            $ccrStatus = switch ($result.Status) {
+                "Success" { if ($result.FolderDeleteFailed) { "Warning" } else { "Success" } }
+                "Skipped" { "Warning" }
+                default   { "Error" }
+            }
+            $ccrDetail = switch ($result.Status) {
+                "Success" { if ($result.FolderDeleteFailed) { "zipped OK, but source folder delete failed" } else { $null } }
+                "Skipped" { "zip skipped: unconverted source image(s) still present" }
+                default   { "zip failed" }
+            }
+            Complete-CcrChapterProgressIfEnabled -SeriesName $SeriesName -ChapterName $ChapterName -Status $ccrStatus -Detail $ccrDetail
+        }
+    }
 }
