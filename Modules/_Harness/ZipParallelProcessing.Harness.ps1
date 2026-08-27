@@ -4,15 +4,26 @@
     (Modules\ZipParallelProcessing.ps1).
 
 .DESCRIPTION
-    Dot-sources the real module (not a reimplementation) and exercises it
-    with fake workers that do no real conversion or zipping - just
-    simulated delay/failure/hang - so it can be validated before any
-    pipeline is pointed at it for real.
+    Dot-sources the REAL dependency modules now - AbortPipeline.ps1 and
+    Logging.ps1 - instead of hand-rolling stand-ins for what used to be
+    ZipParallelProcessing.ps1's own inline
+    ConsoleCtrl/Write-Log/Flush-ConsoleQueue/Test-AbortSignal copies.
+    Migrated 2026-08-27 along with the module itself (see
+    ZipParallelProcessing.ps1's own header and CLAUDE.md "Known gaps") -
+    this harness previously stubbed those pieces by hand precisely
+    because the module defined its own; now that it forward-references
+    the real ones, testing against stand-ins would no longer prove
+    anything real, so this harness switched to the same real-dependency
+    pattern ZipPipeline.Harness.ps1 already uses.
+
+    Exercises the module with fake workers that do no real conversion or
+    zipping - just simulated delay/failure/hang.
 
     Scenarios A, B, and D run in a few seconds. Scenario C (graceful-drain-
     then-force-stop after a real Ctrl+C-equivalent abort) takes about a
     minute by design, since it exercises the real 60-second timeout in
-    Invoke-ZipParallelProcessing - run it with -RunSlowTest.
+    Invoke-GracefulDrain (via Invoke-ZipParallelProcessing) - run it with
+    -RunSlowTest.
 
     KNOWN GAP: this harness simulates abort by setting
     [ConsoleCtrl]::AbortRequested directly from a background runspace,
@@ -37,27 +48,37 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-. (Join-Path $PSScriptRoot "..\ZipParallelProcessing.ps1")
+$modulesDir = Join-Path $PSScriptRoot ".."
+. (Join-Path $modulesDir "AbortPipeline.ps1")
+. (Join-Path $modulesDir "Logging.ps1")
+. (Join-Path $modulesDir "ZipParallelProcessing.ps1")
 
 # ==============================================================================
-#  Script-scope state Write-Log / Test-AbortSignal / Invoke-ZipParallelProcessing
-#  expect to find - same variable names as the main script, minimal harness
-#  stand-ins for the rest (no real -Path, no real log/state files).
+#  Real Initialize-LogPaths instead of hand-rolled $logFile/$pathHash stand-
+#  ins - Logging.ps1's Write-Log and Invoke-ZipParallelProcessing's
+#  Initialize-LogMutex both read $script:pathHash/$script:logFile/etc.
 # ==============================================================================
-$script:logMutex           = $null
-$script:workerConsoleQueue = $null
-$script:abortRequested     = $false
-$script:ctrlCloseAbort     = $false
-$script:cts                = $null   # Invoke-ZipParallelProcessing assigns/uses this per-scenario
+$scratchDir = Join-Path ([System.IO.Path]::GetTempPath()) ("zpp-harness-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $scratchDir -Force | Out-Null
+Initialize-LogPaths -TargetPath $scratchDir -FullLogging $true -ScriptDir $scratchDir
 
 $FullLogging  = $true
-$logFile      = Join-Path ([System.IO.Path]::GetTempPath()) ("pfj-harness-" + [guid]::NewGuid().ToString("N") + ".log")
-$logErrorFile = $logFile
-$logWarnFile  = $logFile
-$pathHash     = "harness0001"   # stand-in for the real per-Path SHA256 hash; only used for a mutex name
+$logFile      = $script:logFile
+$logErrorFile = $script:logErrorFile
+$logWarnFile  = $script:logWarnFile
 
 Write-Host ("Harness log file: " + $logFile) -ForegroundColor DarkGray
 Write-Host ""
+
+function Reset-HarnessAbortState {
+    [ConsoleCtrl]::AbortRequested = $false
+    [ConsoleCtrl]::IsCloseEvent   = $false
+    [ConsoleCtrl]::DrainComplete.Reset()
+    $script:abortRequested = $false
+    $script:ctrlCloseAbort = $false
+    $script:abortCancellationSources.Clear()
+}
+Reset-HarnessAbortState
 
 # ==============================================================================
 #  Fake workers - no real conversion/zipping, just simulated delay/failure.
@@ -151,7 +172,7 @@ for ($i = 1; $i -le 6; $i++) {
 $handlerA = { param($r) $resultsA.Add($r) }
 
 $outcomeA = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -JobParams $jobParamsA `
-    -SharedFunctionNames @('Write-Log') -MaxParallel 3 -Cts $script:cts -ResultHandler $handlerA
+    -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite') -MaxParallel 3 -Cts $script:cts -ResultHandler $handlerA
 $script:cts.Dispose()
 
 Test-Assert ($resultsA.Count -eq 6) ("all 6 jobs returned a result (got " + $resultsA.Count + ")")
@@ -197,7 +218,7 @@ $providerB = {
 $handlerB = { param($r) $resultsB.Add($r) }
 
 $outcomeB = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -NextJobProvider $providerB `
-    -SharedFunctionNames @('Write-Log') -MaxParallel 4 -Cts $script:cts -ResultHandler $handlerB
+    -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite') -MaxParallel 4 -Cts $script:cts -ResultHandler $handlerB
 $script:cts.Dispose()
 
 Test-Assert ($stateB.Index -eq $bTotal) "provider was called through to full exhaustion"
@@ -221,7 +242,7 @@ $handlerD = { param($r) $resultsD.Add($r) }
 $threwD = $false
 try {
     $outcomeD = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerFail -JobParams $jobParamsD `
-        -SharedFunctionNames @('Write-Log') -MaxParallel 2 -Cts $script:cts -ResultHandler $handlerD
+        -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite') -MaxParallel 2 -Cts $script:cts -ResultHandler $handlerD
 } catch {
     $threwD = $true
 }
@@ -240,11 +261,16 @@ if ($RunSlowTest) {
     Write-Host "=== Scenario C (slow, ~65s): abort mid-run forces stragglers after 60s ===" -ForegroundColor Cyan
     Write-Host "  (2 fast jobs should complete; 2 slow jobs should get force-stopped)" -ForegroundColor DarkGray
 
-    [ConsoleCtrl]::AbortRequested = $false
-    [ConsoleCtrl]::IsCloseEvent   = $false
-    $script:abortRequested = $false
-    $script:ctrlCloseAbort = $false
+    Reset-HarnessAbortState
     $script:cts = [System.Threading.CancellationTokenSource]::new()
+    # Test-AbortSignal (now AbortPipeline.ps1's real one) cancels every CTS
+    # in its registry, not a hardcoded variable name - without this
+    # registration, [ConsoleCtrl]::AbortRequested being set below would
+    # never actually cancel $script:cts, and this scenario would just hang
+    # for the full 120s instead of draining/force-stopping at 60s (the
+    # exact bug class ImageConversionPipeline.ps1's own rework hit and
+    # fixed this same session - see CHANGELOG.md).
+    Register-AbortCancellationSource -Cts $script:cts
 
     $resultsC = [System.Collections.Generic.List[hashtable]]::new()
     $jobParamsC = [System.Collections.Generic.List[hashtable]]::new()
@@ -270,21 +296,21 @@ if ($RunSlowTest) {
 
     $swC = [System.Diagnostics.Stopwatch]::StartNew()
     $outcomeC = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -JobParams $jobParamsC `
-        -SharedFunctionNames @('Write-Log') -MaxParallel 4 -Cts $script:cts -ResultHandler $handlerC
+        -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite') -MaxParallel 4 -Cts $script:cts -ResultHandler $handlerC
     $swC.Stop()
 
     $triggerPs.EndInvoke($triggerHandle)
     $triggerPs.Dispose()
+    Unregister-AbortCancellationSource -Cts $script:cts
     $script:cts.Dispose()
 
     Test-Assert ($outcomeC.ForceStoppedCount -eq 2) ("expected 2 force-stopped jobs (the two 120s hangs), got " + $outcomeC.ForceStoppedCount)
     Test-Assert ((@($resultsC | Where-Object { $_.JobId -in @(1,2) })).Count -eq 2) "both fast jobs (1,2) completed and reported a result despite the abort"
     Test-Assert ($swC.Elapsed.TotalSeconds -ge 60 -and $swC.Elapsed.TotalSeconds -lt 90) ("total run time (" + [math]::Round($swC.Elapsed.TotalSeconds,1) + "s) is in the expected ~60-70s window (2s to abort + up to 60s drain, not the full 120s hang)")
+    Test-Assert ([ConsoleCtrl]::DrainComplete.IsSet) "DrainComplete was signalled by Invoke-GracefulDrain (a real fix this migration picked up - the old inline drain never signalled it at all)"
 
     # Reset shared abort state so nothing leaks into a later run of this harness.
-    [ConsoleCtrl]::AbortRequested = $false
-    $script:abortRequested = $false
-    $script:ctrlCloseAbort = $false
+    Reset-HarnessAbortState
 
     Write-Host ""
 } else {
@@ -303,6 +329,6 @@ if ($script:failCount -eq 0) {
 }
 Write-Host "==============================================="
 
-if (Test-Path -LiteralPath $logFile) { try { Remove-Item -LiteralPath $logFile -Force } catch { } }
+try { Remove-Item -LiteralPath $scratchDir -Recurse -Force } catch { }
 
 if ($script:failCount -gt 0) { exit 1 } else { exit 0 }

@@ -34,6 +34,11 @@
         (see "INCREMENTAL SCANNING" below)
       - Invoke-ZipParallelProcessing (ZipParallelProcessing.ps1) - mode 3
         is ZPP's one current caller; this is where that wiring lives.
+      - Register-AbortCancellationSource, Unregister-AbortCancellationSource
+        (AbortPipeline.ps1) - added 2026-08-27 once ZPP migrated onto
+        AbortPipeline.ps1's registry (see "ABORT WIRING NOTE" below);
+        ZPP itself also now forward-references AbortPipeline.ps1/
+        Logging.ps1 directly, so both must be dot-sourced before ZPP.
     Modules\_Harness\ZipPipeline.Harness.ps1 dot-sources all of the above
     real, already-built modules (this is the first module built with
     enough real dependencies available to test against the genuine
@@ -71,14 +76,16 @@
     $script:logFile/logErrorFile/logWarnFile paths Initialize-LogPaths
     already set up, matching what any real caller must do).
 
-    ABORT WIRING NOTE: Invoke-ZipOnlyPipeline sets $script:zipOnlyCts (not
-    AbortPipeline.ps1's Register-AbortCancellationSource registry) purely
-    because ZipParallelProcessing.ps1's own Test-AbortSignal is still on
-    the OLD hardcoded-three-variable pattern (see CLAUDE.md "Known gaps") -
-    a CTS registered only via the new registry would never actually get
-    cancelled by ZPP's current abort check. Revisit once ZPP migrates onto
-    AbortPipeline.ps1 - this is current-reality compatibility, not an
-    endorsement of the old pattern.
+    ABORT WIRING NOTE (updated 2026-08-27): now that ZipParallelProcessing.ps1
+    has migrated onto AbortPipeline.ps1 (see that module's own header),
+    Invoke-ZipOnlyPipeline registers $script:zipOnlyCts with
+    Register-AbortCancellationSource right after creating it, and
+    unregisters it in the same finally block that disposes it - matching
+    ImageConversionPipeline.ps1's own $looseCts pattern exactly. It still
+    keeps the name $script:zipOnlyCts (harmless, just a local variable
+    name at this point, not a magic name anything else depends on) rather
+    than renaming it, since nothing about the registry cares what the
+    caller calls its own CTS.
 
     INCREMENTAL SCANNING (2026-08-17): Invoke-ZipOnlyPipeline dispatches
     via LeafDirectoryDiscovery.ps1's New-ZippableLeafDirProvider +
@@ -385,10 +392,13 @@ function Invoke-ZipOnlyPipeline {
             }
         }.GetNewClosure()
 
-        # See this module's own header ("ABORT WIRING NOTE") for why this
-        # is the old hardcoded-variable pattern rather than
-        # AbortPipeline.ps1's registry.
+        # Registered for the whole mode-3 call (one phase), not per-job -
+        # see this module's own header ("ABORT WIRING NOTE") and matches
+        # Register-AbortCancellationSource's own "call once per pipeline
+        # phase" contract, same pattern ImageConversionPipeline.ps1 uses
+        # for its own $looseCts.
         $script:zipOnlyCts = [System.Threading.CancellationTokenSource]::new()
+        Register-AbortCancellationSource -Cts $script:zipOnlyCts
         try {
             $zoResultHandler = {
                 param($r)
@@ -406,6 +416,7 @@ function Invoke-ZipOnlyPipeline {
 
             $totals.ForceStoppedCount = $zoOutcome.ForceStoppedCount
         } finally {
+            Unregister-AbortCancellationSource -Cts $script:zipOnlyCts
             $script:zipOnlyCts.Dispose()
             $script:zipOnlyCts = $null
         }

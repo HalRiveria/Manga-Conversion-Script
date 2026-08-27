@@ -6,7 +6,16 @@
     Dot-sources the real module and exercises it against real folders -
     not mocked I/O. Write-Log is a FORWARD REFERENCE this module expects
     from Logging.ps1 - stubbed here since LeafDirectoryDiscovery must
-    stay standalone-testable without it.
+    stay standalone-testable without it. Scenario O also dot-sources the
+    real ZipParallelProcessing.ps1 (for its own real dispatch/runspace
+    behavior) - since that module migrated onto Logging.ps1/
+    AbortPipeline.ps1 (2026-08-27, see CLAUDE.md "Known gaps"), it now
+    forward-references Test-AbortSignal/Flush-ConsoleQueue/
+    Initialize-LogMutex/Invoke-GracefulDrain too, all stubbed alongside
+    Write-Log below for the same "stay standalone" reason - Scenario O
+    never triggers an abort, so Invoke-GracefulDrain's stub is never
+    actually exercised, just present so the dot-source doesn't fail
+    Set-StrictMode or a future call.
 
     Scenario K/L reproduce the "parent/container folder" bug documented
     in CHANGELOG.md's former-container guard entry, using a folder shape
@@ -26,17 +35,23 @@
 
 $ErrorActionPreference = "Stop"
 
-# Dot-sourced BEFORE the Write-Log stub below, so ours wins over ZPP's own
-# stale inline copy - same ordering concern documented in ZipPipeline.ps1's
-# harness. Needed here for Scenario O's real end-to-end dispatch test.
-. (Join-Path $PSScriptRoot "..\ZipParallelProcessing.ps1")
-
+# ZipParallelProcessing.ps1 now forward-references Test-AbortSignal/
+# Flush-ConsoleQueue/Initialize-LogMutex/Invoke-GracefulDrain (from
+# AbortPipeline.ps1/Logging.ps1 - see its own header) instead of defining
+# its own inline copies, so all four need a stub defined BEFORE it's
+# dot-sourced, same as Write-Log below.
 $script:logMessages = [System.Collections.Generic.List[string]]::new()
 function Write-Log {
     param([string]$Message, [string]$Level = "Info")
     $script:logMessages.Add($Message)
     Write-Host ("  [log:" + $Level + "] " + $Message) -ForegroundColor DarkGray
 }
+function Test-AbortSignal { return $false }   # Scenario O never triggers an abort
+function Flush-ConsoleQueue { param($Queue) }   # no-op; nothing gets queued (SharedFunctionNames is empty in Scenario O)
+function Initialize-LogMutex { param([string]$PathHash) $script:logMutex = $null }
+function Invoke-GracefulDrain { param($Handles, $ResultHandler, $ConsoleQueue, $ErrorHandler, $TimeoutSeconds, $AbortWaitMessage) return @{ ForceStoppedCount = 0 } }   # never actually exercised - Scenario O never aborts
+
+. (Join-Path $PSScriptRoot "..\ZipParallelProcessing.ps1")
 
 . (Join-Path $PSScriptRoot "..\LeafDirectoryDiscovery.ps1")
 

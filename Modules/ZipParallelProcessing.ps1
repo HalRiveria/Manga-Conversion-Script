@@ -17,11 +17,57 @@
     file's own historical notes about "copy X here if Y changes" no longer
     apply.
 
-    Pure definitions only - no top-level side effects (ConsoleCtrl's
-    Add-Type is guarded so this can be safely dot-sourced more than once,
-    or alongside Modules\AbortPipeline.ps1, without erroring on a duplicate
-    type). Dot-source this file to get ConsoleCtrl, Write-Log,
-    Flush-ConsoleQueue, Test-AbortSignal, and Invoke-ZipParallelProcessing.
+    MIGRATED (2026-08-27) onto Logging.ps1/AbortPipeline.ps1, per an
+    explicit go-ahead - this file no longer carries its own inline
+    ConsoleCtrl/Write-Log/Flush-ConsoleQueue/Test-AbortSignal copies (see
+    CLAUDE.md "Known gaps" for the full inline-duplication audit that
+    flagged them, and CHANGELOG.md for this migration's own build story).
+    Pure definitions only - no top-level side effects. Dot-source
+    AbortPipeline.ps1 and Logging.ps1 BEFORE this file (see FORWARD
+    REFERENCES below); dot-source this file to get
+    Invoke-ZipParallelProcessing itself.
+
+    FORWARD REFERENCES (not defined in this module - callers must
+    dot-source the owning module(s) first):
+      - ConsoleCtrl (the type), Test-AbortSignal, Register-/Unregister-
+        AbortCancellationSource, Invoke-GracefulDrain (AbortPipeline.ps1)
+      - Write-Log, Flush-ConsoleQueue, Initialize-LogMutex, $script:pathHash
+        (Logging.ps1)
+    Modules\_Harness\ZipParallelProcessing.Harness.ps1 dot-sources both
+    real modules now instead of stubbing this file's own former inline
+    copies - re-verify against the real ordering rule ZipPipeline.ps1's
+    own header already documents: dot-source Logging.ps1/FileDeletion.ps1
+    BEFORE this file if anything else in the same session also dot-sources
+    them, since -SharedFunctionNames captures whichever definition is
+    CURRENTLY active in the caller's scope at call time.
+
+    ABORT REGISTRATION IS THE CALLER'S JOB, NOT THIS FUNCTION'S: matching
+    AbortPipeline.ps1's own documented contract (register once per
+    pipeline phase, right after creating that phase's CTS; unregister
+    when disposing it), Invoke-ZipParallelProcessing does NOT call
+    Register-/Unregister-AbortCancellationSource on the -Cts it's handed
+    - the caller that created that CTS (ZipPipeline.ps1's
+    Invoke-ZipOnlyPipeline) owns that lifecycle, exactly like
+    ImageConversionPipeline.ps1's own $looseCts. This replaces the OLD
+    Test-AbortSignal's hardcoded three-variable cancellation
+    ($script:cts/$script:looseCts/$script:zipOnlyCts) with the
+    generalized registry - a caller no longer needs a magically-named
+    script-scope CTS variable to participate in abort handling.
+
+    THE GRACEFUL-DRAIN RACE CONDITION THIS MIGRATION FIXES: the old inline
+    drain loop force-stopped stragglers immediately after its 60s timeout
+    expired, with no final completion-check pass first - a job finishing
+    in the ~250ms gap between the last poll and the timeout firing had its
+    real result silently discarded and got miscounted as force-stopped
+    (see CLAUDE.md "Known gaps" for the full history). AbortPipeline.ps1's
+    Invoke-GracefulDrain already closes this (one final Receive-
+    CompletedHandles pass before declaring anything force-stopped) -
+    migrating onto it picks up that fix for mode 3 for the first time.
+    Also newly fixed as a side effect: the old inline drain never signalled
+    [ConsoleCtrl]::DrainComplete at all (a separate, already-documented gap
+    - CTRL_CLOSE_EVENT gives the native handler only ~5s before Windows
+    force-kills the process, risking a kill mid-drain) - Invoke-GracefulDrain
+    always signals it now.
 
     Write-Log and Invoke-ZipParallelProcessing expect a handful of
     script-scope variables to already exist in the caller's scope (log file
@@ -29,147 +75,6 @@
     Modules\ZipParallelProcessing.Harness.ps1 for the minimal stand-ins a
     caller needs to provide, and for the actual test scenarios.
 #>
-
-# ==============================================================================
-#  ConsoleCtrl - copied verbatim from Conversion Script Main.ps1
-# ==============================================================================
-if (-not ([System.Management.Automation.PSTypeName]'ConsoleCtrl').Type) {
-    Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using System.Threading;
-
-public static class ConsoleCtrl
-{
-    public delegate bool HandlerRoutine(uint ctrlType);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    public static extern bool SetConsoleCtrlHandler(HandlerRoutine handler, bool add);
-
-    // Shared state set by the handler; polled by the main PowerShell thread.
-    public static volatile bool AbortRequested = false;
-    public static volatile bool IsCloseEvent   = false;   // true = X button, false = Ctrl+C
-
-    // The handler signals this when abort is requested; the main thread calls
-    // Set() when the graceful drain is complete so the handler can return.
-    public static readonly ManualResetEventSlim DrainComplete = new ManualResetEventSlim(false);
-
-    private static HandlerRoutine _handler;   // keep a strong ref so the GC can't collect it
-
-    public static void Register()
-    {
-        _handler = new HandlerRoutine(Handler);
-        SetConsoleCtrlHandler(_handler, true);
-    }
-
-    private static bool Handler(uint ctrlType)
-    {
-        // ctrlType: 0=CTRL_C, 1=CTRL_BREAK, 2=CTRL_CLOSE, 5=CTRL_LOGOFF, 6=CTRL_SHUTDOWN
-        if (ctrlType == 0 || ctrlType == 1 || ctrlType == 2 || ctrlType == 5 || ctrlType == 6)
-        {
-            AbortRequested = true;
-            IsCloseEvent   = (ctrlType == 2 || ctrlType == 5 || ctrlType == 6);
-            // Block until the PowerShell main thread finishes the graceful drain
-            // (or until Windows force-kills us after its timeout).
-            DrainComplete.Wait(65000);   // 65 s > our 60 s job timeout
-            return true;   // suppress default OS action
-        }
-        return false;
-    }
-}
-'@ -Language CSharp
-}
-
-# ==============================================================================
-#  Write-Log / Flush-ConsoleQueue / Test-AbortSignal are copied verbatim from
-#  Conversion Script Main.ps1. Invoke-ZipParallelProcessing below is this
-#  file's own canonical definition - see the file-level .DESCRIPTION for what
-#  that means for keeping it in sync (or not) with the main script's still-
-#  separate, older-named inline copy.
-# ==============================================================================
-function Write-Log {
-    param(
-        [string]$Message,
-        [ValidateSet("Info","Warn","Error","Summary")][string]$Level = "Info"
-    )
-
-    $line = (Get-Date -Format "yyyy-MM-dd HHmmss") + " [" + $Level + "] " + $Message
-    $safeLine = [System.Text.RegularExpressions.Regex]::Replace($line, "[^\x00-\x7F]", "?")
-
-    $mtx = $script:logMutex
-
-    if ($FullLogging) {
-        # Full-logging mode: every level goes to the single timestamped file
-        try   {
-            if ($null -ne $mtx) { $null = $mtx.WaitOne() }
-            $safeLine | Out-File -FilePath $logFile -Append -Encoding ASCII
-        }
-        finally { if ($null -ne $mtx) { $mtx.ReleaseMutex() } }
-    } else {
-        # Split-log mode
-        if ($Level -eq "Error") {
-            try   {
-                if ($null -ne $mtx) { $null = $mtx.WaitOne() }
-                $safeLine | Out-File -FilePath $logErrorFile -Append -Encoding ASCII
-            }
-            finally { if ($null -ne $mtx) { $mtx.ReleaseMutex() } }
-        } elseif ($Level -eq "Warn") {
-            try   {
-                if ($null -ne $mtx) { $null = $mtx.WaitOne() }
-                $safeLine | Out-File -FilePath $logWarnFile -Append -Encoding ASCII
-            }
-            finally { if ($null -ne $mtx) { $mtx.ReleaseMutex() } }
-        } elseif ($Level -eq "Summary") {
-            # Summary is written later in block form; nothing to do per-line here
-        }
-        # Info lines are not written in split-log mode
-    }
-
-    # Inside a runspace worker, $script:workerConsoleQueue is set (see $zipWorker) and
-    # cross-thread Write-Host is unsafe, so queue for the main thread to drain
-    # via Flush-ConsoleQueue instead of writing directly.
-    if ($null -ne $script:workerConsoleQueue) {
-        $script:workerConsoleQueue.Enqueue([pscustomobject]@{ Message = $Message; Level = $Level })
-    } else {
-        switch ($Level) {
-            "Error"   { Write-Host $line -ForegroundColor Red    }
-            "Warn"    { Write-Host $line -ForegroundColor Yellow }
-            "Summary" { Write-Host $line -ForegroundColor Cyan   }
-            default   { Write-Host $line }
-        }
-    }
-}
-
-function Flush-ConsoleQueue {
-    param([System.Collections.Concurrent.ConcurrentQueue[object]]$Queue)
-
-    $item = $null
-    while ($Queue.TryDequeue([ref]$item)) {
-        $line = (Get-Date -Format "yyyy-MM-dd HHmmss") + " [" + $item.Level + "] " + $item.Message
-        switch ($item.Level) {
-            "Error"   { Write-Host $line -ForegroundColor Red    }
-            "Warn"    { Write-Host $line -ForegroundColor Yellow }
-            "Summary" { Write-Host $line -ForegroundColor Cyan   }
-            default   { Write-Host $line }
-        }
-    }
-}
-
-function Test-AbortSignal {
-    if ([ConsoleCtrl]::AbortRequested -and -not $script:abortRequested) {
-        $script:abortRequested = $true
-        $script:ctrlCloseAbort = [ConsoleCtrl]::IsCloseEvent
-        if ($null -ne $script:cts)        { try { $script:cts.Cancel()        } catch { } }
-        if ($null -ne $script:looseCts)   { try { $script:looseCts.Cancel()   } catch { } }
-        if ($null -ne $script:zipOnlyCts) { try { $script:zipOnlyCts.Cancel() } catch { } }
-        if (-not $script:ctrlCloseAbort) {
-            Write-Host "`n[ABORT] Ctrl+C detected - finishing current jobs, please wait..." -ForegroundColor Yellow
-        } else {
-            Write-Host "`n[ABORT] Window close detected - finishing current jobs, please wait..." -ForegroundColor Yellow
-        }
-    }
-    return $script:abortRequested
-}
 
 
 function Invoke-ZipParallelProcessing {
@@ -199,8 +104,11 @@ function Invoke-ZipParallelProcessing {
     # the docstring for why that distinction matters here).
     $fixedListIndex = 0
 
-    $localLogMutex   = [System.Threading.Mutex]::new($false, ("JxlLogMutex_" + $pathHash))
-    $script:logMutex = $localLogMutex
+    # Was its own inline "JxlLogMutex_" + $pathHash construction - now
+    # Logging.ps1's Initialize-LogMutex (same naming convention, single
+    # implementation instead of a third copy of it - see CLAUDE.md).
+    Initialize-LogMutex
+    $localLogMutex = $script:logMutex
     $localConsoleQueue = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
 
     $localIss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
@@ -283,37 +191,25 @@ function Invoke-ZipParallelProcessing {
         # finish naturally, then force-stop anything still running. Jobs the
         # provider hadn't yet produced (or hadn't been dispatched due to a
         # full pool) are simply never dispatched - nothing to drain for those.
-        if ($Cts.Token.IsCancellationRequested -and $localHandles.Count -gt 0) {
-            if ($AbortWaitMessage) { Write-Host $AbortWaitMessage -ForegroundColor Yellow }
-            $abortDeadline = [System.Diagnostics.Stopwatch]::StartNew()
-
-            while ($localHandles.Count -gt 0 -and $abortDeadline.Elapsed.TotalSeconds -lt 60) {
-                $localStillActive = [System.Collections.Generic.List[hashtable]]::new()
-                foreach ($h in $localHandles) {
-                    if ($h.Handle.IsCompleted) {
-                        try {
-                            $localResults = $h.PS.EndInvoke($h.Handle)
-                            foreach ($r in $localResults) { & $ResultHandler $r }
-                        } catch { }
-                        finally { $h.PS.Dispose() }
-                    } else {
-                        $localStillActive.Add($h)
-                    }
-                }
-                $localHandles = $localStillActive
-                Flush-ConsoleQueue -Queue $localConsoleQueue
-                if ($localHandles.Count -gt 0) { Start-Sleep -Milliseconds 250 }
-            }
-
-            if ($localHandles.Count -gt 0) {
-                $forceStoppedCount = $localHandles.Count
-                Write-Host ("[ABORT] Force-stopping " + $forceStoppedCount + " job(s) that did not finish within 60s.") -ForegroundColor Red
-                foreach ($h in $localHandles) {
-                    try { $h.PS.Stop() } catch { }
-                    try { $h.PS.Dispose() } catch { }
-                }
-                $localHandles = [System.Collections.Generic.List[hashtable]]::new()
-            }
+        # Was its own inline copy of this loop - now AbortPipeline.ps1's
+        # Invoke-GracefulDrain, which additionally fixes a race this inline
+        # version had (a job finishing in the gap between the last poll and
+        # the timeout firing was silently discarded and miscounted as
+        # force-stopped - see this module's own header and CLAUDE.md's
+        # "Known gaps") and signals [ConsoleCtrl]::DrainComplete, which this
+        # inline version never did at all. Deliberately still gated on
+        # $Cts.Token.IsCancellationRequested, same as before - Invoke-
+        # GracefulDrain must NOT run (and must NOT signal DrainComplete) on
+        # a normal, non-aborted completion, since DrainComplete is a
+        # process-lifetime ManualResetEventSlim never Reset() in production
+        # code: signalling it here unconditionally would make a LATER, real
+        # Ctrl+C's own drain wait return instantly, risking the OS force-
+        # killing the process before that real drain has actually happened.
+        if ($Cts.Token.IsCancellationRequested) {
+            $drainResult = Invoke-GracefulDrain -Handles $localHandles -ResultHandler $ResultHandler `
+                -ConsoleQueue $localConsoleQueue -TimeoutSeconds 60 -AbortWaitMessage $AbortWaitMessage `
+                -ErrorHandler { param($msg) Write-Log $msg -Level Error }
+            $forceStoppedCount = $drainResult.ForceStoppedCount
         }
 
         Flush-ConsoleQueue -Queue $localConsoleQueue

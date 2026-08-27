@@ -6,14 +6,21 @@
     Unlike prior harnesses (mostly stubbed dependencies), this one dot-
     sources the REAL already-built dependency modules - FileDeletion.ps1,
     ZipCreation.ps1, ZipValidation.ps1, LeafDirectoryDiscovery.ps1,
-    ZipParallelProcessing.ps1, Logging.ps1, and CleanConsoleRendering.ps1
-    - since ZipPipeline.ps1 is an orchestration-tier module that composes
-    all of them for real. This is closer to an integration test than the
-    earlier pure-unit harnesses, appropriate for this tier. Only the
-    dot-source ORDER matters (see ZipPipeline.ps1's own "IMPORTANT
-    ordering note"): Logging.ps1 must be dot-sourced AFTER
-    ZipParallelProcessing.ps1, or ZPP's stale inline Write-Log would
-    silently win instead of Logging.ps1's real one.
+    AbortPipeline.ps1, Logging.ps1, CleanConsoleRendering.ps1, and
+    ZipParallelProcessing.ps1 - since ZipPipeline.ps1 is an orchestration-
+    tier module that composes all of them for real. This is closer to an
+    integration test than the earlier pure-unit harnesses, appropriate
+    for this tier.
+
+    DOT-SOURCE ORDER FLIPPED (2026-08-27, ZPP's migration onto
+    Logging.ps1/AbortPipeline.ps1): it used to matter that Logging.ps1
+    came AFTER ZipParallelProcessing.ps1, since ZPP had its own stale
+    inline Write-Log/Test-AbortSignal that would otherwise silently win.
+    ZPP no longer defines any of those itself - it forward-references
+    them - so AbortPipeline.ps1 and Logging.ps1 must now be dot-sourced
+    BEFORE ZipParallelProcessing.ps1, or ZPP's own Invoke-ZipParallelProcessing
+    would fail immediately (Write-Log/Test-AbortSignal/Invoke-GracefulDrain
+    undefined).
 
 .EXAMPLE
     .\Modules\_Harness\ZipPipeline.Harness.ps1
@@ -26,9 +33,10 @@ $modulesDir = Join-Path $PSScriptRoot ".."
 . (Join-Path $modulesDir "ZipCreation.ps1")
 . (Join-Path $modulesDir "ZipValidation.ps1")
 . (Join-Path $modulesDir "LeafDirectoryDiscovery.ps1")
-. (Join-Path $modulesDir "ZipParallelProcessing.ps1")
-. (Join-Path $modulesDir "Logging.ps1")   # AFTER ZipParallelProcessing.ps1 - see header note
+. (Join-Path $modulesDir "AbortPipeline.ps1")
+. (Join-Path $modulesDir "Logging.ps1")
 . (Join-Path $modulesDir "CleanConsoleRendering.ps1")
+. (Join-Path $modulesDir "ZipParallelProcessing.ps1")   # AFTER AbortPipeline.ps1/Logging.ps1 now - see header note
 . (Join-Path $modulesDir "ZipPipeline.ps1")
 
 $script:passCount = 0
