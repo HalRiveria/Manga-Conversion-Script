@@ -5,7 +5,10 @@
 .DESCRIPTION
     Dot-sources the real module and exercises it against real filesystem
     paths and a real PATH-resolvable executable (cmd.exe) - not mocked -
-    so it tests actual behavior, not a guess at it.
+    so it tests actual behavior, not a guess at it. Find-ExeCached is
+    exercised with plain hashtables built in-line (no dependency on
+    Config.ps1's Import-/Export-ScriptSettings - Find-ExeCached doesn't
+    need them either, by design).
 
 .EXAMPLE
     .\Modules\_Harness\DependencyDetection.Harness.ps1
@@ -117,6 +120,73 @@ Write-Host "=== Scenario G: -ExeName is Mandatory ===" -ForegroundColor Cyan
 $threwG = $false
 try { Find-Exe -UserPath "C:\whatever.exe" } catch { $threwG = $true }
 Test-Assert $threwG "Find-Exe without -ExeName throws (Mandatory parameter)"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario H: Find-ExeCached - a valid cached path is used without a
+#  fresh search (proven by a -Candidates value that would fail if used)
+# ==============================================================================
+Write-Host "=== Scenario H: Find-ExeCached uses a valid cached path, skipping fresh search ===" -ForegroundColor Cyan
+$cachedPathH = Join-Path $scratchDir "cached-cjxl.exe"
+"fake exe content" | Out-File -FilePath $cachedPathH -Encoding UTF8
+$settingsH = @{ CjxlPath = $cachedPathH }
+$resultH = Find-ExeCached -Settings $settingsH -SettingsKey "CjxlPath" -ExeName "totally-fake-exe-name-zzz" -Candidates @("C:\also\does\not\exist.exe")
+Test-Assert ($resultH -eq $cachedPathH) "a valid cached path was returned"
+Test-Assert ($settingsH.CjxlPath -eq $cachedPathH) "the cache was left unchanged"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario I: Find-ExeCached - a stale cached path (no longer exists on
+#  disk) falls through to a fresh search, same as a stale -UserPath does
+# ==============================================================================
+Write-Host "=== Scenario I: Find-ExeCached falls through when the cached path no longer exists ===" -ForegroundColor Cyan
+$settingsI = @{ CjxlPath = (Join-Path $scratchDir "cached-but-deleted.exe") }
+$resultI = Find-ExeCached -Settings $settingsI -SettingsKey "CjxlPath" -ExeName "cmd"
+Test-Assert ($null -ne $resultI -and (Test-Path -LiteralPath $resultI)) "fell through to a real, existing path via PATH lookup"
+Test-Assert ($resultI -like "*cmd.exe") "the fresh search found cmd.exe"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario J: Find-ExeCached - a fresh detection result gets written back
+#  into $Settings (mutated in place) so a later call can use the cache
+# ==============================================================================
+Write-Host "=== Scenario J: Find-ExeCached writes a fresh result back into `$Settings ===" -ForegroundColor Cyan
+$settingsJ = @{ CjxlPath = "" }
+$resultJ = Find-ExeCached -Settings $settingsJ -SettingsKey "CjxlPath" -ExeName "cmd"
+Test-Assert ($settingsJ.CjxlPath -eq $resultJ) "the freshly-found path was cached into `$Settings.CjxlPath"
+
+# a second call with the now-cached value present should return the same
+# path without needing PATH/-Candidates at all
+$settingsJ2 = @{ CjxlPath = $resultJ }
+$resultJ2 = Find-ExeCached -Settings $settingsJ2 -SettingsKey "CjxlPath" -ExeName "totally-fake-exe-name-zzz" -Candidates @("C:\also\does\not\exist.exe")
+Test-Assert ($resultJ2 -eq $resultJ) "a subsequent call reuses the now-cached path"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario K: Find-ExeCached - an explicit -UserPath wins over the cache
+#  and is deliberately NOT written back into it (a one-off override should
+#  not silently become the new persisted default)
+# ==============================================================================
+Write-Host "=== Scenario K: -UserPath wins over the cache and does not overwrite it ===" -ForegroundColor Cyan
+$cachedPathK = Join-Path $scratchDir "cached-cjxl-k.exe"
+"fake exe content" | Out-File -FilePath $cachedPathK -Encoding UTF8
+$overridePathK = Join-Path $scratchDir "override-cjxl-k.exe"
+"fake exe content" | Out-File -FilePath $overridePathK -Encoding UTF8
+$settingsK = @{ CjxlPath = $cachedPathK }
+$resultK = Find-ExeCached -Settings $settingsK -SettingsKey "CjxlPath" -UserPath $overridePathK -ExeName "totally-fake-exe-name-zzz"
+Test-Assert ($resultK -eq $overridePathK) "the explicit -UserPath override was returned, not the cached path"
+Test-Assert ($settingsK.CjxlPath -eq $cachedPathK) "the cache still holds its original value - the override was not persisted"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario L: Find-ExeCached - nothing found anywhere returns `$null` and
+#  leaves the cache untouched (does not cache a null result)
+# ==============================================================================
+Write-Host "=== Scenario L: Find-ExeCached returns `$null and leaves the cache untouched when nothing is found ===" -ForegroundColor Cyan
+$settingsL = @{ CjxlPath = "" }
+$resultL = Find-ExeCached -Settings $settingsL -SettingsKey "CjxlPath" -ExeName "totally-fake-exe-name-zzz" -Candidates @((Join-Path $scratchDir "nope.exe"))
+Test-Assert ($null -eq $resultL) "returns `$null when nothing is found anywhere"
+Test-Assert ($settingsL.CjxlPath -eq "") "the cache was not polluted with a null/failed result"
 Write-Host ""
 
 # ==============================================================================

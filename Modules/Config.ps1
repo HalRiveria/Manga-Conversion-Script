@@ -1,0 +1,255 @@
+<#
+.SYNOPSIS
+    Config - the settings file this project's other modules read their
+    tunables from: default schema, load (with corrupt/stale-file
+    recovery), and save.
+
+.DESCRIPTION
+    Pure definitions only - no top-level side effects, safe to dot-source
+    more than once or alongside other modules.
+
+    Forward-references (same pattern as ZipCreation.ps1/FileDeletion.ps1):
+      - Write-Log (Modules\Logging.ps1) - used only for non-fatal warnings
+        when a settings file is missing/corrupt/stale. Never required:
+        every code path here still works correctly if Write-Log isn't
+        defined-safe order just means those warnings currently error out
+        instead of logging, exactly like every other module's forward
+        reference in this project.
+
+    Settings file location: %LOCALAPPDATA%\ConversionScript\settings.json
+    by default (Get-ScriptSettingsPath), matching the design already
+    decided in Docs\module-loading-design.md. -BaseDir lets a caller (or
+    this module's harness) point elsewhere instead of the real per-user
+    AppData folder.
+
+    Schema: see Get-DefaultScriptSettings. Field names were chosen to
+    match the -Param names of the real Initialize-* functions that
+    consume them (Initialize-FileDeletion -PermanentDelete,
+    Initialize-LogPaths -FullLogging/-DisableSummaryFile,
+    Initialize-CleanConsoleOutput -Enabled, Convert-ImageBatch
+    -MaxCjxlProcs/-JpegLossless/-JpegQuality) so a future caller can
+    splat the loaded hashtable straight in without a translation layer.
+
+    Real decisions made building this (not just extraction) - see
+    CLAUDE.md/CHANGELOG.md for the full writeup:
+      - $MaxThreads/$MaxParallel (reference: one value, CLI-overridable,
+        shared by mode 3 and mode 4) became ZipParallelThreads here - one
+        settings-file value, still shared by both modes, matching real
+        current behavior. The options-menu sketch in Todo.md lists "Zip-
+        Only Pipeline Threads" and "Rezip Pipeline Threads" as two
+        separate options; splitting them is a real behavior change, not
+        just data-modeling, so it was left as one setting rather than
+        guessed at.
+      - $deleteFolders (reference: hardcoded $true, mode 4's "delete
+        extracted staging folders after a successful re-zip" flag) became
+        a real setting, DeleteExtractedFoldersAfterRezip, default $true
+        (unchanged behavior) - the reference file's own comment flagged
+        this as worth promoting to a real toggle once a config module
+        existed.
+      - CjxlPath/MagickPath are persisted here even though they're
+        currently CLI params resolved fresh (via Find-Exe) every run -
+        letting a caller cache a successful auto-detection avoids
+        re-running that search every single run. Stored as plain strings,
+        empty by default (meaning "not yet resolved / detect fresh"). The
+        actual cache-check-then-detect-then-remember logic lives in
+        DependencyDetection.ps1's Find-ExeCached, not here - this module
+        only owns the field existing and its load/save; Find-ExeCached
+        takes/mutates a settings hashtable rather than depending on this
+        module directly, so DependencyDetection.ps1 stays standalone.
+      - ModulesPath is included per Docs\module-loading-design.md, but
+        this module does not implement the prompt-and-remember flow
+        itself - that's the main-script rewrite's job. This module just
+        gives it somewhere durable to persist that string.
+      - Values are type/range-validated on load, not just merged - a
+        hand-edited or corrupted settings.json is real user input, not a
+        can't-happen case (CLAUDE.md's "only validate at system
+        boundaries" applies here). A bad value for one key falls back to
+        that key's default individually, with a warning, rather than
+        discarding the whole file.
+
+.NOTES
+    Extracted from Conversion Script Main.ps1 - see
+    Modules\_Reference\Config.reference.ps1 for the verbatim source this
+    was built from, with original line numbers. Unlike a straight
+    extraction, this module's actual job (a real settings FILE, not just
+    the in-memory toggle surface) required real design decisions - see
+    above.
+#>
+
+function Get-DefaultScriptSettings {
+    <#
+    .SYNOPSIS
+        The full settings schema with its current defaults, as a fresh
+        hashtable (never a shared reference - callers can mutate it
+        freely). This is the source of truth for what settings.json is
+        allowed to contain; Import-ScriptSettings merges onto a copy of
+        this.
+    #>
+    return @{
+        ModulesPath                      = ""
+        CjxlPath                         = ""
+        MagickPath                       = ""
+        ZipParallelThreads               = 1
+        MaxCjxlProcs                     = 8
+        FullLogging                      = $false
+        DisableSummaryFile               = $false
+        CleanConsoleOutputEnabled        = $false
+        JpegLossless                     = $false
+        JpegQuality                      = 90
+        PermanentDelete                  = $false
+        EnableModePrompt                 = $true
+        DeleteExtractedFoldersAfterRezip = $true
+    }
+}
+
+function Get-ScriptSettingsPath {
+    <#
+    .SYNOPSIS
+        The settings file path: "<BaseDir>\ConversionScript\settings.json".
+    .PARAMETER BaseDir
+        Defaults to $env:LOCALAPPDATA. Override for testing (this
+        module's harness always does) rather than touching the real
+        per-user AppData folder.
+    #>
+    param([string]$BaseDir)
+
+    if ([string]::IsNullOrWhiteSpace($BaseDir)) { $BaseDir = $env:LOCALAPPDATA }
+    return (Join-Path $BaseDir "ConversionScript\settings.json")
+}
+
+function ConvertTo-SettingsHashtable {
+    <#
+    .SYNOPSIS
+        Flattens a ConvertFrom-Json PSCustomObject into a hashtable.
+        Private helper - PS 5.1's ConvertFrom-Json has no -AsHashtable
+        (that's PS6+), so this does it by hand.
+    #>
+    param([Parameter(Mandatory)]$InputObject)
+
+    $ht = @{}
+    foreach ($prop in $InputObject.PSObject.Properties) {
+        $ht[$prop.Name] = $prop.Value
+    }
+    return ,$ht
+}
+
+function Test-ScriptSettingValue {
+    <#
+    .SYNOPSIS
+        True if $Value is an acceptable value for settings key $Key,
+        given $Default (used for both its .NET type and, for numeric
+        keys, its sanity range). Private helper for Import-ScriptSettings.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Key,
+        $Value,
+        [Parameter(Mandatory)]
+        $Default
+    )
+
+    if ($null -eq $Value) { return $false }
+
+    if ($Default -is [bool]) {
+        return ($Value -is [bool])
+    }
+    if ($Default -is [int]) {
+        # ConvertFrom-Json yields [double] for whole numbers - accept an
+        # integral double as well as a real int.
+        $isIntegral = ($Value -is [int]) -or ($Value -is [long]) -or
+                      (($Value -is [double]) -and ($Value -eq [math]::Truncate($Value)))
+        if (-not $isIntegral) { return $false }
+
+        $intValue = [int]$Value
+        switch ($Key) {
+            'JpegQuality'        { return ($intValue -ge 1 -and $intValue -le 100) }
+            'ZipParallelThreads' { return ($intValue -ge 1) }
+            'MaxCjxlProcs'       { return ($intValue -ge 1) }
+            default              { return $true }
+        }
+    }
+    if ($Default -is [string]) {
+        return ($Value -is [string])
+    }
+
+    return $true
+}
+
+function Import-ScriptSettings {
+    <#
+    .SYNOPSIS
+        Loads settings.json, merged onto Get-DefaultScriptSettings so a
+        file from an older schema (missing newer keys) still comes back
+        complete. Never throws: a missing file, unreadable/corrupt JSON,
+        an unknown key, or a bad value for a known key all fall back to
+        that key's default (with a Write-Log Warn for the latter three),
+        rather than failing the whole load.
+    .PARAMETER Path
+        Defaults to Get-ScriptSettingsPath (real per-user AppData
+        location). Pass explicitly to point at a test file instead.
+    .OUTPUTS
+        Hashtable, always containing every key from
+        Get-DefaultScriptSettings.
+    #>
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { $Path = Get-ScriptSettingsPath }
+
+    $settings = Get-DefaultScriptSettings
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $settings
+    }
+
+    $parsed = $null
+    try {
+        $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+        $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        Write-Log ("Settings file at '" + $Path + "' could not be read/parsed (" + $_.Exception.Message + ") - using defaults.") -Level Warn
+        $backupPath = $Path + ".corrupt-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".bak"
+        try { Copy-Item -LiteralPath $Path -Destination $backupPath -Force -ErrorAction Stop } catch { }
+        return $settings
+    }
+
+    $loaded = ConvertTo-SettingsHashtable -InputObject $parsed
+    foreach ($key in $loaded.Keys) {
+        if (-not $settings.ContainsKey($key)) {
+            Write-Log ("Ignoring unknown setting '" + $key + "' found in '" + $Path + "'.") -Level Warn
+            continue
+        }
+        $value = $loaded[$key]
+        if (Test-ScriptSettingValue -Key $key -Value $value -Default $settings[$key]) {
+            $settings[$key] = $value
+        } else {
+            Write-Log ("Setting '" + $key + "' in '" + $Path + "' has an invalid value - keeping default (" + $settings[$key] + ").") -Level Warn
+        }
+    }
+
+    return $settings
+}
+
+function Export-ScriptSettings {
+    <#
+    .SYNOPSIS
+        Writes $Settings to $Path as JSON, creating the parent directory
+        if needed.
+    .PARAMETER Path
+        Defaults to Get-ScriptSettingsPath.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Settings,
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { $Path = Get-ScriptSettingsPath }
+
+    $dir = Split-Path -Path $Path -Parent
+    if (-not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+
+    $json = $Settings | ConvertTo-Json -Depth 5
+    Set-Content -LiteralPath $Path -Value $json -Encoding UTF8
+}

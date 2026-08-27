@@ -18,6 +18,16 @@
     Lookup order: -UserPath (if supplied and it exists) > PATH (via
     Get-Command) > -Candidates, in order > $null if nothing matched.
 
+    Find-ExeCached wraps Find-Exe with a settings-hashtable-backed cache
+    (see Modules\Config.ps1) so a caller doesn't repeat the PATH/
+    -Candidates search every single run once a tool's been found once.
+    It takes/mutates a plain hashtable rather than depending on
+    Config.ps1's Import-/Export-ScriptSettings directly, so this module
+    stays standalone (no cross-module dependency, no forward reference to
+    load/save) - the caller owns loading the settings in and persisting
+    them back out (e.g. Import-ScriptSettings before, Export-ScriptSettings
+    after).
+
 .EXAMPLE
     Find-Exe -UserPath $CjxlPath -ExeName "cjxl" -Candidates @(
         ($env:ProgramFiles + "\libjxl\cjxl.exe"),
@@ -77,4 +87,59 @@ function Find-Exe {
     }
 
     return $null
+}
+
+function Find-ExeCached {
+    <#
+    .SYNOPSIS
+        Find-Exe, but checks a cached path in $Settings[$SettingsKey]
+        first (if it's still valid) before falling back to a fresh
+        PATH/-Candidates search - and remembers a fresh result by writing
+        it back into $Settings (mutated in place; caller persists it,
+        e.g. via Config.ps1's Export-ScriptSettings).
+    .PARAMETER Settings
+        A settings hashtable (as returned by Config.ps1's
+        Import-ScriptSettings). Mutated in place when a fresh detection
+        succeeds - the caller decides whether/when to save it.
+    .PARAMETER SettingsKey
+        Which key in $Settings holds the cached path, e.g. "CjxlPath".
+    .PARAMETER UserPath
+        Same meaning as Find-Exe's -UserPath: an explicit one-off
+        override. Takes priority over the cache, and deliberately does
+        NOT get written back into the cache - a one-time override
+        shouldn't silently become the new default for every future run.
+    .DESCRIPTION
+        Priority order: -UserPath (if it exists) > cached path in
+        $Settings (if it still exists on disk) > fresh Find-Exe search
+        (PATH, then -Candidates) - and a fresh search's result, if found,
+        is written into $Settings[$SettingsKey] so the next call can use
+        the cache instead. A stale cached path (tool moved/uninstalled)
+        is treated exactly like Find-Exe treats a stale -UserPath: falls
+        through to a fresh search rather than being trusted blindly.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Settings,
+        [Parameter(Mandatory)]
+        [string]$SettingsKey,
+        [string]$UserPath,
+        [Parameter(Mandatory)]
+        [string]$ExeName,
+        [string[]]$Candidates = @()
+    )
+
+    if ($UserPath -and (Test-Path -LiteralPath $UserPath)) {
+        return $UserPath
+    }
+
+    $cached = $Settings[$SettingsKey]
+    if ($cached -and (Test-Path -LiteralPath $cached)) {
+        return $cached
+    }
+
+    $found = Find-Exe -ExeName $ExeName -Candidates $Candidates
+    if ($found) {
+        $Settings[$SettingsKey] = $found
+    }
+    return $found
 }
