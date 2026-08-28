@@ -43,7 +43,7 @@
     script's temporary stand-in: real, working code today, but expected
     to move into Controller.ps1 wholesale once its dispatcher is
     designed and built, per the project owner's explicit go-ahead
-    (2026-08-29) to do the rewrite now and stub the Controller
+    (2026-08-28) to do the rewrite now and stub the Controller
     connections. Mode 8 ("Image Conversion + Zip") is a partial stub -
     its CCR-fold behavior is decided (see Todo.md) but not coded, so it
     currently zips unconditionally rather than folding into one CCR
@@ -319,7 +319,7 @@ function Invoke-SelectedMode {
                 -FullLogging $Settings.FullLogging -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $Settings.PermanentDelete
         }
         'ImageConversionZip' {
-            # STUB - mode 8's CCR-fold decision (Todo.md, 2026-08-29) is not
+            # STUB - mode 8's CCR-fold decision (Todo.md, 2026-08-28) is not
             # coded yet: this runs conversion then zips unconditionally
             # rather than folding both outcomes into one CCR transition or
             # honoring ZipWithUnconvertedAnimated. Real wiring pending.
