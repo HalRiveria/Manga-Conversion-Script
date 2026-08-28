@@ -637,6 +637,43 @@ Test-Assert ($script:postRunCallsU -eq 1) "a `$null Invoke-Mode result still rea
 Write-Host ""
 
 # ==============================================================================
+#  Scenario V: the Full-Pipeline AVIF race fix (2026-08-28) - a static and
+#  an animated AVIF in the SAME chapter are each routed to exactly one
+#  engine, proving the reconciliation actually prevents double-discovery/
+#  double-dispatch, not just that both engines still individually work.
+# ==============================================================================
+Write-Host "=== Scenario V: AVIF race fix - static/animated AVIF each routed to exactly one engine ===" -ForegroundColor Cyan
+$chV = New-Dir "scenario-v\Series\Chapter 1"
+New-FakeAvifIn -DirPath $chV -Name "static.avif" -Frames 1 | Out-Null
+New-FakeAvifIn -DirPath $chV -Name "animated.avif" -Frames 5 | Out-Null
+
+$totalsV = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-v") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+
+Test-Assert ($totalsV.ConvertedImageSuccess -eq 1) ("exactly one file converted by the IMAGE engine - the static one (got " + $totalsV.ConvertedImageSuccess + ")")
+Test-Assert ($totalsV.ConvertedAnimatedSuccess -eq 1) ("exactly one file converted by the ANIMATED engine - the animated one (got " + $totalsV.ConvertedAnimatedSuccess + ")")
+Test-Assert ($totalsV.InspectFailedCount -eq 0) "no classification failures for two cleanly-identifiable files"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario W: a file the reconciliation can't classify is excluded from
+#  BOTH engines for that run, not guessed at or left to race - the
+#  "fail safe" half of the same fix.
+# ==============================================================================
+Write-Host "=== Scenario W: AVIF race fix - an unclassifiable file is excluded from BOTH engines ===" -ForegroundColor Cyan
+$chW = New-Dir "scenario-w\Series\Chapter 1"
+[System.IO.File]::WriteAllText((Join-Path $chW "corrupt.avif"), "FAIL_IDENTIFY")
+New-FakeAvifIn -DirPath $chW -Name "animated.avif" -Frames 5 | Out-Null
+
+$totalsW = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-w") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+
+Test-Assert ($totalsW.ConvertedImageSuccess -eq 0 -and $totalsW.ConvertedImageFail -eq 0 -and $totalsW.ConvertedImageSkipped -eq 0) "the unclassifiable file was NOT dispatched to the image engine at all"
+Test-Assert ($totalsW.ConvertedAnimatedSuccess -eq 1) "the OTHER, real animated file in the same chapter still converted normally"
+Test-Assert ($totalsW.InspectFailedCount -eq 1) ("the classification failure was counted exactly once, directly in Invoke-FullPipeline's own InspectFailedCount, not through either engine (got " + $totalsW.InspectFailedCount + ")")
+Test-Assert (Test-Path -LiteralPath (Join-Path $chW "corrupt.avif")) "the unclassifiable source file was left untouched, not deleted by either engine"
+Test-Assert ($totalsW.ZipCreatedSuccess -eq 0) "the chapter was NOT zipped at all - a real bug this scenario caught live: without blocking zip here too, the unclassified source got swept into the zip in raw form and its loose folder deleted anyway"
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

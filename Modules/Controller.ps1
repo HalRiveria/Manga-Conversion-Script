@@ -165,6 +165,41 @@
     this brings in: Menu.ps1 (Get-SelectedMode, Show-PostRunPrompt) -
     Controller.ps1 never needed Menu.ps1 before this.
 
+    AVIF CLASSIFICATION (2026-08-28, the Full-Pipeline AVIF race fix -
+    see Todo.md's "Full-Pipeline AVIF race" entry for the full decision
+    record). Invoke-FullPipeline's own -LooseImageExtensions default now
+    includes .avif (previously excluded specifically to avoid this
+    problem) - static AVIF gets converted here now too, for the same
+    "consistency across the whole library" reason ImageConversionPipeline.ps1
+    already converts it in every other mode. Since Get-LooseImageCandidates
+    and Get-LooseAnimatedCandidates are two INDEPENDENT scans, both now
+    discover the same .avif file, which would otherwise get dispatched
+    to both engines' concurrently-running runspaces at once - a real
+    race (one engine converting+deleting a file the other is still
+    identifying). Fixed with a per-series reconciliation step, run once
+    on the main thread BEFORE either engine's dispatch begins for that
+    series: for every .avif file both scans agree on, Test-AvifAnimated
+    decides ownership (static -> stays in the image list, animated ->
+    stays in the animated list, removed from the other) - reuses
+    Test-AvifAnimated UNCHANGED (a real magick identify process spawn;
+    decided explicitly NOT to replace it with a cheap byte-level check
+    for this fix). A file that can't be classified is removed from BOTH
+    lists for that run (never guessed at, never left in either engine's
+    hands), logged at -Level Error, and counted directly in
+    Invoke-FullPipeline's own InspectFailedCount - not through either
+    engine's own counter, since the failure happens here, before either
+    engine ever sees the file. Scoped ONLY to Invoke-FullPipeline's own
+    discovery - modes 2/3/8/9 call ImageConversionPipeline.ps1/
+    AnimatedConversionPipeline.ps1 directly and keep their own existing
+    internal checks unchanged; Full Pipeline is the only mode where two
+    engines run concurrently over the same candidate set, so it's the
+    only one that needs this. Written to classify by a Dictionary keyed
+    on file path (Static/Animated/Failed) rather than two separate
+    filter passes, so a file's classification can never disagree between
+    the image-side filter and the animated-side filter - a real
+    consideration, not just tidiness, since disagreeing filters would
+    silently reopen the exact race this fix exists to close.
+
     FORWARD REFERENCES (not defined in this module - callers must
     dot-source the owning module(s) first):
       - Write-Log, Invoke-MutexGuardedWrite (Logging.ps1)
@@ -514,8 +549,11 @@ function Invoke-FullPipeline {
            Aborted } - InspectFailedCount (added 2026-08-28) sums BOTH
         engines' own field of the same name (a real Test-AvifAnimated
         failure inside Convert-ImageBatch's new static-AVIF path, or
-        Convert-AnimatedBatch's pre-existing one) - matches Summary.ps1's
-        new InspectFailed row, which reads from either engine.
+        Convert-AnimatedBatch's pre-existing one) PLUS any AVIF
+        classification failure this function's own per-series
+        reconciliation hits directly (see "AVIF CLASSIFICATION" in this
+        module's header) - matches Summary.ps1's new InspectFailed row,
+        which reads from this one combined total either way.
     #>
     param(
         [Parameter(Mandatory)]
@@ -538,7 +576,7 @@ function Invoke-FullPipeline {
         [string]$LogWarnFile,
         [Parameter(Mandatory)]
         [bool]$PermanentDelete,
-        [string[]]$LooseImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif"),
+        [string[]]$LooseImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif"),
         [string[]]$AnimatedFileExtensions = @(".avif"),
         [string[]]$KnownZipPaths = @(),
         [string[]]$FolderQualifyingExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif"),
@@ -573,6 +611,13 @@ function Invoke-FullPipeline {
             if ($null -eq $series) { break }
             $totals.SeriesCount++
 
+            # Directories holding a file the AVIF classification step
+            # below couldn't resolve - populated during that step,
+            # consulted when building $chapterEntries further down to
+            # force IsZippable=$false for any chapter affected. Reset
+            # per series, same lifetime as $avifClassification.
+            $failedClassificationDirs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
             $chapters = Get-SeriesChapters -SeriesPath $series.FullName -QualifyingExtensions $FolderQualifyingExtensions `
                 -ExcludeStagingDirs $FolderExcludeStagingDirs -ForceRezip $false
 
@@ -580,6 +625,72 @@ function Invoke-FullPipeline {
                 -KnownZipPaths $KnownZipPaths -ExcludeStagingDirs $FolderExcludeStagingDirs
             $animatedCandidates = Get-LooseAnimatedCandidates -ScanPath $series.FullName -AnimatedFileExtensions $AnimatedFileExtensions `
                 -KnownZipPaths $KnownZipPaths -ExcludeStagingDirs $FolderExcludeStagingDirs
+
+            # AVIF CLASSIFICATION (2026-08-28) - see this module's header.
+            # When -LooseImageExtensions includes .avif (the default,
+            # confirmed decision), the image and animated engines' own
+            # independent scans both discover the SAME .avif file - the
+            # image engine would convert+delete a static one while the
+            # animated engine concurrently identifies/converts an
+            # animated one, racing on any file both scans agree on.
+            # Resolve ownership HERE, once, before either engine's
+            # dispatch begins, so neither ever sees a file that isn't
+            # theirs. Reuses Test-AvifAnimated unchanged (decided
+            # 2026-08-28 - no byte-level rewrite). A file that can't be
+            # classified (a real identify failure) is excluded from BOTH
+            # engines this run - logged as an Error (a real problem, not
+            # an expected skip) and counted directly in this function's
+            # own InspectFailedCount, since the failure happens here, in
+            # Controller's own classification step, before either engine
+            # ever sees the file - not through either engine's counter.
+            if ($MagickExe -and ($LooseImageExtensions -icontains ".avif") -and $animatedCandidates.Count -gt 0) {
+                $animatedPathSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                foreach ($af in $animatedCandidates) { $null = $animatedPathSet.Add($af.FullName) }
+
+                # Built ONCE per series, then used to filter BOTH lists
+                # below - a Dictionary, not two separate filter passes,
+                # so a file's classification can never disagree between
+                # the image-side filter and the animated-side filter.
+                $avifClassification = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                foreach ($img in $imageCandidates.NeedsConversion) {
+                    if ($img.Extension -ine ".avif" -or -not $animatedPathSet.Contains($img.FullName)) {
+                        continue   # not .avif, or not claimed by both scans - no ambiguity to resolve
+                    }
+                    try {
+                        $isAnimated = Test-AvifAnimated -AvifPath $img.FullName -MagickExe $MagickExe
+                        $avifClassification[$img.FullName] = if ($isAnimated) { "Animated" } else { "Static" }
+                    } catch {
+                        Write-Log ("Could not determine if AVIF '" + $img.FullName + "' is animated - excluding it from BOTH engines this run: " + $_) -Level Error
+                        $totals.InspectFailedCount++
+                        $avifClassification[$img.FullName] = "Failed"
+                    }
+                }
+
+                if ($avifClassification.Count -gt 0) {
+                    $imageCandidates.NeedsConversion = @($imageCandidates.NeedsConversion | Where-Object {
+                        -not $avifClassification.ContainsKey($_.FullName) -or $avifClassification[$_.FullName] -eq "Static"
+                    })
+                    $animatedCandidates = @($animatedCandidates | Where-Object {
+                        -not $avifClassification.ContainsKey($_.FullName) -or $avifClassification[$_.FullName] -eq "Animated"
+                    })
+                    # A chapter holding an unclassifiable file must NOT be
+                    # zipped this run - live-caught via this fix's own
+                    # harness (Scenario W): without this, the unclassified
+                    # source got swept into the zip in its raw, unconverted
+                    # form and its loose folder deleted anyway, since
+                    # neither engine's own merged status has any visibility
+                    # into a failure that happened before either of them
+                    # ran. Tracked by directory (not by file), same
+                    # granularity Get-MergedChapterStatus already zip-
+                    # blocks at.
+                    foreach ($entry in $avifClassification.GetEnumerator()) {
+                        if ($entry.Value -eq "Failed") {
+                            $failedAvifDir = [System.IO.Path]::GetDirectoryName($entry.Key)
+                            $null = $failedClassificationDirs.Add($failedAvifDir)
+                        }
+                    }
+                }
+            }
 
             $staleResult = Remove-StaleLooseSources -StaleSources $imageCandidates.StaleSources
             $totals.StaleImageCleanedSuccess += $staleResult.Success
@@ -607,7 +718,16 @@ function Invoke-FullPipeline {
             $chapterEntries = [System.Collections.Generic.List[hashtable]]::new()
             foreach ($c in $chapters) {
                 $null = $chapterDirSet.Add($c.Dir.FullName)
-                $chapterEntries.Add(@{ Dir = $c.Dir; ZipOut = $c.ZipOut; IsZippable = $true })
+                # A chapter holding a file the AVIF classification step
+                # above couldn't resolve must not be zipped this run -
+                # see that step's own comment for why (a real bug this
+                # fix's own harness caught: the unclassified source was
+                # otherwise swept into the zip and its folder deleted
+                # anyway, since neither engine's merged status has any
+                # visibility into a failure that happened before either
+                # of them ran).
+                $isChapterZippable = -not $failedClassificationDirs.Contains($c.Dir.FullName)
+                $chapterEntries.Add(@{ Dir = $c.Dir; ZipOut = $c.ZipOut; IsZippable = $isChapterZippable })
             }
             $extraDirPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             foreach ($k in $imagesByDir.Keys)    { if (-not $chapterDirSet.Contains($k)) { $null = $extraDirPaths.Add($k) } }
