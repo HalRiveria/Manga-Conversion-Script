@@ -5,45 +5,52 @@ images to JPEG XL (`.jxl`), archiving folders into `.zip`, and (soon)
 converting animated AVIF to WebP. Built and iterated on with Claude as a
 development/debugging partner.
 
-**Status: active rewrite in progress.** The project is moving from a single
-large script toward independently-built-and-tested modules that get merged
-into a shipped script only once each is verified working on its own. See
-`CLAUDE.md` for full working context if you're picking this up in a new
-session (human or Claude Code), and `CHANGELOG.md` for full version history.
+**Status: standalone-build phase done, main-script rewrite not started.**
+The project is moving from a single large script toward independently-
+built-and-tested modules that get merged into a shipped script only once
+each is verified working on its own. **All 18 planned modules are now
+built and tested** (20/20 harnesses, 791+ assertions) - none are merged
+into the main script yet, which stays frozen until that rewrite starts.
+See `CLAUDE.md` for full working context if you're picking this up in a
+new session (human or Claude Code), `Todo.md` for the live tracker, and
+`CHANGELOG.md` for full version history.
 
 ## What's in this repo
 
 | File | What it does |
 |---|---|
-| `Conversion Script Main.ps1` | Main conversion script (currently v16.1). Extracts ZIPs, converts images to `.jxl`, re-zips, handles loose files, zip-only archiving. Four modes: loose-only, loose+zip, zip-only, rezip-only. |
+| `Conversion Script Main.ps1` | Main conversion script (currently v16.1), FROZEN - no edits until the module rewrite starts. Extracts ZIPs, converts images to `.jxl`, re-zips, handles loose files, zip-only archiving. Four modes: loose-only, loose+zip, zip-only, rezip-only. |
 
-`Modules\` holds every standalone module built per the development process
-below - not yet merged into the main script, or (once merged) kept around
-as the canonical, independently-testable definition. Ten are actually
-built and tested (`ZipParallelProcessing`, `AbortPipeline`, `Logging`,
-`FileDeletion`, `DependencyDetection`, `ZipCreation`, `ZipValidation`,
-`LeafDirectoryDiscovery`, `ZipPipeline`, `CleanConsoleRendering`); the
-other seven are empty placeholders with a corresponding extraction in
-`Modules\_Reference\` (`ImageConversionPipeline.ps1` is a third
-state - a real but untested draft, committed but explicitly flagged as
-unverified, paused mid-build - see `CLAUDE.md`'s "Clean Console Output"
-section) - see `Todo.md` for the
-current state of each:
+`Modules\` holds all 18 standalone modules built per the development
+approach below - not yet merged into the main script. Each is a
+self-contained `.ps1` (pure function definitions, no top-level side
+effects) with its own test harness in `Modules\_Harness\`. Full detail on
+every module - real design decisions made, bugs found and fixed, forward
+references - lives in `CLAUDE.md`; this table is a quick map, not the
+full story:
 
 | File | What it does |
 |---|---|
-| `Modules\ZipParallelProcessing.ps1` | `Invoke-ZipParallelProcessing`, the parallel-dispatch engine for the zip-only pipeline (mode 3) - pure definitions, no top-level side effects, safe to dot-source. Renamed from `Invoke-ParallelFolderJobs`/`InvokeParallelFolderJobs.ps1` since it's currently zip-specific; the main script's own inline copy of the same algorithm still uses the older name until mode 3 (and eventually mode 4) migrates onto this module - see its file header. Has its own inline (and partly stale) copies of logic `Logging`/`AbortPipeline` now own - see `CLAUDE.md`'s "Known gaps". |
-| `Modules\AbortPipeline.ps1` | Standalone module (not yet merged into the main script): the Ctrl+C/window-close abort pipeline - `ConsoleCtrl`, abort-state tracking, a CTS registry, and a generalized graceful-drain/force-stop function - centralizing logic currently duplicated across modes 3/4 in the main script. When Clean Console Output is on (via `Logging.ps1`'s toggle, read here as a forward reference), abort/drain messages route through `CleanConsoleRendering.ps1`'s `Write-CleanConsoleMessage` instead of a raw `Write-Host`, and `Complete-AbortDrain` finalizes the display before signalling completion. |
-| `Modules\Logging.ps1` | `Write-Log`, `Write-SummaryLog`, `Flush-ConsoleQueue`, plus `Initialize-LogPaths` (call once before anything logs). Includes a `-DisableSummaryFile` toggle (split-log mode only), abandoned-mutex recovery, UTF-8 log encoding, Recycle-Bin cleanup of old full-logging-mode log files, `Initialize-LogMutex` for the shared log-mutex naming convention, and `Initialize-CleanConsoleOutput` to suppress `Write-Log`'s console echo (log files unaffected) when the Clean Console Output toggle is on. |
-| `Modules\FileDeletion.ps1` | `Move-ToRecycleBin`, `Remove-ItemPermanently`, and `Remove-Source` (the wrapper every mode calls, routing based on `Initialize-FileDeletion -PermanentDelete`). |
-| `Modules\DependencyDetection.ps1` | `Find-Exe` - generalized cjxl/magick/ffmpeg executable locator (`-UserPath` > PATH > `-Candidates`), not separate per-tool wrapper functions. |
-| `Modules\ZipCreation.ps1` | `Compress-FolderToZip` - creates a ZIP from a folder, clearing any pre-existing same-name ZIP first and cleaning up stray output if creation fails partway through. |
-| `Modules\ZipValidation.ps1` | `Test-ZipArchive` - post-creation sanity check (entry count, optional required `.jxl` presence). No cross-module dependencies. |
-| `Modules\LeafDirectoryDiscovery.ps1` | `Get-ZippableLeafDirs` - shared leaf-folder scan (mode 2/3) with staleness and former-container guards; its harness live-reproduces the historical "parent folder gets zipped" bug from `CHANGELOG.md` for the first time and confirms the fix works. Also `New-ZippableLeafDirProvider`, an incremental alternative that lets dispatch start on the first qualifying folder while a large tree is still being scanned, instead of the whole tree needing to finish first. Plus `New-SeriesProvider`/`Get-SeriesChapters`, a two-tier addition (lazy across a library's series, eager within one series) built for the Clean Console Output feature's per-series chapter counts. |
-| `Modules\ZipPipeline.ps1` | `Invoke-ZipOnlyPipeline` (mode 3 end to end) and `Invoke-LooseFolderZip` (mode 2's per-folder zip step) - the first orchestration-tier module, tested as a real integration harness against the other six built modules together rather than stubs. |
-| `Modules\CleanConsoleRendering.ps1` | The "Clean Console Output" toggle's renderer - live per-series/chapter progress display, replacing default per-file console spam (log files unaffected). Zero forward references, like `DependencyDetection.ps1`. Falls back to plain sequential printing when real console cursor control isn't available (confirmed via a live probe that this throws in non-interactive/redirected contexts) rather than crashing a run. Also `Write-CleanConsoleMessage`, for other modules' (currently `AbortPipeline.ps1`'s) one-off status lines that aren't part of the series/chapter model. |
-| `Modules\_Harness\*.Harness.ps1` | Standalone test harness per built module - dot-sources the real module from `..\`. |
-| `Modules\_Reference\*.reference.ps1` | Extracted-but-not-yet-built reference material for every module, including the two above - not working code, see `CLAUDE.md`'s "Modularization in progress" section. |
+| `Modules\Logging.ps1` | `Write-Log`, `Write-SummaryLog`, `Flush-ConsoleQueue`, `Initialize-LogPaths`/`Initialize-LogMutex`/`Initialize-CleanConsoleOutput`. Nearly every other module forward-references this one. |
+| `Modules\FileDeletion.ps1` | `Move-ToRecycleBin`, `Remove-ItemPermanently`, `Remove-Source` (the wrapper every mode calls, routing on `Initialize-FileDeletion -PermanentDelete`). |
+| `Modules\AbortPipeline.ps1` | The Ctrl+C/window-close abort pipeline - `ConsoleCtrl`, a CTS registry, `Invoke-GracefulDrain` (generalized graceful-drain/force-stop, fixes a race the main script's own inline copies still have). |
+| `Modules\DependencyDetection.ps1` | `Find-Exe` (generalized cjxl/magick locator) and `Find-ExeCached` (checks a cached path in a settings hashtable before searching again). |
+| `Modules\ZipCreation.ps1` | `Compress-FolderToZip` - creates a ZIP from a folder, clearing any pre-existing same-name ZIP first. |
+| `Modules\ZipValidation.ps1` | `Test-ZipArchive` - post-creation sanity check (entry count, optional required `.jxl` presence). |
+| `Modules\LeafDirectoryDiscovery.ps1` | `Get-ZippableLeafDirs`/`New-ZippableLeafDirProvider` (incremental leaf-folder scan) plus `New-SeriesProvider`/`Get-SeriesChapters` (two-tier series/chapter discovery for Clean Console Output). |
+| `Modules\ZipParallelProcessing.ps1` | `Invoke-ZipParallelProcessing` - the parallel-dispatch engine used by the zip pipelines; the main script's own inline copy (`Invoke-ParallelFolderJobs`) hasn't migrated onto it yet. |
+| `Modules\CleanConsoleRendering.ps1` | The Clean Console Output renderer - live per-series/chapter progress display replacing per-file console spam (log files unaffected). |
+| `Modules\ZipPipeline.ps1` | `Invoke-ZipOnlyPipeline` (mode 3) and `Invoke-LooseFolderZip` (mode 2's zip step) - zip-domain orchestration. |
+| `Modules\ImageConversionPipeline.ps1` | `Convert-ImageBatch` (shared batch conversion engine) and `Invoke-LooseImageConversionPipeline` (mode 1 end to end, Clean Console Output-integrated). |
+| `Modules\Config.ps1` | Settings schema + `Import-/Export-ScriptSettings` at `%LOCALAPPDATA%\ConversionScript\settings.json`, with per-key validation and corrupt-file recovery. |
+| `Modules\Menu.ps1` | `Get-SelectedMode`/`Show-ModeMenu` (mode-selection prompt) and `Show-OptionsMenuLevel` (data-driven options-menu renderer). |
+| `Modules\Summary.ps1` | The clean-run summary report - `New-StatsTracker`, `Format-ElapsedTime`, `Get-SummaryLines`/`Write-SummaryReport`. |
+| `Modules\ResumeState.ps1` | Tracks which ZIPs the rezip pipeline has already completed, so a re-run can skip them. |
+| `Modules\RezipPipeline.ps1` | `Invoke-RezipPipeline` - mode 9 ("Convert Zipped"), deprecated/legacy, minimal-effort build. |
+| `Modules\AnimatedConversionPipeline.ps1` | `Convert-AnimatedBatch` - AVIF→WebP batch conversion (the primitive only; no library-walking orchestrator yet). |
+| `Modules\UnwantedImage.ps1` | Detects/deletes known unwanted images by size+dimensions+hash match, plus a trailing-zero-filename audit and a real profile-persistence feature (`Add-UnwantedImageProfileFromFile`). |
+| `Modules\_Harness\*.Harness.ps1` | Standalone test harness per module - dot-sources the real module from `..\`. |
+| `Modules\_Reference\*.reference.ps1` | The extraction each module was built FROM - historical build input, not pending work (16 of 18 modules have one; `ZipParallelProcessing`/`CleanConsoleRendering` legitimately don't). |
 
 Earlier working scripts, including the standalone `Zip_Files-claude-parallel.ps1`
 that the staleness-check and former-container-guard logic were ported from,
@@ -67,21 +74,27 @@ Conversion Script/
 ├── CHANGELOG.md           <- full version history (v1.0 → v16.1)
 ├── Todo.md                <- live modularization checklist
 ├── Conversion Script Main.ps1
-├── Modules/               <- every standalone module lives here
-│   ├── ZipParallelProcessing.ps1
-│   ├── AbortPipeline.ps1
+├── Modules/               <- every standalone module lives here (all 18 built)
 │   ├── Logging.ps1
 │   ├── FileDeletion.ps1
+│   ├── AbortPipeline.ps1
 │   ├── DependencyDetection.ps1
 │   ├── ZipCreation.ps1
 │   ├── ZipValidation.ps1
 │   ├── LeafDirectoryDiscovery.ps1
-│   ├── ZipPipeline.ps1
+│   ├── ZipParallelProcessing.ps1
 │   ├── CleanConsoleRendering.ps1
-│   ├── ImageConversionPipeline.ps1 (untested draft, paused mid-build)
-│   ├── (7 more placeholder modules - see Todo.md)
-│   ├── _Harness/          <- test harness per built module
-│   └── _Reference/        <- extracted reference material per module
+│   ├── ZipPipeline.ps1
+│   ├── ImageConversionPipeline.ps1
+│   ├── Config.ps1
+│   ├── Menu.ps1
+│   ├── Summary.ps1
+│   ├── ResumeState.ps1
+│   ├── RezipPipeline.ps1
+│   ├── AnimatedConversionPipeline.ps1
+│   ├── UnwantedImage.ps1
+│   ├── _Harness/          <- test harness per module
+│   └── _Reference/        <- extraction each module was built from
 ├── Tools/
 │   └── Run-Harness.ps1    <- runs one or all harnesses, compresses output to
 │                              PASS/FAIL summaries instead of every assertion line
@@ -110,25 +123,17 @@ no CI runner configured against this local-only repo yet.
 
 ## Known open items
 
-- Mode 3 (zip-only pipeline) still has its own inline copy of the parallel-
-  dispatch algorithm (under the name `Invoke-ParallelFolderJobs`) instead of
-  dot-sourcing `Modules\ZipParallelProcessing.ps1`'s `Invoke-ZipParallelProcessing` -
-  migration planned, not yet done. Mode 4 (rezip/ZIP-extraction pipeline)
-  has its own separate inline copy of the same kind of dispatch logic too -
-  also not yet migrated onto the module.
-- A narrow race condition exists in the main script's inline
-  `Invoke-ParallelFolderJobs` abort-drain logic (a job finishing in the
-  final ~250ms before the 60s force-stop timeout can have its result
-  silently dropped) - documented, and fixed in
-  `Modules\ZipParallelProcessing.ps1`'s rewrite of the same logic, but the
-  main script's copy hasn't been migrated to use it yet.
-- `Modules\AbortPipeline.ps1` centralizes the abort/graceful-drain logic
-  that's currently duplicated (with variations) across the main script's
-  inline `Invoke-ParallelFolderJobs`, the ZIP-extraction pipeline's inline
-  dispatch loop, and the loose-image pipeline. Built and verified
-  standalone; not yet wired into the main script.
-- AVIF→WebP conversion pipeline not yet integrated (separate existing script
-  to be merged in).
+The frozen main script still runs on its own original inline logic
+throughout (parallel dispatch, abort/drain, everything) - none of the 18
+built modules are wired into it yet; that's the main-script rewrite,
+still not started. Beyond that, a handful of real open items remain even
+within the standalone modules themselves - see `CLAUDE.md`'s "Known
+gaps / open work" section for the current, maintained list (things like:
+`AnimatedConversionPipeline.ps1` is a batch-conversion primitive only,
+no library-walking orchestrator yet; `UnwantedImage.ps1` has no `Menu.ps1`
+entry wired in yet; a couple of small cross-module consistency questions
+flagged but deliberately deferred). Not duplicated here since it changes
+often enough that a second copy would just go stale.
 
 ## Language
 
