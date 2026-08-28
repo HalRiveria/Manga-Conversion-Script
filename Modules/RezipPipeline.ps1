@@ -118,7 +118,8 @@
       - Register-AbortCancellationSource, Unregister-AbortCancellationSource
         (AbortPipeline.ps1)
       - Get-ResumeStatePath, Import-ResumeStateMap, Save-ResumeStateEntry,
-        Test-ResumeStateComplete (ResumeState.ps1)
+        Test-ResumeStateComplete, Write-ResumeStateRetainedNotice
+        (ResumeState.ps1)
     Same dot-source ordering rule as ZipPipeline.ps1: Logging.ps1/
     FileDeletion.ps1 BEFORE ZipParallelProcessing.ps1, since
     -SharedFunctionNames captures whichever definition is CURRENTLY active
@@ -507,6 +508,14 @@ function Invoke-RezipPipeline {
     } finally {
         $stateMutex.Dispose()
     }
+
+    # The "gap, not yet done" this project's own docs flagged: nothing
+    # emitted this notice anywhere until now (Summary.ps1 deliberately
+    # left it to ResumeState.ps1's domain instead of building it itself -
+    # see that module's header). Called once, after every completion
+    # write this run made, so a real newly-created state file is
+    # reflected too, not just a pre-existing one.
+    Write-ResumeStateRetainedNotice -StateFile $stateFile
 
     return $totals
 }

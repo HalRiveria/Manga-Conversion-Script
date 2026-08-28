@@ -324,6 +324,35 @@ Test-Assert ($mapJ.Count -eq 4) "all 4 recorded in resume-state after this singl
 Write-Host ""
 
 # ==============================================================================
+#  Scenario K: Invoke-RezipPipeline actually calls
+#  Write-ResumeStateRetainedNotice once, with the real state file path -
+#  the real wiring for the "resume state file retained" gap this
+#  session's docs flagged, not just that ResumeState.ps1's own function
+#  works in isolation (covered by ResumeState.Harness.ps1's own Scenario
+#  M).
+# ==============================================================================
+Write-Host "=== Scenario K: Write-ResumeStateRetainedNotice actually gets called ===" -ForegroundColor Cyan
+$originalRetainedNotice = ${function:Write-ResumeStateRetainedNotice}
+$script:retainedNoticeCalls = [System.Collections.Generic.List[string]]::new()
+function Write-ResumeStateRetainedNotice {
+    param([string]$StateFile)
+    $script:retainedNoticeCalls.Add($StateFile)
+    & $originalRetainedNotice -StateFile $StateFile
+}
+
+$rootK = New-Dir "scenario-k"
+New-SourceZip -ZipPath (Join-Path $rootK "Chapter1.zip") -Files @{ "page1.jpg" = "ok" } | Out-Null
+$null = Invoke-RezipPipeline -Path $rootK -MaxParallel 2 -FullLogging $false `
+    -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile `
+    -PermanentDelete $true -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2
+
+Test-Assert ($script:retainedNoticeCalls.Count -eq 1) ("called exactly once (got " + $script:retainedNoticeCalls.Count + ")")
+Test-Assert ($script:retainedNoticeCalls.Count -gt 0 -and $script:retainedNoticeCalls[0] -eq (Get-ResumeStatePath -TargetPath $rootK)) "called with this run's real state file path"
+
+${function:Write-ResumeStateRetainedNotice} = $originalRetainedNotice
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

@@ -245,6 +245,23 @@ try {
 Write-Host ""
 
 # ==============================================================================
+#  Scenario M: Write-ResumeStateRetainedNotice - logs when the state file
+#  exists, is a silent no-op when it doesn't.
+# ==============================================================================
+Write-Host "=== Scenario M: Write-ResumeStateRetainedNotice ===" -ForegroundColor Cyan
+$pathM1 = New-ScratchStateFile "scenario-m-exists"
+Save-ResumeStateEntry -StateFile $pathM1 -StateMutex (New-Object System.Threading.Mutex) -ZipPath "C:\Library\First.zip" -LastWriteTimeUtc "2026-07-01T00:00:00Z" | Out-Null
+$script:logCalls.Clear()
+Write-ResumeStateRetainedNotice -StateFile $pathM1
+Test-Assert ((@($script:logCalls | Where-Object { $_ -like "Summary:*Resume state file retained*" -and $_ -like "*$pathM1*" })).Count -eq 1) "logged the retained-notice line, naming the real state file path, when the file exists"
+
+$pathM2 = New-ScratchStateFile "scenario-m-missing"
+$script:logCalls.Clear()
+Write-ResumeStateRetainedNotice -StateFile $pathM2
+Test-Assert ($script:logCalls.Count -eq 0) "no-op (nothing logged) when the state file was never created"
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

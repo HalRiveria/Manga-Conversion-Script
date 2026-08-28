@@ -268,3 +268,24 @@ function Save-ResumeStateBag {
         return $null
     }
 }
+
+function Write-ResumeStateRetainedNotice {
+    <#
+    .SYNOPSIS
+        Logs "Resume state file retained for future runs: '<path>'" if
+        $StateFile exists on disk - a no-op otherwise (e.g. every
+        candidate ZIP was skipped/failed this run and nothing was ever
+        recorded, or a prior run never created the file either). Ported
+        verbatim from the original script's own end-of-run text (see
+        Modules\_Reference\Summary.reference.ps1) - Summary.ps1
+        deliberately did not pick this up (not its domain, this module's
+        instead), and this module never had a real call for it added
+        until now. Call once, at the very end of a rezip run, after
+        whatever completion writes that run made.
+    #>
+    param([Parameter(Mandatory)][string]$StateFile)
+
+    if (Test-Path -LiteralPath $StateFile) {
+        Write-Log ("Resume state file retained for future runs: '" + $StateFile + "'") -Level Summary
+    }
+}
