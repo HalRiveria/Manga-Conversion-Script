@@ -428,22 +428,24 @@ $fakeImageHandlerJ = {
     param($Path, $CjxlExe, $MagickExe, $JpegLossless, $JpegQuality, $MaxCjxlProcs, $FullLogging)
     $capturedJ.Path = $Path; $capturedJ.CjxlExe = $CjxlExe; $capturedJ.MagickExe = $MagickExe
     $capturedJ.JpegQuality = $JpegQuality; $capturedJ.MaxCjxlProcs = $MaxCjxlProcs; $capturedJ.FullLogging = $FullLogging
-    return @{ ConvertedSuccess = 3; ConvertedFail = 1; ConvertedSkipped = 2; DeletedSuccess = 3; DeletedFail = 0; StaleCleanedSuccess = 1; StaleCleanedFail = 0 }
+    return @{ ConvertedSuccess = 3; ConvertedFail = 1; ConvertedSkipped = 2; DeletedSuccess = 3; DeletedFail = 0; StaleCleanedSuccess = 1; StaleCleanedFail = 0; InspectFailedCount = 2 }
 }.GetNewClosure()
 $statsJ = Invoke-Mode -Resolved @{ Mode = 'ImageConversion' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ImageConversionHandler $fakeImageHandlerJ
 
 Test-Assert ($capturedJ.Path -eq "C:\fake\lib" -and $capturedJ.CjxlExe -eq "fake_cjxl.exe" -and $capturedJ.JpegQuality -eq 77 -and $capturedJ.MaxCjxlProcs -eq 6) "ImageConversion: real Settings values reached the handler"
 Test-Assert ($statsJ.LooseImgConverted.Success -eq 3 -and $statsJ.LooseImgConverted.Fail -eq 1 -and $statsJ.LooseImgConverted.Skipped -eq 2) "ImageConversion: LooseImgConverted mapped correctly"
 Test-Assert ($statsJ.LooseImgDeleted.Success -eq 3 -and $statsJ.LooseStaleCleaned.Success -eq 1) "ImageConversion: LooseImgDeleted/LooseStaleCleaned mapped correctly"
+Test-Assert ($statsJ.InspectFailed.Count -eq 2) "ImageConversion: InspectFailedCount mapped onto InspectFailed.Count"
 Write-Host ""
 
 Write-Host "=== Scenario K: Invoke-Mode / AnimatedConversion - param translation + result mapping ===" -ForegroundColor Cyan
 $fakeAnimHandlerK = { param($Path, $MagickExe, $AnimatedLossless, $AnimatedQuality, $AnimatedThreads, $AnimatedOverwrite, $AnimatedDeleteSource, $FullLogging)
-    return @{ ConvertedSuccess = 4; ConvertedFail = 0; ConvertedSkipped = 1; DeletedSuccess = 4; DeletedFail = 0 }
+    return @{ ConvertedSuccess = 4; ConvertedFail = 0; ConvertedSkipped = 1; DeletedSuccess = 4; DeletedFail = 0; InspectFailedCount = 1 }
 }
 $statsK = Invoke-Mode -Resolved @{ Mode = 'AnimatedConversion' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -AnimatedConversionHandler $fakeAnimHandlerK
 Test-Assert ($statsK.LooseAnimatedConverted.Success -eq 4 -and $statsK.LooseAnimatedConverted.Skipped -eq 1) "AnimatedConversion: LooseAnimatedConverted mapped correctly"
 Test-Assert ($statsK.LooseAnimatedDeleted.Success -eq 4) "AnimatedConversion: LooseAnimatedDeleted mapped correctly"
+Test-Assert ($statsK.InspectFailed.Count -eq 1) "AnimatedConversion: InspectFailedCount mapped onto InspectFailed.Count"
 Write-Host ""
 
 Write-Host "=== Scenario L: Invoke-Mode / ZipFolders - result mapping ===" -ForegroundColor Cyan
@@ -471,19 +473,59 @@ $fakeFullHandlerN = { param($Path, $CjxlExe, $MagickExe, $JpegLossless, $JpegQua
         StaleImageCleanedSuccess = 0; StaleImageCleanedFail = 0
         ConvertedAnimatedSuccess = 2; ConvertedAnimatedFail = 0; ConvertedAnimatedSkipped = 0; DeletedAnimatedSuccess = 2; DeletedAnimatedFail = 0
         ZipCreatedSuccess = 3; ZipCreatedFail = 0; ZipSkippedDueToError = 0; FolderDeletedSuccess = 3; FolderDeletedFail = 0
-        ForceKilledCount = 0; SeriesCount = 1; ChapterCount = 3; Aborted = $false
+        ForceKilledCount = 0; InspectFailedCount = 4; SeriesCount = 1; ChapterCount = 3; Aborted = $false
     }
 }
 $statsN = Invoke-Mode -Resolved @{ Mode = 'FullPipeline' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -FullPipelineHandler $fakeFullHandlerN
 Test-Assert ($statsN.LooseImgConverted.Success -eq 5 -and $statsN.LooseAnimatedConverted.Success -eq 2 -and $statsN.LooseFolderZipped.Success -eq 3) "FullPipeline: image + animated + zip stat groups all mapped in one call"
+Test-Assert ($statsN.InspectFailed.Count -eq 4) "FullPipeline: InspectFailedCount (both engines summed by Controller.ps1) mapped onto InspectFailed.Count"
 Write-Host ""
 
-Write-Host "=== Scenario O: Invoke-Mode / ImageConversionZip (mode 8) - known partial stub, behaves like ImageConversion ===" -ForegroundColor Cyan
-$fakeImageHandlerO = { param($Path, $CjxlExe, $MagickExe, $JpegLossless, $JpegQuality, $MaxCjxlProcs, $FullLogging)
-    return @{ ConvertedSuccess = 1; ConvertedFail = 0; ConvertedSkipped = 0; DeletedSuccess = 1; DeletedFail = 0; StaleCleanedSuccess = 0; StaleCleanedFail = 0 }
-}
-$statsO = Invoke-Mode -Resolved @{ Mode = 'ImageConversionZip' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ImageConversionHandler $fakeImageHandlerO
-Test-Assert ($statsO.LooseImgConverted.Success -eq 1) "ImageConversionZip: still dispatches to the image handler (stub, no zip step yet)"
+Write-Host "=== Scenario O: Invoke-Mode / ImageConversionZip (mode 8) - real zip-step wiring, 2026-08-28 ===" -ForegroundColor Cyan
+# This fake -ImageConversionHandler simulates what the real
+# Invoke-LooseImageConversionPipeline does: actually invokes the
+# -ZipStepCallback it was given, so this scenario proves the CALLBACK's
+# own logic (extension selection, Status/Detail mapping) - not just that
+# a callback object gets constructed and never used.
+$zipHandlerCallsO = [System.Collections.Generic.List[hashtable]]::new()
+$fakeZipFolderHandlerO = {
+    param($FolderPath, $ZipOut, $LooseImageExtensions)
+    $zipHandlerCallsO.Add(@{ FolderPath = $FolderPath; ZipOut = $ZipOut; LooseImageExtensions = $LooseImageExtensions })
+    return @{ Status = "Success"; ZipSize = 123; EntryCount = 4; FolderDeleted = $true; FolderDeleteFailed = $false }
+}.GetNewClosure()
+$zipOutcomeBoxO = @{ Value = $null }
+$fakeImageHandlerO = {
+    param($Path, $CjxlExe, $MagickExe, $JpegLossless, $JpegQuality, $MaxCjxlProcs, $FullLogging, $ZipStepCallback)
+    # Mutate the boxed hashtable's key, not reassign a bare/$script: var -
+    # .GetNewClosure() puts this scriptblock in its own dynamic module, so
+    # a bare "$zipOutcomeSeenO = ..." (or even "$script:zipOutcomeSeenO =
+    # ..." for a variable that doesn't already exist in script scope
+    # before the closure is created) would silently write to a
+    # disconnected copy the outer scope never sees - see
+    # Docs/lessons-learned.md and CLAUDE.md's "Lessons learned", same
+    # trap this project has been bitten by before. $capturedJ (Scenario
+    # J, above) already uses this exact box pattern successfully.
+    $zipOutcome = & $ZipStepCallback @{ Dir = (Get-Item -LiteralPath $Path); ZipOut = (Join-Path $Path "Chapter.zip") }
+    $zipOutcomeBoxO.Value = $zipOutcome
+    return @{ ConvertedSuccess = 1; ConvertedFail = 0; ConvertedSkipped = 0; DeletedSuccess = 1; DeletedFail = 0; StaleCleanedSuccess = 0; StaleCleanedFail = 0; InspectFailedCount = 0 }
+}.GetNewClosure()
+
+$fakeSettingsO = $fakeSettings.Clone()
+$fakeSettingsO.ZipWithUnconvertedAnimated = $false
+$statsO = Invoke-Mode -Resolved @{ Mode = 'ImageConversionZip' } -TargetPath $scratchDir -Settings $fakeSettingsO -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ImageConversionHandler $fakeImageHandlerO -ZipFolderHandler $fakeZipFolderHandlerO
+
+Test-Assert ($statsO.LooseImgConverted.Success -eq 1) "ImageConversionZip: image conversion still ran and mapped correctly"
+Test-Assert ($zipHandlerCallsO.Count -eq 1) ("the zip-folder handler fired exactly once (got " + $zipHandlerCallsO.Count + ")")
+Test-Assert ($zipHandlerCallsO[0].LooseImageExtensions -contains ".avif") "ZipWithUnconvertedAnimated=false (default): .avif is in the blocking extension list"
+Test-Assert ($zipOutcomeBoxO.Value.Status -eq "Success" -and $zipOutcomeBoxO.Value.Detail -eq "4 entries") "the callback mapped the zip result into @{ Status; Detail } correctly"
+
+# Flip the setting: .avif should be EXCLUDED from the blocking list, so an
+# unconverted .avif sitting in the folder no longer blocks zipping.
+$zipHandlerCallsO.Clear()
+$fakeSettingsO2 = $fakeSettings.Clone()
+$fakeSettingsO2.ZipWithUnconvertedAnimated = $true
+$null = Invoke-Mode -Resolved @{ Mode = 'ImageConversionZip' } -TargetPath $scratchDir -Settings $fakeSettingsO2 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ImageConversionHandler $fakeImageHandlerO -ZipFolderHandler $fakeZipFolderHandlerO
+Test-Assert ($zipHandlerCallsO[0].LooseImageExtensions -notcontains ".avif") "ZipWithUnconvertedAnimated=true: .avif is EXCLUDED from the blocking extension list"
 Write-Host ""
 
 Write-Host "=== Scenario P: Invoke-Mode / blank MagickExe fails fast for magick-dependent modes ===" -ForegroundColor Cyan
@@ -513,6 +555,37 @@ $logHandlerR = { param($m) $fatalMsgsR.Add($m) }.GetNewClosure()
 $statsR = Invoke-Mode -Resolved @{ Mode = 'NotARealMode' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -LogHandler $logHandlerR
 Test-Assert ($null -eq $statsR) "an unrecognized mode returns `$null"
 Test-Assert ($fatalMsgsR.Count -eq 1 -and $fatalMsgsR[0] -match "unrecognized mode") "the fatal message names the bad mode string"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario S: back to the REAL Invoke-FullPipeline (not Invoke-Mode) -
+#  Convert-ImageBatch's new InspectFailedCount field (a real
+#  Test-AvifAnimated failure) is summed into Invoke-FullPipeline's own
+#  totals (2026-08-28), same as the pre-existing animated-engine field.
+#
+#  NOTE ON SCOPE: Invoke-FullPipeline's own -LooseImageExtensions default
+#  deliberately still does NOT include .avif (unlike
+#  ImageConversionPipeline.ps1's own default, which now does) - adding it
+#  would make BOTH engines independently discover and dispatch the SAME
+#  .avif file at once (Get-LooseImageCandidates AND
+#  Get-LooseAnimatedCandidates both defaulting to .avif), a real race
+#  between two concurrently-running engines that could delete a file out
+#  from under the other mid-identify. That's a genuine, pre-existing gap
+#  (Full Pipeline never routed static AVIF to the image engine before
+#  this session either) surfaced while verifying THIS change, not solved
+#  by it - flagged in Todo.md, not fixed here. This scenario isolates
+#  Invoke-FullPipeline's own accumulation line by explicitly routing the
+#  AVIF only to the image engine (-AnimatedFileExtensions @()) - a test
+#  construction, not a claim that's a supported real configuration.
+# ==============================================================================
+Write-Host "=== Scenario S: Invoke-FullPipeline sums the image engine's InspectFailedCount too ===" -ForegroundColor Cyan
+$chS = New-Dir "scenario-s\Series\Chapter 1"
+[System.IO.File]::WriteAllText((Join-Path $chS "corrupt.avif"), "FAIL_IDENTIFY")
+
+$totalsS = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-s") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true `
+    -LooseImageExtensions @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif") -AnimatedFileExtensions @()
+
+Test-Assert ($totalsS.InspectFailedCount -eq 1) ("the image engine's inspect-failure was summed into Invoke-FullPipeline's own totals (got " + $totalsS.InspectFailedCount + ")")
 Write-Host ""
 
 # ==============================================================================

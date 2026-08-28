@@ -42,6 +42,19 @@
     field names/shape once that module is actually built (see CLAUDE.md's
     Known gaps, same note extended to cover this module too).
 
+    InspectFailed (2026-08-28, Todo.md's decided design): its own field,
+    NOT folded into any engine's Fail count - "couldn't determine if a
+    file is animated" (a real Test-AvifAnimated failure) isn't the same
+    kind of outcome as "conversion actually failed," same distinction
+    this module already draws for StaticSkippedCount getting no row at
+    all (a static AVIF being left alone is expected, not report-worthy -
+    InspectFailed IS report-worthy, a genuine "couldn't tell" problem).
+    Shared by BOTH the image and animated engines (each can hit this same
+    failure mode independently now that ImageConversionPipeline.ps1 also
+    does its own Test-AvifAnimated call for the static-AVIF path) -
+    shown whenever either RunImageConversion or RunAnimatedConversion is
+    active, one shared line rather than two near-duplicate ones.
+
 .NOTES
     Extracted from Conversion Script Main.ps1 - see
     Modules\_Reference\Summary.reference.ps1 for the verbatim source this
@@ -73,6 +86,7 @@ function New-StatsTracker {
         LooseFolderDeleted     = @{ Success = 0; Fail = 0 }
         ZipOnlyZipped          = @{ Success = 0; Fail = 0 }
         ZipOnlyFolderDeleted   = @{ Success = 0; Fail = 0 }
+        InspectFailed          = @{ Count = 0 }
     }
 }
 
@@ -133,6 +147,10 @@ function Get-SummaryLines {
     if ($ModeFlags.RunAnimatedConversion) {
         $lines.Add("Loose Anim. Conv.   : Success = " + $Stats.LooseAnimatedConverted.Success + "  |  Failed = " + $Stats.LooseAnimatedConverted.Fail + "  |  Skipped (already converted) = " + $Stats.LooseAnimatedConverted.Skipped)
         $lines.Add("Loose Anim. Deleted : Success = " + $Stats.LooseAnimatedDeleted.Success   + "  |  Failed = " + $Stats.LooseAnimatedDeleted.Fail)
+    }
+
+    if ($ModeFlags.RunImageConversion -or $ModeFlags.RunAnimatedConversion) {
+        $lines.Add("Inspect Failed      : " + $Stats.InspectFailed.Count + " file(s) - could not determine if animated")
     }
 
     if ($ModeFlags.RunZip) {

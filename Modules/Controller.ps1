@@ -145,14 +145,14 @@
     overrides its handler explicitly (the real-function defaults only
     matter for an actual caller that doesn't override them).
 
-    Mode 8 (ImageConversionZip) is a KNOWN PARTIAL STUB here, matching
-    the main script's own stub - it dispatches to
-    Invoke-LooseImageConversionPipeline exactly like mode 2, no zip step.
-    The real zip wiring (an optional -ZipStepCallback on
-    ImageConversionPipeline.ps1's own orchestrator, decided in Todo.md)
-    is Phase 2 of the agreed build plan - deliberately not done here so
-    Invoke-Mode could be built and proven standalone first, touching no
-    other module.
+    Mode 8 (ImageConversionZip) - real, built 2026-08-28 (Phase 2 of the
+    build plan): dispatches to Invoke-LooseImageConversionPipeline with a
+    real -ZipStepCallback closure that owns mode 8's own business logic
+    (which extensions block zipping, based on
+    $Settings.ZipWithUnconvertedAnimated) and calls Invoke-LooseFolderZip
+    (ZipPipeline.ps1) via the injectable -ZipFolderHandler. Deliberately
+    was a stub through Phase 1 - built here only once Invoke-Mode itself
+    was proven standalone, touching no other module.
 
     NOT BUILT HERE (see this module's own header intro and Todo.md):
     Show-PostRunPrompt's run-loop - confirmed in scope, deliberately not
@@ -189,8 +189,10 @@
         sourced by this module's own harness, see above
       - Invoke-RezipPipeline (RezipPipeline.ps1) - same caveat, for
         -ConvertZippedHandler
+      - Invoke-LooseFolderZip (ZipPipeline.ps1) - same caveat, for
+        -ZipFolderHandler (mode 8's real zip step, built 2026-08-28)
       - New-StatsTracker (Summary.ps1) - Invoke-Mode's own output shape,
-        needed unconditionally (not caveat-gated like the two above)
+        needed unconditionally (not caveat-gated like the ones above)
     Same dot-source ordering rule as ZipPipeline.ps1/RezipPipeline.ps1:
     Logging.ps1/FileDeletion.ps1 BEFORE ZipParallelProcessing.ps1, since
     -SharedFunctionNames captures whichever definition is CURRENTLY
@@ -497,7 +499,12 @@ function Invoke-FullPipeline {
            DeletedAnimatedSuccess; DeletedAnimatedFail;
            ZipCreatedSuccess; ZipCreatedFail; ZipSkippedDueToError;
            FolderDeletedSuccess; FolderDeletedFail;
-           ForceKilledCount; SeriesCount; ChapterCount; Aborted }
+           ForceKilledCount; InspectFailedCount; SeriesCount; ChapterCount;
+           Aborted } - InspectFailedCount (added 2026-08-28) sums BOTH
+        engines' own field of the same name (a real Test-AvifAnimated
+        failure inside Convert-ImageBatch's new static-AVIF path, or
+        Convert-AnimatedBatch's pre-existing one) - matches Summary.ps1's
+        new InspectFailed row, which reads from either engine.
     #>
     param(
         [Parameter(Mandatory)]
@@ -536,6 +543,7 @@ function Invoke-FullPipeline {
         ZipCreatedSuccess        = 0; ZipCreatedFail        = 0; ZipSkippedDueToError = 0
         FolderDeletedSuccess     = 0; FolderDeletedFail     = 0
         ForceKilledCount         = 0
+        InspectFailedCount       = 0
         SeriesCount              = 0
         ChapterCount             = 0
         Aborted                  = $false
@@ -645,6 +653,7 @@ function Invoke-FullPipeline {
                     $totals.DeletedImageSuccess   += $ir.DeletedCount
                     $totals.DeletedImageFail      += $ir.DeleteFailedCount
                     $totals.ForceKilledCount      += $ir.ForceKilledCount
+                    $totals.InspectFailedCount    += $ir.InspectFailedCount
                 }
                 if ($null -ne $chapterOutcome.AnimatedResult) {
                     $ar = $chapterOutcome.AnimatedResult
@@ -654,6 +663,7 @@ function Invoke-FullPipeline {
                     $totals.DeletedAnimatedSuccess   += $ar.DeletedCount
                     $totals.DeletedAnimatedFail      += $ar.DeleteFailedCount
                     $totals.ForceKilledCount         += $ar.ForceKilledCount
+                    $totals.InspectFailedCount       += $ar.InspectFailedCount
                 }
 
                 if ($chapterOutcome.Zipped) {
@@ -715,6 +725,15 @@ function Invoke-Mode {
         resolve at all, so it never needs Invoke-Mode's own harness to
         dot-source ZipPipeline.ps1/RezipPipeline.ps1 - see this module's
         header.
+    .PARAMETER ZipFolderHandler
+        Mode 8's real zip step (2026-08-28, Phase 2) - defaults to
+        Invoke-LooseFolderZip (ZipPipeline.ps1), same injectable/caveat-
+        gated shape as the handlers above. The closure built for mode 8's
+        -ZipStepCallback calls this WITHOUT -SeriesName/-ChapterName
+        (Invoke-LooseFolderZip would start its own CCR transition
+        otherwise - see ImageConversionPipeline.ps1's -ZipStepCallback
+        contract) and owns mode 8's own business logic - which extensions
+        block zipping, based on $Settings.ZipWithUnconvertedAnimated.
     .PARAMETER LogHandler
         Passed straight to Invoke-AbortOrFatalHandler on a caught
         exception. Defaults to a real Write-Log Error call (this module
@@ -746,6 +765,7 @@ function Invoke-Mode {
         [scriptblock]$ZipFoldersHandler = ${function:Invoke-ZipOnlyPipeline},
         [scriptblock]$ConvertZippedHandler = ${function:Invoke-RezipPipeline},
         [scriptblock]$FullPipelineHandler = ${function:Invoke-FullPipeline},
+        [scriptblock]$ZipFolderHandler = ${function:Invoke-LooseFolderZip},
         [scriptblock]$LogHandler = { param($m) Write-Log $m -Level Error }
     )
 
@@ -768,6 +788,7 @@ function Invoke-Mode {
                 $stats.LooseImgConverted.Success = $r.ConvertedSuccess; $stats.LooseImgConverted.Fail = $r.ConvertedFail; $stats.LooseImgConverted.Skipped = $r.ConvertedSkipped
                 $stats.LooseImgDeleted.Success   = $r.DeletedSuccess;   $stats.LooseImgDeleted.Fail   = $r.DeletedFail
                 $stats.LooseStaleCleaned.Success = $r.StaleCleanedSuccess; $stats.LooseStaleCleaned.Fail = $r.StaleCleanedFail
+                $stats.InspectFailed.Count       = $r.InspectFailedCount
             }
             'AnimatedConversion' {
                 $r = & $AnimatedConversionHandler -Path $TargetPath -MagickExe $MagickExe `
@@ -775,6 +796,7 @@ function Invoke-Mode {
                     -AnimatedOverwrite $Settings.AnimatedOverwrite -AnimatedDeleteSource $Settings.AnimatedDeleteSource -FullLogging $Settings.FullLogging
                 $stats.LooseAnimatedConverted.Success = $r.ConvertedSuccess; $stats.LooseAnimatedConverted.Fail = $r.ConvertedFail; $stats.LooseAnimatedConverted.Skipped = $r.ConvertedSkipped
                 $stats.LooseAnimatedDeleted.Success   = $r.DeletedSuccess;   $stats.LooseAnimatedDeleted.Fail   = $r.DeletedFail
+                $stats.InspectFailed.Count            = $r.InspectFailedCount
             }
             'ZipFolders' {
                 $r = & $ZipFoldersHandler -Path $TargetPath -MaxParallel $Settings.ZipParallelThreads -DeleteFolders $true `
@@ -804,17 +826,54 @@ function Invoke-Mode {
                 $stats.LooseAnimatedDeleted.Success   = $r.DeletedAnimatedSuccess;   $stats.LooseAnimatedDeleted.Fail   = $r.DeletedAnimatedFail
                 $stats.LooseFolderZipped.Success      = $r.ZipCreatedSuccess;        $stats.LooseFolderZipped.Fail      = $r.ZipCreatedFail;        $stats.LooseFolderZipped.Skipped = $r.ZipSkippedDueToError
                 $stats.LooseFolderDeleted.Success     = $r.FolderDeletedSuccess;     $stats.LooseFolderDeleted.Fail     = $r.FolderDeletedFail
+                $stats.InspectFailed.Count            = $r.InspectFailedCount
             }
             'ImageConversionZip' {
-                # KNOWN PARTIAL STUB - see this module's header. Behaves
-                # exactly like 'ImageConversion' until Phase 2 wires
-                # ImageConversionPipeline.ps1's -ZipStepCallback through.
-                Write-Log "Mode 8 (Image Conversion + Zip) is a STUB pending -ZipStepCallback wiring (Todo.md Phase 2) - running plain conversion only for now, no zip step." -Level Warn
+                # Mode 8's real zip-step wiring (2026-08-28, Phase 2 of the
+                # build plan) - the -ZipStepCallback contract ImageConversionPipeline.ps1
+                # decided: this closure owns ALL of mode 8's own business
+                # logic (which extensions block zipping, based on
+                # ZipWithUnconvertedAnimated), while ImageConversionPipeline.ps1
+                # itself only decides WHETHER to call it (IsZippable/Error
+                # gate) and folds its @{ Status; Detail } return into the
+                # SAME Complete-ChapterProgress call conversion already
+                # makes - see that module's own header/docstring.
+                # Deliberately does NOT pass -SeriesName/-ChapterName to
+                # -ZipFolderHandler - that would make Invoke-LooseFolderZip
+                # start its OWN CCR transition, which is exactly the
+                # second-transition shape this design rejected.
+                $zipLooseExtensions = if ($Settings.ZipWithUnconvertedAnimated) {
+                    @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif")
+                } else {
+                    @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif")
+                }
+                $zipStep = {
+                    param($Info)
+                    $zipResult = & $ZipFolderHandler -FolderPath $Info.Dir.FullName -ZipOut $Info.ZipOut -LooseImageExtensions $zipLooseExtensions
+                    $detail = switch ($zipResult.Status) {
+                        'Success' { $zipResult.EntryCount.ToString() + " entries" }
+                        'Skipped' { "unconverted source(s) remain" }
+                        default   { $null }
+                    }
+                    return @{ Status = $zipResult.Status; Detail = $detail }
+                }.GetNewClosure()
+
                 $r = & $ImageConversionHandler -Path $TargetPath -CjxlExe $CjxlExe -MagickExe $MagickExe `
-                    -JpegLossless $Settings.JpegLossless -JpegQuality $Settings.JpegQuality -MaxCjxlProcs $Settings.MaxCjxlProcs -FullLogging $Settings.FullLogging
+                    -JpegLossless $Settings.JpegLossless -JpegQuality $Settings.JpegQuality -MaxCjxlProcs $Settings.MaxCjxlProcs -FullLogging $Settings.FullLogging `
+                    -ZipStepCallback $zipStep
                 $stats.LooseImgConverted.Success = $r.ConvertedSuccess; $stats.LooseImgConverted.Fail = $r.ConvertedFail; $stats.LooseImgConverted.Skipped = $r.ConvertedSkipped
                 $stats.LooseImgDeleted.Success   = $r.DeletedSuccess;   $stats.LooseImgDeleted.Fail   = $r.DeletedFail
                 $stats.LooseStaleCleaned.Success = $r.StaleCleanedSuccess; $stats.LooseStaleCleaned.Fail = $r.StaleCleanedFail
+                $stats.InspectFailed.Count       = $r.InspectFailedCount
+                # LooseFolderZipped/LooseFolderDeleted are NOT populated
+                # here - Invoke-LooseImageConversionPipeline's own $totals
+                # has no zip-step counters (that's ZipPipeline.ps1's
+                # domain, deliberately kept decoupled - see this module's
+                # header). A future pass could thread zip outcomes back
+                # through -ZipStepCallback's own closure state if that
+                # reporting gap turns out to matter in practice; not done
+                # here to avoid inventing an accumulation mechanism the
+                # design never actually asked for.
             }
             default {
                 throw ("Invoke-Mode: unrecognized mode '" + $Resolved.Mode + "'.")

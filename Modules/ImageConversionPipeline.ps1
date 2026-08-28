@@ -75,12 +75,20 @@
       - Start-SeriesProgress, Start-ChapterProgress,
         Complete-ChapterProgress, Complete-AllActiveSeriesProgress
         (CleanConsoleRendering.ps1)
+      - Test-AvifAnimated (AnimatedConversionPipeline.ps1) - NEW
+        2026-08-28, for the static-AVIF conversion path in
+        Convert-ImageBatch (see "STATIC AVIF -> JXL" below). Spawns a
+        real magick identify process - not a cheap byte read like the
+        WebP animation check - so this module now genuinely depends on
+        AnimatedConversionPipeline.ps1 being dot-sourced first, a real
+        new coupling between the two, not just a docstring note.
     Modules\_Harness\ImageConversionPipeline.Harness.ps1 dot-sources the
     real Logging.ps1/FileDeletion.ps1/AbortPipeline.ps1/
-    LeafDirectoryDiscovery.ps1/CleanConsoleRendering.ps1, and compiles a
-    small real stand-in executable (via Add-Type -OutputType
-    ConsoleApplication) to serve as $CjxlExe/$MagickExe -
-    Convert-ImageBatch spawns real OS processes via
+    LeafDirectoryDiscovery.ps1/CleanConsoleRendering.ps1/
+    AnimatedConversionPipeline.ps1 (the last one added 2026-08-28, for
+    Test-AvifAnimated), and compiles a small real stand-in executable
+    (via Add-Type -OutputType ConsoleApplication) to serve as
+    $CjxlExe/$MagickExe - Convert-ImageBatch spawns real OS processes via
     System.Diagnostics.Process, so a genuine (if fake) executable is used
     rather than mocking the process layer away.
 
@@ -101,6 +109,42 @@
     value instead of waiting out a real 60s drain, matching the same
     fix already applied to AbortPipeline.ps1's Invoke-GracefulDrain.
 
+    STATIC AVIF -> JXL (2026-08-28, Phase 2 of the main-script-rewrite
+    build plan, Todo.md): decided unconditionally, no toggle - convert
+    static AVIF the same as everything else, for consistency with the
+    rest of the library. Lives HERE, not AnimatedConversionPipeline.ps1,
+    since it's a static-image concern - reuses the exact same "transcode
+    to a temp PNG via magick, then hand that to cjxl" detour already
+    built for WebP (the two now share one code path in the dispatch
+    loop below, the WebP/AVIF-specific parts are only the pre-checks:
+    the byte-level VP8X animation-flag read for WebP, a real
+    Test-AvifAnimated call - a magick identify process spawn, NOT a
+    cheap byte read - for AVIF). Animated AVIF is left untouched here,
+    same as animated WebP - it has its own conversion pipeline
+    (AnimatedConversionPipeline.ps1). A real Test-AvifAnimated failure
+    (couldn't determine frame count) is its own outcome, NOT folded into
+    FailedCount or SkippedCount - see the new InspectFailedCount field,
+    matching Convert-AnimatedBatch's own field of the same name for the
+    identical failure mode (this project's own "give it its own field,
+    don't fold it into Fail" call, see Todo.md's Summary.ps1 decision -
+    applied here preemptively for consistency, not just in Summary.ps1
+    itself, ahead of the project owner's own requested cross-codebase
+    naming/consistency review, Todo.md Phase 4).
+
+    -ZIPSTEPCALLBACK (2026-08-28, Phase 2): mode 8's ("Image Conversion +
+    Zip") decided CCR-fold mechanism - see .PARAMETER ZipStepCallback on
+    Invoke-LooseImageConversionPipeline below and Docs/menu-design.md.
+    Delays Complete-ChapterProgress until after the callback returns (if
+    one was supplied and the chapter is zippable and conversion didn't
+    already hit an Error), then merges both outcomes into ONE Detail/
+    Status - mirrors Controller.ps1's Get-MergedChapterStatus merge
+    shape (worst-of-two, concatenated sub-summaries) without importing
+    that function directly, since the zip callback's own return shape
+    (@{ Status; Detail }) is already simple enough not to need it. $null
+    default (mode 2's existing behavior) leaves Get-ChapterProgressStatus's
+    own Detail format completely unchanged - the "Convert: ... | Zip: ..."
+    concatenation only ever appears when a real callback actually ran.
+
 .NOTES
     Extracted from Conversion Script Main.ps1 - see
     Modules\_Reference\ImageConversionPipeline.reference.ps1 for the
@@ -114,16 +158,23 @@
 function Convert-ImageBatch {
     <#
     .SYNOPSIS
-        Converts a batch of image files to .jxl via $CjxlExe (WebP inputs
-        are pre-converted to PNG via $MagickExe first; a PNG whose ICC
-        profile mismatches its actual pixel format is retried once with
-        the profile stripped). Dispatches up to $MaxCjxlProcs processes in
-        parallel, deletes each source on a successful conversion, and
-        gracefully drains (then force-kills stragglers) on cancellation.
+        Converts a batch of image files to .jxl via $CjxlExe (WebP/static-
+        AVIF inputs are pre-converted to PNG via $MagickExe first; a PNG
+        whose ICC profile mismatches its actual pixel format is retried
+        once with the profile stripped). Animated WebP/AVIF are skipped,
+        not converted - AVIF has its own conversion pipeline
+        (AnimatedConversionPipeline.ps1). Dispatches up to $MaxCjxlProcs
+        processes in parallel, deletes each source on a successful
+        conversion, and gracefully drains (then force-kills stragglers)
+        on cancellation.
     .OUTPUTS
         @{ ConvertedCount; FailedCount; SkippedCount; DeletedCount;
            DeleteFailedCount; ConvertedPaths; SkippedPaths; PendingPaths;
-           ForceKilledCount }
+           ForceKilledCount; InspectFailedCount } - InspectFailedCount is
+        AVIF-only: a real magick identify failure (couldn't determine
+        whether the file is animated), NOT folded into FailedCount -
+        matches Convert-AnimatedBatch's own field of the same name for
+        the identical failure mode.
     #>
     param(
         [System.IO.FileInfo[]]$ImageFiles,
@@ -147,15 +198,16 @@ function Convert-ImageBatch {
     )
 
     $batchResult = @{
-        ConvertedCount    = 0
-        FailedCount       = 0
-        SkippedCount      = 0
-        DeletedCount      = 0
-        DeleteFailedCount = 0
-        ConvertedPaths    = [System.Collections.Generic.List[string]]::new()
-        SkippedPaths      = [System.Collections.Generic.List[string]]::new()
-        PendingPaths      = [System.Collections.Generic.List[string]]::new()
-        ForceKilledCount  = 0
+        ConvertedCount     = 0
+        FailedCount        = 0
+        SkippedCount       = 0
+        DeletedCount       = 0
+        DeleteFailedCount  = 0
+        ConvertedPaths     = [System.Collections.Generic.List[string]]::new()
+        SkippedPaths       = [System.Collections.Generic.List[string]]::new()
+        PendingPaths       = [System.Collections.Generic.List[string]]::new()
+        ForceKilledCount   = 0
+        InspectFailedCount = 0
     }
 
     if (-not $ImageFiles -or $ImageFiles.Count -eq 0) { return $batchResult }
@@ -219,43 +271,72 @@ function Convert-ImageBatch {
             $psi.RedirectStandardError  = $true
             $psi.CreateNoWindow         = $true
 
-            # cjxl 0.11.x cannot read WebP directly - transcode to a temp PNG first.
-            # Animated WebPs are skipped entirely (cjxl has no multi-frame support).
+            # cjxl 0.11.x cannot read WebP or AVIF directly - transcode to a
+            # temp PNG first. Animated WebP/AVIF are skipped entirely (cjxl
+            # has no multi-frame support) - animated AVIF has its own
+            # conversion pipeline, AnimatedConversionPipeline.ps1. The two
+            # formats share this one transcode step; only the animation
+            # pre-check differs (a cheap WebP byte read vs. a real magick
+            # identify process spawn for AVIF - see this module's header,
+            # "STATIC AVIF -> JXL").
             $isWebp = ($j.SrcPath -imatch '\.webp$')
-            if ($isWebp) {
+            $isAvif = ($j.SrcPath -imatch '\.avif$')
+            if ($isWebp -or $isAvif) {
+                $formatLabel = if ($isAvif) { "AVIF" } else { "WebP" }
                 if (-not $MagickExe) {
-                    Write-Log ("SKIPPING WebP '" + $j.SrcPath + "': ImageMagick not found. Install ImageMagick or pass -MagickPath.") -Level Error
+                    Write-Log ("SKIPPING " + $formatLabel + " '" + $j.SrcPath + "': ImageMagick not found. Install ImageMagick or pass -MagickPath.") -Level Error
                     $batchResult.FailedCount++
                     if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
                     continue
                 }
 
-                # --- Animated WebP check (VP8X chunk, no process spawn) ---
-                # Animated WebPs carry a VP8X extended-format chunk at offset 12.
-                # Bit 1 (0x02) of its flags field (offset 20) is the Animation flag.
-                # Simple lossy (VP8 ) and lossless (VP8L) files cannot be animated.
-                $webpBytes  = [System.IO.File]::ReadAllBytes($j.SrcPath)
-                $isAnimated = $false
-                if ($webpBytes.Length -ge 24) {
-                    $chunkId = [System.Text.Encoding]::ASCII.GetString($webpBytes, 12, 4)
-                    if ($chunkId -eq 'VP8X') {
-                        $flags      = [System.BitConverter]::ToUInt32($webpBytes, 20)
-                        $isAnimated = ($flags -band 0x02) -ne 0
+                if ($isWebp) {
+                    # --- Animated WebP check (VP8X chunk, no process spawn) ---
+                    # Animated WebPs carry a VP8X extended-format chunk at offset 12.
+                    # Bit 1 (0x02) of its flags field (offset 20) is the Animation flag.
+                    # Simple lossy (VP8 ) and lossless (VP8L) files cannot be animated.
+                    $webpBytes  = [System.IO.File]::ReadAllBytes($j.SrcPath)
+                    $isAnimated = $false
+                    if ($webpBytes.Length -ge 24) {
+                        $chunkId = [System.Text.Encoding]::ASCII.GetString($webpBytes, 12, 4)
+                        if ($chunkId -eq 'VP8X') {
+                            $flags      = [System.BitConverter]::ToUInt32($webpBytes, 20)
+                            $isAnimated = ($flags -band 0x02) -ne 0
+                        }
                     }
-                }
 
-                if ($isAnimated) {
-                    Write-Log ("SKIPPING animated WebP '" + $j.SrcPath + "': Animation flag set in VP8X chunk - animated WebP cannot be converted to JXL (no multi-frame support). File left untouched.") -Level Warn
-                    $batchResult.SkippedCount++
-                    $batchResult.SkippedPaths.Add($j.SrcPath)
-                    if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
-                    continue
+                    if ($isAnimated) {
+                        Write-Log ("SKIPPING animated WebP '" + $j.SrcPath + "': Animation flag set in VP8X chunk - animated WebP cannot be converted to JXL (no multi-frame support). File left untouched.") -Level Warn
+                        $batchResult.SkippedCount++
+                        $batchResult.SkippedPaths.Add($j.SrcPath)
+                        if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
+                        continue
+                    }
+                    # --- End animated WebP check ---
+                } else {
+                    # --- Animated AVIF check (real magick identify spawn) ---
+                    $isAnimatedAvif = $false
+                    try {
+                        $isAnimatedAvif = Test-AvifAnimated -AvifPath $j.SrcPath -MagickExe $MagickExe
+                    } catch {
+                        Write-Log ("Could not determine if AVIF '" + $j.SrcPath + "' is animated - skipping: " + $_) -Level Warn
+                        $batchResult.InspectFailedCount++
+                        if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
+                        continue
+                    }
+                    if ($isAnimatedAvif) {
+                        Write-Log ("SKIPPING animated AVIF '" + $j.SrcPath + "': has its own conversion pipeline (AnimatedConversionPipeline.ps1) - not converted here.") -Level Warn
+                        $batchResult.SkippedCount++
+                        $batchResult.SkippedPaths.Add($j.SrcPath)
+                        if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
+                        continue
+                    }
+                    # --- End animated AVIF check ---
                 }
-                # --- End animated WebP check ---
 
                 $tempPng = [System.IO.Path]::Combine(
                     [System.IO.Path]::GetDirectoryName($j.SrcPath),
-                    [System.IO.Path]::GetFileNameWithoutExtension($j.SrcPath) + "_tmp_webp2png.png"
+                    [System.IO.Path]::GetFileNameWithoutExtension($j.SrcPath) + "_tmp_" + $formatLabel.ToLowerInvariant() + "2png.png"
                 )
                 $magickPsi = New-Object System.Diagnostics.ProcessStartInfo
                 $magickPsi.FileName               = $MagickExe
@@ -269,7 +350,7 @@ function Convert-ImageBatch {
                 $magickExitCode = $magickProc.ExitCode
                 $magickProc.Dispose()
                 if ($magickExitCode -ne 0 -or -not (Test-Path -LiteralPath $tempPng)) {
-                    Write-Log ("FAILED WebP->PNG pre-conversion for '" + $j.SrcPath + "': magick exited " + $magickExitCode) -Level Error
+                    Write-Log ("FAILED " + $formatLabel + "->PNG pre-conversion for '" + $j.SrcPath + "': magick exited " + $magickExitCode) -Level Error
                     $batchResult.FailedCount++
                     if (Test-Path -LiteralPath $tempPng) { try { [System.IO.File]::Delete($tempPng) } catch { } }
                     if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
@@ -556,7 +637,7 @@ function Get-LooseImageCandidates {
     param(
         [Parameter(Mandatory)]
         [string]$ScanPath,
-        [string[]]$LooseImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif"),
+        [string[]]$LooseImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif"),
         [string[]]$KnownZipPaths = @(),
         [System.Collections.Generic.HashSet[string]]$ExcludeStagingDirs = $null
     )
@@ -705,12 +786,30 @@ function Invoke-LooseImageConversionPipeline {
         closure that calls ZipPipeline.ps1's Invoke-LooseFolderZip itself
         ONLY when IsZippable is true, matching Convert-ImageBatch's own
         -AbortPollCallback precedent for this kind of hook.
+    .PARAMETER ZipStepCallback
+        Mode 8's ("Image Conversion + Zip") decided CCR-fold mechanism,
+        2026-08-28 - see this module's header, "-ZIPSTEPCALLBACK".
+        Invoked with @{ SeriesName; ChapterName; Dir; ChapterResult;
+        ZipOut } ONLY when IsZippable is true AND conversion didn't
+        already hit an Error - must return @{ Status =
+        "Success"|"Fail"|"Skipped"; Detail = <string, or $null> } (or
+        $null itself for "did nothing"). Its outcome is merged into the
+        SAME Complete-ChapterProgress call conversion already makes
+        (worst-of-two Status, concatenated "Convert: ... | Zip: ..."
+        Detail) - NOT a second CCR transition. $null default (mode 2's
+        existing behavior) leaves everything about this function
+        completely unchanged. Deliberately dumb: this function only
+        decides WHETHER to call it (IsZippable/Error gate); mode-8-
+        specific business logic (e.g. ZipWithUnconvertedAnimated) belongs
+        inside the callback Controller.ps1 builds, not here.
     .OUTPUTS
         @{ ConvertedSuccess; ConvertedFail; ConvertedSkipped;
            DeletedSuccess; DeletedFail; StaleCleanedSuccess;
-           StaleCleanedFail; ForceKilledCount; LastCompletedPaths;
-           LastSkippedPaths; StillPendingPaths; SeriesCount; ChapterCount;
-           Aborted }
+           StaleCleanedFail; ForceKilledCount; InspectFailedCount;
+           LastCompletedPaths; LastSkippedPaths; StillPendingPaths;
+           SeriesCount; ChapterCount; Aborted } - InspectFailedCount is
+        the sum of every chapter's Convert-ImageBatch InspectFailedCount
+        (AVIF files whose animation status couldn't be determined).
     #>
     param(
         [Parameter(Mandatory)]
@@ -724,11 +823,12 @@ function Invoke-LooseImageConversionPipeline {
         [int]$MaxCjxlProcs,
         [Parameter(Mandatory)]
         [bool]$FullLogging,
-        [string[]]$LooseImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif"),
+        [string[]]$LooseImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif"),
         [string[]]$KnownZipPaths = @(),
         [string[]]$FolderQualifyingExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif"),
         [System.Collections.Generic.HashSet[string]]$FolderExcludeStagingDirs = $null,
         [scriptblock]$PostChapterCallback = $null,
+        [scriptblock]$ZipStepCallback = $null,
         [int]$AbortTimeoutSeconds = 60
     )
 
@@ -741,6 +841,7 @@ function Invoke-LooseImageConversionPipeline {
         StaleCleanedSuccess = 0
         StaleCleanedFail    = 0
         ForceKilledCount    = 0
+        InspectFailedCount  = 0
         LastCompletedPaths  = [System.Collections.Generic.List[string]]::new()
         LastSkippedPaths    = [System.Collections.Generic.List[string]]::new()
         StillPendingPaths   = [System.Collections.Generic.List[string]]::new()
@@ -907,12 +1008,13 @@ function Invoke-LooseImageConversionPipeline {
                         -AbortWaitMessage "[ABORT] Waiting for current loose-image jobs to finish (up to $AbortTimeoutSeconds s)..." `
                         -AbortTimeoutSeconds $AbortTimeoutSeconds
 
-                    $totals.ConvertedSuccess += $chapterResult.ConvertedCount
-                    $totals.ConvertedFail    += $chapterResult.FailedCount
-                    $totals.ConvertedSkipped += $chapterResult.SkippedCount
-                    $totals.DeletedSuccess   += $chapterResult.DeletedCount
-                    $totals.DeletedFail      += $chapterResult.DeleteFailedCount
-                    $totals.ForceKilledCount += $chapterResult.ForceKilledCount
+                    $totals.ConvertedSuccess    += $chapterResult.ConvertedCount
+                    $totals.ConvertedFail       += $chapterResult.FailedCount
+                    $totals.ConvertedSkipped    += $chapterResult.SkippedCount
+                    $totals.DeletedSuccess      += $chapterResult.DeletedCount
+                    $totals.DeletedFail         += $chapterResult.DeleteFailedCount
+                    $totals.ForceKilledCount    += $chapterResult.ForceKilledCount
+                    $totals.InspectFailedCount  += $chapterResult.InspectFailedCount
                     foreach ($p in $chapterResult.SkippedPaths) { $totals.LastSkippedPaths.Add($p) }
                     foreach ($p in $chapterResult.PendingPaths) { $totals.StillPendingPaths.Add($p) }
                     if ($looseCts.Token.IsCancellationRequested) { $totals.Aborted = $true }
@@ -920,8 +1022,42 @@ function Invoke-LooseImageConversionPipeline {
                     Write-Log ("Chapter '" + $chapterDir.FullName + "': no unconverted images - skipping conversion.")
                 }
 
+                # Computed unconditionally (not just when CCR is enabled) -
+                # -ZipStepCallback's own IsZippable/Error gate below needs
+                # $chapterStatus regardless of whether progress is being
+                # displayed. Only the actual Complete-ChapterProgress CALL
+                # stays gated on the toggle, same as everywhere else in
+                # this module.
+                $chapterStatus, $chapterDetail = Get-ChapterProgressStatus -ChapterResult $chapterResult
+
+                # Mode 8's decided CCR-fold (Todo.md/Docs/menu-design.md,
+                # 2026-08-28): delay Complete-ChapterProgress until after
+                # the zip step returns, merge both outcomes into ONE
+                # Detail/Status - not a second CCR transition. Gated on
+                # IsZippable (an "extra" entry, e.g. the series root, is
+                # never zippable - same rule Controller.ps1's Full Pipeline
+                # zip step follows) AND $chapterStatus -ne 'Error' (don't
+                # zip a chapter conversion already failed) - both checks
+                # live HERE, in this module's own domain knowledge, not in
+                # the callback itself, which stays a dumb "just zip or
+                # don't" hook (mode-8-specific business logic like
+                # ZipWithUnconvertedAnimated belongs in the callback
+                # Controller.ps1 builds, not here).
+                if ($null -ne $ZipStepCallback -and $chapter.IsZippable -and $chapterStatus -ne 'Error') {
+                    $zipOutcome = & $ZipStepCallback @{ SeriesName = $series.Name; ChapterName = $chapterName; Dir = $chapterDir; ChapterResult = $chapterResult; ZipOut = $chapter.ZipOut }
+                    if ($null -ne $zipOutcome) {
+                        $zipSeverity = switch ($zipOutcome.Status) { 'Fail' { 2 }; 'Skipped' { 1 }; default { 0 } }
+                        $chapterRank = @{ Success = 0; Warning = 1; Error = 2 }
+                        if ($zipSeverity -gt $chapterRank[$chapterStatus]) {
+                            $chapterStatus = switch ($zipSeverity) { 2 { 'Error' }; 1 { 'Warning' }; default { 'Success' } }
+                        }
+                        $convertDetailPart = if ($chapterDetail) { "Convert: " + $chapterDetail } else { "Convert: OK" }
+                        $zipDetailPart     = "Zip: " + $(if ($zipOutcome.Detail) { $zipOutcome.Detail } else { $zipOutcome.Status })
+                        $chapterDetail     = $convertDetailPart + " | " + $zipDetailPart
+                    }
+                }
+
                 if ($script:CleanConsoleOutputEnabled) {
-                    $chapterStatus, $chapterDetail = Get-ChapterProgressStatus -ChapterResult $chapterResult
                     $null = Complete-ChapterProgress -SeriesName $series.Name -ChapterName $chapterName -Status $chapterStatus -Detail $chapterDetail
                 }
 

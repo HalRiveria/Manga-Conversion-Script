@@ -58,6 +58,7 @@ Test-Assert ($statsA2.LooseImgConverted.Success -eq 0) "mutating one tracker's n
 Test-Assert (
     $statsA2.ContainsKey('LooseAnimatedConverted') -and $statsA2.ContainsKey('LooseAnimatedDeleted')
 ) "schema includes the new LooseAnimatedConverted/LooseAnimatedDeleted groups"
+Test-Assert ($statsA2.ContainsKey('InspectFailed') -and $statsA2.InspectFailed.Count -eq 0) "schema includes InspectFailed (2026-08-28), defaulting to 0"
 Write-Host ""
 
 # ==============================================================================
@@ -84,6 +85,7 @@ Test-Assert ($blobC -match "ZIPs Extracted") "shows the ZIP-pipeline rows when R
 Test-Assert ($blobC -match "Success = 5") "the actual stat value appears in the line"
 Test-Assert ($blobC -notmatch "Loose Img Conv\.") "does not show loose-image rows when RunConvertZipped is the only flag set"
 Test-Assert ($blobC -notmatch "Zip-only") "does not show zip-only rows"
+Test-Assert ($blobC -notmatch "Inspect Failed") "does not show Inspect Failed - neither RunImageConversion nor RunAnimatedConversion is set"
 Test-Assert ($linesC[0] -eq "=== SUMMARY ===" -and $linesC[-1] -eq "=== Processing complete ===") "starts/ends with the standard header/footer"
 Write-Host ""
 
@@ -93,6 +95,7 @@ Write-Host ""
 # ==============================================================================
 Write-Host "=== Scenario D: Get-SummaryLines, Full Pipeline flags ===" -ForegroundColor Cyan
 $statsD = New-StatsTracker
+$statsD.InspectFailed.Count = 3
 $flagsD = @{ RunImageConversion = $true; RunAnimatedConversion = $true; RunZip = $true; RunZipOnly = $false; RunConvertZipped = $false }
 $blobD = (Get-SummaryLines -Stats $statsD -ElapsedString "00h 00m 05s" -ModeFlags $flagsD) -join "`n"
 Test-Assert ($blobD -match "Loose Img Conv\.") "shows loose image conversion rows"
@@ -100,6 +103,21 @@ Test-Assert ($blobD -match "Loose Anim\. Conv\.") "shows loose animated conversi
 Test-Assert ($blobD -match "Loose Folders Zipped") "shows the zip-after-conversion rows"
 Test-Assert ($blobD -notmatch "ZIPs Extracted") "does not show the (unrelated) rezip/ZIP-pipeline rows"
 Test-Assert ($blobD -notmatch "Zip-only") "does not show the (unrelated) zip-only rows"
+Test-Assert ($blobD -match "Inspect Failed\s*: 3 file\(s\)") "shows Inspect Failed with the real count (2026-08-28)"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario D2: Inspect Failed shows when ONLY RunAnimatedConversion is set
+#  (not RunImageConversion) - proves the shared row is on an -or, not -and,
+#  since either engine can hit this failure mode independently.
+# ==============================================================================
+Write-Host "=== Scenario D2: Inspect Failed shows for RunAnimatedConversion alone ===" -ForegroundColor Cyan
+$statsD2 = New-StatsTracker
+$statsD2.InspectFailed.Count = 1
+$flagsD2 = Get-AllModeFlagsFalse
+$flagsD2.RunAnimatedConversion = $true
+$blobD2 = (Get-SummaryLines -Stats $statsD2 -ElapsedString "00h 00m 01s" -ModeFlags $flagsD2) -join "`n"
+Test-Assert ($blobD2 -match "Inspect Failed\s*: 1 file\(s\)") "Inspect Failed shows with RunAnimatedConversion alone, RunImageConversion false"
 Write-Host ""
 
 # ==============================================================================
@@ -113,6 +131,7 @@ $blobE = (Get-SummaryLines -Stats $statsE -ElapsedString "00h 00m 01s" -ModeFlag
 Test-Assert ($blobE -match "Zip-only Zipped") "shows zip-only rows"
 Test-Assert ($blobE -notmatch "Loose") "shows nothing from any loose-pipeline group"
 Test-Assert ($blobE -notmatch "ZIPs Extracted") "shows nothing from the rezip/ZIP-pipeline group"
+Test-Assert ($blobE -notmatch "Inspect Failed") "does not show Inspect Failed - RunZipOnly alone doesn't touch either conversion engine"
 Write-Host ""
 
 # ==============================================================================

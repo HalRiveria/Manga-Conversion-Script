@@ -329,6 +329,17 @@ function Invoke-ZipOnlyPipeline {
         ForceStoppedCount    = 0
     }
 
+    # No outer catch here (2026-08-28, Phase 2 of the main-script-rewrite
+    # build plan) - this used to swallow any exception into a generic
+    # "Zip-only pipeline error: ..." Write-Log call, the one real outlier
+    # among all five real pipeline entry points (the other four only have
+    # try/finally at this level, letting a genuine exception propagate to
+    # the caller). Controller.ps1's Invoke-Mode owns the shared top-level
+    # catch now (Todo.md's decided design) - swallowing here would have
+    # made that catch permanently unreachable for this pipeline. Expected
+    # per-item failures (a single zip failing) were never affected either
+    # way - those are already fully handled inside $script:zipOnlyWorker's
+    # own try/catch, folded into $r.Failed, never thrown this far.
     try {
         Write-Log ("Zip-only: scanning and zipping leaf directories incrementally (up to " + $MaxParallel + " in parallel)...")
 
@@ -431,8 +442,6 @@ function Invoke-ZipOnlyPipeline {
             $zoCompleteMsg += (" " + $totals.ForceStoppedCount + " job(s) force-stopped on abort.")
         }
         Write-Log $zoCompleteMsg -Level Summary
-    } catch {
-        Write-Log ("Zip-only pipeline error: " + $_) -Level Error
     } finally {
         # Safety net for the abort/shutdown path, same as
         # ImageConversionPipeline.ps1's own finally block - force-resolves

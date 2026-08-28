@@ -50,6 +50,7 @@ $modulesDir = Join-Path $PSScriptRoot ".."
 . (Join-Path $modulesDir "LeafDirectoryDiscovery.ps1")
 . (Join-Path $modulesDir "CleanConsoleRendering.ps1")
 . (Join-Path $modulesDir "Logging.ps1")
+. (Join-Path $modulesDir "AnimatedConversionPipeline.ps1")
 . (Join-Path $modulesDir "ImageConversionPipeline.ps1")
 
 $script:passCount = 0
@@ -78,6 +79,7 @@ function Reset-AbortState {
     $script:unregisterCtsWasCancelled.Clear()
     $script:testAbortSignalCallCount = 0
     $script:testAbortSignalTriggerAt = -1
+    $script:completeChapterProgressCalls.Clear()
 }
 
 # ------------------------------------------------------------------
@@ -124,6 +126,19 @@ function Test-AbortSignal {
         [ConsoleCtrl]::AbortRequested = $true
     }
     & $originalTestAbortSignal
+}
+
+# Spy for the -ZipStepCallback merge scenarios (Q onward) - same
+# call-straight-through-to-the-real-one pattern as the abort spies above.
+# Records every Status/Detail Complete-ChapterProgress is actually called
+# with, so a scenario can prove the merge happened in ONE call rather than
+# two, without needing to inspect CCR's internal state directly.
+$script:completeChapterProgressCalls = [System.Collections.Generic.List[hashtable]]::new()
+$originalCompleteChapterProgress = ${function:Complete-ChapterProgress}
+function Complete-ChapterProgress {
+    param([string]$SeriesName, [string]$ChapterName, [string]$Status, [string]$Detail = $null)
+    $script:completeChapterProgressCalls.Add(@{ SeriesName = $SeriesName; ChapterName = $ChapterName; Status = $Status; Detail = $Detail })
+    & $originalCompleteChapterProgress -SeriesName $SeriesName -ChapterName $ChapterName -Status $Status -Detail $Detail
 }
 
 $scratchDir = Join-Path ([System.IO.Path]::GetTempPath()) ("icp-harness-" + [guid]::NewGuid().ToString("N"))
@@ -181,6 +196,59 @@ class Program {
 '@
 $fakeCjxlExe = Join-Path $scratchDir "fake_cjxl.exe"
 Add-Type -TypeDefinition $fakeCjxlSource -Language CSharp -OutputAssembly $fakeCjxlExe -OutputType ConsoleApplication
+
+# ------------------------------------------------------------------
+#  Fake magick.exe (added 2026-08-28, for the new static-AVIF path) -
+#  same technique as AnimatedConversionPipeline.Harness.ps1's own fake:
+#   - "identify -format "%n" <path>": reads FRAMES:<n> from the input's
+#     content (default 1 - static); FAIL_IDENTIFY -> exit 1 (an
+#     inspect-failure fake_cjxl.exe never even sees).
+#   - otherwise (the real "<src>[0]" "<dst>" transcode call): copies the
+#     SOURCE's own text content into the destination PNG verbatim, so
+#     fake_cjxl.exe's own FAIL_CJXL sniff still works correctly on
+#     whatever ends up in the temp PNG it's actually handed.
+# ------------------------------------------------------------------
+$fakeMagickSource = @'
+using System;
+using System.IO;
+using System.Text.RegularExpressions;
+class Program {
+    static int Main(string[] args) {
+        if (args.Length > 0 && args[0] == "identify") {
+            string path = args[args.Length - 1];
+            string content = File.Exists(path) ? File.ReadAllText(path) : "";
+            if (content.Contains("FAIL_IDENTIFY")) {
+                Console.Error.WriteLine("simulated identify failure");
+                return 1;
+            }
+            Match fm = Regex.Match(content, "FRAMES:(\\d+)");
+            int frames = fm.Success ? int.Parse(fm.Groups[1].Value) : 1;
+            Console.Write(frames.ToString());
+            return 0;
+        }
+
+        string srcArg = args[0];
+        string src = srcArg.EndsWith("[0]") ? srcArg.Substring(0, srcArg.Length - 3) : srcArg;
+        string dst = args[args.Length - 1];
+        string srcContent = File.Exists(src) ? File.ReadAllText(src) : "";
+        if (srcContent.Contains("FAIL_MAGICK")) {
+            Console.Error.WriteLine("simulated magick pre-conversion failure");
+            return 1;
+        }
+        File.WriteAllText(dst, srcContent);
+        return 0;
+    }
+}
+'@
+$fakeMagickExe = Join-Path $scratchDir "fake_magick.exe"
+Add-Type -TypeDefinition $fakeMagickSource -Language CSharp -OutputAssembly $fakeMagickExe -OutputType ConsoleApplication
+
+function New-FakeAvif {
+    param([string]$DirPath, [string]$Name, [string]$Content = "FRAMES:1")
+    $path = Join-Path $DirPath $Name
+    [System.IO.File]::WriteAllText($path, $Content)
+    return $path
+}
 
 Write-Host ""
 
@@ -559,6 +627,126 @@ Test-Assert (($script:budgetSnapshotsP | Where-Object { $_ -eq 0 }).Count -gt 0)
 Test-Assert ($budgetP.CurrentCount -eq 2) "the budget is back to its full initial count after the call - no leaked slots"
 $budgetP.Dispose()
 Write-Host ""
+
+# ==============================================================================
+#  Scenario Q: static AVIF converts through the WebP-style temp-PNG detour,
+#  2026-08-28 (Todo.md's decided static-AVIF-always-converts change).
+# ==============================================================================
+Write-Host "=== Scenario Q: static AVIF converts to .jxl, same detour as WebP ===" -ForegroundColor Cyan
+$chQ = New-Dir "scenario-q\Series\Chapter 1"
+$avifQ = New-FakeAvif -DirPath $chQ -Name "cover.avif" -Content "FRAMES:1"
+
+$totalsQ = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-q") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -MaxCjxlProcs 2 -FullLogging $false
+
+Test-Assert ($totalsQ.ConvertedSuccess -eq 1 -and $totalsQ.ConvertedFail -eq 0) ("static AVIF converted successfully (got ConvertedSuccess=" + $totalsQ.ConvertedSuccess + ", ConvertedFail=" + $totalsQ.ConvertedFail + ")")
+Test-Assert (-not (Test-Path -LiteralPath $avifQ)) "the static AVIF source was deleted after a successful conversion"
+Test-Assert (Test-Path -LiteralPath (Join-Path $chQ "cover.jxl")) "cover.jxl was created"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario R: animated AVIF is left untouched here - its own conversion
+#  pipeline (AnimatedConversionPipeline.ps1) owns it, not this one.
+# ==============================================================================
+Write-Host "=== Scenario R: animated AVIF is skipped, not converted ===" -ForegroundColor Cyan
+$chR = New-Dir "scenario-r\Series\Chapter 1"
+$avifR = New-FakeAvif -DirPath $chR -Name "animated.avif" -Content "FRAMES:12"
+
+$totalsR = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-r") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -MaxCjxlProcs 2 -FullLogging $false
+
+Test-Assert ($totalsR.ConvertedSkipped -eq 1 -and $totalsR.ConvertedSuccess -eq 0) ("animated AVIF counted as skipped, not converted (got ConvertedSkipped=" + $totalsR.ConvertedSkipped + ", ConvertedSuccess=" + $totalsR.ConvertedSuccess + ")")
+Test-Assert (Test-Path -LiteralPath $avifR) "the animated AVIF source was left untouched, not deleted"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario S: a real Test-AvifAnimated failure (couldn't determine frame
+#  count) is its own InspectFailedCount outcome - NOT folded into
+#  FailedCount, matching Convert-AnimatedBatch's identical failure mode.
+# ==============================================================================
+Write-Host "=== Scenario S: AVIF inspect-failure counts separately from FailedCount ===" -ForegroundColor Cyan
+$chS = New-Dir "scenario-s\Series\Chapter 1"
+$avifS = New-FakeAvif -DirPath $chS -Name "corrupt.avif" -Content "FAIL_IDENTIFY"
+
+$totalsS = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-s") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -MaxCjxlProcs 2 -FullLogging $false
+
+Test-Assert ($totalsS.InspectFailedCount -eq 1) ("inspect-failure counted (got InspectFailedCount=" + $totalsS.InspectFailedCount + ")")
+Test-Assert ($totalsS.ConvertedFail -eq 0) "NOT folded into ConvertedFail - a different kind of outcome"
+Test-Assert (Test-Path -LiteralPath $avifS) "the source was left untouched - never got far enough to convert or delete"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario T: -ZipStepCallback (mode 8's decided CCR-fold, 2026-08-28) -
+#  fires only when IsZippable and conversion didn't already hit an Error,
+#  and its outcome is folded into the SAME Complete-ChapterProgress call
+#  conversion already makes, not a second one.
+# ==============================================================================
+Write-Host "=== Scenario T: -ZipStepCallback fires and folds into ONE CCR transition ===" -ForegroundColor Cyan
+Reset-AbortState
+$rootT = New-Dir "scenario-t"
+$chT = New-Dir "scenario-t\Series\Chapter 1"
+New-FakeImage -DirPath $chT -Name "page1.jpg" | Out-Null
+
+$zipCallsT = [System.Collections.Generic.List[hashtable]]::new()
+$zipStepT = {
+    param($Info)
+    $zipCallsT.Add($Info)
+    return @{ Status = "Success"; Detail = "1 entry" }
+}.GetNewClosure()
+
+$script:CleanConsoleOutputEnabled = $true
+try {
+    $totalsT = Invoke-LooseImageConversionPipeline -Path $rootT -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false -ZipStepCallback $zipStepT
+} finally {
+    $script:CleanConsoleOutputEnabled = $false
+}
+
+Test-Assert ($zipCallsT.Count -eq 1) ("the zip callback fired exactly once (got " + $zipCallsT.Count + ")")
+Test-Assert ($zipCallsT[0].ChapterResult.ConvertedCount -eq 1) "the zip callback saw the real ChapterResult, not a stub"
+Test-Assert ($script:completeChapterProgressCalls.Count -eq 1) ("exactly ONE Complete-ChapterProgress call for the chapter - not a separate second transition for the zip step (got " + $script:completeChapterProgressCalls.Count + ")")
+Test-Assert ($script:completeChapterProgressCalls[0].Status -eq "Success") "merged Status is Success (both halves clean)"
+Test-Assert ($script:completeChapterProgressCalls[0].Detail -eq "Convert: OK | Zip: 1 entry") ("merged Detail concatenates both halves (got '" + $script:completeChapterProgressCalls[0].Detail + "')")
+Reset-AbortState
+Write-Host ""
+
+# ==============================================================================
+#  Scenario U: -ZipStepCallback is NOT called for a non-zippable "extra"
+#  entry, and NOT called when conversion itself already hit an Error - both
+#  gates live in this module, not the callback (see .PARAMETER ZipStepCallback).
+# ==============================================================================
+Write-Host "=== Scenario U: -ZipStepCallback gated on IsZippable and non-Error ===" -ForegroundColor Cyan
+$rootU = New-Dir "scenario-u"
+# An "extra" entry: an image sitting directly in the series root, no real
+# chapter subfolder - never zippable, same construction as Scenario L.
+New-FakeImage -DirPath $rootU -Name "loose.jpg" | Out-Null
+$chU2 = New-Dir "scenario-u\Series\Chapter 1"
+New-FakeImage -DirPath $chU2 -Name "bad.jpg" -Fail $true | Out-Null
+
+$zipCallsU = [System.Collections.Generic.List[hashtable]]::new()
+$zipStepU = { param($Info) $zipCallsU.Add($Info); return @{ Status = "Success"; Detail = $null } }.GetNewClosure()
+
+$totalsU = Invoke-LooseImageConversionPipeline -Path $rootU -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false -ZipStepCallback $zipStepU
+
+Test-Assert ($zipCallsU.Count -eq 0) ("the zip callback never fired - neither entry qualified (extra=not zippable, Chapter 1=conversion Error) (got " + $zipCallsU.Count + " call(s))")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario V: $null -ZipStepCallback (mode 2's existing default) leaves
+#  Get-ChapterProgressStatus's own Detail format completely unchanged - no
+#  "Convert: ..." prefix ever appears unless a real callback actually ran.
+# ==============================================================================
+Write-Host "=== Scenario V: default (no callback) Detail format is untouched ===" -ForegroundColor Cyan
+Reset-AbortState
+$chV = New-Dir "scenario-v\Series\Chapter 1"
+New-FakeImage -DirPath $chV -Name "skip-me.webp" -Fail $false | Out-Null   # no MagickExe supplied -> FAILED, not skipped/converted; simplest deterministic non-clean case without needing magick
+$script:CleanConsoleOutputEnabled = $true
+try {
+    $null = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-v") -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
+} finally {
+    $script:CleanConsoleOutputEnabled = $false
+}
+Test-Assert ($script:completeChapterProgressCalls.Count -eq 1 -and $script:completeChapterProgressCalls[0].Detail -notmatch "^Convert: ") ("Detail has no 'Convert: ' prefix when no callback ran (got '" + $script:completeChapterProgressCalls[0].Detail + "')")
+Reset-AbortState
+Write-Host ""
+
 if ($script:failCount -eq 0) {
     Write-Host ("ALL PASSED  (" + $script:passCount + " assertions)") -ForegroundColor Green
     exit 0
