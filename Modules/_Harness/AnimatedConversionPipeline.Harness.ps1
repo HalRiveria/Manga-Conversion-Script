@@ -3,8 +3,8 @@
     Standalone test harness for Modules\AnimatedConversionPipeline.ps1.
 
 .DESCRIPTION
-    Dot-sources the real module and stubs Write-Log/Remove-Source/
-    $script:PermanentDelete (same pattern as
+    PART 1 (Scenarios A-M): dot-sources the real module and stubs
+    Write-Log/Remove-Source/$script:PermanentDelete (same pattern as
     ImageConversionPipeline.Harness.ps1) so this module doesn't need
     Logging.ps1/FileDeletion.ps1 built/working to be tested. A compiled
     fake magick.exe (same technique as that harness's fake cjxl.exe)
@@ -14,13 +14,31 @@
     exact argument string it received into the output file so a scenario
     can assert which flags (lossless vs quality) were actually passed.
 
+    PART 2 (Scenarios N onward, added 2026-08-28): also dot-sources the
+    REAL AbortPipeline.ps1/LeafDirectoryDiscovery.ps1/
+    CleanConsoleRendering.ps1 - same integration-style choice
+    ImageConversionPipeline.Harness.ps1 made for its own PART 2, since
+    Invoke-LooseAnimatedConversionPipeline is an orchestration-tier
+    function whose real value is in proving the two-tier walk/coverage-
+    completeness/CCR wiring actually work against real directory trees,
+    not in mocking that machinery away. Write-Log/Remove-Source stay the
+    lightweight local stubs from PART 1 - AbortPipeline.ps1 and
+    LeafDirectoryDiscovery.ps1 both only need Write-Log stubbed (verified
+    against each module's own FORWARD REFERENCE header text), not the
+    real Logging.ps1/FileDeletion.ps1 modules, so PART 1's existing
+    scenarios needed no changes at all.
+
 .EXAMPLE
     .\Modules\_Harness\AnimatedConversionPipeline.Harness.ps1
 #>
 
 $ErrorActionPreference = "Stop"
 
-. (Join-Path $PSScriptRoot "..\AnimatedConversionPipeline.ps1")
+$modulesDirAC = Join-Path $PSScriptRoot ".."
+. (Join-Path $modulesDirAC "AnimatedConversionPipeline.ps1")
+. (Join-Path $modulesDirAC "AbortPipeline.ps1")
+. (Join-Path $modulesDirAC "LeafDirectoryDiscovery.ps1")
+. (Join-Path $modulesDirAC "CleanConsoleRendering.ps1")
 
 $script:logCalls = New-Object System.Collections.Generic.List[string]
 function Write-Log {
@@ -50,6 +68,55 @@ function Test-Assert {
     }
 }
 
+# ------------------------------------------------------------------
+#  PART 2 abort spies - same idiom as
+#  ImageConversionPipeline.Harness.ps1's own (capture the real
+#  originals, wrap with call-tracking, restore afterward). Only used by
+#  the abort scenario below.
+# ------------------------------------------------------------------
+$script:registerCtsCalls          = [System.Collections.Generic.List[System.Threading.CancellationTokenSource]]::new()
+$script:unregisterCtsCalls        = [System.Collections.Generic.List[System.Threading.CancellationTokenSource]]::new()
+$script:unregisterCtsWasCancelled = [System.Collections.Generic.List[bool]]::new()
+$script:testAbortSignalCallCount  = 0
+$script:testAbortSignalTriggerAt  = -1
+
+$originalRegisterAbortCts   = ${function:Register-AbortCancellationSource}
+$originalUnregisterAbortCts = ${function:Unregister-AbortCancellationSource}
+$originalTestAbortSignal    = ${function:Test-AbortSignal}
+
+function Register-AbortCancellationSource {
+    param([System.Threading.CancellationTokenSource]$Cts)
+    $script:registerCtsCalls.Add($Cts)
+    & $originalRegisterAbortCts -Cts $Cts
+}
+function Unregister-AbortCancellationSource {
+    param([System.Threading.CancellationTokenSource]$Cts)
+    $script:unregisterCtsCalls.Add($Cts)
+    $script:unregisterCtsWasCancelled.Add([bool]$Cts.Token.IsCancellationRequested)
+    & $originalUnregisterAbortCts -Cts $Cts
+}
+function Test-AbortSignal {
+    $script:testAbortSignalCallCount++
+    if ($script:testAbortSignalCallCount -eq $script:testAbortSignalTriggerAt) {
+        [ConsoleCtrl]::AbortRequested = $true
+    }
+    & $originalTestAbortSignal
+}
+function Reset-AbortState {
+    [ConsoleCtrl]::AbortRequested = $false
+    [ConsoleCtrl]::IsCloseEvent   = $false
+    [ConsoleCtrl]::DrainComplete.Reset()
+    $script:abortRequested = $false
+    $script:ctrlCloseAbort = $false
+    $script:abortCancellationSources.Clear()
+    $script:CleanConsoleOutputEnabled = $false
+    $script:registerCtsCalls.Clear()
+    $script:unregisterCtsCalls.Clear()
+    $script:unregisterCtsWasCancelled.Clear()
+    $script:testAbortSignalCallCount = 0
+    $script:testAbortSignalTriggerAt = -1
+}
+
 $scratchDir = Join-Path ([System.IO.Path]::GetTempPath()) ("animatedconv-harness-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $scratchDir -Force | Out-Null
 Write-Host ("Scratch dir: " + $scratchDir) -ForegroundColor DarkGray
@@ -61,6 +128,25 @@ function New-FakeAvif {
     if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
     Set-Content -LiteralPath $path -Value $Content -Encoding UTF8 -NoNewline
     return (Get-Item -LiteralPath $path)
+}
+
+# ------------------------------------------------------------------
+#  PART 2 helpers - mirror ImageConversionPipeline.Harness.ps1's own
+#  New-Dir/New-FakeImage exactly (same shape, "animated" instead of
+#  "image" naming).
+# ------------------------------------------------------------------
+function New-Dir {
+    param([string]$RelativePath)
+    $path = Join-Path $scratchDir $RelativePath
+    New-Item -ItemType Directory -Path $path -Force | Out-Null
+    return $path
+}
+function New-FakeAvifIn {
+    param([string]$DirPath, [string]$Name, [int]$Frames = 5, [bool]$Fail = $false)
+    $path = Join-Path $DirPath $Name
+    $content = "FRAMES:" + $Frames + $(if ($Fail) { "`nFAIL_MAGICK" } else { "" })
+    [System.IO.File]::WriteAllText($path, $content)
+    return $path
 }
 
 # ------------------------------------------------------------------
@@ -292,6 +378,175 @@ Write-Host ""
 Write-Host "=== Scenario M: empty input ===" -ForegroundColor Cyan
 $resultM = Convert-AnimatedBatch -AnimatedFiles @() -MagickExe $fakeMagickExe -AnimatedThreads 2 -CancelToken ([System.Threading.CancellationToken]::None)
 Test-Assert ($resultM.ConvertedCount -eq 0 -and $resultM.FailedCount -eq 0) "no work, no error, for an empty batch"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario N: multi-series, multi-chapter conversion end to end -
+#  correct per-chapter batching, source deletion, SeriesCount/ChapterCount.
+# ==============================================================================
+Write-Host "=== Scenario N: multi-series/multi-chapter conversion ===" -ForegroundColor Cyan
+$s1c1N = New-Dir "scenario-n\Series One\Chapter 1"
+$s1c2N = New-Dir "scenario-n\Series One\Chapter 2"
+$s2c1N = New-Dir "scenario-n\Series Two\Chapter 1"
+New-FakeAvifIn -DirPath $s1c1N -Name "page1.avif" | Out-Null
+New-FakeAvifIn -DirPath $s1c1N -Name "page2.avif" | Out-Null
+New-FakeAvifIn -DirPath $s1c2N -Name "page1.avif" | Out-Null
+New-FakeAvifIn -DirPath $s2c1N -Name "page1.avif" | Out-Null
+
+$totalsN = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-n") -MagickExe $fakeMagickExe -AnimatedThreads 2 -FullLogging $false
+
+Test-Assert ($totalsN.SeriesCount -eq 2) ("2 series found (got " + $totalsN.SeriesCount + ")")
+Test-Assert ($totalsN.ChapterCount -eq 3) ("3 chapters found (got " + $totalsN.ChapterCount + ")")
+Test-Assert ($totalsN.ConvertedSuccess -eq 4) ("4 files converted (got " + $totalsN.ConvertedSuccess + ")")
+Test-Assert ($totalsN.ConvertedFail -eq 0) "no conversion failures"
+Test-Assert ($totalsN.DeletedSuccess -eq 4) ("4 sources deleted (got " + $totalsN.DeletedSuccess + ")")
+Test-Assert (-not (Test-Path -LiteralPath (Join-Path $s1c1N "page1.avif"))) "Series One/Chapter 1 page1 source gone"
+Test-Assert (Test-Path -LiteralPath (Join-Path $s1c1N "page1.webp")) "Series One/Chapter 1 page1.webp created"
+Test-Assert (-not $totalsN.Aborted) "not marked aborted"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario O: a chapter with a real conversion failure counts correctly
+#  and does not get its source deleted.
+# ==============================================================================
+Write-Host "=== Scenario O: conversion failure ===" -ForegroundColor Cyan
+$chO = New-Dir "scenario-o\Series\Chapter 1"
+New-FakeAvifIn -DirPath $chO -Name "good.avif" | Out-Null
+New-FakeAvifIn -DirPath $chO -Name "bad.avif" -Fail $true | Out-Null
+
+$totalsO = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-o") -MagickExe $fakeMagickExe -AnimatedThreads 2 -FullLogging $false
+
+Test-Assert ($totalsO.ConvertedSuccess -eq 1) ("1 converted (got " + $totalsO.ConvertedSuccess + ")")
+Test-Assert ($totalsO.ConvertedFail -eq 1) ("1 failed (got " + $totalsO.ConvertedFail + ")")
+Test-Assert (Test-Path -LiteralPath (Join-Path $chO "bad.avif")) "failed source left in place, not deleted"
+Test-Assert (-not (Test-Path -LiteralPath (Join-Path $chO "good.avif"))) "successful source deleted"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario P: a series with zero qualifying chapters is counted and
+#  skipped cleanly (no crash, no chapters processed).
+# ==============================================================================
+Write-Host "=== Scenario P: series with zero chapters ===" -ForegroundColor Cyan
+New-Dir "scenario-p\Empty Series" | Out-Null
+
+$totalsP = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-p") -MagickExe $fakeMagickExe -AnimatedThreads 2 -FullLogging $false
+
+Test-Assert ($totalsP.SeriesCount -eq 1) "the empty series was still walked"
+Test-Assert ($totalsP.ChapterCount -eq 0) "zero chapters counted"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario Q: -PostChapterCallback fires once per chapter with the
+#  documented shape - no ZipOut/IsZippable (mode 3 never zips, unlike
+#  the image pipeline's callback shape).
+# ==============================================================================
+Write-Host "=== Scenario Q: PostChapterCallback shape ===" -ForegroundColor Cyan
+$chQ = New-Dir "scenario-q\My Series\Ch 1"
+New-FakeAvifIn -DirPath $chQ -Name "page1.avif" | Out-Null
+
+$callbackCallsQ = [System.Collections.Generic.List[hashtable]]::new()
+$cbQ = { param($Info) $callbackCallsQ.Add($Info) }.GetNewClosure()
+
+$null = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-q") -MagickExe $fakeMagickExe -AnimatedThreads 2 -FullLogging $false -PostChapterCallback $cbQ
+
+Test-Assert ($callbackCallsQ.Count -eq 1) ("callback fired once (got " + $callbackCallsQ.Count + ")")
+Test-Assert ($callbackCallsQ[0].SeriesName -eq "My Series") "callback saw the right SeriesName"
+Test-Assert ($callbackCallsQ[0].ChapterName -eq "Ch 1") "callback saw the right ChapterName"
+Test-Assert ($callbackCallsQ[0].Dir.FullName -eq $chQ) "callback saw the right Dir"
+Test-Assert ($callbackCallsQ[0].ChapterResult.ConvertedCount -eq 1) "callback saw the real ChapterResult"
+Test-Assert (-not $callbackCallsQ[0].ContainsKey("ZipOut")) "callback payload has no ZipOut field - mode 3 never zips"
+Test-Assert (-not $callbackCallsQ[0].ContainsKey("IsZippable")) "callback payload has no IsZippable field - mode 3 never zips"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario R: Get-ChapterAnimatedStatus mapping, tested directly
+#  (unit-level) - Error > Warning > Success ordering, and StaticSkippedCount
+#  deliberately does NOT trigger Warning.
+# ==============================================================================
+Write-Host "=== Scenario R: Get-ChapterAnimatedStatus mapping ===" -ForegroundColor Cyan
+$statusNullR, $detailNullR = Get-ChapterAnimatedStatus -ChapterResult $null
+Test-Assert ($statusNullR -eq "Success" -and $null -eq $detailNullR) "`$null ChapterResult (nothing to convert) maps to a clean Success"
+
+$statusErrR, $detailErrR = Get-ChapterAnimatedStatus -ChapterResult @{ FailedCount = 2; ForceKilledCount = 1; DeleteFailedCount = 0; SkippedCount = 0; InspectFailedCount = 0 }
+Test-Assert ($statusErrR -eq "Error" -and $detailErrR -match "2 failed" -and $detailErrR -match "1 force-stopped") "Error tier wins and lists both failure kinds"
+
+$statusWarnR, $detailWarnR = Get-ChapterAnimatedStatus -ChapterResult @{ FailedCount = 0; ForceKilledCount = 0; DeleteFailedCount = 0; SkippedCount = 3; InspectFailedCount = 1 }
+Test-Assert ($statusWarnR -eq "Warning" -and $detailWarnR -match "3 skipped" -and $detailWarnR -match "1 inspect failure") "Warning tier covers both Skipped and InspectFailed"
+
+$statusStaticR, $detailStaticR = Get-ChapterAnimatedStatus -ChapterResult @{ FailedCount = 0; ForceKilledCount = 0; DeleteFailedCount = 0; SkippedCount = 0; InspectFailedCount = 0; StaticSkippedCount = 5 }
+Test-Assert ($statusStaticR -eq "Success" -and $null -eq $detailStaticR) "StaticSkippedCount alone does NOT trigger Warning - a static AVIF being left alone is expected, not a problem"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario S: CCR wiring - real CleanConsoleRendering.ps1 functions
+#  actually get called and reach the expected end state.
+# ==============================================================================
+Write-Host "=== Scenario S: CCR event emission ===" -ForegroundColor Cyan
+$chS1 = New-Dir "scenario-s\CCR Series\Chapter 1"
+$chS2 = New-Dir "scenario-s\CCR Series\Chapter 2"
+New-FakeAvifIn -DirPath $chS1 -Name "page1.avif" | Out-Null
+New-FakeAvifIn -DirPath $chS2 -Name "page1.avif" -Fail $true | Out-Null
+
+$script:CleanConsoleOutputEnabled = $true
+try {
+    $totalsS = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-s") -MagickExe $fakeMagickExe -AnimatedThreads 2 -FullLogging $false
+} finally {
+    $script:CleanConsoleOutputEnabled = $false
+}
+
+Test-Assert ($script:ccrActiveSeries.Count -eq 0) "series resolved and left the active registry once both chapters completed"
+Test-Assert ($totalsS.ConvertedSuccess -eq 1 -and $totalsS.ConvertedFail -eq 1) "conversion counts still correct with CCR on"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario T: a chapter dir excluded by Get-SeriesChapters's
+#  former-container guard (a stray .zip sitting alongside real,
+#  unconverted .avif files) is still folded in and converted - same
+#  coverage-completeness fix as ImageConversionPipeline.ps1's own.
+# ==============================================================================
+Write-Host "=== Scenario T: former-container guard doesn't drop conversion coverage ===" -ForegroundColor Cyan
+$chT = New-Dir "scenario-t\Series\Chapter 1"
+New-FakeAvifIn -DirPath $chT -Name "page1.avif" | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $chT "Chapter 1.zip"), "not a real zip, just a stray file triggering the former-container guard")
+
+$totalsT = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-t") -MagickExe $fakeMagickExe -AnimatedThreads 2 -FullLogging $false
+
+Test-Assert ($totalsT.ChapterCount -eq 1) "the guard-excluded directory was still folded in as a chapter-equivalent entry"
+Test-Assert ($totalsT.ConvertedSuccess -eq 1) "its real .avif file was still converted, not silently skipped"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario U: abort mid-batch - registration/cancellation actually wired
+#  up for real (same technique as ImageConversionPipeline.Harness.ps1's
+#  own Scenario H).
+# ==============================================================================
+Write-Host "=== Scenario U: abort registration actually wired up ===" -ForegroundColor Cyan
+Reset-AbortState
+$chU = New-Dir "scenario-u\Series\Chapter 1"
+New-FakeAvifIn -DirPath $chU -Name "page1.avif" | Out-Null
+[System.IO.File]::AppendAllText((Join-Path $chU "page1.avif"), "`nSLEEP_MS:300")
+
+# Same call-sequence reasoning as ImageConversionPipeline.Harness.ps1's
+# Scenario H: call 1 = series while-loop top check, call 2 = chapter
+# foreach-loop top check, call 3 = Convert-AnimatedBatch's first
+# AbortPollCallback (before dispatch), call 4 = its second - by then the
+# fake magick process is dispatched and still sleeping.
+$script:testAbortSignalTriggerAt = 4
+
+$totalsU = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-u") -MagickExe $fakeMagickExe -AnimatedThreads 2 -FullLogging $false -AbortTimeoutSeconds 5
+
+Test-Assert ($script:registerCtsCalls.Count -eq 1) ("Register-AbortCancellationSource called exactly once (got " + $script:registerCtsCalls.Count + ")")
+Test-Assert ($script:unregisterCtsCalls.Count -eq 1) ("Unregister-AbortCancellationSource called exactly once (got " + $script:unregisterCtsCalls.Count + ")")
+Test-Assert ([object]::ReferenceEquals($script:registerCtsCalls[0], $script:unregisterCtsCalls[0])) "the registered and unregistered CTS are the SAME object"
+Test-Assert ($script:unregisterCtsWasCancelled[0]) "that CTS's token actually got cancelled by the real abort"
+Test-Assert ($totalsU.Aborted) "pipeline reports Aborted"
+Test-Assert ($totalsU.ConvertedSuccess -eq 1) "the in-flight job still completed successfully via the abort-drain wait, rather than being force-killed"
+Test-Assert ($script:abortCancellationSources.Count -eq 0) "registry is empty again after the call (finally block ran)"
+Reset-AbortState
+
+${function:Register-AbortCancellationSource}   = $originalRegisterAbortCts
+${function:Unregister-AbortCancellationSource} = $originalUnregisterAbortCts
+${function:Test-AbortSignal}                   = $originalTestAbortSignal
 Write-Host ""
 
 # ==============================================================================
