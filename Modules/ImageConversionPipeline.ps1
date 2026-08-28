@@ -142,7 +142,8 @@ function Convert-ImageBatch {
         [string]$BatchLabel             = $null,
         [string]$AbortWaitMessage       = $null,
         [scriptblock]$AbortPollCallback = $null,
-        [int]$AbortTimeoutSeconds       = 60
+        [int]$AbortTimeoutSeconds       = 60,
+        [System.Threading.SemaphoreSlim]$SharedBudget = $null
     )
 
     $batchResult = @{
@@ -195,8 +196,21 @@ function Convert-ImageBatch {
             & $AbortPollCallback $inFlight
         }
 
-        # Fill up to MaxCjxlProcs slots
-        while ($pending.Count -gt 0 -and $running.Count -lt $MaxCjxlProcs -and (-not $CancelToken.IsCancellationRequested)) {
+        # Fill up to MaxCjxlProcs slots - or, when -SharedBudget is
+        # supplied (Controller.ps1's Full Pipeline engine only), up to
+        # however many slots the shared SemaphoreSlim currently has free,
+        # ignoring $MaxCjxlProcs entirely (the shared budget IS the real
+        # ceiling in that mode). Wait(0) is a non-blocking try-acquire -
+        # it either grabs a slot and returns true, or returns false
+        # immediately without consuming one - so this loop never stalls
+        # waiting on a slot the OTHER engine's runspace is holding; it
+        # just stops dispatching for this pass and the outer while-loop's
+        # normal poll/sleep cycle tries again next time around. EVERY
+        # early `continue` below (a job that never reaches
+        # Process.Start/$running.Add) MUST release a slot it just
+        # acquired here first - see each one.
+        while ($pending.Count -gt 0 -and (-not $CancelToken.IsCancellationRequested) -and `
+               $(if ($SharedBudget) { $SharedBudget.Wait(0) } else { $running.Count -lt $MaxCjxlProcs })) {
             $j   = $pending.Dequeue()
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName               = $CjxlExe
@@ -212,6 +226,7 @@ function Convert-ImageBatch {
                 if (-not $MagickExe) {
                     Write-Log ("SKIPPING WebP '" + $j.SrcPath + "': ImageMagick not found. Install ImageMagick or pass -MagickPath.") -Level Error
                     $batchResult.FailedCount++
+                    if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
                     continue
                 }
 
@@ -233,6 +248,7 @@ function Convert-ImageBatch {
                     Write-Log ("SKIPPING animated WebP '" + $j.SrcPath + "': Animation flag set in VP8X chunk - animated WebP cannot be converted to JXL (no multi-frame support). File left untouched.") -Level Warn
                     $batchResult.SkippedCount++
                     $batchResult.SkippedPaths.Add($j.SrcPath)
+                    if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
                     continue
                 }
                 # --- End animated WebP check ---
@@ -256,6 +272,7 @@ function Convert-ImageBatch {
                     Write-Log ("FAILED WebP->PNG pre-conversion for '" + $j.SrcPath + "': magick exited " + $magickExitCode) -Level Error
                     $batchResult.FailedCount++
                     if (Test-Path -LiteralPath $tempPng) { try { [System.IO.File]::Delete($tempPng) } catch { } }
+                    if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
                     continue
                 }
                 $j.TempPng = $tempPng
@@ -295,6 +312,12 @@ function Convert-ImageBatch {
                 $stderr = $j.Proc.StandardError.ReadToEnd()
                 $code   = $j.Proc.ExitCode
                 $j.Proc.Dispose()
+                # This job is leaving $running for good in every path below
+                # (including the ICC-retry re-enqueue, which `continue`s
+                # this foreach - the RETRY job acquires its own fresh slot
+                # later when it's actually dispatched) - release its slot
+                # exactly once, here, regardless of outcome.
+                if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
 
                 if ($DoFullLogging -and -not [string]::IsNullOrWhiteSpace($stdout)) {
                     Write-Log ("cjxl stdout for '" + $j.SrcPath + "': " + $stdout.Trim())
@@ -406,6 +429,7 @@ function Convert-ImageBatch {
                     $stderr = $j.Proc.StandardError.ReadToEnd()
                     $code   = $j.Proc.ExitCode
                     $j.Proc.Dispose()
+                    if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
                     $convOk = $false
                     try {
                         if ($code -ne 0) {
@@ -492,6 +516,7 @@ function Convert-ImageBatch {
                     try { [System.IO.File]::Delete($j.JxlPath) } catch { }
                 }
                 $j.Proc.Dispose()
+                if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
             }
         }
     }

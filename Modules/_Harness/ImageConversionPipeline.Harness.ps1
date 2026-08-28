@@ -533,7 +533,31 @@ $totalsO = Invoke-LooseImageConversionPipeline -Path $rootO -CjxlExe $fakeCjxlEx
 
 Test-Assert ($totalsO.StaleCleanedSuccess -eq 0) ("the staging dir's stale source was NOT cleaned up (got StaleCleanedSuccess=" + $totalsO.StaleCleanedSuccess + ")")
 Test-Assert (Test-Path -LiteralPath $staleSrcO) "the staging dir's stale source file still exists"
+Write-Host ""
 
+# ==============================================================================
+#  Scenario P: -SharedBudget (Controller.ps1's Full Pipeline concurrency
+#  design, 2026-08-28) - a SemaphoreSlim with FEWER slots than
+#  -MaxCjxlProcs actually constrains dispatch to the semaphore's count
+#  (proven by observing it get fully exhausted - CurrentCount reaching 0 -
+#  mid-run via -AbortPollCallback, not just inferred from final totals,
+#  which would look identical whether gating worked or not), and every
+#  slot is released again (no leak) once the batch completes.
+# ==============================================================================
+Write-Host "=== Scenario P: -SharedBudget gates dispatch and never leaks ===" -ForegroundColor Cyan
+$chP = New-Dir "scenario-p\Series\Chapter 1"
+$filesP = 1..5 | ForEach-Object { Get-Item -LiteralPath (New-FakeImage -DirPath $chP -Name ("budget" + $_ + ".jpg") -SleepMs 150) }
+$budgetP = [System.Threading.SemaphoreSlim]::new(2, 2)
+$script:budgetSnapshotsP = [System.Collections.Generic.List[int]]::new()
+$pollP = { param($inFlight) $script:budgetSnapshotsP.Add($budgetP.CurrentCount) }
+
+$resultP = Convert-ImageBatch -ImageFiles $filesP -CjxlExe $fakeCjxlExe -MaxCjxlProcs 5 -DoFullLogging $false `
+    -CancelToken ([System.Threading.CancellationToken]::None) -SharedBudget $budgetP -AbortPollCallback $pollP
+
+Test-Assert ($resultP.ConvertedCount -eq 5 -and $resultP.FailedCount -eq 0) "all 5 converted correctly through the shared budget"
+Test-Assert (($script:budgetSnapshotsP | Where-Object { $_ -eq 0 }).Count -gt 0) "the 2-slot budget was actually driven to 0 at some point - proves dispatch was really gated to 2 concurrent, not just passed through unused (MaxCjxlProcs=5 would have let all 5 start at once otherwise)"
+Test-Assert ($budgetP.CurrentCount -eq 2) "the budget is back to its full initial count after the call - no leaked slots"
+$budgetP.Dispose()
 Write-Host ""
 if ($script:failCount -eq 0) {
     Write-Host ("ALL PASSED  (" + $script:passCount + " assertions)") -ForegroundColor Green

@@ -203,7 +203,8 @@ function Convert-AnimatedBatch {
         [string]$AbortWaitMessage       = $null,
         [scriptblock]$AbortPollCallback = $null,
         [int]$AbortTimeoutSeconds       = 60,
-        [int]$HeartbeatIntervalSeconds  = 30
+        [int]$HeartbeatIntervalSeconds  = 30,
+        [System.Threading.SemaphoreSlim]$SharedBudget = $null
     )
 
     $batchResult = @{
@@ -244,14 +245,22 @@ function Convert-AnimatedBatch {
             & $AbortPollCallback $inFlight
         }
 
-        # Fill up to AnimatedThreads slots
-        while ($pending.Count -gt 0 -and $running.Count -lt $AnimatedThreads -and (-not $CancelToken.IsCancellationRequested)) {
+        # Fill up to AnimatedThreads slots - or, when -SharedBudget is
+        # supplied (Controller.ps1's Full Pipeline engine only), up to
+        # however many slots the shared SemaphoreSlim currently has free,
+        # ignoring $AnimatedThreads entirely - same non-blocking Wait(0)
+        # shape and same "every early continue must release" contract as
+        # Convert-ImageBatch's own dispatch loop - see that function's
+        # comment for the full reasoning.
+        while ($pending.Count -gt 0 -and (-not $CancelToken.IsCancellationRequested) -and `
+               $(if ($SharedBudget) { $SharedBudget.Wait(0) } else { $running.Count -lt $AnimatedThreads })) {
             $j = $pending.Dequeue()
 
             if ((Test-Path -LiteralPath $j.WebpPath) -and -not $DoAnimatedOverwrite) {
                 Write-Log ("SKIPPING '" + $j.SrcPath + "': output '" + $j.WebpPath + "' already exists (Overwrite is off).")
                 $batchResult.SkippedCount++
                 $batchResult.SkippedPaths.Add($j.SrcPath)
+                if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
                 continue
             }
 
@@ -261,6 +270,7 @@ function Convert-AnimatedBatch {
             } catch {
                 Write-Log ("Could not determine if '" + $j.SrcPath + "' is animated - skipping: " + $_) -Level Warn
                 $batchResult.InspectFailedCount++
+                if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
                 continue
             }
 
@@ -268,6 +278,7 @@ function Convert-AnimatedBatch {
                 Write-Log ("'" + $j.SrcPath + "' is a static AVIF (not animated) - left unconverted.")
                 $batchResult.StaticSkippedCount++
                 $batchResult.StaticSkippedPaths.Add($j.SrcPath)
+                if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
                 continue
             }
 
@@ -296,6 +307,7 @@ function Convert-AnimatedBatch {
                 $stderr = $j.Proc.StandardError.ReadToEnd()
                 $code   = $j.Proc.ExitCode
                 $j.Proc.Dispose()
+                if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
 
                 if ($DoFullLogging -and -not [string]::IsNullOrWhiteSpace($stdout)) {
                     Write-Log ("magick stdout for '" + $j.SrcPath + "': " + $stdout.Trim())
@@ -364,6 +376,7 @@ function Convert-AnimatedBatch {
                     $stderr = $j.Proc.StandardError.ReadToEnd()
                     $code   = $j.Proc.ExitCode
                     $j.Proc.Dispose()
+                    if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
 
                     $convOk = $false
                     try {
@@ -410,6 +423,7 @@ function Convert-AnimatedBatch {
                 try { $j.Proc.WaitForExit(5000) } catch { }
                 if (Test-Path -LiteralPath $j.WebpPath) { try { [System.IO.File]::Delete($j.WebpPath) } catch { } }
                 $j.Proc.Dispose()
+                if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
             }
         }
     }

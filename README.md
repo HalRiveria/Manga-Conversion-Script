@@ -8,8 +8,10 @@ development/debugging partner.
 **Status: standalone-build phase done, main-script rewrite not started.**
 The project is moving from a single large script toward independently-
 built-and-tested modules that get merged into a shipped script only once
-each is verified working on its own. **All 18 planned modules are now
-built and tested** (20/20 harnesses, 800+ assertions) - none are merged
+each is verified working on its own. **All 18 originally-planned modules
+are built and tested, plus a 19th (`Controller.ps1`, Full Pipeline's
+per-chapter engine, added 2026-08-28)** (21/21 harnesses, 890+
+assertions) - none are merged
 into the main script yet, which stays frozen until that rewrite starts.
 See `CLAUDE.md` for full working context if you're picking this up in a
 new session (human or Claude Code), `Todo.md` for the live tracker, and
@@ -21,7 +23,7 @@ new session (human or Claude Code), `Todo.md` for the live tracker, and
 |---|---|
 | `Conversion Script Main.ps1` | Main conversion script (currently v16.1), FROZEN - no edits until the module rewrite starts. Extracts ZIPs, converts images to `.jxl`, re-zips, handles loose files, zip-only archiving. Four modes: loose-only, loose+zip, zip-only, rezip-only. |
 
-`Modules\` holds all 18 standalone modules built per the development
+`Modules\` holds all 19 standalone modules built per the development
 approach below - not yet merged into the main script. Each is a
 self-contained `.ps1` (pure function definitions, no top-level side
 effects) with its own test harness in `Modules\_Harness\`. Full detail on
@@ -49,6 +51,7 @@ full story:
 | `Modules\RezipPipeline.ps1` | `Invoke-RezipPipeline` - mode 9 ("Convert Zipped"), deprecated/legacy, minimal-effort build. |
 | `Modules\AnimatedConversionPipeline.ps1` | `Convert-AnimatedBatch` - AVIF→WebP batch conversion (the primitive only; no library-walking orchestrator yet). |
 | `Modules\UnwantedImage.ps1` | Detects/deletes known unwanted images by size+dimensions+hash match, plus a trailing-zero-filename audit and a real profile-persistence feature (`Add-UnwantedImageProfileFromFile`). |
+| `Modules\Controller.ps1` | Full Pipeline's (mode 1) per-chapter engine - runs image and animated conversion concurrently per chapter, sharing one process budget, and zips a chapter only when both succeeded. Added 2026-08-28, not one of the original 18. |
 | `Modules\_Harness\*.Harness.ps1` | Standalone test harness per module - dot-sources the real module from `..\`. |
 | `Modules\_Reference\*.reference.ps1` | The extraction each module was built FROM - historical build input, not pending work (16 of 18 modules have one; `ZipParallelProcessing`/`CleanConsoleRendering` legitimately don't). |
 
@@ -74,7 +77,7 @@ Conversion Script/
 ├── CHANGELOG.md           <- full version history (v1.0 → v16.1)
 ├── Todo.md                <- live modularization checklist
 ├── Conversion Script Main.ps1
-├── Modules/               <- every standalone module lives here (all 18 built)
+├── Modules/               <- every standalone module lives here (19 built)
 │   ├── Logging.ps1
 │   ├── FileDeletion.ps1
 │   ├── AbortPipeline.ps1
@@ -93,6 +96,7 @@ Conversion Script/
 │   ├── RezipPipeline.ps1
 │   ├── AnimatedConversionPipeline.ps1
 │   ├── UnwantedImage.ps1
+│   ├── Controller.ps1
 │   ├── _Harness/          <- test harness per module
 │   └── _Reference/        <- extraction each module was built from
 ├── Tools/

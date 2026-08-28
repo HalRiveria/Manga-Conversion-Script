@@ -550,6 +550,30 @@ ${function:Test-AbortSignal}                   = $originalTestAbortSignal
 Write-Host ""
 
 # ==============================================================================
+#  Scenario V: -SharedBudget (Controller.ps1's Full Pipeline concurrency
+#  design, 2026-08-28) - a SemaphoreSlim with FEWER slots than
+#  -AnimatedThreads actually constrains dispatch to the semaphore's count
+#  (proven by observing it get fully exhausted mid-run via
+#  -AbortPollCallback, not just inferred from final totals), and every
+#  slot is released again (no leak) once the batch completes. Same
+#  technique as ImageConversionPipeline.Harness.ps1's own Scenario P.
+# ==============================================================================
+Write-Host "=== Scenario V: -SharedBudget gates dispatch and never leaks ===" -ForegroundColor Cyan
+$filesV = 1..5 | ForEach-Object { New-FakeAvif -Name ("scenario-v\budget" + $_ + ".avif") -Content "FRAMES:6`nSLEEP_MS:150" }
+$budgetV = [System.Threading.SemaphoreSlim]::new(2, 2)
+$script:budgetSnapshotsV = [System.Collections.Generic.List[int]]::new()
+$pollV = { param($inFlight) $script:budgetSnapshotsV.Add($budgetV.CurrentCount) }
+
+$resultV = Convert-AnimatedBatch -AnimatedFiles $filesV -MagickExe $fakeMagickExe -AnimatedThreads 5 -DoFullLogging $false `
+    -CancelToken ([System.Threading.CancellationToken]::None) -SharedBudget $budgetV -AbortPollCallback $pollV
+
+Test-Assert ($resultV.ConvertedCount -eq 5 -and $resultV.FailedCount -eq 0) "all 5 converted correctly through the shared budget"
+Test-Assert (($script:budgetSnapshotsV | Where-Object { $_ -eq 0 }).Count -gt 0) "the 2-slot budget was actually driven to 0 at some point - proves dispatch was really gated to 2 concurrent, not just passed through unused (AnimatedThreads=5 would have let all 5 start at once otherwise)"
+Test-Assert ($budgetV.CurrentCount -eq 2) "the budget is back to its full initial count after the call - no leaked slots"
+$budgetV.Dispose()
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="
