@@ -379,6 +379,106 @@ Test-Assert ($rawHostRecordsM2.Count -eq 0) "explicitly passing -AbortWaitMessag
 Write-Host ""
 
 # ==============================================================================
+#  Scenario N: Test-OwnAbortException - both conditions required
+#  (abortRequested AND a matching exception type), built 2026-08-28 from
+#  a real extraction of the main script's own top-level catch block (see
+#  Modules\_Reference\AbortPipeline.reference.ps1).
+# ==============================================================================
+Write-Host "=== Scenario N: Test-OwnAbortException ===" -ForegroundColor Cyan
+
+function New-FakeErrorRecord {
+    <#
+    .SYNOPSIS
+        Builds a real System.Management.Automation.ErrorRecord wrapping
+        $Exception WITHOUT ever throwing it through PowerShell's own
+        pipeline - constructing the ErrorRecord directly instead.
+        Deliberate, not a shortcut: a real `throw` of a
+        PipelineStoppedException specifically triggers PowerShell's own
+        internal pipeline-stop machinery (that IS what the type is FOR),
+        which killed this harness process outright the first time this
+        scenario was written using try/throw/catch to build a "caught"
+        exception the normal way - live-caught, not hypothetical.
+    #>
+    param([Parameter(Mandatory)][System.Exception]$Exception)
+    return [System.Management.Automation.ErrorRecord]::new($Exception, "TestError", [System.Management.Automation.ErrorCategory]::NotSpecified, $null)
+}
+
+Reset-AbortState
+$script:abortRequested = $true
+$errPipelineStopped = New-FakeErrorRecord -Exception ([System.Management.Automation.PipelineStoppedException]::new())
+Test-Assert ((Test-OwnAbortException -ErrorRecord $errPipelineStopped) -eq $true) "abortRequested + PipelineStoppedException -> true"
+
+$errOperationCanceled = New-FakeErrorRecord -Exception ([System.OperationCanceledException]::new())
+Test-Assert ((Test-OwnAbortException -ErrorRecord $errOperationCanceled) -eq $true) "abortRequested + OperationCanceledException -> true"
+
+$script:abortRequested = $false
+Test-Assert ((Test-OwnAbortException -ErrorRecord $errPipelineStopped) -eq $false) "the SAME exception type with abortRequested false -> false (a matching exception type alone isn't enough)"
+
+$script:abortRequested = $true
+$errUnrelated = New-FakeErrorRecord -Exception ([System.IO.IOException]::new("disk full"))
+Test-Assert ((Test-OwnAbortException -ErrorRecord $errUnrelated) -eq $false) "abortRequested true but an UNRELATED exception type -> false (a real crash mid-abort is still a real crash)"
+Reset-AbortState
+Write-Host ""
+
+# ==============================================================================
+#  Scenario O: Invoke-AbortOrFatalHandler - the own-abort branch finalizes
+#  the drain (Complete-AbortDrain) and does NOT invoke -LogHandler - this
+#  is a graceful abort, not something to report as an error.
+# ==============================================================================
+Write-Host "=== Scenario O: Invoke-AbortOrFatalHandler - own-abort branch ===" -ForegroundColor Cyan
+Reset-AbortState
+$script:abortRequested = $true
+$script:CleanConsoleOutputEnabled = $true
+$logCallsO = [System.Collections.Generic.List[string]]::new()
+$logHandlerO = { param($m) $logCallsO.Add($m) }.GetNewClosure()
+
+$resultO = Invoke-AbortOrFatalHandler -ErrorRecord $errPipelineStopped -LogHandler $logHandlerO
+
+Test-Assert ($resultO -eq $true) "returns `$true for our own abort"
+Test-Assert ($logCallsO.Count -eq 0) "-LogHandler was never invoked - a graceful abort is not a logged error"
+Test-Assert ([ConsoleCtrl]::DrainComplete.IsSet) "DrainComplete was signalled (via Complete-AbortDrain)"
+Test-Assert ($script:completeAllActiveSeriesProgressCallCount -eq 1) "Complete-AbortDrain's own CCR finalization fired too (CleanConsoleOutputEnabled was on) - proves this really called Complete-AbortDrain, not a reimplementation"
+Reset-AbortState
+Write-Host ""
+
+# ==============================================================================
+#  Scenario P: Invoke-AbortOrFatalHandler - a genuine crash builds a real
+#  "FATAL ERROR" message (exception text + stack trace) and hands it to
+#  -LogHandler; DrainComplete is untouched by this branch.
+# ==============================================================================
+Write-Host "=== Scenario P: Invoke-AbortOrFatalHandler - genuine crash branch ===" -ForegroundColor Cyan
+Reset-AbortState
+$script:abortRequested = $true   # even mid-abort, an unrelated crash is still a crash
+$logCallsP = [System.Collections.Generic.List[string]]::new()
+$logHandlerP = { param($m) $logCallsP.Add($m) }.GetNewClosure()
+
+$resultP = Invoke-AbortOrFatalHandler -ErrorRecord $errUnrelated -LogHandler $logHandlerP
+
+Test-Assert ($resultP -eq $false) "returns `$false for a genuine crash"
+Test-Assert ($logCallsP.Count -eq 1) "-LogHandler invoked exactly once"
+Test-Assert ($logCallsP[0] -match [regex]::Escape("FATAL ERROR:") -and $logCallsP[0] -match [regex]::Escape("disk full")) "the message names it a fatal error and includes the real exception text"
+Test-Assert ($logCallsP[0] -match [regex]::Escape("Stack Trace:")) "the message includes a stack trace section"
+Test-Assert (-not [ConsoleCtrl]::DrainComplete.IsSet) "DrainComplete was NOT touched by the fatal-error branch - only the own-abort branch finalizes the drain"
+Reset-AbortState
+Write-Host ""
+
+# ==============================================================================
+#  Scenario Q: Invoke-AbortOrFatalHandler - the default -LogHandler is a
+#  raw Write-Host (no hard Write-Log dependency), matching
+#  Invoke-GracefulDrain's own -ErrorHandler default convention.
+# ==============================================================================
+Write-Host "=== Scenario Q: default -LogHandler needs no Logging.ps1 dependency ===" -ForegroundColor Cyan
+Reset-AbortState
+$threwQ = $false
+try {
+    $resultQ = Invoke-AbortOrFatalHandler -ErrorRecord $errUnrelated
+} catch { $threwQ = $true }
+Test-Assert (-not $threwQ) "no -LogHandler supplied, no Write-Log dot-sourced anywhere in this harness - does not throw"
+Test-Assert ($resultQ -eq $false) "still correctly identified as a genuine crash"
+Reset-AbortState
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

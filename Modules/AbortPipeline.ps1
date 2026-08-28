@@ -25,6 +25,15 @@
          exposed separately for paths that need to unblock the handler
          without going through a drain (e.g. abort detected before any job
          was ever dispatched).
+      5. In the script's own top-level catch block, call
+         Invoke-AbortOrFatalHandler -ErrorRecord $_ - disambiguates
+         PowerShell's own internal Ctrl+C handling firing early (a
+         PipelineStoppedException/OperationCanceledException thrown before
+         step 1's handler suppresses it) from a genuine, unrelated crash.
+         Built 2026-08-28 from a real extraction of the main script's own
+         catch block that sat unmerged since this module was first built -
+         see Modules\_Reference\AbortPipeline.reference.ps1 and CLAUDE.md's
+         Known gaps for the full history.
 
     What this module deliberately does NOT own: per-pipeline dispatch loops
     (job scanning/throttling), per-mode abort summaries (stats formatting,
@@ -261,6 +270,76 @@ function Complete-AbortDrain {
         try { Complete-AllActiveSeriesProgress } catch { }
     }
     try { [ConsoleCtrl]::DrainComplete.Set() } catch { }
+}
+
+function Test-OwnAbortException {
+    <#
+    .SYNOPSIS
+        True only if $ErrorRecord looks like our own abort mechanism
+        firing early - PowerShell's internal Ctrl+C handling throwing a
+        PipelineStoppedException/OperationCanceledException before our
+        SetConsoleCtrlHandler-based handler suppresses it - rather than a
+        genuine, unrelated crash. Requires BOTH conditions: an abort must
+        already be in progress ($script:abortRequested) AND the exception
+        type must match - an exception of either type that fires with NO
+        abort in progress is a real crash that merely resembles one (e.g.
+        an unrelated cancellation from some other source), not our own
+        abort.
+    .PARAMETER ErrorRecord
+        The caught error - pass $_ from a catch block.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+    $exType = $ErrorRecord.Exception.GetType().FullName
+    return ($script:abortRequested -and ($exType -like '*PipelineStoppedException*' -or $exType -like '*OperationCanceled*'))
+}
+
+function Invoke-AbortOrFatalHandler {
+    <#
+    .SYNOPSIS
+        Ported from the real main script's top-level catch block (see
+        Modules\_Reference\AbortPipeline.reference.ps1 for the verbatim
+        extraction this was built from, and CLAUDE.md's Known gaps for
+        the full history): if $ErrorRecord is our own abort firing early
+        (Test-OwnAbortException), finalizes the drain via
+        Complete-AbortDrain and does nothing else - this is a graceful
+        abort, not an error, so nothing gets logged as one. Otherwise
+        it's a genuine crash: builds a "FATAL ERROR: ..." message
+        (exception text + stack trace) and hands it to -LogHandler.
+    .PARAMETER LogHandler
+        Scriptblock taking a single message string. Defaults to a raw
+        Write-Host in red, matching Invoke-GracefulDrain's own
+        -ErrorHandler default - this module has no hard dependency on
+        the caller's Write-Log. A real caller with Logging.ps1 dot-
+        sourced should pass `{ param($m) Write-Log $m -Level Error }`
+        instead - Write-Log already handles mutex-guarded writes and
+        FullLogging-aware file routing, which the original main-script
+        snippet's raw (unguarded) Out-File call never did. The original
+        snippet's ASCII-stripping (for a legacy `-Encoding ASCII` Out-File
+        call) is deliberately NOT ported - Logging.ps1's real Write-Log
+        already writes UTF-8, making that workaround dead code, not a
+        behavior worth preserving.
+    .OUTPUTS
+        $true if this was our own abort (already handled, nothing more
+        to do); $false if it was a genuine fatal error (already handed
+        to -LogHandler).
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord,
+        [scriptblock]$LogHandler = { param($Message) Write-Host ("`r`n" + $Message) -ForegroundColor Red }
+    )
+
+    if (Test-OwnAbortException -ErrorRecord $ErrorRecord) {
+        Complete-AbortDrain
+        return $true
+    }
+
+    $fatalMsg = "FATAL ERROR: " + $ErrorRecord.ToString() + "`r`nStack Trace:`r`n" + $ErrorRecord.ScriptStackTrace
+    & $LogHandler $fatalMsg
+    return $false
 }
 
 function Receive-CompletedHandles {
