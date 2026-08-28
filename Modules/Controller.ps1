@@ -154,10 +154,16 @@
     was a stub through Phase 1 - built here only once Invoke-Mode itself
     was proven standalone, touching no other module.
 
-    NOT BUILT HERE (see this module's own header intro and Todo.md):
-    Show-PostRunPrompt's run-loop - confirmed in scope, deliberately not
-    designed yet (Invoke-Mode runs ONE selected mode; the loop that
-    calls it repeatedly is separate, larger, unscoped work).
+    Invoke-MainLoop (2026-08-28) - the run loop that used to live inline
+    in the main script: resolve a mode (Get-SelectedMode), run it
+    (Invoke-Mode), report it (Format-ElapsedTime/Get-SummaryLines/
+    Write-SummaryReport), prompt to continue or exit
+    (Show-PostRunPrompt). All four real functions are injectable, same
+    DI pattern as Invoke-Mode's own pipeline handlers - a harness proves
+    the LOOP's own control flow (iteration count, when it stops) without
+    a real interactive prompt or real pipeline. New forward reference
+    this brings in: Menu.ps1 (Get-SelectedMode, Show-PostRunPrompt) -
+    Controller.ps1 never needed Menu.ps1 before this.
 
     FORWARD REFERENCES (not defined in this module - callers must
     dot-source the owning module(s) first):
@@ -191,8 +197,13 @@
         -ConvertZippedHandler
       - Invoke-LooseFolderZip (ZipPipeline.ps1) - same caveat, for
         -ZipFolderHandler (mode 8's real zip step, built 2026-08-28)
-      - New-StatsTracker (Summary.ps1) - Invoke-Mode's own output shape,
-        needed unconditionally (not caveat-gated like the ones above)
+      - New-StatsTracker, Format-ElapsedTime, Get-SummaryLines,
+        Write-SummaryReport (Summary.ps1) - the last three for
+        Invoke-MainLoop specifically (2026-08-28), needed unconditionally
+      - Get-SelectedMode, Show-PostRunPrompt (Menu.ps1) - Invoke-MainLoop
+        only (2026-08-28), same caveat as the Invoke-Mode handlers above:
+        only matters for a real caller that doesn't override
+        -GetModeHandler/-PostRunPromptHandler
     Same dot-source ordering rule as ZipPipeline.ps1/RezipPipeline.ps1:
     Logging.ps1/FileDeletion.ps1 BEFORE ZipParallelProcessing.ps1, since
     -SharedFunctionNames captures whichever definition is CURRENTLY
@@ -847,9 +858,25 @@ function Invoke-Mode {
                 } else {
                     @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif")
                 }
+                # Boxed, not a bare/$script: var - .GetNewClosure() puts
+                # $zipStep in its own dynamic module, so a plain
+                # "$zipStatsBox = ..." reassignment inside it would silently
+                # write to a disconnected copy this scope never sees (the
+                # exact trap Controller.Harness.ps1's own Scenario O test
+                # hit while proving this callback - see CLAUDE.md's Lessons
+                # learned). Mutating an existing hashtable's keys, not
+                # reassigning the variable, is what makes this safe.
+                $zipStatsBox = @{ Success = 0; Fail = 0; Skipped = 0; FolderDeletedSuccess = 0; FolderDeletedFail = 0 }
                 $zipStep = {
                     param($Info)
                     $zipResult = & $ZipFolderHandler -FolderPath $Info.Dir.FullName -ZipOut $Info.ZipOut -LooseImageExtensions $zipLooseExtensions
+                    switch ($zipResult.Status) {
+                        'Success' { $zipStatsBox.Success++ }
+                        'Fail'    { $zipStatsBox.Fail++ }
+                        'Skipped' { $zipStatsBox.Skipped++ }
+                    }
+                    if ($zipResult.FolderDeleted)      { $zipStatsBox.FolderDeletedSuccess++ }
+                    if ($zipResult.FolderDeleteFailed) { $zipStatsBox.FolderDeletedFail++ }
                     $detail = switch ($zipResult.Status) {
                         'Success' { $zipResult.EntryCount.ToString() + " entries" }
                         'Skipped' { "unconverted source(s) remain" }
@@ -865,15 +892,17 @@ function Invoke-Mode {
                 $stats.LooseImgDeleted.Success   = $r.DeletedSuccess;   $stats.LooseImgDeleted.Fail   = $r.DeletedFail
                 $stats.LooseStaleCleaned.Success = $r.StaleCleanedSuccess; $stats.LooseStaleCleaned.Fail = $r.StaleCleanedFail
                 $stats.InspectFailed.Count       = $r.InspectFailedCount
-                # LooseFolderZipped/LooseFolderDeleted are NOT populated
-                # here - Invoke-LooseImageConversionPipeline's own $totals
-                # has no zip-step counters (that's ZipPipeline.ps1's
-                # domain, deliberately kept decoupled - see this module's
-                # header). A future pass could thread zip outcomes back
-                # through -ZipStepCallback's own closure state if that
-                # reporting gap turns out to matter in practice; not done
-                # here to avoid inventing an accumulation mechanism the
-                # design never actually asked for.
+                # LooseFolderZipped/LooseFolderDeleted - fixed 2026-08-28.
+                # Invoke-LooseImageConversionPipeline's own $totals has no
+                # zip-step counters (ZipPipeline.ps1's domain, deliberately
+                # kept decoupled - see this module's header), so mode 8's
+                # zip outcomes are only ever visible through $zipStatsBox,
+                # accumulated across every chapter's -ZipStepCallback call.
+                $stats.LooseFolderZipped.Success  = $zipStatsBox.Success
+                $stats.LooseFolderZipped.Fail      = $zipStatsBox.Fail
+                $stats.LooseFolderZipped.Skipped   = $zipStatsBox.Skipped
+                $stats.LooseFolderDeleted.Success  = $zipStatsBox.FolderDeletedSuccess
+                $stats.LooseFolderDeleted.Fail      = $zipStatsBox.FolderDeletedFail
             }
             default {
                 throw ("Invoke-Mode: unrecognized mode '" + $Resolved.Mode + "'.")
@@ -884,5 +913,68 @@ function Invoke-Mode {
     } catch {
         $null = Invoke-AbortOrFatalHandler -ErrorRecord $_ -LogHandler $LogHandler
         return $null
+    }
+}
+
+function Invoke-MainLoop {
+    <#
+    .SYNOPSIS
+        The run loop that used to live inline in the main script's own
+        `while` block (moved here 2026-08-28, per the "Show-PostRunPrompt's
+        run loop lives in Controller.ps1" decision, Todo.md): resolve a
+        mode, run it via Invoke-Mode, report the result, prompt to
+        continue or exit. Loops until Show-PostRunPrompt (or its
+        injected fake) returns 'Exit'.
+    .PARAMETER GetModeHandler
+    .PARAMETER InvokeModeHandler
+    .PARAMETER PostRunPromptHandler
+        Injectable, same DI pattern as Invoke-Mode's own pipeline
+        handlers - default to the real Get-SelectedMode/Invoke-Mode/
+        Show-PostRunPrompt. A harness overriding all three never needs a
+        real interactive prompt, real pipeline, or real keypress to test
+        the loop's own control flow (how many iterations, when it stops).
+    .OUTPUTS
+        None - runs until exit, same as the main script's old inline loop.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$TargetPath,
+        [Parameter(Mandatory)]
+        [hashtable]$Settings,
+        [Parameter(Mandatory)]
+        [string]$SettingsPath,
+        [Parameter(Mandatory)]
+        [string]$CjxlExe,
+        [string]$MagickExe,
+        [string]$LogFile,
+        [string]$LogErrorFile,
+        [string]$LogWarnFile,
+        [scriptblock]$GetModeHandler = ${function:Get-SelectedMode},
+        [scriptblock]$InvokeModeHandler = ${function:Invoke-Mode},
+        [scriptblock]$PostRunPromptHandler = ${function:Show-PostRunPrompt}
+    )
+
+    while ($true) {
+        $resolved = & $GetModeHandler -Settings $Settings -SettingsPath $SettingsPath
+
+        $runStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        $stats = & $InvokeModeHandler -Resolved $resolved -TargetPath $TargetPath -Settings $Settings -CjxlExe $CjxlExe -MagickExe $MagickExe `
+            -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile
+        $runStopwatch.Stop()
+
+        if ($null -eq $stats) {
+            # Invoke-Mode's own shared catch already logged the real cause
+            # (Invoke-AbortOrFatalHandler) - a $null return means the run
+            # did NOT complete, so there is no real $stats to report.
+            Write-Log "Run did not complete - see the error above." -Level Warn
+        } else {
+            $elapsedString = Format-ElapsedTime -Elapsed $runStopwatch.Elapsed
+            $summaryLines = Get-SummaryLines -Stats $stats -ElapsedString $elapsedString -ModeFlags $resolved
+            Write-SummaryReport -Lines $summaryLines -FullLogging $Settings.FullLogging
+        }
+
+        $postRun = & $PostRunPromptHandler
+        if ($postRun -eq 'Exit') { break }
+        Write-Host ""
     }
 }

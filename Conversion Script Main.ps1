@@ -32,17 +32,16 @@
     is what proves the logic itself is correct, this file just carries a
     copy of it.
 
-    DISPATCH (2026-08-28, Phase 3 of the build plan): the main loop below
-    calls Controller.ps1's real Invoke-Mode - the Phase 1/2 work that
-    used to be stubbed inline in this file (per-mode param translation,
-    output normalization onto Summary.ps1's $stats shape, the shared
-    abort/fatal-error catch) now lives there for real, proven standalone
-    by Controller.Harness.ps1 before ever being wired in here. The ONE
-    piece still NOT moved into Controller.ps1: Show-PostRunPrompt's run
-    loop (the `while ($true) { ... }` below) - that's bigger, separate,
-    unscoped work (see Todo.md's Open Decisions), so this file still owns
-    the literal loop, just delegates each iteration's real work to
-    Invoke-Mode instead of doing it inline.
+    DISPATCH AND MAIN LOOP (2026-08-28, Phases 3 and the following
+    session): this file now just calls Controller.ps1's Invoke-MainLoop.
+    Everything that used to be stubbed or inlined here - per-mode param
+    translation, output normalization onto Summary.ps1's $stats shape,
+    the shared abort/fatal-error catch (Invoke-Mode, Phase 3), AND the
+    run loop itself including Show-PostRunPrompt (Invoke-MainLoop, built
+    right after) - now lives in Controller.ps1, proven standalone by
+    Controller.Harness.ps1 before ever being wired in here. This file's
+    job really is just bootstrap now: find Modules\, load settings,
+    dot-source everything, resolve dependencies, hand off.
 
 .PARAMETER Path
     Root directory to operate in. Defaults to the current working
@@ -262,33 +261,10 @@ Export-ScriptSettings -Settings $settings -Path $settingsPath
 Write-Log ("Conversion Script starting. Path: '" + $Path + "'. cjxl: '" + $resolvedCjxlPath + "'. magick: '" + $(if ($resolvedMagickPath) { $resolvedMagickPath } else { "(not found - WebP/AVIF input will fail)" }) + "'.")
 
 # ==============================================================================
-#  MAIN LOOP - Show-PostRunPrompt's loop is the one piece that stays here
-#  rather than moving into Controller.ps1 (see header above); each
-#  iteration's real work is entirely Controller.ps1's Invoke-Mode now.
+#  MAIN LOOP - moved into Controller.ps1's Invoke-MainLoop (2026-08-28) -
+#  this file's job is now purely bootstrap; the run loop itself, including
+#  Show-PostRunPrompt, lives in Controller.ps1.
 # ==============================================================================
 
-while ($true) {
-    $resolved = Get-SelectedMode -Settings $settings -SettingsPath $settingsPath
-
-    $runStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    $stats = Invoke-Mode -Resolved $resolved -TargetPath $Path -Settings $settings -CjxlExe $resolvedCjxlPath -MagickExe $resolvedMagickPath `
-        -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile
-    $runStopwatch.Stop()
-
-    if ($null -eq $stats) {
-        # Invoke-Mode's own shared catch already logged the real cause
-        # (Invoke-AbortOrFatalHandler - either a genuine crash or the
-        # rare abort-exception race) - a $null return here means the run
-        # did NOT complete, so there is no real $stats to report. Skip
-        # the summary rather than printing a misleading all-zeros report.
-        Write-Log "Run did not complete - see the error above." -Level Warn
-    } else {
-        $elapsedString = Format-ElapsedTime -Elapsed $runStopwatch.Elapsed
-        $summaryLines = Get-SummaryLines -Stats $stats -ElapsedString $elapsedString -ModeFlags $resolved
-        Write-SummaryReport -Lines $summaryLines -FullLogging $settings.FullLogging
-    }
-
-    $postRun = Show-PostRunPrompt
-    if ($postRun -eq 'Exit') { break }
-    Write-Host ""
-}
+Invoke-MainLoop -TargetPath $Path -Settings $settings -SettingsPath $settingsPath -CjxlExe $resolvedCjxlPath -MagickExe $resolvedMagickPath `
+    -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile

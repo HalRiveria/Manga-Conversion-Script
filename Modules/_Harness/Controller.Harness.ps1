@@ -518,6 +518,8 @@ Test-Assert ($statsO.LooseImgConverted.Success -eq 1) "ImageConversionZip: image
 Test-Assert ($zipHandlerCallsO.Count -eq 1) ("the zip-folder handler fired exactly once (got " + $zipHandlerCallsO.Count + ")")
 Test-Assert ($zipHandlerCallsO[0].LooseImageExtensions -contains ".avif") "ZipWithUnconvertedAnimated=false (default): .avif is in the blocking extension list"
 Test-Assert ($zipOutcomeBoxO.Value.Status -eq "Success" -and $zipOutcomeBoxO.Value.Detail -eq "4 entries") "the callback mapped the zip result into @{ Status; Detail } correctly"
+Test-Assert ($statsO.LooseFolderZipped.Success -eq 1 -and $statsO.LooseFolderZipped.Fail -eq 0 -and $statsO.LooseFolderZipped.Skipped -eq 0) ("mode 8's zip outcome IS reflected in LooseFolderZipped now (2026-08-28 fix) - got Success=" + $statsO.LooseFolderZipped.Success)
+Test-Assert ($statsO.LooseFolderDeleted.Success -eq 1 -and $statsO.LooseFolderDeleted.Fail -eq 0) "mode 8's folder-deletion outcome IS reflected in LooseFolderDeleted now"
 
 # Flip the setting: .avif should be EXCLUDED from the blocking list, so an
 # unconverted .avif sitting in the folder no longer blocks zipping.
@@ -586,6 +588,52 @@ $totalsS = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-s") -CjxlE
     -LooseImageExtensions @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif") -AnimatedFileExtensions @()
 
 Test-Assert ($totalsS.InspectFailedCount -eq 1) ("the image engine's inspect-failure was summed into Invoke-FullPipeline's own totals (got " + $totalsS.InspectFailedCount + ")")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario T: Invoke-MainLoop (2026-08-28) - the run loop moved out of the
+#  main script. Every handler injected, so this proves the LOOP's own
+#  control flow (how many iterations, what stops it) without a real
+#  interactive prompt or real pipeline.
+# ==============================================================================
+Write-Host "=== Scenario T: Invoke-MainLoop runs until Show-PostRunPrompt returns Exit ===" -ForegroundColor Cyan
+$getModeCallsT = 0
+$fakeGetModeT = { param($Settings, $SettingsPath) $script:getModeCallsT++; return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
+$invokeModeCallsT = 0
+$fakeInvokeModeT = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile)
+    $script:invokeModeCallsT++
+    $s = New-StatsTracker
+    $s.LooseImgConverted.Success = $script:invokeModeCallsT
+    return $s
+}
+$postRunCallsT = 0
+$fakePostRunT = {
+    $script:postRunCallsT++
+    if ($script:postRunCallsT -ge 3) { return 'Exit' }
+    return 'ReturnToMenu'
+}
+$script:getModeCallsT = 0; $script:invokeModeCallsT = 0; $script:postRunCallsT = 0
+Invoke-MainLoop -TargetPath "C:\fake\lib" -Settings $fakeSettings -SettingsPath "C:\fake\settings.json" -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" `
+    -GetModeHandler $fakeGetModeT -InvokeModeHandler $fakeInvokeModeT -PostRunPromptHandler $fakePostRunT
+
+Test-Assert ($script:getModeCallsT -eq 3 -and $script:invokeModeCallsT -eq 3) ("the loop ran exactly 3 iterations before Exit (got GetMode=" + $script:getModeCallsT + ", InvokeMode=" + $script:invokeModeCallsT + ")")
+Test-Assert ($script:postRunCallsT -eq 3) "Show-PostRunPrompt was consulted after every iteration, including the one that stopped the loop"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario U: Invoke-MainLoop - a $null Invoke-Mode result (a run that
+#  didn't complete) is logged, not treated as a clean summary, and does
+#  NOT stop the loop by itself - only Show-PostRunPrompt's own Exit does.
+# ==============================================================================
+Write-Host "=== Scenario U: Invoke-MainLoop handles a `$null Invoke-Mode result without crashing the loop ===" -ForegroundColor Cyan
+$fakeGetModeU = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
+$fakeInvokeModeU = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) return $null }
+$script:postRunCallsU = 0
+$fakePostRunU = { $script:postRunCallsU++; return 'Exit' }
+Invoke-MainLoop -TargetPath "C:\fake\lib" -Settings $fakeSettings -SettingsPath "C:\fake\settings.json" -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" `
+    -GetModeHandler $fakeGetModeU -InvokeModeHandler $fakeInvokeModeU -PostRunPromptHandler $fakePostRunU
+
+Test-Assert ($script:postRunCallsU -eq 1) "a `$null Invoke-Mode result still reaches Show-PostRunPrompt - the loop doesn't crash or skip the prompt"
 Write-Host ""
 
 # ==============================================================================
