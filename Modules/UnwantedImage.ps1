@@ -69,7 +69,16 @@
     from the file, not typed in by hand) and persists it
     (Add-UnwantedImageProfile, which refuses a duplicate hash rather than
     adding one) in one call - so it's picked up automatically by every
-    future scan, no further wiring needed.
+    future scan, no further wiring needed. Show-AddUnwantedImageProfileFlow
+    is the interactive console flow around that (prompt for path -> prompt
+    for label -> show what was actually read from the file -> require an
+    explicit Y confirmation before persisting -> report the outcome) - the
+    design (preview+confirm, a duplicate just informs rather than offering
+    a rename, one add per visit, fixed default tolerance) was settled with
+    the project owner before it was built. NOT wired into Menu.ps1 yet -
+    which mode number it gets, or whether it's standalone, is still an
+    open question (see Todo.md) - this is the flow a future menu entry
+    calls into, not the entry itself.
 
     FORWARD REFERENCES (not defined in this module - callers must
     dot-source the owning module(s) first):
@@ -307,6 +316,108 @@ function Add-UnwantedImageProfileFromFile {
     $addResult = Add-UnwantedImageProfile -Profile $profile -ProfilesPath $ProfilesPath
 
     return @{ Added = $addResult.Added; Reason = $addResult.Reason; Profile = $profile }
+}
+
+function Show-AddUnwantedImageProfileFlow {
+    <#
+    .SYNOPSIS
+        The interactive "add an unwanted-image profile" flow: prompts for
+        an image path (drag-and-drop or a pasted/typed path both work -
+        any Read-Host prompt accepts a dropped file in a Windows
+        console), a label (blank defaults to the file's own name), shows
+        what was actually read from the file (dimensions/size/hash), and
+        requires an explicit Y confirmation before persisting - a wrong
+        image here would get auto-deleted on every future scan, so this
+        is a real safety check, not a formality. A duplicate hash is
+        reported (naming the existing profile's Label) rather than
+        added again. Design settled with the project owner before this
+        was built: preview+confirm (not immediate-add), duplicate just
+        informs rather than offering to rename the existing entry, adds
+        exactly one profile then returns (no "add another?" loop), and
+        always uses the default 5000-byte SizeTolerance (not prompted
+        per-profile).
+    .PARAMETER PromptFunc
+        Defaults to a thin Read-Host wrapper. Injectable for testing -
+        same "inject the real dependency, let a harness override it"
+        pattern Menu.ps1's Show-ModeMenu/Show-OptionsMenuLevel already
+        established, for the same reason: a harness can drive the whole
+        interactive flow without simulating real stdin.
+    .OUTPUTS
+        @{ Added = <bool>; Reason = <string, set for every non-Added
+        outcome - "no path entered"/"cancelled by file-read error"/
+        "cancelled by user"/"a profile with the same hash already
+        exists"> ; Profile = <the built profile, or $null if the file
+        couldn't be read>; ExistingLabel = <set only on a duplicate> }
+    #>
+    param(
+        [string]$ProfilesPath = (Get-UnwantedImageProfilesPath),
+        [scriptblock]$PromptFunc = { param($Message) Read-Host $Message }
+    )
+
+    $path = (& $PromptFunc "Enter the path to the image (drag & drop the file in, or paste the path)")
+    if ($null -ne $path) { $path = $path.Trim().Trim('"') }
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        Write-Host "No path entered - cancelled." -ForegroundColor Yellow
+        return @{ Added = $false; Reason = "No path entered."; Profile = $null }
+    }
+
+    $label = (& $PromptFunc "Label for this profile (Enter to use the filename)")
+    if ($null -ne $label) { $label = $label.Trim() }
+
+    $profile = $null
+    try {
+        if ([string]::IsNullOrWhiteSpace($label)) {
+            $profile = New-UnwantedImageProfileFromFile -Path $path
+        } else {
+            $profile = New-UnwantedImageProfileFromFile -Path $path -Label $label
+        }
+    } catch {
+        Write-Host ("Could not read '" + $path + "' as an image: " + $_) -ForegroundColor Red
+        return @{ Added = $false; Reason = "Cancelled by file-read error: " + $_; Profile = $null }
+    }
+
+    Write-Host ""
+    Write-Host "Pulled from the file:" -ForegroundColor Cyan
+    Write-Host ("  Width      : " + $profile.Width)
+    Write-Host ("  Height     : " + $profile.Height)
+    Write-Host ("  Size       : " + $profile.SizeBytes + " bytes")
+    Write-Host ("  SHA-256    : " + $profile.Hash)
+    Write-Host ""
+
+    $confirm = (& $PromptFunc "Add this as a new unwanted-image profile? (Y/N)")
+    if ($null -eq $confirm -or $confirm.Trim() -notmatch '^(?i:y|yes)$') {
+        Write-Host "Cancelled - not added." -ForegroundColor Yellow
+        return @{ Added = $false; Reason = "Cancelled by user."; Profile = $profile }
+    }
+
+    $addResult = Add-UnwantedImageProfile -Profile $profile -ProfilesPath $ProfilesPath
+    if ($addResult.Added) {
+        Write-Host ("Added '" + $profile.Label + "' - will be caught on every future scan.") -ForegroundColor Green
+        return @{ Added = $true; Reason = $null; Profile = $profile }
+    }
+
+    # Captured into a variable FIRST, then THAT variable is piped into
+    # Where-Object - not the function call directly. Get-AllUnwantedImageProfiles
+    # comma-guards its own return (`return ,(...)`, needed so a result
+    # that happens to be 0/1 elements doesn't collapse) - that makes it
+    # safe to ASSIGN (the caller just captures the one real array that
+    # crossed the function boundary), but piping the function call
+    # STRAIGHT into another cmdlet is a different, deeper trap: only ONE
+    # object crosses the pipeline boundary (the comma-protected array
+    # itself), so Where-Object's `$_` binds to that whole array as its
+    # single input item, not to each profile individually.
+    # PowerShell's collection-member-enumeration then makes `$_.Hash`
+    # return an ARRAY of every element's Hash, and `-eq` against an array
+    # does element-wise comparison - truthy (matches) the moment ANY one
+    # element matches, not just when $_ itself is the right profile - so
+    # every profile passes the filter and `.Label` afterward returns
+    # every Label concatenated. Live-caught this exact way twice while
+    # building this function (the @()-wrap first, then this) - see
+    # CHANGELOG.md.
+    $allProfiles = Get-AllUnwantedImageProfiles -ProfilesPath $ProfilesPath
+    $existingLabel = ($allProfiles | Where-Object { $_.Hash -eq $profile.Hash } | Select-Object -First 1).Label
+    Write-Host ("Not added - already tracked as '" + $existingLabel + "'.") -ForegroundColor Yellow
+    return @{ Added = $false; Reason = $addResult.Reason; Profile = $profile; ExistingLabel = $existingLabel }
 }
 
 function Get-ImageDimensions {

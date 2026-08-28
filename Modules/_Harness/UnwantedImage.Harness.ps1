@@ -100,6 +100,29 @@ function New-NonImageFile {
     return (Get-Item -LiteralPath $path)
 }
 
+function New-ScriptedPrompt {
+    <#
+    .SYNOPSIS
+        Builds a -PromptFunc scriptblock that returns each of $Responses
+        in order, one per call, and throws if asked for more than were
+        queued - same technique as Menu.Harness.ps1's own helper, so an
+        under-scripted scenario fails loudly instead of blocking on a
+        real Read-Host.
+    #>
+    param([string[]]$Responses)
+
+    $queue = New-Object System.Collections.Generic.Queue[string]
+    foreach ($r in $Responses) { $queue.Enqueue($r) }
+
+    return {
+        param($Message)
+        if ($queue.Count -eq 0) {
+            throw ("ScriptedPrompt exhausted - no more responses queued (asked: '" + $Message + "')")
+        }
+        return $queue.Dequeue()
+    }.GetNewClosure()
+}
+
 Write-Host ""
 
 # ==============================================================================
@@ -450,6 +473,91 @@ $script:removeSourceCalls.Clear()
 $laterScanR = Invoke-UnwantedImageScan -Path $laterRunRootR -Profiles (Get-AllUnwantedImageProfiles -ProfilesPath $profilesPathR)
 Test-Assert ($laterScanR.DeletedCount -eq 1) "a later scan matched and deleted the file using the auto-added profile, with zero manual wiring"
 Test-Assert (-not (Test-Path -LiteralPath (Join-Path $laterRunRootR "found-later.png"))) "the matched file is actually gone"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario S: Show-AddUnwantedImageProfileFlow - happy path with an
+#  explicit label, confirmed
+# ==============================================================================
+Write-Host "=== Scenario S: interactive flow, happy path ===" -ForegroundColor Cyan
+$profilesPathS = Join-Path $scratchDir "profiles-s\unwanted-image-profiles.json"
+$imgS = New-RealImage -Name "flow-source-s.png" -Width 15 -Height 25
+$promptS = New-ScriptedPrompt -Responses @($imgS.FullName, "Flow Label", "Y")
+$flowResultS = Show-AddUnwantedImageProfileFlow -ProfilesPath $profilesPathS -PromptFunc $promptS
+
+Test-Assert ($flowResultS.Added -eq $true) "added via the interactive flow"
+Test-Assert ($flowResultS.Profile.Label -eq "Flow Label") "used the explicitly entered label"
+$loadedS = Import-UnwantedImageProfiles -ProfilesPath $profilesPathS
+Test-Assert ($loadedS.Count -eq 1 -and $loadedS[0].Label -eq "Flow Label") "actually persisted to disk"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario T: blank label defaults to the file's own name; a
+#  drag-and-drop-style quoted path is accepted
+# ==============================================================================
+Write-Host "=== Scenario T: blank label defaults to filename, quoted path accepted ===" -ForegroundColor Cyan
+$profilesPathT = Join-Path $scratchDir "profiles-t\unwanted-image-profiles.json"
+$imgT = New-RealImage -Name "flow-source-t.png" -Width 16 -Height 26
+$quotedPathT = '"' + $imgT.FullName + '"'
+$promptT = New-ScriptedPrompt -Responses @($quotedPathT, "", "Y")
+$flowResultT = Show-AddUnwantedImageProfileFlow -ProfilesPath $profilesPathT -PromptFunc $promptT
+
+Test-Assert ($flowResultT.Added -eq $true) "a drag-and-drop-style quoted path was accepted"
+Test-Assert ($flowResultT.Profile.Label -eq "flow-source-t.png") "a blank label defaulted to the file's own name"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario U: no path entered - cancels immediately, only 1 prompt call
+# ==============================================================================
+Write-Host "=== Scenario U: no path entered cancels immediately ===" -ForegroundColor Cyan
+$promptU = New-ScriptedPrompt -Responses @("")
+$flowResultU = Show-AddUnwantedImageProfileFlow -ProfilesPath (Join-Path $scratchDir "profiles-u\unwanted-image-profiles.json") -PromptFunc $promptU
+Test-Assert ($flowResultU.Added -eq $false -and $flowResultU.Reason -eq "No path entered.") "cancelled immediately - the scripted queue having only 1 response proves no further prompts were made"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario V: a file that can't be read as an image cancels with a
+#  clear reason, nothing persisted
+# ==============================================================================
+Write-Host "=== Scenario V: unreadable image file cancels cleanly ===" -ForegroundColor Cyan
+$badImgV = New-NonImageFile -Name "flow-not-an-image-v.jpg"
+$profilesPathV = Join-Path $scratchDir "profiles-v\unwanted-image-profiles.json"
+$promptV = New-ScriptedPrompt -Responses @($badImgV.FullName, "Doesn't Matter")
+$flowResultV = Show-AddUnwantedImageProfileFlow -ProfilesPath $profilesPathV -PromptFunc $promptV
+Test-Assert ($flowResultV.Added -eq $false -and $flowResultV.Reason -like "Cancelled by file-read error*") "cancelled with a file-read-error reason"
+Test-Assert (-not (Test-Path -LiteralPath $profilesPathV)) "nothing was persisted"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario W: declining the confirmation (N) does not persist anything
+# ==============================================================================
+Write-Host "=== Scenario W: declining confirmation does not add ===" -ForegroundColor Cyan
+$imgW = New-RealImage -Name "flow-source-w.png" -Width 17 -Height 27
+$profilesPathW = Join-Path $scratchDir "profiles-w\unwanted-image-profiles.json"
+$promptW = New-ScriptedPrompt -Responses @($imgW.FullName, "Declined Label", "N")
+$flowResultW = Show-AddUnwantedImageProfileFlow -ProfilesPath $profilesPathW -PromptFunc $promptW
+Test-Assert ($flowResultW.Added -eq $false -and $flowResultW.Reason -eq "Cancelled by user.") "declined via N, not added"
+Test-Assert (-not (Test-Path -LiteralPath $profilesPathW)) "nothing was persisted"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario X: a duplicate hash is reported by the EXISTING profile's
+#  label, not added a second time
+# ==============================================================================
+Write-Host "=== Scenario X: duplicate hash is reported, not re-added ===" -ForegroundColor Cyan
+$profilesPathX = Join-Path $scratchDir "profiles-x\unwanted-image-profiles.json"
+$imgX = New-RealImage -Name "flow-source-x.png" -Width 18 -Height 28
+$existingProfileX = New-UnwantedImageProfileFromFile -Path $imgX.FullName -Label "Already Tracked"
+Add-UnwantedImageProfile -Profile $existingProfileX -ProfilesPath $profilesPathX | Out-Null
+
+# Same real file (identical content -> identical hash) offered again
+# through the interactive flow, under a different label this time.
+$promptX = New-ScriptedPrompt -Responses @($imgX.FullName, "A Different Label This Time", "Y")
+$flowResultX = Show-AddUnwantedImageProfileFlow -ProfilesPath $profilesPathX -PromptFunc $promptX
+
+Test-Assert ($flowResultX.Added -eq $false) "not added a second time"
+Test-Assert ($flowResultX.ExistingLabel -eq "Already Tracked") "the message names the EXISTING profile's label, not the new one just typed in"
+Test-Assert ((Import-UnwantedImageProfiles -ProfilesPath $profilesPathX).Count -eq 1) "still only 1 persisted profile - no duplicate was written"
 Write-Host ""
 
 # ==============================================================================
