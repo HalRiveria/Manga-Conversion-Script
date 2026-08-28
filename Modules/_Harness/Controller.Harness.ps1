@@ -7,10 +7,14 @@
     ImageConversionPipeline.Harness.ps1 - dot-sources the REAL Logging.ps1/
     FileDeletion.ps1/ZipCreation.ps1/ZipValidation.ps1/LeafDirectoryDiscovery.ps1/
     AbortPipeline.ps1/CleanConsoleRendering.ps1/ZipParallelProcessing.ps1/
-    ImageConversionPipeline.ps1/AnimatedConversionPipeline.ps1 (NOT
-    ZipPipeline.ps1 - Controller.ps1 calls Compress-FolderToZip/
-    Test-ZipArchive directly, not Invoke-LooseFolderZip, see
-    Controller.ps1's own header for why),
+    ImageConversionPipeline.ps1/AnimatedConversionPipeline.ps1/Summary.ps1
+    (the last one for Invoke-Mode's New-StatsTracker output shape - NOT
+    ZipPipeline.ps1/RezipPipeline.ps1, since every Invoke-Mode scenario
+    below injects a fake -ZipFoldersHandler/-ConvertZippedHandler rather
+    than exercising the real ones; Controller.ps1 also calls
+    Compress-FolderToZip/Test-ZipArchive directly for Full Pipeline's
+    own zip step, not Invoke-LooseFolderZip, see Controller.ps1's own
+    header for why),
     since Controller.ps1 is a top-tier orchestrator whose real value is in
     proving the two-runspace-per-chapter dispatch, the shared process
     budget, the merged CCR status, and the zip-blocking policy actually
@@ -44,6 +48,7 @@ $modulesDir = Join-Path $PSScriptRoot ".."
 . (Join-Path $modulesDir "ZipParallelProcessing.ps1")
 . (Join-Path $modulesDir "ImageConversionPipeline.ps1")
 . (Join-Path $modulesDir "AnimatedConversionPipeline.ps1")
+. (Join-Path $modulesDir "Summary.ps1")
 . (Join-Path $modulesDir "Controller.ps1")
 
 $script:passCount = 0
@@ -388,6 +393,126 @@ $totalsI = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-i") -CjxlE
 Test-Assert ($totalsI.ConvertedImageSkipped -eq 1 -and $totalsI.ConvertedImageSuccess -eq 0) "the animated WebP was skipped, not converted - zero real .jxl entries despite having an image file queued"
 Test-Assert ($totalsI.ConvertedAnimatedSuccess -eq 1) "the real animated file still converted successfully"
 Test-Assert ($totalsI.ZipCreatedSuccess -eq 1 -and $totalsI.ZipCreatedFail -eq 0) "zipped successfully - did NOT wrongly require a .jxl entry just because an image file was queued"
+Write-Host ""
+
+# ==============================================================================
+#  Invoke-Mode scenarios (J onward) - the top-level dispatcher. Every
+#  scenario injects fake handlers rather than exercising the real
+#  pipelines - proving dispatch/translation/error-catch logic, not
+#  re-testing pipelines already covered by their own harnesses. Never
+#  needs real cjxl/magick or a ZipPipeline.ps1/RezipPipeline.ps1 dot-
+#  source - see Controller.ps1's own header.
+# ==============================================================================
+
+function New-FakeErrorRecord {
+    <#
+    .SYNOPSIS
+        Constructs an ErrorRecord directly rather than throwing the
+        exception through the pipeline - see AbortPipeline.Harness.ps1's
+        own real bug (a literally-thrown PipelineStoppedException killed
+        the whole harness process, even caught) for why this matters.
+    #>
+    param([Parameter(Mandatory)][System.Exception]$Exception)
+    return [System.Management.Automation.ErrorRecord]::new($Exception, "TestError", [System.Management.Automation.ErrorCategory]::NotSpecified, $null)
+}
+
+$fakeSettings = @{
+    JpegLossless = $false; JpegQuality = 77; MaxCjxlProcs = 6; FullLogging = $false
+    AnimatedLossless = $false; AnimatedQuality = 88; AnimatedThreads = 3; AnimatedOverwrite = $false; AnimatedDeleteSource = $true
+    ZipParallelThreads = 2; PermanentDelete = $true; DeleteExtractedFoldersAfterRezip = $true
+}
+
+Write-Host "=== Scenario J: Invoke-Mode / ImageConversion - param translation + result mapping ===" -ForegroundColor Cyan
+$capturedJ = @{}
+$fakeImageHandlerJ = {
+    param($Path, $CjxlExe, $MagickExe, $JpegLossless, $JpegQuality, $MaxCjxlProcs, $FullLogging)
+    $capturedJ.Path = $Path; $capturedJ.CjxlExe = $CjxlExe; $capturedJ.MagickExe = $MagickExe
+    $capturedJ.JpegQuality = $JpegQuality; $capturedJ.MaxCjxlProcs = $MaxCjxlProcs; $capturedJ.FullLogging = $FullLogging
+    return @{ ConvertedSuccess = 3; ConvertedFail = 1; ConvertedSkipped = 2; DeletedSuccess = 3; DeletedFail = 0; StaleCleanedSuccess = 1; StaleCleanedFail = 0 }
+}.GetNewClosure()
+$statsJ = Invoke-Mode -Resolved @{ Mode = 'ImageConversion' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ImageConversionHandler $fakeImageHandlerJ
+
+Test-Assert ($capturedJ.Path -eq "C:\fake\lib" -and $capturedJ.CjxlExe -eq "fake_cjxl.exe" -and $capturedJ.JpegQuality -eq 77 -and $capturedJ.MaxCjxlProcs -eq 6) "ImageConversion: real Settings values reached the handler"
+Test-Assert ($statsJ.LooseImgConverted.Success -eq 3 -and $statsJ.LooseImgConverted.Fail -eq 1 -and $statsJ.LooseImgConverted.Skipped -eq 2) "ImageConversion: LooseImgConverted mapped correctly"
+Test-Assert ($statsJ.LooseImgDeleted.Success -eq 3 -and $statsJ.LooseStaleCleaned.Success -eq 1) "ImageConversion: LooseImgDeleted/LooseStaleCleaned mapped correctly"
+Write-Host ""
+
+Write-Host "=== Scenario K: Invoke-Mode / AnimatedConversion - param translation + result mapping ===" -ForegroundColor Cyan
+$fakeAnimHandlerK = { param($Path, $MagickExe, $AnimatedLossless, $AnimatedQuality, $AnimatedThreads, $AnimatedOverwrite, $AnimatedDeleteSource, $FullLogging)
+    return @{ ConvertedSuccess = 4; ConvertedFail = 0; ConvertedSkipped = 1; DeletedSuccess = 4; DeletedFail = 0 }
+}
+$statsK = Invoke-Mode -Resolved @{ Mode = 'AnimatedConversion' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -AnimatedConversionHandler $fakeAnimHandlerK
+Test-Assert ($statsK.LooseAnimatedConverted.Success -eq 4 -and $statsK.LooseAnimatedConverted.Skipped -eq 1) "AnimatedConversion: LooseAnimatedConverted mapped correctly"
+Test-Assert ($statsK.LooseAnimatedDeleted.Success -eq 4) "AnimatedConversion: LooseAnimatedDeleted mapped correctly"
+Write-Host ""
+
+Write-Host "=== Scenario L: Invoke-Mode / ZipFolders - result mapping ===" -ForegroundColor Cyan
+$fakeZipHandlerL = { param($Path, $MaxParallel, $DeleteFolders, $FullLogging, $LogFile, $LogErrorFile, $LogWarnFile, $PermanentDelete)
+    return @{ CandidateCount = 5; ZippedSuccess = 4; ZippedFail = 1; FolderDeletedSuccess = 4; FolderDeletedFail = 0; ForceStoppedCount = 0 }
+}
+$statsL = Invoke-Mode -Resolved @{ Mode = 'ZipFolders' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ZipFoldersHandler $fakeZipHandlerL
+Test-Assert ($statsL.ZipOnlyZipped.Success -eq 4 -and $statsL.ZipOnlyZipped.Fail -eq 1) "ZipFolders: ZipOnlyZipped mapped correctly"
+Test-Assert ($statsL.ZipOnlyFolderDeleted.Success -eq 4) "ZipFolders: ZipOnlyFolderDeleted mapped correctly"
+Write-Host ""
+
+Write-Host "=== Scenario M: Invoke-Mode / ConvertZipped - result mapping ===" -ForegroundColor Cyan
+$fakeRezipHandlerM = { param($Path, $MaxParallel, $DeleteFolders, $FullLogging, $LogFile, $LogErrorFile, $LogWarnFile, $PermanentDelete, $CjxlExe, $MagickExe, $MaxCjxlProcs, $JpegLossless, $JpegQuality)
+    return @{ CandidateCount = 2; ZipExtractedSuccess = 2; ZipExtractedFail = 0; ImgConvertedSuccess = 6; ImgConvertedFail = 0; ImgConvertedSkipped = 1; ImgDeletedSuccess = 6; ImgDeletedFail = 0; ZipCreatedSuccess = 2; ZipCreatedFail = 0; FolderDeletedSuccess = 2; FolderDeletedFail = 0; Skipped = 0; ForceStoppedCount = 0 }
+}
+$statsM = Invoke-Mode -Resolved @{ Mode = 'ConvertZipped' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ConvertZippedHandler $fakeRezipHandlerM
+Test-Assert ($statsM.ZipExtracted.Success -eq 2 -and $statsM.ImgConverted.Success -eq 6 -and $statsM.ImgConverted.Skipped -eq 1) "ConvertZipped: ZipExtracted/ImgConverted mapped correctly"
+Test-Assert ($statsM.ZipCreated.Success -eq 2 -and $statsM.FolderDeleted.Success -eq 2) "ConvertZipped: ZipCreated/FolderDeleted mapped correctly"
+Write-Host ""
+
+Write-Host "=== Scenario N: Invoke-Mode / FullPipeline - all three stat groups populated at once ===" -ForegroundColor Cyan
+$fakeFullHandlerN = { param($Path, $CjxlExe, $MagickExe, $JpegLossless, $JpegQuality, $AnimatedLossless, $AnimatedQuality, $AnimatedOverwrite, $AnimatedDeleteSource, $FullPipelineMaxConcurrentProcs, $FullLogging, $LogFile, $LogErrorFile, $LogWarnFile, $PermanentDelete)
+    return @{
+        ConvertedImageSuccess = 5; ConvertedImageFail = 0; ConvertedImageSkipped = 0; DeletedImageSuccess = 5; DeletedImageFail = 0
+        StaleImageCleanedSuccess = 0; StaleImageCleanedFail = 0
+        ConvertedAnimatedSuccess = 2; ConvertedAnimatedFail = 0; ConvertedAnimatedSkipped = 0; DeletedAnimatedSuccess = 2; DeletedAnimatedFail = 0
+        ZipCreatedSuccess = 3; ZipCreatedFail = 0; ZipSkippedDueToError = 0; FolderDeletedSuccess = 3; FolderDeletedFail = 0
+        ForceKilledCount = 0; SeriesCount = 1; ChapterCount = 3; Aborted = $false
+    }
+}
+$statsN = Invoke-Mode -Resolved @{ Mode = 'FullPipeline' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -FullPipelineHandler $fakeFullHandlerN
+Test-Assert ($statsN.LooseImgConverted.Success -eq 5 -and $statsN.LooseAnimatedConverted.Success -eq 2 -and $statsN.LooseFolderZipped.Success -eq 3) "FullPipeline: image + animated + zip stat groups all mapped in one call"
+Write-Host ""
+
+Write-Host "=== Scenario O: Invoke-Mode / ImageConversionZip (mode 8) - known partial stub, behaves like ImageConversion ===" -ForegroundColor Cyan
+$fakeImageHandlerO = { param($Path, $CjxlExe, $MagickExe, $JpegLossless, $JpegQuality, $MaxCjxlProcs, $FullLogging)
+    return @{ ConvertedSuccess = 1; ConvertedFail = 0; ConvertedSkipped = 0; DeletedSuccess = 1; DeletedFail = 0; StaleCleanedSuccess = 0; StaleCleanedFail = 0 }
+}
+$statsO = Invoke-Mode -Resolved @{ Mode = 'ImageConversionZip' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ImageConversionHandler $fakeImageHandlerO
+Test-Assert ($statsO.LooseImgConverted.Success -eq 1) "ImageConversionZip: still dispatches to the image handler (stub, no zip step yet)"
+Write-Host ""
+
+Write-Host "=== Scenario P: Invoke-Mode / blank MagickExe fails fast for magick-dependent modes ===" -ForegroundColor Cyan
+$fatalMsgsP = [System.Collections.Generic.List[string]]::new()
+$logHandlerP = { param($m) $fatalMsgsP.Add($m) }.GetNewClosure()
+$neverCalledHandler = { param($Path) throw "should never be invoked" }
+$statsP1 = Invoke-Mode -Resolved @{ Mode = 'AnimatedConversion' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "" -AnimatedConversionHandler $neverCalledHandler -LogHandler $logHandlerP
+Test-Assert ($null -eq $statsP1) "AnimatedConversion with blank MagickExe returns `$null, not a stats object"
+Test-Assert ($fatalMsgsP.Count -eq 1 -and $fatalMsgsP[0] -match "requires magick\.exe") "the fail-fast message names the mode and the missing dependency"
+Write-Host ""
+
+Write-Host "=== Scenario Q: Invoke-Mode / a genuine crash inside a handler is caught, not left uncaught ===" -ForegroundColor Cyan
+$fatalMsgsQ = [System.Collections.Generic.List[string]]::new()
+$logHandlerQ = { param($m) $fatalMsgsQ.Add($m) }.GetNewClosure()
+$crashingHandler = { param($Path, $CjxlExe, $MagickExe, $JpegLossless, $JpegQuality, $MaxCjxlProcs, $FullLogging)
+    $errorRecord = New-FakeErrorRecord -Exception ([System.InvalidOperationException]::new("simulated real crash, not an abort"))
+    throw $errorRecord
+}
+$statsQ = Invoke-Mode -Resolved @{ Mode = 'ImageConversion' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ImageConversionHandler $crashingHandler -LogHandler $logHandlerQ
+Test-Assert ($null -eq $statsQ) "a genuine crash returns `$null rather than a partial/misleading stats object"
+Test-Assert ($fatalMsgsQ.Count -eq 1 -and $fatalMsgsQ[0] -match "FATAL ERROR" -and $fatalMsgsQ[0] -match "simulated real crash") "Invoke-AbortOrFatalHandler actually ran and classified it as a genuine fatal error"
+Write-Host ""
+
+Write-Host "=== Scenario R: Invoke-Mode / an unrecognized mode is a caught error, not an uncaught throw ===" -ForegroundColor Cyan
+$fatalMsgsR = [System.Collections.Generic.List[string]]::new()
+$logHandlerR = { param($m) $fatalMsgsR.Add($m) }.GetNewClosure()
+$statsR = Invoke-Mode -Resolved @{ Mode = 'NotARealMode' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -LogHandler $logHandlerR
+Test-Assert ($null -eq $statsR) "an unrecognized mode returns `$null"
+Test-Assert ($fatalMsgsR.Count -eq 1 -and $fatalMsgsR[0] -match "unrecognized mode") "the fatal message names the bad mode string"
 Write-Host ""
 
 # ==============================================================================
