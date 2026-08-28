@@ -77,7 +77,6 @@ Conversion Script/
 ├── CHANGELOG.md           <- full version history (v1.0 → v16.1)
 ├── Todo.md                <- live modularization checklist
 ├── Conversion Script Main.ps1
-├── ModuleLoading.ps1      <- built + tested, repo root not Modules/ (see its own header) - not yet wired to a caller
 ├── Modules/               <- every standalone module lives here (19 built)
 │   ├── Logging.ps1
 │   ├── FileDeletion.ps1
