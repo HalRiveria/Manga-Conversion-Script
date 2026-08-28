@@ -46,16 +46,30 @@
         (deleted_files_log.txt / hash_mismatch_log.txt) - Write-Log
         already handles full-logging vs. summary-only routing itself, so
         there's no need for a second, separate logging mechanism here.
-      - $TargetProfiles is exposed via Get-UnwantedImageProfiles rather
-        than a bare script variable, but is STILL a hardcoded table in
-        this module's own source, unchanged from the original -
-        Todo.md's "easier way to add images/files" idea (pulling the info
-        a new profile needs straight from a file, rather than typing it
-        in by hand) is a real, separately-discussed future addition, not
-        built as part of this port.
       - System.Drawing (Get-ImageDimensions) kept as-is - legacy/
         Windows-only, but this whole project is Windows-only already, and
         nothing about porting this module changes that calculus.
+
+    PROFILE PERSISTENCE (added 2026-08-27, per explicit follow-up
+    request - "point the script at an image and have it pull the info
+    and add it... automatically"): $TargetProfiles is still exposed via
+    Get-UnwantedImageProfiles as a hardcoded table, unchanged - but
+    that's now only the BUILT-IN half. A separate persisted store lives
+    at Get-UnwantedImageProfilesPath's location
+    (%LOCALAPPDATA%\ConversionScript\unwanted-image-profiles.json - same
+    base directory as Config.ps1's settings.json, but its own file, not
+    folded into it) via Import-/Export-UnwantedImageProfiles, matching
+    Config.ps1's own resilience convention (missing file -> empty,
+    corrupt file -> backed up + Warn, never thrown). Get-AllUnwantedImageProfiles
+    combines built-in + persisted, and is what Invoke-UnwantedImageScan
+    actually matches against by default now (still overridable via
+    -Profiles). Add-UnwantedImageProfileFromFile is the actual feature
+    requested: builds a real profile from a real image file
+    (New-UnwantedImageProfileFromFile - dimensions/size/hash all read
+    from the file, not typed in by hand) and persists it
+    (Add-UnwantedImageProfile, which refuses a duplicate hash rather than
+    adding one) in one call - so it's picked up automatically by every
+    future scan, no further wiring needed.
 
     FORWARD REFERENCES (not defined in this module - callers must
     dot-source the owning module(s) first):
@@ -83,6 +97,216 @@ function Get-UnwantedImageProfiles {
     #>
     return @(
     )
+}
+
+function Get-UnwantedImageProfilesPath {
+    <#
+    .SYNOPSIS
+        "<BaseDir>\ConversionScript\unwanted-image-profiles.json" - the
+        one place this filename is decided. Same base directory
+        Config.ps1's settings.json lives in (Get-ScriptSettingsPath),
+        but its own separate file - profiles are a growing list of
+        target signatures, not a settings toggle, matching this
+        project's own precedent of resume-state living in its own file
+        rather than being folded into settings.json.
+    #>
+    param([string]$BaseDir)
+
+    if ([string]::IsNullOrWhiteSpace($BaseDir)) { $BaseDir = $env:LOCALAPPDATA }
+    return (Join-Path $BaseDir "ConversionScript\unwanted-image-profiles.json")
+}
+
+function Import-UnwantedImageProfiles {
+    <#
+    .SYNOPSIS
+        Loads user-added profiles from $ProfilesPath - just those, NOT
+        the hardcoded built-in table (see Get-AllUnwantedImageProfiles
+        for the combined view). A missing file returns an empty array
+        silently; a corrupt/unparsable file returns an empty array with
+        a Write-Log Warn and backs up the bad file
+        (.corrupt-<timestamp>.bak) rather than throwing or silently
+        discarding it - same resilience convention as Config.ps1's
+        Import-ScriptSettings.
+    #>
+    param([string]$ProfilesPath = (Get-UnwantedImageProfilesPath))
+
+    if (-not (Test-Path -LiteralPath $ProfilesPath)) { return @() }
+
+    try {
+        $raw = [System.IO.File]::ReadAllText($ProfilesPath) | ConvertFrom-Json
+    } catch {
+        Write-Log ("Could not read unwanted-image profiles file '" + $ProfilesPath + "' - starting with none. (" + $_ + ")") -Level Warn
+        $backupPath = $ProfilesPath + ".corrupt-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".bak"
+        try { Copy-Item -LiteralPath $ProfilesPath -Destination $backupPath -Force -ErrorAction Stop } catch { }
+        return @()
+    }
+
+    $profiles = @(foreach ($p in $raw) {
+        @{
+            Label         = $p.Label
+            Width         = [int]$p.Width
+            Height        = [int]$p.Height
+            SizeBytes     = [int64]$p.SizeBytes
+            SizeTolerance = [int]$p.SizeTolerance
+            Hash          = $p.Hash
+        }
+    })
+    return ,$profiles
+}
+
+function Export-UnwantedImageProfiles {
+    <#
+    .SYNOPSIS
+        Writes $Profiles to $ProfilesPath as a proper JSON array
+        regardless of count (0, 1, or many) - via -InputObject rather
+        than the pipeline, same array-safety technique
+        ResumeState.ps1's Merge-ResumeStateEntries uses (PS 5.1's
+        ConvertTo-Json has no -AsArray; piping a single object through
+        it serializes a bare object instead of a one-element array).
+        Creates the parent directory if it doesn't exist yet.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [array]$Profiles,
+        [string]$ProfilesPath = (Get-UnwantedImageProfilesPath)
+    )
+
+    $dir = Split-Path -Path $ProfilesPath -Parent
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+
+    $json = ConvertTo-Json -InputObject $Profiles -Depth 5
+    Set-Content -LiteralPath $ProfilesPath -Value $json -Encoding UTF8
+}
+
+function Get-AllUnwantedImageProfiles {
+    <#
+    .SYNOPSIS
+        The hardcoded built-in profiles (Get-UnwantedImageProfiles) plus
+        whatever's been persisted at $ProfilesPath (Import-UnwantedImageProfiles)
+        - this is what Invoke-UnwantedImageScan actually matches against
+        by default, so a profile added via Add-UnwantedImageProfileFromFile
+        is picked up automatically on the next scan without any extra
+        wiring.
+    #>
+    param([string]$ProfilesPath = (Get-UnwantedImageProfilesPath))
+
+    # Get-UnwantedImageProfiles does NOT comma-guard its own return (a
+    # plain `return @(...)` of 5 items), so @() here is the correct,
+    # single layer of protection for it. Import-UnwantedImageProfiles
+    # DOES already comma-guard internally - wrapping ITS call in @() as
+    # well would double-protect it (the comma-guard's single-object
+    # pipeline emission, itself an array, gets re-collected as one
+    # element of a NEW outer array) - captured directly instead, exactly
+    # once protected, not twice.
+    $builtIn   = @(Get-UnwantedImageProfiles)
+    $persisted = Import-UnwantedImageProfiles -ProfilesPath $ProfilesPath
+    return ,($builtIn + $persisted)
+}
+
+function New-UnwantedImageProfileFromFile {
+    <#
+    .SYNOPSIS
+        Builds a profile hashtable FROM a real image file - pixel
+        dimensions (Get-ImageDimensions), file size, and SHA-256 hash
+        are all read from $Path directly, not typed in by hand. Throws
+        if $Path can't be read as an image (Get-ImageDimensions fails) -
+        a profile with no real dimensions would never match anything and
+        isn't worth silently creating.
+    .PARAMETER Label
+        Defaults to the file's own name if not supplied.
+    .PARAMETER SizeTolerance
+        Defaults to 5000 bytes, matching every built-in profile's own
+        tolerance.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+        [string]$Label,
+        [int]$SizeTolerance = 5000
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw ("New-UnwantedImageProfileFromFile: '" + $Path + "' does not exist.")
+    }
+    $file = Get-Item -LiteralPath $Path
+
+    $width  = $null
+    $height = $null
+    $dimOk  = Get-ImageDimensions -Path $file.FullName -OutWidth ([ref]$width) -OutHeight ([ref]$height)
+    if (-not $dimOk) {
+        throw ("New-UnwantedImageProfileFromFile: '" + $Path + "' could not be read as an image.")
+    }
+
+    if ([string]::IsNullOrWhiteSpace($Label)) { $Label = $file.Name }
+
+    return @{
+        Label         = $Label
+        Width         = $width
+        Height        = $height
+        SizeBytes     = $file.Length
+        SizeTolerance = $SizeTolerance
+        Hash          = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+    }
+}
+
+function Add-UnwantedImageProfile {
+    <#
+    .SYNOPSIS
+        Persists $Profile at $ProfilesPath, appended to whatever's
+        already there. Refuses (does not add, does not throw) a profile
+        whose Hash already matches an existing one - built-in OR already-
+        persisted - checked via Get-AllUnwantedImageProfiles, so the
+        same image can't get added twice under different labels.
+    .OUTPUTS
+        @{ Added = <bool>; Reason = <string, only set when Added is
+        $false> }
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Profile,
+        [string]$ProfilesPath = (Get-UnwantedImageProfilesPath)
+    )
+
+    $existing = Get-AllUnwantedImageProfiles -ProfilesPath $ProfilesPath
+    if (@($existing | Where-Object { $_.Hash -eq $Profile.Hash }).Count -gt 0) {
+        Write-Log ("Not adding unwanted-image profile '" + $Profile.Label + "' - a profile with the same hash already exists.") -Level Warn
+        return @{ Added = $false; Reason = "A profile with the same hash already exists." }
+    }
+
+    $userProfiles = Import-UnwantedImageProfiles -ProfilesPath $ProfilesPath
+    $userProfiles = @($userProfiles) + @($Profile)
+    Export-UnwantedImageProfiles -Profiles $userProfiles -ProfilesPath $ProfilesPath
+
+    Write-Log ("Added unwanted-image profile '" + $Profile.Label + "' (" + $Profile.Width + "x" + $Profile.Height + ", " + $Profile.SizeBytes + " bytes) to '" + $ProfilesPath + "'.") -Level Summary
+    return @{ Added = $true; Reason = $null }
+}
+
+function Add-UnwantedImageProfileFromFile {
+    <#
+    .SYNOPSIS
+        The actual "point it at an image and have it pull the info and
+        add it automatically" feature: builds a profile from a real
+        image file (New-UnwantedImageProfileFromFile) and persists it
+        (Add-UnwantedImageProfile) in one call, so it's picked up by
+        every future Invoke-UnwantedImageScan call (via
+        Get-AllUnwantedImageProfiles, its default -Profiles source) with
+        no further wiring needed.
+    .OUTPUTS
+        @{ Added = <bool>; Reason = <string or $null>; Profile = <the
+        built profile hashtable> }
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+        [string]$Label,
+        [int]$SizeTolerance = 5000,
+        [string]$ProfilesPath = (Get-UnwantedImageProfilesPath)
+    )
+
+    $profile = New-UnwantedImageProfileFromFile -Path $Path -Label $Label -SizeTolerance $SizeTolerance
+    $addResult = Add-UnwantedImageProfile -Profile $profile -ProfilesPath $ProfilesPath
+
+    return @{ Added = $addResult.Added; Reason = $addResult.Reason; Profile = $profile }
 }
 
 function Get-ImageDimensions {
@@ -161,10 +385,12 @@ function Invoke-UnwantedImageScan {
     <#
     .SYNOPSIS
         Scans $Path recursively for image files matching
-        Get-UnwantedImageProfiles (or -Profiles, if supplied), deleting
-        each match via Remove-Source (respects $script:PermanentDelete);
-        a hash mismatch (size+dimensions matched, hash didn't) is logged
-        at -Level Warn but never deleted.
+        Get-AllUnwantedImageProfiles - built-in profiles plus anything
+        persisted via Add-UnwantedImageProfileFromFile (or -Profiles, if
+        supplied, to override entirely) - deleting each match via
+        Remove-Source (respects $script:PermanentDelete); a hash mismatch
+        (size+dimensions matched, hash didn't) is logged at -Level Warn
+        but never deleted.
     .PARAMETER DryRun
         Logs "WOULD DELETE" and counts as if deleted, without actually
         calling Remove-Source - matches the original script's own -DryRun
@@ -178,7 +404,7 @@ function Invoke-UnwantedImageScan {
     param(
         [Parameter(Mandatory)]
         [string]$Path,
-        [array]$Profiles = (Get-UnwantedImageProfiles),
+        [array]$Profiles = (Get-AllUnwantedImageProfiles),
         [string[]]$ImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff"),
         [string[]]$ExcludePaths = @(),
         [bool]$DryRun = $false

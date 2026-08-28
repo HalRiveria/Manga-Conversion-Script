@@ -317,6 +317,142 @@ Test-Assert (-not (Test-Path -LiteralPath $reportPathK2)) "no report file was cr
 Write-Host ""
 
 # ==============================================================================
+#  Scenario L: Get-UnwantedImageProfilesPath
+# ==============================================================================
+Write-Host "=== Scenario L: Get-UnwantedImageProfilesPath ===" -ForegroundColor Cyan
+Test-Assert ((Get-UnwantedImageProfilesPath -BaseDir "C:\Fake") -eq (Join-Path "C:\Fake" "ConversionScript\unwanted-image-profiles.json")) "builds the expected path under -BaseDir"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario M: Import-UnwantedImageProfiles - missing file, real file,
+#  corrupt file
+# ==============================================================================
+Write-Host "=== Scenario M: Import-UnwantedImageProfiles ===" -ForegroundColor Cyan
+$profilesPathM = Join-Path $scratchDir "profiles-m\unwanted-image-profiles.json"
+Test-Assert (@(Import-UnwantedImageProfiles -ProfilesPath $profilesPathM).Count -eq 0) "a missing profiles file returns an empty array"
+
+New-Item -ItemType Directory -Path (Split-Path $profilesPathM -Parent) -Force | Out-Null
+'[{"Label":"Test A","Width":10,"Height":20,"SizeBytes":100,"SizeTolerance":5,"Hash":"AAA"}]' | Set-Content -LiteralPath $profilesPathM -Encoding UTF8
+$loadedM = Import-UnwantedImageProfiles -ProfilesPath $profilesPathM
+Test-Assert ($loadedM.Count -eq 1 -and $loadedM[0].Label -eq "Test A" -and $loadedM[0].Width -eq 10) "a real profiles file loads correctly"
+
+$corruptPathM = Join-Path $scratchDir "profiles-m-corrupt\unwanted-image-profiles.json"
+New-Item -ItemType Directory -Path (Split-Path $corruptPathM -Parent) -Force | Out-Null
+"{ not valid json" | Set-Content -LiteralPath $corruptPathM -Encoding UTF8
+$script:logCalls.Clear()
+$threwM = $false
+$loadedM2 = $null
+try { $loadedM2 = Import-UnwantedImageProfiles -ProfilesPath $corruptPathM } catch { $threwM = $true }
+Test-Assert (-not $threwM -and @($loadedM2).Count -eq 0) "a corrupt profiles file returns an empty array, does not throw"
+Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*" }).Count -ge 1) "a Warn was logged for the corrupt file"
+Test-Assert (@(Get-ChildItem -LiteralPath (Split-Path $corruptPathM -Parent) -Filter "*.corrupt-*.bak").Count -eq 1) "the corrupt file was backed up, not silently discarded"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario N: Export-UnwantedImageProfiles round-trips, including a
+#  single-entry array staying a real JSON array (not a bare object)
+# ==============================================================================
+Write-Host "=== Scenario N: Export-UnwantedImageProfiles round-trips ===" -ForegroundColor Cyan
+$profilesPathN = Join-Path $scratchDir "profiles-n\unwanted-image-profiles.json"
+Export-UnwantedImageProfiles -Profiles @(@{ Label = "Solo"; Width = 5; Height = 6; SizeBytes = 7; SizeTolerance = 1; Hash = "ZZZ" }) -ProfilesPath $profilesPathN
+$rawTextN = Get-Content -LiteralPath $profilesPathN -Raw
+Test-Assert ($rawTextN.TrimStart().StartsWith("[")) "a single-entry file is written as a JSON array, not a bare object"
+$loadedN = Import-UnwantedImageProfiles -ProfilesPath $profilesPathN
+Test-Assert ($loadedN.Count -eq 1 -and $loadedN[0].Label -eq "Solo") "round-trips correctly"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario O: Get-AllUnwantedImageProfiles combines built-in + persisted
+# ==============================================================================
+Write-Host "=== Scenario O: Get-AllUnwantedImageProfiles ===" -ForegroundColor Cyan
+$profilesPathO = Join-Path $scratchDir "profiles-o\unwanted-image-profiles.json"
+Export-UnwantedImageProfiles -Profiles @(
+    @{ Label = "Custom 1"; Width = 1; Height = 1; SizeBytes = 1; SizeTolerance = 0; Hash = "C1" }
+    @{ Label = "Custom 2"; Width = 2; Height = 2; SizeBytes = 2; SizeTolerance = 0; Hash = "C2" }
+) -ProfilesPath $profilesPathO
+$allO = Get-AllUnwantedImageProfiles -ProfilesPath $profilesPathO
+Test-Assert ($allO.Count -eq 7) ("5 built-in + 2 persisted = 7 (got " + $allO.Count + ")")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario P: New-UnwantedImageProfileFromFile - builds a profile from
+#  a REAL file's real dimensions/size/hash; default Label; error paths
+# ==============================================================================
+Write-Host "=== Scenario P: New-UnwantedImageProfileFromFile ===" -ForegroundColor Cyan
+$imgP = New-RealImage -Name "profile-source-p.png" -Width 33 -Height 22
+$profileP = New-UnwantedImageProfileFromFile -Path $imgP.FullName -Label "My New Target"
+Test-Assert ($profileP.Width -eq 33 -and $profileP.Height -eq 22) "real dimensions read from the file"
+Test-Assert ($profileP.SizeBytes -eq $imgP.Length) "real file size read from the file"
+Test-Assert ($profileP.Hash -eq (Get-FileHash -LiteralPath $imgP.FullName -Algorithm SHA256).Hash) "real SHA-256 hash read from the file"
+Test-Assert ($profileP.Label -eq "My New Target") "the given label is used"
+Test-Assert ($profileP.SizeTolerance -eq 5000) "default SizeTolerance is 5000, matching the built-in profiles"
+
+$imgP2 = New-RealImage -Name "unlabeled-p.png" -Width 10 -Height 10
+$profileP2 = New-UnwantedImageProfileFromFile -Path $imgP2.FullName
+Test-Assert ($profileP2.Label -eq "unlabeled-p.png") "Label defaults to the file's own name when omitted"
+
+$threwP = $false
+try { New-UnwantedImageProfileFromFile -Path (Join-Path $scratchDir "does-not-exist.png") -Label "X" } catch { $threwP = $true }
+Test-Assert $threwP "throws for a nonexistent file"
+
+$nonImgP = New-NonImageFile -Name "notimage-p.jpg"
+$threwP2 = $false
+try { New-UnwantedImageProfileFromFile -Path $nonImgP.FullName -Label "X" } catch { $threwP2 = $true }
+Test-Assert $threwP2 "throws for a file that can't be read as an image"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario Q: Add-UnwantedImageProfile - adds successfully, persists,
+#  refuses a duplicate hash (against built-in AND already-persisted)
+# ==============================================================================
+Write-Host "=== Scenario Q: Add-UnwantedImageProfile ===" -ForegroundColor Cyan
+$profilesPathQ = Join-Path $scratchDir "profiles-q\unwanted-image-profiles.json"
+$imgQ = New-RealImage -Name "profile-source-q.png" -Width 44 -Height 55
+$profileQ = New-UnwantedImageProfileFromFile -Path $imgQ.FullName -Label "Add Target"
+
+$addResultQ = Add-UnwantedImageProfile -Profile $profileQ -ProfilesPath $profilesPathQ
+Test-Assert ($addResultQ.Added -eq $true) "the new profile was added"
+$loadedQ = Import-UnwantedImageProfiles -ProfilesPath $profilesPathQ
+Test-Assert ($loadedQ.Count -eq 1 -and $loadedQ[0].Label -eq "Add Target") "it's actually persisted to disk"
+
+$dupResultQ = Add-UnwantedImageProfile -Profile $profileQ -ProfilesPath $profilesPathQ
+Test-Assert ($dupResultQ.Added -eq $false -and $dupResultQ.Reason) "adding the exact same profile again is refused, with a reason"
+Test-Assert ((Import-UnwantedImageProfiles -ProfilesPath $profilesPathQ).Count -eq 1) "still only 1 persisted - no duplicate was written"
+
+$builtInDupProfileQ = (Get-UnwantedImageProfiles)[0].Clone()
+$dupResultQ2 = Add-UnwantedImageProfile -Profile $builtInDupProfileQ -ProfilesPath $profilesPathQ
+Test-Assert ($dupResultQ2.Added -eq $false) "a profile matching a BUILT-IN profile's hash is also refused, not just persisted-vs-persisted"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario R: Add-UnwantedImageProfileFromFile end to end - build +
+#  persist in one call, then a LATER scan picks it up automatically with
+#  no further wiring (the actual feature requested)
+# ==============================================================================
+Write-Host "=== Scenario R: Add-UnwantedImageProfileFromFile, then a later scan picks it up ===" -ForegroundColor Cyan
+$profilesPathR = Join-Path $scratchDir "profiles-r\unwanted-image-profiles.json"
+$sourceImgR = New-RealImage -Name "source-for-profile-r.png" -Width 77 -Height 88
+
+$addFromFileR = Add-UnwantedImageProfileFromFile -Path $sourceImgR.FullName -Label "Auto-Added" -ProfilesPath $profilesPathR
+Test-Assert ($addFromFileR.Added -eq $true) "the profile was built from the real file and added in one call"
+Test-Assert ($addFromFileR.Profile.Width -eq 77 -and $addFromFileR.Profile.Height -eq 88) "the built profile reflects the real file's dimensions"
+
+# Simulate a LATER, separate run: a target image with the SAME real
+# content as the source used to build the profile shows up somewhere
+# else in the library. A fresh Get-AllUnwantedImageProfiles call (as
+# Invoke-UnwantedImageScan's own default -Profiles does) should now
+# match and delete it - with NO manual profile list update in between.
+$laterRunRootR = Join-Path $scratchDir "scenario-r-later-run"
+New-Item -ItemType Directory -Path $laterRunRootR -Force | Out-Null
+Copy-Item -LiteralPath $sourceImgR.FullName -Destination (Join-Path $laterRunRootR "found-later.png")
+
+$script:removeSourceCalls.Clear()
+$laterScanR = Invoke-UnwantedImageScan -Path $laterRunRootR -Profiles (Get-AllUnwantedImageProfiles -ProfilesPath $profilesPathR)
+Test-Assert ($laterScanR.DeletedCount -eq 1) "a later scan matched and deleted the file using the auto-added profile, with zero manual wiring"
+Test-Assert (-not (Test-Path -LiteralPath (Join-Path $laterRunRootR "found-later.png"))) "the matched file is actually gone"
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="
