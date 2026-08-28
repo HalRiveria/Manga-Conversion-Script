@@ -32,22 +32,17 @@
     is what proves the logic itself is correct, this file just carries a
     copy of it.
 
-    STUB NOTE (read before touching Invoke-SelectedMode below):
-    Controller.ps1's confirmed future role is TOP-LEVEL DISPATCHER for
-    every mode - owning per-mode param translation, output normalization,
-    the shared abort/fatal-error catch, and Show-PostRunPrompt's run
-    loop (see Docs/full-pipeline-design.md and Todo.md's Open Decisions).
-    That generalized dispatcher does not exist yet - only
-    Invoke-FullPipeline (mode 1's per-chapter engine) is built. Every
-    place below marked "STUB - belongs in Controller.ps1" is this
-    script's temporary stand-in: real, working code today, but expected
-    to move into Controller.ps1 wholesale once its dispatcher is
-    designed and built, per the project owner's explicit go-ahead
-    (2026-08-28) to do the rewrite now and stub the Controller
-    connections. Mode 8 ("Image Conversion + Zip") is a partial stub -
-    its CCR-fold behavior is decided (see Todo.md) but not coded, so it
-    currently zips unconditionally rather than folding into one CCR
-    transition.
+    DISPATCH (2026-08-28, Phase 3 of the build plan): the main loop below
+    calls Controller.ps1's real Invoke-Mode - the Phase 1/2 work that
+    used to be stubbed inline in this file (per-mode param translation,
+    output normalization onto Summary.ps1's $stats shape, the shared
+    abort/fatal-error catch) now lives there for real, proven standalone
+    by Controller.Harness.ps1 before ever being wired in here. The ONE
+    piece still NOT moved into Controller.ps1: Show-PostRunPrompt's run
+    loop (the `while ($true) { ... }` below) - that's bigger, separate,
+    unscoped work (see Todo.md's Open Decisions), so this file still owns
+    the literal loop, just delegates each iteration's real work to
+    Invoke-Mode instead of doing it inline.
 
 .PARAMETER Path
     Root directory to operate in. Defaults to the current working
@@ -267,100 +262,30 @@ Export-ScriptSettings -Settings $settings -Path $settingsPath
 Write-Log ("Conversion Script starting. Path: '" + $Path + "'. cjxl: '" + $resolvedCjxlPath + "'. magick: '" + $(if ($resolvedMagickPath) { $resolvedMagickPath } else { "(not found - WebP/AVIF input will fail)" }) + "'.")
 
 # ==============================================================================
-#  DISPATCH - STUB, belongs in Controller.ps1 (see header above)
-# ==============================================================================
-
-function Invoke-SelectedMode {
-    <#
-    .SYNOPSIS
-        STUB - belongs in Controller.ps1. Runs whichever mode
-        Get-SelectedMode resolved, translating $Settings into each real
-        pipeline entry point's own param list and returning that
-        pipeline's raw result. No output normalization across modes yet
-        (Controller's confirmed, not-yet-built job) - Write-SummaryReport
-        below builds mode-specific lines directly from each raw result
-        instead of a unified $stats shape.
-    #>
-    param(
-        [Parameter(Mandatory)]
-        [hashtable]$Resolved,
-        [Parameter(Mandatory)]
-        [string]$TargetPath,
-        [Parameter(Mandatory)]
-        [hashtable]$Settings,
-        [Parameter(Mandatory)]
-        [string]$CjxlExe,
-        [string]$MagickExe
-    )
-
-    switch ($Resolved.Mode) {
-        'ImageConversion' {
-            return Invoke-LooseImageConversionPipeline -Path $TargetPath -CjxlExe $CjxlExe -MagickExe $MagickExe `
-                -JpegLossless $Settings.JpegLossless -JpegQuality $Settings.JpegQuality -MaxCjxlProcs $Settings.MaxCjxlProcs -FullLogging $Settings.FullLogging
-        }
-        'AnimatedConversion' {
-            return Invoke-LooseAnimatedConversionPipeline -Path $TargetPath -MagickExe $MagickExe `
-                -AnimatedLossless $Settings.AnimatedLossless -AnimatedQuality $Settings.AnimatedQuality -AnimatedThreads $Settings.AnimatedThreads `
-                -AnimatedOverwrite $Settings.AnimatedOverwrite -AnimatedDeleteSource $Settings.AnimatedDeleteSource -FullLogging $Settings.FullLogging
-        }
-        'ZipFolders' {
-            return Invoke-ZipOnlyPipeline -Path $TargetPath -MaxParallel $Settings.ZipParallelThreads -DeleteFolders $true `
-                -FullLogging $Settings.FullLogging -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $Settings.PermanentDelete
-        }
-        'ConvertZipped' {
-            return Invoke-RezipPipeline -Path $TargetPath -MaxParallel $Settings.ZipParallelThreads -DeleteFolders $Settings.DeleteExtractedFoldersAfterRezip `
-                -FullLogging $Settings.FullLogging -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $Settings.PermanentDelete `
-                -CjxlExe $CjxlExe -MagickExe $MagickExe -MaxCjxlProcs $Settings.MaxCjxlProcs -JpegLossless $Settings.JpegLossless -JpegQuality $Settings.JpegQuality
-        }
-        'FullPipeline' {
-            return Invoke-FullPipeline -Path $TargetPath -CjxlExe $CjxlExe -MagickExe $MagickExe `
-                -JpegLossless $Settings.JpegLossless -JpegQuality $Settings.JpegQuality -AnimatedLossless $Settings.AnimatedLossless -AnimatedQuality $Settings.AnimatedQuality `
-                -AnimatedOverwrite $Settings.AnimatedOverwrite -AnimatedDeleteSource $Settings.AnimatedDeleteSource -FullPipelineMaxConcurrentProcs $Settings.MaxCjxlProcs `
-                -FullLogging $Settings.FullLogging -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $Settings.PermanentDelete
-        }
-        'ImageConversionZip' {
-            # STUB - mode 8's CCR-fold decision (Todo.md, 2026-08-28) is not
-            # coded yet: this runs conversion then zips unconditionally
-            # rather than folding both outcomes into one CCR transition or
-            # honoring ZipWithUnconvertedAnimated. Real wiring pending.
-            Write-Log "Mode 8 (Image Conversion + Zip) is a STUB pending Controller.ps1's CCR-fold wiring - running plain conversion only for now, no zip step." -Level Warn
-            return Invoke-LooseImageConversionPipeline -Path $TargetPath -CjxlExe $CjxlExe -MagickExe $MagickExe `
-                -JpegLossless $Settings.JpegLossless -JpegQuality $Settings.JpegQuality -MaxCjxlProcs $Settings.MaxCjxlProcs -FullLogging $Settings.FullLogging
-        }
-        default {
-            throw ("Invoke-SelectedMode: unrecognized mode '" + $Resolved.Mode + "'.")
-        }
-    }
-}
-
-# ==============================================================================
-#  MAIN LOOP - STUB, belongs in Controller.ps1 (Show-PostRunPrompt's run
-#  loop and the shared abort/fatal-error catch are both confirmed to move
-#  there once its dispatcher exists - see Todo.md's Open Decisions)
+#  MAIN LOOP - Show-PostRunPrompt's loop is the one piece that stays here
+#  rather than moving into Controller.ps1 (see header above); each
+#  iteration's real work is entirely Controller.ps1's Invoke-Mode now.
 # ==============================================================================
 
 while ($true) {
     $resolved = Get-SelectedMode -Settings $settings -SettingsPath $settingsPath
 
-    try {
-        $runResult = Invoke-SelectedMode -Resolved $resolved -TargetPath $Path -Settings $settings -CjxlExe $resolvedCjxlPath -MagickExe $resolvedMagickPath
-        Write-SummaryReport -Lines @(
-            "Run complete - mode: " + $resolved.Mode,
-            ($runResult | Out-String).Trim()
-        ) -FullLogging $settings.FullLogging
-    } catch {
-        # STUB - belongs in Controller.ps1 as its one shared top-level
-        # catch (Todo.md, 2026-08-28 decision). Verified against
-        # Invoke-ZipOnlyPipeline, Invoke-LooseImageConversionPipeline,
-        # Invoke-FullPipeline, Invoke-RezipPipeline, and
-        # Invoke-LooseAnimatedConversionPipeline's real outer-scope
-        # structure - four of five already let an exception propagate
-        # this far as-is; Invoke-ZipOnlyPipeline is the known outlier
-        # that currently swallows its own (see Todo.md's follow-up).
-        # Deliberately NOT the deep-dive verification pass the project
-        # owner wants once the whole script is actually running - this
-        # is the decided design wired in, not yet stress-tested for real.
-        $null = Invoke-AbortOrFatalHandler -ErrorRecord $_ -LogHandler { param($m) Write-Log $m -Level Error }
+    $runStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $stats = Invoke-Mode -Resolved $resolved -TargetPath $Path -Settings $settings -CjxlExe $resolvedCjxlPath -MagickExe $resolvedMagickPath `
+        -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile
+    $runStopwatch.Stop()
+
+    if ($null -eq $stats) {
+        # Invoke-Mode's own shared catch already logged the real cause
+        # (Invoke-AbortOrFatalHandler - either a genuine crash or the
+        # rare abort-exception race) - a $null return here means the run
+        # did NOT complete, so there is no real $stats to report. Skip
+        # the summary rather than printing a misleading all-zeros report.
+        Write-Log "Run did not complete - see the error above." -Level Warn
+    } else {
+        $elapsedString = Format-ElapsedTime -Elapsed $runStopwatch.Elapsed
+        $summaryLines = Get-SummaryLines -Stats $stats -ElapsedString $elapsedString -ModeFlags $resolved
+        Write-SummaryReport -Lines $summaryLines -FullLogging $settings.FullLogging
     }
 
     $postRun = Show-PostRunPrompt
