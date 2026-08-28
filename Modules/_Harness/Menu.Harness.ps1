@@ -31,6 +31,17 @@ function Write-Log {
     $script:logCalls.Add($Level + ": " + $Message)
 }
 
+# Stub for UnwantedImage.ps1's Get-UnwantedImageProfilesPath - only its
+# default-parameter-value evaluation is exercised here (Show-ModeMenu's
+# '5' dispatch calls Show-CoverDeletionMenu without -ProfilesPath); the
+# real scan/add/action behavior is verified via injected -RunHandler/
+# -AddHandler/-ActionHandler below, not the real UnwantedImage.ps1
+# functions, so this module is not dot-sourced.
+function Get-UnwantedImageProfilesPath {
+    param([string]$BaseDir)
+    return (Join-Path ([System.IO.Path]::GetTempPath()) "menu-harness-unused-profiles.json")
+}
+
 $script:passCount = 0
 $script:failCount = 0
 function Test-Assert {
@@ -83,13 +94,14 @@ function New-ScratchSettingsPath {
 Write-Host "=== Scenario A: Get-ModeMenuLines ===" -ForegroundColor Cyan
 $linesA = Get-ModeMenuLines
 Test-Assert (($linesA -join "`n") -match "1 - Full Pipeline") "lists Full Pipeline (1)"
+Test-Assert (($linesA -join "`n") -match "5 - Cover Deletion") "lists Cover Deletion (5)"
 Test-Assert (($linesA -join "`n") -match "8 - Image Conversion \+ Zip") "lists Image Conversion + Zip (8)"
 Test-Assert (($linesA -join "`n") -match "9 - Convert Zipped") "lists Convert Zipped (9)"
 Test-Assert (($linesA -join "`n") -match "DEPRECATED") "Convert Zipped is marked DEPRECATED on the menu text itself"
 Test-Assert (($linesA -join "`n") -match "0 - Options") "lists Options (0)"
 Test-Assert (($linesA -join "`n") -match "Ctrl\+C") "mentions Ctrl+C abort behavior"
-$reservedShownA = @($linesA | Where-Object { $_ -match "^\s*[567] - " })
-Test-Assert ($reservedShownA.Count -eq 0) "reserved numbers 5/6/7 are not shown as menu items"
+$reservedShownA = @($linesA | Where-Object { $_ -match "^\s*[67] - " })
+Test-Assert ($reservedShownA.Count -eq 0) "reserved numbers 6/7 are not shown as menu items"
 Write-Host ""
 
 # ==============================================================================
@@ -132,9 +144,9 @@ Write-Host ""
 Write-Host "=== Scenario D: Show-ModeMenu re-prompts on invalid input ===" -ForegroundColor Cyan
 $settingsD = Get-DefaultScriptSettings
 $pathD = New-ScratchSettingsPath "scenario-d"
-$promptD = New-ScriptedPrompt -Responses @('abc', '5', '2')
+$promptD = New-ScriptedPrompt -Responses @('abc', '6', '2')
 $resultD = Show-ModeMenu -Settings $settingsD -SettingsPath $pathD -PromptFunc $promptD
-Test-Assert ($resultD.Mode -eq 'ImageConversion') "invalid ('abc') and reserved ('5') inputs were rejected before the valid '2' was accepted"
+Test-Assert ($resultD.Mode -eq 'ImageConversion') "invalid ('abc') and reserved ('6') inputs were rejected before the valid '2' was accepted"
 Test-Assert (-not (Test-Path -LiteralPath $pathD)) "Options was never entered, so no settings file was written"
 Write-Host ""
 
@@ -325,6 +337,72 @@ try {
     Show-OptionsMenuLevel -Items (Get-OptionsMenuSchema) -Settings $settingsO -SettingsPath $pathO -PromptFunc $promptO
 } catch { $threwO = $true }
 Test-Assert (-not $threwO) "an invalid top-level choice ('7', not in the schema) did not throw - just re-prompted"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario P: Get-CoverDeletionMenuLines - shape, 0-Back last
+# ==============================================================================
+Write-Host "=== Scenario P: Get-CoverDeletionMenuLines ===" -ForegroundColor Cyan
+$linesP = Get-CoverDeletionMenuLines
+Test-Assert (($linesP -join "`n") -match "1 - Run") "lists Run (1)"
+Test-Assert (($linesP -join "`n") -match "2 - Add Image") "lists Add Image (2)"
+Test-Assert (($linesP -join "`n") -match "4 - Open Profile Location") "lists Open Profile Location (4)"
+Test-Assert ($linesP[-1] -eq "  0 - Back") "last line is always 0 - Back"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario Q: Show-ModeMenu - '5' opens the Cover Deletion submenu (via
+#  a stubbed RunHandler pass-through), then re-shows the main prompt
+#  afterward instead of resolving to a mode
+# ==============================================================================
+Write-Host "=== Scenario Q: Show-ModeMenu dispatches '5' into Cover Deletion, returns to main prompt after Back ===" -ForegroundColor Cyan
+$settingsQ = Get-DefaultScriptSettings
+$pathQ = New-ScratchSettingsPath "scenario-q"
+$promptQ = New-ScriptedPrompt -Responses @('5', '0', '2')
+$resultQ = Show-ModeMenu -Settings $settingsQ -SettingsPath $pathQ -PromptFunc $promptQ
+Test-Assert ($resultQ.Mode -eq 'ImageConversion') "after Back ('0') out of Cover Deletion, the main prompt re-showed and '2' resolved to ImageConversion"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario R: Show-CoverDeletionMenu - Run and Add both dispatch through
+#  their injected handlers and return to the SAME submenu (not the
+#  caller) until Back is chosen
+# ==============================================================================
+Write-Host "=== Scenario R: Show-CoverDeletionMenu Run/Add dispatch, stay in submenu until Back ===" -ForegroundColor Cyan
+$callsR = New-Object System.Collections.Generic.List[string]
+$runHandlerR = { param($ProfilesPath, $PromptFunc) $callsR.Add('Run') }.GetNewClosure()
+$addHandlerR = { param($ProfilesPath, $PromptFunc) $callsR.Add('Add') }.GetNewClosure()
+$promptR = New-ScriptedPrompt -Responses @('1', '2', '1', '0')
+Show-CoverDeletionMenu -ProfilesPath "unused" -PromptFunc $promptR -RunHandler $runHandlerR -AddHandler $addHandlerR
+Test-Assert (($callsR -join ",") -eq "Run,Add,Run") "Run/Add/Run all dispatched in order, staying in the submenu each time, before Back exited it"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario S: Show-CoverDeletionMenu - Open Profile Location (4)
+#  dispatches through -ActionHandler without exiting the submenu, and an
+#  invalid choice re-prompts instead of throwing
+# ==============================================================================
+Write-Host "=== Scenario S: Open Profile Location dispatches via -ActionHandler; invalid choice re-prompts ===" -ForegroundColor Cyan
+$actionCallsS = New-Object System.Collections.Generic.List[string]
+$actionHandlerS = { param($ActionName, $ProfilesPath) $actionCallsS.Add($ActionName) }.GetNewClosure()
+$promptS = New-ScriptedPrompt -Responses @('9', '4', '0')
+$threwS = $false
+try {
+    Show-CoverDeletionMenu -ProfilesPath "unused" -PromptFunc $promptS -ActionHandler $actionHandlerS
+} catch { $threwS = $true }
+Test-Assert (-not $threwS) "an invalid choice ('9') did not throw - just re-prompted"
+Test-Assert ($actionCallsS.Count -eq 1 -and $actionCallsS[0] -eq 'OpenProfileLocation') "picking 4 dispatched 'OpenProfileLocation' exactly once through the injected handler"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario T: Show-PostRunPrompt - Escape returns 'Exit', any other key
+#  returns 'ReturnToMenu'
+# ==============================================================================
+Write-Host "=== Scenario T: Show-PostRunPrompt key handling ===" -ForegroundColor Cyan
+$escKeyReader = { [pscustomobject]@{ VirtualKeyCode = 27 } }
+$otherKeyReader = { [pscustomobject]@{ VirtualKeyCode = 65 } }
+Test-Assert ((Show-PostRunPrompt -KeyReader $escKeyReader) -eq 'Exit') "Escape (VirtualKeyCode 27) returns 'Exit'"
+Test-Assert ((Show-PostRunPrompt -KeyReader $otherKeyReader) -eq 'ReturnToMenu') "any other key (e.g. 'A') returns 'ReturnToMenu'"
 Write-Host ""
 
 # ==============================================================================

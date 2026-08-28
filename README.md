@@ -9,7 +9,7 @@ development/debugging partner.
 The project is moving from a single large script toward independently-
 built-and-tested modules that get merged into a shipped script only once
 each is verified working on its own. **All 18 planned modules are now
-built and tested** (20/20 harnesses, 791+ assertions) - none are merged
+built and tested** (20/20 harnesses, 800+ assertions) - none are merged
 into the main script yet, which stays frozen until that rewrite starts.
 See `CLAUDE.md` for full working context if you're picking this up in a
 new session (human or Claude Code), `Todo.md` for the live tracker, and
@@ -43,7 +43,7 @@ full story:
 | `Modules\ZipPipeline.ps1` | `Invoke-ZipOnlyPipeline` (mode 3) and `Invoke-LooseFolderZip` (mode 2's zip step) - zip-domain orchestration. |
 | `Modules\ImageConversionPipeline.ps1` | `Convert-ImageBatch` (shared batch conversion engine) and `Invoke-LooseImageConversionPipeline` (mode 1 end to end, Clean Console Output-integrated). |
 | `Modules\Config.ps1` | Settings schema + `Import-/Export-ScriptSettings` at `%LOCALAPPDATA%\ConversionScript\settings.json`, with per-key validation and corrupt-file recovery. |
-| `Modules\Menu.ps1` | `Get-SelectedMode`/`Show-ModeMenu` (mode-selection prompt) and `Show-OptionsMenuLevel` (data-driven options-menu renderer). |
+| `Modules\Menu.ps1` | `Get-SelectedMode`/`Show-ModeMenu` (mode-selection prompt, including the Cover Deletion submenu on option 5) and `Show-OptionsMenuLevel` (data-driven options-menu renderer). |
 | `Modules\Summary.ps1` | The clean-run summary report - `New-StatsTracker`, `Format-ElapsedTime`, `Get-SummaryLines`/`Write-SummaryReport`. |
 | `Modules\ResumeState.ps1` | Tracks which ZIPs the rezip pipeline has already completed, so a re-run can skip them. |
 | `Modules\RezipPipeline.ps1` | `Invoke-RezipPipeline` - mode 9 ("Convert Zipped"), deprecated/legacy, minimal-effort build. |
@@ -130,9 +130,9 @@ still not started. Beyond that, a handful of real open items remain even
 within the standalone modules themselves - see `CLAUDE.md`'s "Known
 gaps / open work" section for the current, maintained list (things like:
 `AnimatedConversionPipeline.ps1` is a batch-conversion primitive only,
-no library-walking orchestrator yet; `UnwantedImage.ps1` has no `Menu.ps1`
-entry wired in yet; a couple of small cross-module consistency questions
-flagged but deliberately deferred). Not duplicated here since it changes
+no library-walking orchestrator yet; `Menu.ps1`'s post-run prompt isn't
+wired into a real run loop yet; a couple of small cross-module
+consistency questions flagged but deliberately deferred). Not duplicated here since it changes
 often enough that a second copy would just go stale.
 
 ## Language

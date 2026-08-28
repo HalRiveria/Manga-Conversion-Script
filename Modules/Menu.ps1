@@ -12,6 +12,10 @@
       - Export-ScriptSettings (Modules\Config.ps1) - every options-menu
         edit saves immediately, not batched, so nothing is lost on a
         mid-menu Ctrl+C (decided explicitly, not a guess).
+      - Get-AllUnwantedImageProfiles, Get-UnwantedImageProfilesPath,
+        Invoke-UnwantedImageScan, Show-AddUnwantedImageProfileFlow
+        (Modules\UnwantedImage.ps1) - the Cover Deletion submenu (option
+        5) is pure wiring around these, no new pipeline logic of its own.
 
     TESTABILITY: every interactive loop takes a -PromptFunc scriptblock
     (defaults to a thin `Read-Host` wrapper) instead of calling Read-Host
@@ -29,10 +33,13 @@
     this was built (full history in CHANGELOG.md) - see Todo.md's "Menu
     (main prompt + options submenu)" section for the authoritative,
     up-to-date rendered draft this module implements:
-      - Mode codes are 1, 2, 3, 4, 8, 9 (NOT contiguous - 5/6/7 are
+      - Mode codes are 1, 2, 3, 4, 5, 8, 9 (NOT contiguous - 6/7 are
         deliberately unused/reserved for a future mode without
         renumbering everything already shipped). "0" enters the options
-        menu rather than selecting a mode.
+        menu rather than selecting a mode. "5" (Cover Deletion) is a
+        submenu, same shape as "0" - it does NOT resolve via
+        Resolve-ModeSelection, it opens Show-CoverDeletionMenu and then
+        re-shows the main prompt afterward.
       - Old mode 2 ("loose conversion + zip") was deliberately dropped as
         its own mode - Full Pipeline (1) covers "convert everything and
         zip"; if only image conversion + zip is wanted, that's mode 8,
@@ -74,6 +81,7 @@ function Get-ModeMenuLines {
         "  2 - Image Conversion         (convert loose images only; no zipping)"
         "  3 - Animated Conversion      (convert loose animated/avif files only; no zipping)"
         "  4 - Zip Folders              (no conversion; zips folders that are already ready)"
+        "  5 - Cover Deletion           (submenu - unwanted-image profile scan/add)"
         "  8 - Image Conversion + Zip   (convert loose images, then zip)"
         "  9 - Convert Zipped           [DEPRECATED - image files only, does not convert animated content]"
         "  0 - Options                  (view/change settings - saved for future runs)"
@@ -131,6 +139,12 @@ function Show-ModeMenu {
 
         if ($choice -eq '0') {
             Show-OptionsMenuLevel -Items (Get-OptionsMenuSchema) -Settings $Settings -SettingsPath $SettingsPath -PromptFunc $PromptFunc -Title "Options"
+            Write-Host ""
+            continue
+        }
+
+        if ($choice -eq '5') {
+            Show-CoverDeletionMenu -PromptFunc $PromptFunc
             Write-Host ""
             continue
         }
@@ -350,4 +364,152 @@ function Show-OptionsMenuLevel {
             }
         }
     }
+}
+
+function Get-CoverDeletionMenuLines {
+    <#
+    .SYNOPSIS
+        The Cover Deletion submenu's display lines (pure - no I/O). Same
+        shape as Get-ModeMenuLines - "0 - Back" always last, matching
+        every other submenu in this design.
+    #>
+    return @(
+        "Cover Deletion"
+        "  1 - Run                      (scan a folder for known unwanted covers)"
+        "  2 - Add Image                (point at a real image to add as a new profile)"
+        "  4 - Open Profile Location    (opens the unwanted-image-profiles.json folder)"
+        "  0 - Back"
+    )
+}
+
+function Invoke-CoverDeletionAction {
+    <#
+    .SYNOPSIS
+        Default -ActionHandler for Show-CoverDeletionMenu's one real
+        side-effecting item, 'OpenProfileLocation' - opens the unwanted-
+        image profiles file's parent folder in Explorer (creating it
+        first if it doesn't exist yet, same as Invoke-OptionsMenuAction's
+        OpenSettingsLocation).
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$ActionName,
+        [string]$ProfilesPath
+    )
+
+    switch ($ActionName) {
+        'OpenProfileLocation' {
+            $dir = Split-Path -Path $ProfilesPath -Parent
+            if (-not (Test-Path -LiteralPath $dir)) {
+                New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            }
+            Start-Process -FilePath "explorer.exe" -ArgumentList $dir
+        }
+    }
+}
+
+function Invoke-CoverDeletionRun {
+    <#
+    .SYNOPSIS
+        The "1 - Run" item's real behavior: prompts for a folder to scan
+        (same drag-and-drop-or-paste convention as
+        Show-AddUnwantedImageProfileFlow's path prompt), then runs
+        Invoke-UnwantedImageScan against it using every known profile
+        (built-in + persisted). A blank path or one that doesn't exist
+        cancels without scanning - no silent no-op against an empty
+        $Path.
+    #>
+    param(
+        [string]$ProfilesPath = (Get-UnwantedImageProfilesPath),
+        [scriptblock]$PromptFunc = { param($Message) Read-Host $Message }
+    )
+
+    $path = (& $PromptFunc "Enter the folder to scan (drag & drop the folder in, or paste the path)")
+    if ($null -ne $path) { $path = $path.Trim().Trim('"') }
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        Write-Host "No path entered - cancelled." -ForegroundColor Yellow
+        return @{ Ran = $false; Reason = "No path entered." }
+    }
+    if (-not (Test-Path -LiteralPath $path)) {
+        Write-Host ("Path not found: '" + $path + "'") -ForegroundColor Red
+        return @{ Ran = $false; Reason = "Path not found." }
+    }
+
+    $result = Invoke-UnwantedImageScan -Path $path -Profiles (Get-AllUnwantedImageProfiles -ProfilesPath $ProfilesPath)
+    return @{ Ran = $true; Reason = $null; Result = $result }
+}
+
+function Show-CoverDeletionMenu {
+    <#
+    .SYNOPSIS
+        The Cover Deletion submenu loop - "1 - Run" and "2 - Add Image"
+        both return to THIS submenu when they finish (not the main
+        prompt), matching Options' own "stay until you back out" shape;
+        "4 - Open Profile Location" and "0 - Back" are one-shot. Design
+        settled with the project owner (see Todo.md's Menu section) -
+        this function is pure wiring around already-built
+        UnwantedImage.ps1 functions, no new pipeline logic.
+    .PARAMETER RunHandler
+        Defaults to Invoke-CoverDeletionRun. Injectable so a harness can
+        verify dispatch without a real folder scan.
+    .PARAMETER AddHandler
+        Defaults to Show-AddUnwantedImageProfileFlow. Injectable for the
+        same reason.
+    .PARAMETER ActionHandler
+        Defaults to Invoke-CoverDeletionAction. Override in tests to
+        avoid a real Explorer launch while still verifying the right
+        action name was dispatched - same pattern as
+        Show-OptionsMenuLevel's -ActionHandler.
+    #>
+    param(
+        [string]$ProfilesPath = (Get-UnwantedImageProfilesPath),
+        [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
+        [scriptblock]$RunHandler = { param($ProfilesPath, $PromptFunc) Invoke-CoverDeletionRun -ProfilesPath $ProfilesPath -PromptFunc $PromptFunc },
+        [scriptblock]$AddHandler = { param($ProfilesPath, $PromptFunc) Show-AddUnwantedImageProfileFlow -ProfilesPath $ProfilesPath -PromptFunc $PromptFunc },
+        [scriptblock]$ActionHandler = { param($ActionName, $ProfilesPath) Invoke-CoverDeletionAction -ActionName $ActionName -ProfilesPath $ProfilesPath }
+    )
+
+    while ($true) {
+        foreach ($line in (Get-CoverDeletionMenuLines)) { Write-Host $line }
+        $choice = (& $PromptFunc "Enter a number").Trim()
+
+        switch ($choice) {
+            '0' { return }
+            '1' { & $RunHandler $ProfilesPath $PromptFunc; Write-Host "" }
+            '2' { & $AddHandler $ProfilesPath $PromptFunc; Write-Host "" }
+            '4' { & $ActionHandler 'OpenProfileLocation' $ProfilesPath }
+            default { Write-Host "Invalid selection." -ForegroundColor Yellow }
+        }
+    }
+}
+
+function Show-PostRunPrompt {
+    <#
+    .SYNOPSIS
+        After a run finishes: "Press any key to return to the main menu,
+        or press Esc to exit." Applies broadly to any mode's run, not
+        just one (Todo.md, raised 2026-08-27) - a single primitive a
+        future run-loop wraps around Get-SelectedMode, so the menu
+        doesn't just dump back to a bare prompt or close the window
+        outright once a run completes. Not wired into a real run loop
+        yet - that's the same future implementation pass as the rest of
+        the menu loop (see Todo.md), this is the tested primitive it'll
+        call.
+    .PARAMETER KeyReader
+        Defaults to a real single-keypress read via $Host.UI.RawUI.
+        Injectable so a harness can feed a fake key object (needs only a
+        .VirtualKeyCode property) without blocking on real console input.
+    .OUTPUTS
+        'Exit' if the key pressed was Escape (VirtualKeyCode 27),
+        'ReturnToMenu' for any other key.
+    #>
+    param(
+        [scriptblock]$KeyReader = { $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") }
+    )
+
+    Write-Host ""
+    Write-Host "Press any key to return to the main menu, or press Esc to exit." -ForegroundColor Cyan
+    $key = & $KeyReader
+    if ($key.VirtualKeyCode -eq 27) { return 'Exit' }
+    return 'ReturnToMenu'
 }
