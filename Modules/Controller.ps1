@@ -191,6 +191,19 @@ $script:fullPipelineChapterWorker = {
         [System.Threading.CancellationToken]$CancelToken
     )
 
+    # A fresh runspace has no assemblies pre-loaded beyond the CLR
+    # defaults - [Microsoft.VisualBasic.FileIO.FileSystem] (what
+    # Move-ToRecycleBin, FileDeletion.ps1, actually calls) does NOT
+    # resolve without this, confirmed by a live repro (a fresh runspace
+    # pool, no Add-Type, throws "Unable to find type"). Same fix
+    # RezipPipeline.ps1's own worker already needed and applied - Remove-
+    # Source only calls Move-ToRecycleBin when $script:PermanentDelete is
+    # $false (Recycle Bin, this project's DEFAULT), so this was a live
+    # bug on the default settings, just never exercised by a harness
+    # scenario (every Controller.Harness.ps1 run used -PermanentDelete
+    # $true).
+    Add-Type -AssemblyName "Microsoft.VisualBasic"
+
     # A fresh runspace shares nothing with the caller's scope - every
     # $script: value Write-Log/Remove-Source/Convert-*Batch need has to
     # be set here explicitly, same pattern RezipPipeline.ps1's own
@@ -375,14 +388,21 @@ function Invoke-FullPipelineChapter {
         try {
             Write-Log ("Zipping '" + $ChapterDir + "' -> '" + $ZipOut + "'")
             $zipSize = Compress-FolderToZip -SourceDir $ChapterDir -ZipOut $ZipOut
-            # -RequireJxlEntry only when this chapter actually had image
-            # files - an animated-only chapter's zip legitimately has
-            # ZERO .jxl entries (just .webp), and Test-ZipArchive's own
-            # default ($true) is built for the image-only world. Found
-            # live via this module's own harness (Scenario E: a real,
-            # fully-successful animated-only chapter's zip was rejected
-            # by this exact default).
-            $verify  = Test-ZipArchive -ZipPath $ZipOut -RequireJxlEntry ($ChapterImageFiles.Count -gt 0)
+            # -RequireJxlEntry only when the image engine actually
+            # CONVERTED something to .jxl - NOT just "did this chapter
+            # have image files queued". An animated-only chapter
+            # legitimately has zero .jxl entries (just .webp), matching
+            # Test-ZipArchive's own default ($true) being built for the
+            # image-only world (found live via Scenario E). Checking
+            # queued-count alone is a distinct, narrower bug: a chapter
+            # whose only "image" files are all animated WebP (cjxl has
+            # no multi-frame support, so Convert-ImageBatch SKIPS them,
+            # not fails them - a legitimate Warning, not an Error) would
+            # have ChapterImageFiles.Count > 0 but ConvertedCount == 0 -
+            # genuinely zero .jxl entries despite "having image files" -
+            # the old check would have wrongly required one and thrown.
+            $imageActuallyConverted = ($null -ne $imageResult -and $imageResult.ConvertedCount -gt 0)
+            $verify  = Test-ZipArchive -ZipPath $ZipOut -RequireJxlEntry $imageActuallyConverted
 
             Write-Log ("ZIP OK: '" + $ZipOut + "' (" + $zipSize + " bytes, " + $verify.EntryCount + " entries)")
             $zipResult.Status     = 'Success'

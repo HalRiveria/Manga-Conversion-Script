@@ -357,6 +357,40 @@ Test-Assert ($totalsH.ZipCreatedSuccess -eq 1) "a Warning-tier outcome (a skip, 
 Write-Host ""
 
 # ==============================================================================
+#  Scenario I: a chapter whose only "image" file is an ANIMATED WebP (cjxl
+#  has no multi-frame support - Convert-ImageBatch SKIPS it, does not fail
+#  it) plus a real animated .avif that converts successfully - zero .jxl
+#  entries despite ChapterImageFiles.Count > 0, a legitimate Warning, not
+#  an Error. Regression test for a real bug this session's code review
+#  found: -RequireJxlEntry was originally computed from "did this chapter
+#  have image files queued" rather than "did the image engine actually
+#  convert anything" - this exact case would have wrongly required a
+#  .jxl entry and thrown, turning a correct Warning-tier chapter into a
+#  reported zip failure.
+# ==============================================================================
+Write-Host "=== Scenario I: all-skipped image files (animated WebP) don't force a spurious RequireJxlEntry ===" -ForegroundColor Cyan
+$chI = New-Dir "scenario-i\Series\Chapter 1"
+# A minimal real VP8X chunk with the animation bit (0x02) set at the flags
+# byte (offset 20) - this is what Convert-ImageBatch's own animated-WebP
+# detection actually reads (see ImageConversionPipeline.ps1), not
+# something the fake cjxl.exe needs to understand at all.
+$animatedWebpBytes = New-Object byte[] 24
+$animatedWebpBytes[12] = [byte][char]'V'
+$animatedWebpBytes[13] = [byte][char]'P'
+$animatedWebpBytes[14] = [byte][char]'8'
+$animatedWebpBytes[15] = [byte][char]'X'
+$animatedWebpBytes[20] = 0x02
+[System.IO.File]::WriteAllBytes((Join-Path $chI "animated.webp"), $animatedWebpBytes)
+New-FakeAvifIn -DirPath $chI -Name "anim1.avif" | Out-Null
+
+$totalsI = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-i") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+
+Test-Assert ($totalsI.ConvertedImageSkipped -eq 1 -and $totalsI.ConvertedImageSuccess -eq 0) "the animated WebP was skipped, not converted - zero real .jxl entries despite having an image file queued"
+Test-Assert ($totalsI.ConvertedAnimatedSuccess -eq 1) "the real animated file still converted successfully"
+Test-Assert ($totalsI.ZipCreatedSuccess -eq 1 -and $totalsI.ZipCreatedFail -eq 0) "zipped successfully - did NOT wrongly require a .jxl entry just because an image file was queued"
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="
