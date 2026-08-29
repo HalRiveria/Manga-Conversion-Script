@@ -572,6 +572,56 @@ Test-Assert ($perSeriesCountsU["Series Two"] -eq 1) ("Series Two's real chapter 
 Write-Host ""
 
 # ==============================================================================
+#  Scenario V: New-ZippableLeafDirProvider survives a permission-denied
+#  directory - real bug fix (2026-08-28, see Todo.md/CHANGELOG.md). Before
+#  the stack-based rewrite, the old single flat AllDirectories enumerator
+#  threw on the FIRST inaccessible directory anywhere in the tree and
+#  could never resume, silently abandoning everything past that point -
+#  verified live during the review with the exact icacls setup below: the
+#  batch path (Get-ZippableLeafDirs) found candidates on both sides of a
+#  denied folder, the incremental provider found nothing past it. Real
+#  NTFS permissions via icacls, not a mock - a fake/mocked
+#  UnauthorizedAccessException wouldn't prove the real .NET enumerator
+#  actually throws where this scenario expects it to.
+# ==============================================================================
+Write-Host "=== Scenario V: incremental provider survives a real permission-denied directory ===" -ForegroundColor Cyan
+$libraryV = Join-Path $scratchDir "scenario-v"
+$deniedV  = Join-Path $libraryV "denied-sub"
+$beforeV  = Join-Path $libraryV "a-allowed-before"
+$afterV   = Join-Path $libraryV "z-allowed-after"
+New-Item -ItemType Directory -Path $deniedV -Force | Out-Null
+New-Item -ItemType Directory -Path $beforeV -Force | Out-Null
+New-Item -ItemType Directory -Path $afterV -Force | Out-Null
+"x" | Out-File -LiteralPath (Join-Path $beforeV "page1.jpg") -Encoding ASCII
+"x" | Out-File -LiteralPath (Join-Path $afterV "page1.jpg") -Encoding ASCII
+
+$userV = "$env:USERDOMAIN\$env:USERNAME"
+$icaclsOutV = icacls $deniedV /deny "${userV}:(RX)" 2>&1
+$icaclsOkV = ($LASTEXITCODE -eq 0)
+
+if (-not $icaclsOkV) {
+    Write-Host "  [SKIP] icacls could not deny access in this environment - skipping Scenario V's real-permission assertions" -ForegroundColor Yellow
+} else {
+    try {
+        $providerV = New-ZippableLeafDirProvider -ScanPath $libraryV -QualifyingExtensions $imgExts
+        $foundV = [System.Collections.Generic.List[string]]::new()
+        $i = 0
+        while ($i -lt 10) {
+            $r = & $providerV
+            if ($null -eq $r) { break }
+            $foundV.Add($r.Dir.Name)
+            $i++
+        }
+        Test-Assert ($foundV.Contains("a-allowed-before")) "the candidate BEFORE the denied folder was still found"
+        Test-Assert ($foundV.Contains("z-allowed-after")) "the exact bug this closes: the candidate AFTER the denied folder was ALSO found, not silently abandoned"
+        Test-Assert ($foundV.Count -eq 2) ("exactly the 2 real candidates were found, nothing extra (got " + $foundV.Count + ")")
+    } finally {
+        icacls $deniedV /remove:d $userV 2>&1 | Out-Null
+    }
+}
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

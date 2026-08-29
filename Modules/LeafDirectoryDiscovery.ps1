@@ -53,13 +53,29 @@
     wired up anywhere until now. New-ZippableLeafDirProvider below
     provides that: a scriptblock, compatible with -NextJobProvider, that
     evaluates one candidate directory at a time via a genuinely lazy .NET
-    enumerator, so dispatch can begin on the first qualifying folder while
+    walk, so dispatch can begin on the first qualifying folder while
     the rest of a huge tree is still being walked. Both functions share
     the exact same per-directory guard logic via the internal
     Test-ZippableLeafDirCandidate helper below, so the incremental path can never
-    silently drift from the batch path's behavior. Purely additive to
-    this module's existing, already-tested surface - ZipPipeline.ps1's
-    current use of New-ZippableLeafDirProvider is untouched by any of this.
+    silently drift from the batch path's LEAF-QUALIFYING behavior.
+
+    TRAVERSAL-ERROR PARITY (2026-08-28, real bug fix - see
+    Todo.md/CHANGELOG.md): the guard-logic parity above did NOT originally
+    extend to how the two paths handled an inaccessible directory -
+    verified live, a single permission-denied folder anywhere in the tree
+    made the old incremental provider (a single flat
+    [System.IO.Directory]::EnumerateDirectories(...,
+    SearchOption.AllDirectories) enumerator, which throws on the first
+    inaccessible directory and cannot be resumed) silently abandon
+    everything past that point, while the batch path
+    (Get-ChildItem -Recurse -ErrorAction SilentlyContinue) just skipped
+    that one subtree and kept going. New-ZippableLeafDirProvider now walks
+    the tree manually, one directory level at a time, with each level's
+    own enumeration wrapped in its own try/catch (see that function's own
+    NOTES) - an inaccessible directory now only costs its own subtree,
+    matching the batch path's resilience. Purely additive to this module's
+    existing, already-tested surface - ZipPipeline.ps1's current use of
+    New-ZippableLeafDirProvider is untouched by any of this.
 
     TWO-TIER SERIES/CHAPTER DISCOVERY (2026-08-18, for Clean Console
     Output - see CLAUDE.md's section of that name): under the FIXED
@@ -223,24 +239,53 @@ function New-ZippableLeafDirProvider {
     .OUTPUTS
         [scriptblock] - pass directly as -NextJobProvider.
     .NOTES
-        Uses [System.IO.Directory]::EnumerateDirectories, which is
-        genuinely lazy (unlike Get-ChildItem captured into a variable,
-        which fully materializes before the assignment completes) - so
-        the underlying filesystem walk is spread across repeated calls to
-        the returned scriptblock instead of happening all at once on the
-        first call. A directory that becomes inaccessible mid-enumeration
-        (permissions, a removed network share, etc.) would otherwise throw
-        UnauthorizedAccessException/IOException straight out of
-        MoveNext() and into Invoke-ZipParallelProcessing's dispatch loop,
-        which isn't designed to handle a throwing provider - guarded here
-        by treating that as "nothing more to offer" (logs a warning, ends
-        the scan) rather than propagating. This specific error path is
-        defensively coded but not live-verified against a real
-        permission-denied directory (awkward to set up portably in a
-        test harness without elevation) - flagging that honestly rather
-        than claiming full coverage.
+        MANUAL STACK-BASED WALK (2026-08-28, real bug fix - see
+        Todo.md/CHANGELOG.md), not a single flat
+        [System.IO.Directory]::EnumerateDirectories(...,
+        SearchOption.AllDirectories) enumerator like an earlier version of
+        this function used. That flat enumerator is genuinely lazy (unlike
+        Get-ChildItem captured into a variable, which fully materializes
+        before the assignment completes), but a directory that becomes
+        inaccessible ANYWHERE in the tree (permissions, a removed network
+        share) throws straight out of MoveNext() - and once a .NET
+        enumerator's MoveNext() throws, it cannot be resumed, so the ONLY
+        way to recover was to give up on the entire rest of the scan.
+        Verified live: with one permission-denied folder sitting between
+        two real candidates, the old flat-enumerator version returned
+        nothing past the denied folder, while the batch path
+        (Get-ZippableLeafDirs, via Get-ChildItem -Recurse -ErrorAction
+        SilentlyContinue) correctly found both. This function now walks
+        one directory LEVEL at a time via a Stack[string] of directories
+        still to explore, with each level's own EnumerateDirectories call
+        (and each step of iterating it) wrapped in its own try/catch - an
+        inaccessible directory now only skips exploring THAT subtree
+        (logged as a Warn) and the walk continues with everything else on
+        the stack, matching the batch path's own resilience. Each
+        directory's own enumerator is also disposed as soon as it's
+        exhausted or errors (closing a related gap: the old single flat
+        enumerator's underlying native search handle was never disposed at
+        all, relying entirely on GC finalization).
 
-        The returned scriptblock is a closure over an enumerator and
+        $dirStack is a real, mutable Stack[string] - Push()/Pop() mutate
+        the OBJECT's own internal state, they don't reassign the
+        $dirStack variable itself, so it persists safely across repeated
+        closure invocations the same way this project's other stateful
+        providers already do (see New-SeriesProvider below). The
+        per-directory enumerator is different: it genuinely needs to be
+        REASSIGNED (to a new enumerator, or to $null) as the walk moves
+        between directories - and a bare variable reassignment inside a
+        .GetNewClosure()'d scriptblock does NOT reliably persist across
+        SEPARATE invocations of that closure once dispatched through
+        Invoke-ZipParallelProcessing. This is not theoretical: an early
+        version of RezipPipeline.ps1's own job provider used exactly a
+        bare-scalar reassignment ($zipIndex++) for its own per-call state
+        and, live-reproduced, silently restarted from the beginning on
+        later calls (see that module's header). Boxed in $state (a
+        hashtable) instead, mutated by key - the same pattern
+        Controller.ps1's $zipStatsBox and ImageConversionPipeline.ps1's
+        $alreadyAbortedBox already use for the identical reason.
+
+        The returned scriptblock is a closure over $dirStack/$state and
         parameters captured HERE, outside Invoke-ZipParallelProcessing -
         the specific pattern this project's CLAUDE.md "Lessons learned"
         confirms works reliably (a closure defined and invoked entirely
@@ -265,20 +310,44 @@ function New-ZippableLeafDirProvider {
         throw ("New-ZippableLeafDirProvider: -ScanPath does not exist or is not a directory: '" + $ScanPath + "'")
     }
 
-    $enumerator = [System.IO.Directory]::EnumerateDirectories($ScanPath, "*", [System.IO.SearchOption]::AllDirectories).GetEnumerator()
+    $dirStack = [System.Collections.Generic.Stack[string]]::new()
+    $dirStack.Push($ScanPath)
+    $state = @{ CurrentEnumerator = $null }
 
     return {
         while ($true) {
+            if ($null -eq $state.CurrentEnumerator) {
+                if ($dirStack.Count -eq 0) { return $null }
+                $currentDir = $dirStack.Pop()
+                try {
+                    $state.CurrentEnumerator = [System.IO.Directory]::EnumerateDirectories($currentDir).GetEnumerator()
+                } catch {
+                    Write-Log ("Could not enumerate '" + $currentDir + "' during leaf-directory scan - skipping it, continuing with the rest of the tree: " + $_) -Level Warn
+                    $state.CurrentEnumerator = $null
+                    continue
+                }
+            }
+
             $hasNext = $false
             try {
-                $hasNext = $enumerator.MoveNext()
+                $hasNext = $state.CurrentEnumerator.MoveNext()
             } catch {
-                Write-Log ("Leaf-directory scan stopped early: " + $_) -Level Error
-                return $null
+                Write-Log ("Leaf-directory scan hit an error partway through a directory - skipping the rest of it, continuing with the rest of the tree: " + $_) -Level Warn
+                $state.CurrentEnumerator.Dispose()
+                $state.CurrentEnumerator = $null
+                continue
             }
-            if (-not $hasNext) { return $null }
 
-            $dirInfo = [System.IO.DirectoryInfo]::new($enumerator.Current)
+            if (-not $hasNext) {
+                $state.CurrentEnumerator.Dispose()
+                $state.CurrentEnumerator = $null
+                continue
+            }
+
+            $childPath = $state.CurrentEnumerator.Current
+            $dirStack.Push($childPath)
+
+            $dirInfo = [System.IO.DirectoryInfo]::new($childPath)
             $candidate = Test-ZippableLeafDirCandidate -Dir $dirInfo -QualifyingExtensions $QualifyingExtensions `
                 -ExcludeStagingDirs $ExcludeStagingDirs -ForceRezip $ForceRezip
             if ($null -ne $candidate) { return $candidate }
@@ -337,7 +406,21 @@ function New-SeriesProvider {
             }
         } catch {
             Write-Log ("Series scan stopped early: " + $_) -Level Error
+            # Real bug fix (2026-08-28, see Todo.md/CHANGELOG.md): this
+            # enumerator's underlying native search handle implements
+            # IDisposable and was never disposed anywhere - confirmed live
+            # that [System.IO.Directory]::EnumerateDirectories(...).GetEnumerator()'s
+            # return type (FileSystemEnumerableIterator) really does
+            # implement it. $enumerator is never reassigned in this
+            # function (unlike New-ZippableLeafDirProvider's per-directory
+            # enumerator above), so disposing it directly here is safe -
+            # no boxed-hashtable indirection needed for that reason.
+            $enumerator.Dispose()
+            return $null
         }
+        # Natural exhaustion (MoveNext returned $false, no exception) -
+        # same disposal, just the other exit path.
+        $enumerator.Dispose()
         return $null
     }.GetNewClosure()
 }
