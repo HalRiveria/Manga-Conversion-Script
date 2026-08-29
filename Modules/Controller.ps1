@@ -132,11 +132,12 @@
     on anything that escapes - this is the "shared top-level catch, not
     per-pipeline copies" decision (Todo.md, 2026-08-28), verified
     against all five real entry points' actual outer-scope structure
-    before deciding: four of five only have try/finally at their outer
-    scope (an exception already propagates this far as-is);
-    Invoke-ZipOnlyPipeline is the one known outlier that currently
-    swallows its own (ZipPipeline.ps1, tracked in Todo.md as a follow-up,
-    NOT fixed by this change). Each pipeline call is injectable via a
+    before deciding: at the time, four of five only had try/finally at
+    their outer scope (an exception already propagates this far as-is);
+    Invoke-ZipOnlyPipeline was the one known outlier that swallowed its
+    own. Fixed in the later codebase-review pass (CHANGELOG.md) - its
+    outer catch-swallow was removed, so all five entry points now match.
+    Each pipeline call is injectable via a
     named scriptblock parameter defaulting to the real function (same DI
     pattern as Show-CoverDeletionMenu's -RunHandler/-AddHandler,
     Menu.ps1) - the harness proves dispatch/translation/error-catch
