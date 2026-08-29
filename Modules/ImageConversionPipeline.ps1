@@ -163,6 +163,168 @@
 #  PART 1 - Convert-ImageBatch, the per-batch conversion engine
 # ==============================================================================
 
+function Invoke-IccStripRetryOrFail {
+    <#
+    .SYNOPSIS
+        Private helper - the ICC-profile-mismatch retry step: strips the
+        embedded profile via ImageMagick, and on success enqueues a retry
+        job onto $Pending (a fresh TempPng, same Src/JxlPath) rather than
+        counting the original job failed. Only ever called after the
+        caller has already confirmed cjxl exited 1 with a "Getting pixel
+        data failed" stderr and a real $MagickExe is available.
+    .OUTPUTS
+        $true if a retry was enqueued (caller should treat this job as
+        "not yet decided" and skip its normal failure path); $false if
+        the strip itself also failed (caller falls through to its normal
+        failure path).
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Job,
+        [Parameter(Mandatory)]
+        [System.Collections.Queue]$Pending,
+        [Parameter(Mandatory)]
+        [string]$MagickExe
+    )
+
+    $strippedPng = [System.IO.Path]::Combine(
+        [System.IO.Path]::GetDirectoryName($Job.SrcPath),
+        [System.IO.Path]::GetFileNameWithoutExtension($Job.SrcPath) + "_tmp_iccstrip.png"
+    )
+    Write-Log ("ICC profile mismatch on '" + $Job.SrcPath + "' - stripping profile and retrying.") -Level Warn
+    $stripPsi = New-Object System.Diagnostics.ProcessStartInfo
+    $stripPsi.FileName               = $MagickExe
+    $stripPsi.Arguments              = "`"" + $Job.SrcPath + "`" -colorspace Gray -strip `"" + $strippedPng + "`""
+    $stripPsi.UseShellExecute        = $false
+    $stripPsi.RedirectStandardOutput = $true
+    $stripPsi.RedirectStandardError  = $true
+    $stripPsi.CreateNoWindow         = $true
+    $stripProc = [System.Diagnostics.Process]::Start($stripPsi)
+    $stripProc.WaitForExit()
+    $stripExitCode = $stripProc.ExitCode
+    $stripProc.Dispose()
+
+    if ($stripExitCode -eq 0 -and (Test-Path -LiteralPath $strippedPng)) {
+        # Cancel/abort may be in progress - the dispatch loop won't run
+        # again in that case, so this retry will simply be picked up by
+        # the stragglers drain below (or left for the next run). Enqueue
+        # unconditionally either way.
+        $retryJob = @{
+            SrcPath = $Job.SrcPath
+            JxlPath = $Job.JxlPath
+            Proc    = $null
+            TempPng = $strippedPng
+        }
+        $Pending.Enqueue($retryJob)
+        if (Test-Path -LiteralPath $strippedPng) { try { [System.IO.File]::Delete($strippedPng) } catch { } }
+        return $true
+    }
+
+    Write-Log ("ICC strip failed for '" + $Job.SrcPath + "': magick exited " + $stripExitCode + " - counting as conversion failure.") -Level Error
+    if (Test-Path -LiteralPath $strippedPng) { try { [System.IO.File]::Delete($strippedPng) } catch { } }
+    return $false
+}
+
+function Complete-ImageConversionJob {
+    <#
+    .SYNOPSIS
+        Private helper - handles one finished cjxl job's process cleanup,
+        exit-code/output verification (including the ICC-profile-mismatch
+        retry via Invoke-IccStripRetryOrFail), temp-PNG cleanup, and (on
+        success) source deletion, mutating $BatchResult in place. Shared
+        by Convert-ImageBatch's main dispatch loop and its straggler-
+        drain loop, which previously each implemented this ~70-line block
+        (job completion PLUS the ICC-retry step) almost verbatim - the
+        largest duplication found in the improvement review. The only
+        real differences were the drain copy skipping the -DoFullLogging
+        stdout dump and the success log message (no byte count, "(abort
+        drain)" wording instead), both captured via -IsAbortDrain.
+    .OUTPUTS
+        $true if this job was an ICC mismatch that got re-enqueued onto
+        $Pending as a retry (the caller should `continue` its loop
+        without counting a failure or running cleanup for THIS job - the
+        retry is a new, separate job); $false for every other outcome
+        (converted, failed, or a non-ICC failure) - caller's loop
+        continues normally either way.
+    .PARAMETER IsAbortDrain
+        $true from the straggler-drain loop; $false (default) from the
+        main dispatch loop - see SYNOPSIS for what this changes.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Job,
+        [Parameter(Mandatory)]
+        [hashtable]$BatchResult,
+        [Parameter(Mandatory)]
+        [System.Collections.Queue]$Pending,
+        [string]$MagickExe,
+        [bool]$DoFullLogging,
+        [string]$ItemNoun   = "image",
+        [string]$SourceNoun = "source image",
+        [System.Threading.SemaphoreSlim]$SharedBudget,
+        [bool]$IsAbortDrain = $false
+    )
+
+    $stdout = $Job.Proc.StandardOutput.ReadToEnd()
+    $stderr = $Job.Proc.StandardError.ReadToEnd()
+    $code   = $Job.Proc.ExitCode
+    $Job.Proc.Dispose()
+    # This job is leaving the caller's running list for good in every path
+    # below (including the ICC-retry re-enqueue - the RETRY job acquires
+    # its own fresh slot later when it's actually dispatched) - release
+    # its slot exactly once, here, regardless of outcome.
+    if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
+
+    if (-not $IsAbortDrain -and $DoFullLogging -and -not [string]::IsNullOrWhiteSpace($stdout)) {
+        Write-Log ("cjxl stdout for '" + $Job.SrcPath + "': " + $stdout.Trim())
+    }
+
+    $convOk = $false
+    try {
+        if ($code -ne 0) {
+            if ($code -eq 1 -and $stderr -imatch 'Getting pixel data failed' -and $MagickExe) {
+                if (Invoke-IccStripRetryOrFail -Job $Job -Pending $Pending -MagickExe $MagickExe) {
+                    return $true
+                }
+            }
+            throw ("cjxl exited with code " + $code + ". Stderr: " + $stderr)
+        }
+        if (-not (Test-Path -LiteralPath $Job.JxlPath)) { throw ("Output .jxl was not created: '" + $Job.JxlPath + "'") }
+        $jxlSize = (Get-Item -LiteralPath $Job.JxlPath).Length
+        if ($jxlSize -eq 0) { throw ("Output .jxl is 0 bytes: '" + $Job.JxlPath + "'") }
+        if ($IsAbortDrain) {
+            Write-Log ("Conversion OK (abort drain): '" + $Job.JxlPath + "'")
+        } else {
+            Write-Log ("Conversion OK: '" + $Job.JxlPath + "' (" + $jxlSize + " bytes)")
+        }
+        $BatchResult.ConvertedCount++
+        $BatchResult.ConvertedPaths.Add($Job.SrcPath)
+        $convOk = $true
+    } catch {
+        Write-Log ("FAILED conversion of " + $ItemNoun + " '" + $Job.SrcPath + "': " + $_) -Level Error
+        $BatchResult.FailedCount++
+    }
+
+    # Clean up the temporary PNG used for WebP/ICC-strip pre-conversion
+    if ($Job.TempPng -and (Test-Path -LiteralPath $Job.TempPng)) {
+        try { [System.IO.File]::Delete($Job.TempPng) } catch { }
+    }
+
+    if ($convOk) {
+        try {
+            $null = Remove-Source -ItemPath $Job.SrcPath
+            $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
+            Write-Log ("Deleted " + $SourceNoun + " (" + $deleteDesc + "): '" + $Job.SrcPath + "'")
+            $BatchResult.DeletedCount++
+        } catch {
+            Write-Log ("FAILED to delete " + $SourceNoun + " '" + $Job.SrcPath + "': " + $_) -Level Error
+            $BatchResult.DeleteFailedCount++
+        }
+    }
+
+    return $false
+}
+
 function Convert-ImageBatch {
     <#
     .SYNOPSIS
@@ -397,96 +559,15 @@ function Convert-ImageBatch {
         $stillRunning = [System.Collections.Generic.List[hashtable]]::new()
         foreach ($j in $running) {
             if ($j.Proc.HasExited) {
-                $stdout = $j.Proc.StandardOutput.ReadToEnd()
-                $stderr = $j.Proc.StandardError.ReadToEnd()
-                $code   = $j.Proc.ExitCode
-                $j.Proc.Dispose()
-                # This job is leaving $running for good in every path below
-                # (including the ICC-retry re-enqueue, which `continue`s
-                # this foreach - the RETRY job acquires its own fresh slot
-                # later when it's actually dispatched) - release its slot
-                # exactly once, here, regardless of outcome.
-                if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
-
-                if ($DoFullLogging -and -not [string]::IsNullOrWhiteSpace($stdout)) {
-                    Write-Log ("cjxl stdout for '" + $j.SrcPath + "': " + $stdout.Trim())
-                }
-
-                $convOk = $false
-                try {
-                    if ($code -ne 0) {
-                        # --- ICC profile mismatch retry ---
-                        # cjxl 0.11.x rejects PNGs whose embedded ICC profile
-                        # declares RGB colorspace but whose pixel data is
-                        # grayscale (libpng warning: "RGB color space not
-                        # permitted on grayscale PNG", followed by "Getting
-                        # pixel data failed"). Strip the profile via ImageMagick
-                        # and re-enqueue the job rather than counting it failed.
-                        if ($code -eq 1 -and $stderr -imatch 'Getting pixel data failed' -and $MagickExe) {
-                            $strippedPng = [System.IO.Path]::Combine(
-                                [System.IO.Path]::GetDirectoryName($j.SrcPath),
-                                [System.IO.Path]::GetFileNameWithoutExtension($j.SrcPath) + "_tmp_iccstrip.png"
-                            )
-                            Write-Log ("ICC profile mismatch on '" + $j.SrcPath + "' - stripping profile and retrying.") -Level Warn
-                            $stripPsi = New-Object System.Diagnostics.ProcessStartInfo
-                            $stripPsi.FileName               = $MagickExe
-                            $stripPsi.Arguments              = "`"" + $j.SrcPath + "`" -colorspace Gray -strip `"" + $strippedPng + "`""
-                            $stripPsi.UseShellExecute        = $false
-                            $stripPsi.RedirectStandardOutput = $true
-                            $stripPsi.RedirectStandardError  = $true
-                            $stripPsi.CreateNoWindow         = $true
-                            $stripProc = [System.Diagnostics.Process]::Start($stripPsi)
-                            $stripProc.WaitForExit()
-                            $stripExitCode = $stripProc.ExitCode
-                            $stripProc.Dispose()
-                            if ($stripExitCode -eq 0 -and (Test-Path -LiteralPath $strippedPng)) {
-                                # Cancel/abort may be in progress - the dispatch loop won't
-                                # run again in that case, so this retry will simply be
-                                # picked up by the stragglers drain below (or left for the
-                                # next run). Enqueue unconditionally either way.
-                                $retryJob = @{
-                                    SrcPath = $j.SrcPath
-                                    JxlPath = $j.JxlPath
-                                    Proc    = $null
-                                    TempPng = $strippedPng
-                                }
-                                $pending.Enqueue($retryJob)
-                                if (Test-Path -LiteralPath $strippedPng) { try { [System.IO.File]::Delete($strippedPng) } catch { } }
-                                continue
-                            } else {
-                                Write-Log ("ICC strip failed for '" + $j.SrcPath + "': magick exited " + $stripExitCode + " - counting as conversion failure.") -Level Error
-                                if (Test-Path -LiteralPath $strippedPng) { try { [System.IO.File]::Delete($strippedPng) } catch { } }
-                            }
-                        }
-                        throw ("cjxl exited with code " + $code + ". Stderr: " + $stderr)
-                    }
-                    if (-not (Test-Path -LiteralPath $j.JxlPath)) { throw ("Output .jxl was not created: '" + $j.JxlPath + "'") }
-                    $jxlSize = (Get-Item -LiteralPath $j.JxlPath).Length
-                    if ($jxlSize -eq 0) { throw ("Output .jxl is 0 bytes: '" + $j.JxlPath + "'") }
-                    Write-Log ("Conversion OK: '" + $j.JxlPath + "' (" + $jxlSize + " bytes)")
-                    $batchResult.ConvertedCount++
-                    $batchResult.ConvertedPaths.Add($j.SrcPath)
-                    $convOk = $true
-                } catch {
-                    Write-Log ("FAILED conversion of " + $ItemNoun + " '" + $j.SrcPath + "': " + $_) -Level Error
-                    $batchResult.FailedCount++
-                }
-
-                # Clean up the temporary PNG used for WebP/ICC-strip pre-conversion
-                if ($j.TempPng -and (Test-Path -LiteralPath $j.TempPng)) {
-                    try { [System.IO.File]::Delete($j.TempPng) } catch { }
-                }
-
-                if ($convOk) {
-                    try {
-                        $null = Remove-Source -ItemPath $j.SrcPath
-                        $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
-                        Write-Log ("Deleted " + $SourceNoun + " (" + $deleteDesc + "): '" + $j.SrcPath + "'")
-                        $batchResult.DeletedCount++
-                    } catch {
-                        Write-Log ("FAILED to delete " + $SourceNoun + " '" + $j.SrcPath + "': " + $_) -Level Error
-                        $batchResult.DeleteFailedCount++
-                    }
+                # cjxl 0.11.x rejects PNGs whose embedded ICC profile declares
+                # RGB colorspace but whose pixel data is grayscale (libpng
+                # warning: "RGB color space not permitted on grayscale PNG",
+                # followed by "Getting pixel data failed") - handled inside
+                # Complete-ImageConversionJob via Invoke-IccStripRetryOrFail,
+                # which re-enqueues a retry job onto $pending rather than
+                # counting it failed; a $true return means that happened here.
+                if (Complete-ImageConversionJob -Job $j -BatchResult $batchResult -Pending $pending -MagickExe $MagickExe -DoFullLogging $DoFullLogging -ItemNoun $ItemNoun -SourceNoun $SourceNoun -SharedBudget $SharedBudget) {
+                    continue
                 }
             } else {
                 $stillRunning.Add($j)
@@ -524,72 +605,8 @@ function Convert-ImageBatch {
             $stillWaiting = [System.Collections.Generic.List[hashtable]]::new()
             foreach ($j in $running) {
                 if ($j.Proc.HasExited) {
-                    $stdout = $j.Proc.StandardOutput.ReadToEnd()
-                    $stderr = $j.Proc.StandardError.ReadToEnd()
-                    $code   = $j.Proc.ExitCode
-                    $j.Proc.Dispose()
-                    if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
-                    $convOk = $false
-                    try {
-                        if ($code -ne 0) {
-                            if ($code -eq 1 -and $stderr -imatch 'Getting pixel data failed' -and $MagickExe) {
-                                $strippedPng = [System.IO.Path]::Combine(
-                                    [System.IO.Path]::GetDirectoryName($j.SrcPath),
-                                    [System.IO.Path]::GetFileNameWithoutExtension($j.SrcPath) + "_tmp_iccstrip.png"
-                                )
-                                Write-Log ("ICC profile mismatch on '" + $j.SrcPath + "' - stripping profile and retrying.") -Level Warn
-                                $stripPsi = New-Object System.Diagnostics.ProcessStartInfo
-                                $stripPsi.FileName               = $MagickExe
-                                $stripPsi.Arguments              = "`"" + $j.SrcPath + "`" -colorspace Gray -strip `"" + $strippedPng + "`""
-                                $stripPsi.UseShellExecute        = $false
-                                $stripPsi.RedirectStandardOutput = $true
-                                $stripPsi.RedirectStandardError  = $true
-                                $stripPsi.CreateNoWindow         = $true
-                                $stripProc = [System.Diagnostics.Process]::Start($stripPsi)
-                                $stripProc.WaitForExit()
-                                $stripExitCode = $stripProc.ExitCode
-                                $stripProc.Dispose()
-                                if ($stripExitCode -eq 0 -and (Test-Path -LiteralPath $strippedPng)) {
-                                    $retryJob = @{
-                                        SrcPath = $j.SrcPath
-                                        JxlPath = $j.JxlPath
-                                        Proc    = $null
-                                        TempPng = $strippedPng
-                                    }
-                                    $pending.Enqueue($retryJob)
-                                    if (Test-Path -LiteralPath $strippedPng) { try { [System.IO.File]::Delete($strippedPng) } catch { } }
-                                    continue
-                                } else {
-                                    Write-Log ("ICC strip failed for '" + $j.SrcPath + "': magick exited " + $stripExitCode + " - counting as conversion failure.") -Level Error
-                                    if (Test-Path -LiteralPath $strippedPng) { try { [System.IO.File]::Delete($strippedPng) } catch { } }
-                                }
-                            }
-                            throw ("cjxl exited with code " + $code + ". Stderr: " + $stderr)
-                        }
-                        if (-not (Test-Path -LiteralPath $j.JxlPath)) { throw ("Output .jxl was not created: '" + $j.JxlPath + "'") }
-                        $jxlSize = (Get-Item -LiteralPath $j.JxlPath).Length
-                        if ($jxlSize -eq 0) { throw ("Output .jxl is 0 bytes: '" + $j.JxlPath + "'") }
-                        Write-Log ("Conversion OK (abort drain): '" + $j.JxlPath + "'")
-                        $batchResult.ConvertedCount++
-                        $batchResult.ConvertedPaths.Add($j.SrcPath)
-                        $convOk = $true
-                    } catch {
-                        Write-Log ("FAILED conversion of " + $ItemNoun + " '" + $j.SrcPath + "': " + $_) -Level Error
-                        $batchResult.FailedCount++
-                    }
-                    if ($j.TempPng -and (Test-Path -LiteralPath $j.TempPng)) {
-                        try { [System.IO.File]::Delete($j.TempPng) } catch { }
-                    }
-                    if ($convOk) {
-                        try {
-                            $null = Remove-Source -ItemPath $j.SrcPath
-                            $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
-                            Write-Log ("Deleted " + $SourceNoun + " (" + $deleteDesc + "): '" + $j.SrcPath + "'")
-                            $batchResult.DeletedCount++
-                        } catch {
-                            Write-Log ("FAILED to delete " + $SourceNoun + " '" + $j.SrcPath + "': " + $_) -Level Error
-                            $batchResult.DeleteFailedCount++
-                        }
+                    if (Complete-ImageConversionJob -Job $j -BatchResult $batchResult -Pending $pending -MagickExe $MagickExe -DoFullLogging $DoFullLogging -ItemNoun $ItemNoun -SourceNoun $SourceNoun -SharedBudget $SharedBudget -IsAbortDrain $true) {
+                        continue
                     }
                 } else {
                     $stillWaiting.Add($j)
