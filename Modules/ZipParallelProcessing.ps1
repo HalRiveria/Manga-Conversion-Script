@@ -200,11 +200,14 @@ function Invoke-ZipParallelProcessing {
         # inline version never did at all. Deliberately still gated on
         # $Cts.Token.IsCancellationRequested, same as before - Invoke-
         # GracefulDrain must NOT run (and must NOT signal DrainComplete) on
-        # a normal, non-aborted completion, since DrainComplete is a
-        # process-lifetime ManualResetEventSlim never Reset() in production
-        # code: signalling it here unconditionally would make a LATER, real
-        # Ctrl+C's own drain wait return instantly, risking the OS force-
-        # killing the process before that real drain has actually happened.
+        # a normal, non-aborted completion. AbortPipeline.ps1's
+        # Reset-AbortState now resets DrainComplete once per loop iteration
+        # (Controller.ps1's Invoke-MainLoop, before the next mode is
+        # resolved) - but that's once per RUN, not continuously, so within
+        # a single run this still applies: signalling it here unconditionally
+        # would make a LATER, real Ctrl+C's own drain wait return instantly
+        # for the rest of THIS run, risking the OS force-killing the process
+        # before that real drain has actually happened.
         if ($Cts.Token.IsCancellationRequested) {
             $drainResult = Invoke-GracefulDrain -Handles $localHandles -ResultHandler $ResultHandler `
                 -ConsoleQueue $localConsoleQueue -TimeoutSeconds 60 -AbortWaitMessage $AbortWaitMessage `
