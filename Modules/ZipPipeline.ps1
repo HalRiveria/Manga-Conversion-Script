@@ -427,7 +427,7 @@ function Invoke-ZipOnlyPipeline {
             }.GetNewClosure()
 
             $zoOutcome = Invoke-ZipParallelProcessing -WorkerScript $script:zipOnlyWorker -NextJobProvider $zoJobProvider `
-                -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite', 'Move-ToRecycleBin', 'Remove-ItemPermanently', 'Remove-Source', 'Compress-FolderToZip', 'Test-ZipArchive') `
+                -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile', 'Move-ToRecycleBin', 'Remove-ItemPermanently', 'Invoke-DeleteTreatingVanishedAsFalse', 'Remove-Source', 'Compress-FolderToZip', 'Test-ZipArchive') `
                 -MaxParallel $MaxParallel -Cts $script:zipOnlyCts -ResultHandler $zoResultHandler
 
             $totals.ForceStoppedCount = $zoOutcome.ForceStoppedCount

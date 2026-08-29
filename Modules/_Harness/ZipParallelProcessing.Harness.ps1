@@ -172,7 +172,7 @@ for ($i = 1; $i -le 6; $i++) {
 $handlerA = { param($r) $resultsA.Add($r) }
 
 $outcomeA = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -JobParams $jobParamsA `
-    -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite') -MaxParallel 3 -Cts $script:cts -ResultHandler $handlerA
+    -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile') -MaxParallel 3 -Cts $script:cts -ResultHandler $handlerA
 $script:cts.Dispose()
 
 Test-Assert ($resultsA.Count -eq 6) ("all 6 jobs returned a result (got " + $resultsA.Count + ")")
@@ -218,7 +218,7 @@ $providerB = {
 $handlerB = { param($r) $resultsB.Add($r) }
 
 $outcomeB = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -NextJobProvider $providerB `
-    -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite') -MaxParallel 4 -Cts $script:cts -ResultHandler $handlerB
+    -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile') -MaxParallel 4 -Cts $script:cts -ResultHandler $handlerB
 $script:cts.Dispose()
 
 Test-Assert ($stateB.Index -eq $bTotal) "provider was called through to full exhaustion"
@@ -242,7 +242,7 @@ $handlerD = { param($r) $resultsD.Add($r) }
 $threwD = $false
 try {
     $outcomeD = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerFail -JobParams $jobParamsD `
-        -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite') -MaxParallel 2 -Cts $script:cts -ResultHandler $handlerD
+        -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile') -MaxParallel 2 -Cts $script:cts -ResultHandler $handlerD
 } catch {
     $threwD = $true
 }
@@ -296,7 +296,7 @@ if ($RunSlowTest) {
 
     $swC = [System.Diagnostics.Stopwatch]::StartNew()
     $outcomeC = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -JobParams $jobParamsC `
-        -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite') -MaxParallel 4 -Cts $script:cts -ResultHandler $handlerC
+        -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile') -MaxParallel 4 -Cts $script:cts -ResultHandler $handlerC
     $swC.Stop()
 
     $triggerPs.EndInvoke($triggerHandle)

@@ -284,7 +284,7 @@ Write-Log "main thread's own line"
 $mainThreadLogFile = $script:logFile
 
 $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-foreach ($fn in @('Write-Log', 'Invoke-MutexGuardedWrite')) {
+foreach ($fn in @('Write-Log', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile')) {
     $fnDef = (Get-Item ("Function:\" + $fn)).Definition
     $iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList $fn, $fnDef))
 }

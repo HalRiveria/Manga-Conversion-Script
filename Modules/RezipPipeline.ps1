@@ -486,7 +486,7 @@ function Invoke-RezipPipeline {
         Register-AbortCancellationSource -Cts $script:rezipCts
         try {
             $rzOutcome = Invoke-ZipParallelProcessing -WorkerScript $script:rezipWorker -NextJobProvider $rzJobProvider `
-                -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite', 'Move-ToRecycleBin', 'Remove-ItemPermanently', 'Remove-Source', 'Compress-FolderToZip', 'Test-ZipArchive', 'Convert-ImageBatch') `
+                -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile', 'Move-ToRecycleBin', 'Remove-ItemPermanently', 'Invoke-DeleteTreatingVanishedAsFalse', 'Remove-Source', 'Compress-FolderToZip', 'Test-ZipArchive', 'Convert-ImageBatch') `
                 -MaxParallel $MaxParallel -Cts $script:rezipCts -ResultHandler $rzResultHandler
 
             $totals.ForceStoppedCount = $rzOutcome.ForceStoppedCount

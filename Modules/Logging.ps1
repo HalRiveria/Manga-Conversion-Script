@@ -313,42 +313,78 @@ function Invoke-MutexGuardedWrite {
     }
 }
 
+function Format-LogLine {
+    <#
+    .SYNOPSIS
+        Internal helper - "yyyy-MM-dd HHmmss [Level] Message", the one
+        timestamped-line format both Write-Log (at write time) and
+        Flush-ConsoleQueue (at drain time, its own fresh timestamp - see
+        Flush-ConsoleQueue's own header for why that's intentional, not
+        a bug) build independently.
+    #>
+    param([string]$Message, [string]$Level)
+    return (Get-Date -Format "yyyy-MM-dd HHmmss") + " [" + $Level + "] " + $Message
+}
+
+function Write-LogLineToHost {
+    <#
+    .SYNOPSIS
+        Internal helper - Write-Host $Line, colored by $Level. Shared by
+        Write-Log's direct-echo path and Flush-ConsoleQueue's drain loop,
+        which previously each carried this exact switch by hand.
+    #>
+    param([string]$Line, [string]$Level)
+    switch ($Level) {
+        "Error"   { Write-Host $Line -ForegroundColor Red    }
+        "Warn"    { Write-Host $Line -ForegroundColor Yellow }
+        "Summary" { Write-Host $Line -ForegroundColor Cyan   }
+        default   { Write-Host $Line }
+    }
+}
+
+function Write-LogLineToFile {
+    <#
+    .SYNOPSIS
+        Internal helper - mutex-guarded append of $Line to $FilePath, or
+        a no-op if $FilePath is empty/unset. Guarded the same way
+        Write-SummaryLog already guards $script:logSummaryFile -
+        Write-Log called before Initialize-LogPaths has run (a real,
+        verified gap - see CHANGELOG.md/Todo.md) used to throw
+        ParameterBindingValidationException on a null -FilePath instead
+        of degrading like every other file-write path here does. Not
+        reachable in the real script today (Initialize-LogPaths always
+        runs first), but Write-Log's console echo still has real value
+        even when a file write can't happen, so this only skips the file
+        write, not the whole function. Shared by Write-Log's three
+        near-identical file-write branches (logFile/logErrorFile/
+        logWarnFile), which previously each repeated this "skip if
+        empty, else mutex-guarded write" shape by hand.
+    #>
+    param([string]$FilePath, [string]$Line)
+    if ([string]::IsNullOrEmpty($FilePath)) { return }
+    Invoke-MutexGuardedWrite { $Line | Out-File -FilePath $FilePath -Append -Encoding UTF8 }
+}
+
 function Write-Log {
     param(
         [string]$Message,
         [ValidateSet("Info", "Warn", "Error", "Summary")][string]$Level = "Info"
     )
 
-    $line = (Get-Date -Format "yyyy-MM-dd HHmmss") + " [" + $Level + "] " + $Message
+    $line = Format-LogLine -Message $Message -Level $Level
 
     if ($script:FullLogging) {
         # Full-logging mode: every level goes to the single timestamped file.
-        # Guarded the same way Write-SummaryLog already guards
-        # $script:logSummaryFile - Write-Log called before Initialize-LogPaths
-        # has run (a real, verified gap - see CHANGELOG.md/Todo.md) used to
-        # throw ParameterBindingValidationException on a null -FilePath
-        # instead of degrading like every other file-write path here does.
-        # Not reachable in the real script today (Initialize-LogPaths always
-        # runs first), but the console echo below still has real value even
-        # when the file write can't happen, so this only skips the file
-        # write, not the whole function.
-        if (-not [string]::IsNullOrEmpty($script:logFile)) {
-            Invoke-MutexGuardedWrite { $line | Out-File -FilePath $script:logFile -Append -Encoding UTF8 }
-        }
+        Write-LogLineToFile -FilePath $script:logFile -Line $line
     } else {
-        # Split-log mode - same guard reasoning as above, per target file.
+        # Split-log mode, per target file - Summary is written later in
+        # block form (Write-SummaryLog), and Info lines are not persisted
+        # at all in this mode, so neither reaches Write-LogLineToFile here.
         if ($Level -eq "Error") {
-            if (-not [string]::IsNullOrEmpty($script:logErrorFile)) {
-                Invoke-MutexGuardedWrite { $line | Out-File -FilePath $script:logErrorFile -Append -Encoding UTF8 }
-            }
+            Write-LogLineToFile -FilePath $script:logErrorFile -Line $line
         } elseif ($Level -eq "Warn") {
-            if (-not [string]::IsNullOrEmpty($script:logWarnFile)) {
-                Invoke-MutexGuardedWrite { $line | Out-File -FilePath $script:logWarnFile -Append -Encoding UTF8 }
-            }
-        } elseif ($Level -eq "Summary") {
-            # Summary is written later in block form; nothing to do per-line here
+            Write-LogLineToFile -FilePath $script:logWarnFile -Line $line
         }
-        # Info lines are not written in split-log mode
     }
 
     # Clean Console Output: skip console echo entirely (both paths below) -
@@ -364,12 +400,7 @@ function Write-Log {
     if ($null -ne $script:workerConsoleQueue) {
         $script:workerConsoleQueue.Enqueue([pscustomobject]@{ Message = $Message; Level = $Level })
     } else {
-        switch ($Level) {
-            "Error"   { Write-Host $line -ForegroundColor Red    }
-            "Warn"    { Write-Host $line -ForegroundColor Yellow }
-            "Summary" { Write-Host $line -ForegroundColor Cyan   }
-            default   { Write-Host $line }
-        }
+        Write-LogLineToHost -Line $line -Level $Level
     }
 }
 
@@ -418,13 +449,8 @@ function Flush-ConsoleQueue {
 
     $item = $null
     while ($Queue.TryDequeue([ref]$item)) {
-        $line = (Get-Date -Format "yyyy-MM-dd HHmmss") + " [" + $item.Level + "] " + $item.Message
-        switch ($item.Level) {
-            "Error"   { Write-Host $line -ForegroundColor Red    }
-            "Warn"    { Write-Host $line -ForegroundColor Yellow }
-            "Summary" { Write-Host $line -ForegroundColor Cyan   }
-            default   { Write-Host $line }
-        }
+        $line = Format-LogLine -Message $item.Message -Level $item.Level
+        Write-LogLineToHost -Line $line -Level $item.Level
     }
 }
 
