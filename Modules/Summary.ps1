@@ -38,9 +38,11 @@
     A new Loose Animated Converted/Deleted row-group was added (gated on
     RunAnimatedConversion) since AnimatedConversionPipeline.ps1 has no
     reference-extraction equivalent to draw from - same "designed ahead
-    of the module" situation as Config.ps1's Animated* keys; re-check
-    field names/shape once that module is actually built (see CLAUDE.md's
-    Known gaps, same note extended to cover this module too).
+    of the module" situation as Config.ps1's Animated* keys. Field names
+    confirmed against the real module: Controller.ps1 maps
+    Convert-AnimatedBatch's actual ConvertedSuccess/ConvertedFail/
+    ConvertedSkipped/DeletedSuccess/DeletedFail output onto these fields
+    directly, tested in Controller.Harness.ps1.
 
     InspectFailed (2026-08-28, Todo.md's decided design): its own field,
     NOT folded into any engine's Fail count - "couldn't determine if a
