@@ -180,6 +180,75 @@ function Test-AvifAnimated {
     return ($frameCount -gt 1)
 }
 
+function Complete-AnimatedConversionJob {
+    <#
+    .SYNOPSIS
+        Private helper - handles one finished job's process cleanup,
+        exit-code/output verification, and (on success) source deletion,
+        mutating $BatchResult in place. Shared by Convert-AnimatedBatch's
+        main dispatch loop and its straggler-drain loop, which previously
+        each implemented this ~35-line block almost verbatim - the only
+        real differences were the drain copy skipping the -DoFullLogging
+        stdout dump and the success log message (no byte count, "(abort
+        drain)" wording instead), both captured here via -IsAbortDrain.
+    .PARAMETER IsAbortDrain
+        $true from the straggler-drain loop; $false (default) from the
+        main dispatch loop - see SYNOPSIS for what this changes.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Job,
+        [Parameter(Mandatory)]
+        [hashtable]$BatchResult,
+        [bool]$DoFullLogging,
+        [bool]$DoAnimatedDeleteSource,
+        [System.Threading.SemaphoreSlim]$SharedBudget,
+        [bool]$IsAbortDrain = $false
+    )
+
+    $stdout = $Job.Proc.StandardOutput.ReadToEnd()
+    $stderr = $Job.Proc.StandardError.ReadToEnd()
+    $code   = $Job.Proc.ExitCode
+    $Job.Proc.Dispose()
+    if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
+
+    if (-not $IsAbortDrain -and $DoFullLogging -and -not [string]::IsNullOrWhiteSpace($stdout)) {
+        Write-Log ("magick stdout for '" + $Job.SrcPath + "': " + $stdout.Trim())
+    }
+
+    $convOk = $false
+    try {
+        if ($code -ne 0) { throw ("magick exited with code " + $code + ". Stderr: " + $stderr) }
+        if (-not (Test-Path -LiteralPath $Job.WebpPath)) { throw ("Output .webp was not created: '" + $Job.WebpPath + "'") }
+        $webpSize = (Get-Item -LiteralPath $Job.WebpPath).Length
+        if ($webpSize -eq 0) { throw ("Output .webp is 0 bytes: '" + $Job.WebpPath + "'") }
+        if ($IsAbortDrain) {
+            Write-Log ("Conversion OK (abort drain): '" + $Job.WebpPath + "'")
+        } else {
+            Write-Log ("Conversion OK: '" + $Job.WebpPath + "' (" + $webpSize + " bytes)")
+        }
+        $BatchResult.ConvertedCount++
+        $BatchResult.ConvertedPaths.Add($Job.SrcPath)
+        $convOk = $true
+    } catch {
+        Write-Log ("FAILED conversion of animated AVIF '" + $Job.SrcPath + "': " + $_) -Level Error
+        $BatchResult.FailedCount++
+        if (Test-Path -LiteralPath $Job.WebpPath) { try { [System.IO.File]::Delete($Job.WebpPath) } catch { } }
+    }
+
+    if ($convOk -and $DoAnimatedDeleteSource) {
+        try {
+            $null = Remove-Source -ItemPath $Job.SrcPath
+            $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
+            Write-Log ("Deleted source (" + $deleteDesc + "): '" + $Job.SrcPath + "'")
+            $BatchResult.DeletedCount++
+        } catch {
+            Write-Log ("FAILED to delete source '" + $Job.SrcPath + "': " + $_) -Level Error
+            $BatchResult.DeleteFailedCount++
+        }
+    }
+}
+
 function Convert-AnimatedBatch {
     <#
     .SYNOPSIS
@@ -312,43 +381,7 @@ function Convert-AnimatedBatch {
         $stillRunning = [System.Collections.Generic.List[hashtable]]::new()
         foreach ($j in $running) {
             if ($j.Proc.HasExited) {
-                $stdout = $j.Proc.StandardOutput.ReadToEnd()
-                $stderr = $j.Proc.StandardError.ReadToEnd()
-                $code   = $j.Proc.ExitCode
-                $j.Proc.Dispose()
-                if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
-
-                if ($DoFullLogging -and -not [string]::IsNullOrWhiteSpace($stdout)) {
-                    Write-Log ("magick stdout for '" + $j.SrcPath + "': " + $stdout.Trim())
-                }
-
-                $convOk = $false
-                try {
-                    if ($code -ne 0) { throw ("magick exited with code " + $code + ". Stderr: " + $stderr) }
-                    if (-not (Test-Path -LiteralPath $j.WebpPath)) { throw ("Output .webp was not created: '" + $j.WebpPath + "'") }
-                    $webpSize = (Get-Item -LiteralPath $j.WebpPath).Length
-                    if ($webpSize -eq 0) { throw ("Output .webp is 0 bytes: '" + $j.WebpPath + "'") }
-                    Write-Log ("Conversion OK: '" + $j.WebpPath + "' (" + $webpSize + " bytes)")
-                    $batchResult.ConvertedCount++
-                    $batchResult.ConvertedPaths.Add($j.SrcPath)
-                    $convOk = $true
-                } catch {
-                    Write-Log ("FAILED conversion of animated AVIF '" + $j.SrcPath + "': " + $_) -Level Error
-                    $batchResult.FailedCount++
-                    if (Test-Path -LiteralPath $j.WebpPath) { try { [System.IO.File]::Delete($j.WebpPath) } catch { } }
-                }
-
-                if ($convOk -and $DoAnimatedDeleteSource) {
-                    try {
-                        $null = Remove-Source -ItemPath $j.SrcPath
-                        $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
-                        Write-Log ("Deleted source (" + $deleteDesc + "): '" + $j.SrcPath + "'")
-                        $batchResult.DeletedCount++
-                    } catch {
-                        Write-Log ("FAILED to delete source '" + $j.SrcPath + "': " + $_) -Level Error
-                        $batchResult.DeleteFailedCount++
-                    }
-                }
+                Complete-AnimatedConversionJob -Job $j -BatchResult $batchResult -DoFullLogging $DoFullLogging -DoAnimatedDeleteSource $DoAnimatedDeleteSource -SharedBudget $SharedBudget
             } else {
                 if ($HeartbeatIntervalSeconds -gt 0 -and
                     ($j.StartTime.Elapsed - $j.LastHeartbeat).TotalSeconds -ge $HeartbeatIntervalSeconds) {
@@ -386,39 +419,7 @@ function Convert-AnimatedBatch {
             $stillWaiting = [System.Collections.Generic.List[hashtable]]::new()
             foreach ($j in $running) {
                 if ($j.Proc.HasExited) {
-                    $stdout = $j.Proc.StandardOutput.ReadToEnd()
-                    $stderr = $j.Proc.StandardError.ReadToEnd()
-                    $code   = $j.Proc.ExitCode
-                    $j.Proc.Dispose()
-                    if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
-
-                    $convOk = $false
-                    try {
-                        if ($code -ne 0) { throw ("magick exited with code " + $code + ". Stderr: " + $stderr) }
-                        if (-not (Test-Path -LiteralPath $j.WebpPath)) { throw ("Output .webp was not created: '" + $j.WebpPath + "'") }
-                        $webpSize = (Get-Item -LiteralPath $j.WebpPath).Length
-                        if ($webpSize -eq 0) { throw ("Output .webp is 0 bytes: '" + $j.WebpPath + "'") }
-                        Write-Log ("Conversion OK (abort drain): '" + $j.WebpPath + "'")
-                        $batchResult.ConvertedCount++
-                        $batchResult.ConvertedPaths.Add($j.SrcPath)
-                        $convOk = $true
-                    } catch {
-                        Write-Log ("FAILED conversion of animated AVIF '" + $j.SrcPath + "': " + $_) -Level Error
-                        $batchResult.FailedCount++
-                        if (Test-Path -LiteralPath $j.WebpPath) { try { [System.IO.File]::Delete($j.WebpPath) } catch { } }
-                    }
-
-                    if ($convOk -and $DoAnimatedDeleteSource) {
-                        try {
-                            $null = Remove-Source -ItemPath $j.SrcPath
-                            $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
-                            Write-Log ("Deleted source (" + $deleteDesc + "): '" + $j.SrcPath + "'")
-                            $batchResult.DeletedCount++
-                        } catch {
-                            Write-Log ("FAILED to delete source '" + $j.SrcPath + "': " + $_) -Level Error
-                            $batchResult.DeleteFailedCount++
-                        }
-                    }
+                    Complete-AnimatedConversionJob -Job $j -BatchResult $batchResult -DoFullLogging $DoFullLogging -DoAnimatedDeleteSource $DoAnimatedDeleteSource -SharedBudget $SharedBudget -IsAbortDrain $true
                 } else {
                     $stillWaiting.Add($j)
                 }

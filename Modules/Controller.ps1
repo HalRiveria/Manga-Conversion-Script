@@ -450,7 +450,7 @@ function Invoke-FullPipelineChapter {
         }.GetNewClosure()
 
         $null = Invoke-ZipParallelProcessing -WorkerScript $script:fullPipelineChapterWorker -JobParams $jobParams `
-            -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile', 'Remove-Source', 'Move-ToRecycleBin', 'Remove-ItemPermanently', 'Invoke-DeleteTreatingVanishedAsFalse', 'Convert-ImageBatch', 'Convert-AnimatedBatch', 'Test-AvifAnimated') `
+            -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile', 'Remove-Source', 'Move-ToRecycleBin', 'Remove-ItemPermanently', 'Invoke-DeleteTreatingVanishedAsFalse', 'Convert-ImageBatch', 'Convert-AnimatedBatch', 'Complete-AnimatedConversionJob', 'Test-AvifAnimated') `
             -MaxParallel 2 -Cts $Cts -ResultHandler $resultHandler `
             -AbortWaitMessage "[ABORT] Waiting for current image/animated jobs to finish (up to 60s)..."
 
