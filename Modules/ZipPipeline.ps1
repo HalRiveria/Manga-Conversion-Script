@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
     ZipPipeline - all zip-domain orchestration that isn't the parallel-
-    dispatch engine itself: mode 3 (zip-only) end to end, and mode 2's
+    dispatch engine itself: mode 3 (zip-only) end to end, and mode 8's
     per-folder zip step.
 
 .DESCRIPTION
@@ -12,10 +12,15 @@
 
     Per the reference extraction's ARCHITECTURE decision: any zip logic
     lives here, not scattered across whichever mode happens to need it.
-    Covers PART 1 (mode 3, zip-only pipeline) and PART 2 (mode 2's
+    Covers PART 1 (mode 3, zip-only pipeline) and PART 2 (mode 8's
     per-folder zip step, which runs right after ImageConversionPipeline
     converts each batch - see that module's own PART 2 for the orchestration
-    this was pulled out of).
+    this was pulled out of). PART 2 was built against an earlier menu
+    design where this was called "mode 2" - the menu was renumbered
+    (Menu.ps1) before PART 2 got wired up for real, so every "mode 2"
+    reference below actually means what's now mode 8 ("Image Conversion +
+    Zip") - see Controller.ps1's Invoke-Mode, the real -ZipFolderHandler
+    caller.
 
     NOT YET DECIDED (explicitly flagged, not acted on): whether
     RezipPipeline (mode 4) should call into this module instead of
@@ -478,16 +483,14 @@ function Invoke-LooseFolderZip {
         CALLER must have already started that series (exactly like
         ImageConversionPipeline.ps1 already does when it walks a series'
         chapters) before passing -SeriesName here, or CCR throws ("not an
-        active series"). NOT wired to any real caller yet - mode 2's
-        actual orchestration (does ImageConversionPipeline.ps1's own
-        Complete-ChapterProgress, called on conversion outcome before
-        -PostChapterCallback ever runs, still "own" the chapter's CCR
-        lifecycle, or should this zip step's outcome be folded into that
-        same single transition instead of getting a second one here?) is
-        still an open question, deliberately not decided by this change -
-        see CLAUDE.md's Known gaps. Left optional and self-contained so a
-        future caller can use it either way once that's actually decided,
-        without another signature change.
+        active series"). Mode 8's real caller (Controller.ps1's Invoke-Mode)
+        does NOT pass -SeriesName/-ChapterName here - it merges this
+        function's outcome into ImageConversionPipeline.ps1's own single
+        Complete-ChapterProgress call instead (see that module's
+        -ZipStepCallback), so this parameter pair stays unused by the one
+        real caller today. Left optional and self-contained for a future
+        caller that might want a second, standalone CCR transition
+        instead.
     .OUTPUTS
         @{ Status = "Success"|"Fail"|"Skipped"; ZipSize; EntryCount;
            FolderDeleted; FolderDeleteFailed } - a plain result object,
