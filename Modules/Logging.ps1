@@ -69,10 +69,10 @@
     as-is, not sanitized to "?" like the original extraction did.
 
     Initialize-LogMutex centralizes the "JxlLogMutex_" + pathHash naming
-    convention, previously reimplemented independently at 3 call sites
-    (see its own header comment). Not yet adopted by those call sites -
-    this only makes the shared implementation available, migrating the
-    existing duplicates is separate, not-yet-authorized work.
+    convention, previously reimplemented independently at every call site
+    that needed it (the main script, ZipParallelProcessing.ps1). Both
+    real call sites have since migrated onto this shared implementation -
+    see its own header comment.
 
 .NOTES
     Extracted from Conversion Script Main.ps1 - see
@@ -233,14 +233,12 @@ function Initialize-LogMutex {
         same target's log files uses the SAME underlying OS mutex.
     .DESCRIPTION
         This naming convention ("JxlLogMutex_" + pathHash) used to be
-        independently reimplemented at every call site that needed it
-        (previously: Conversion Script Main.ps1 twice, and
-        ZipParallelProcessing.ps1 once - confirmed via grep, not just
-        suspected) rather than being this module's own responsibility.
-        Centralized here now. NOT YET adopted by those existing call
-        sites - see CLAUDE.md's "Known gaps" for why, and don't migrate
-        them without an explicit go-ahead first (they're already-built,
-        already-tested modules/script sections).
+        independently reimplemented at every call site that needed it -
+        the main script and ZipParallelProcessing.ps1. Both have since
+        migrated onto this shared implementation; only the frozen
+        `Modules\_Reference\Conversion Script Main - Old.ps1` and build-input
+        reference files still carry the old inline construction, which is
+        expected - they're historical, not live code.
     .PARAMETER PathHash
         Defaults to $script:pathHash (set by Initialize-LogPaths) if not
         supplied. Must be passed explicitly from a runspace worker that
