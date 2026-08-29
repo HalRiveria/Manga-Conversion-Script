@@ -267,7 +267,10 @@ function Add-UnwantedImageProfile {
         same image can't get added twice under different labels.
     .OUTPUTS
         @{ Added = <bool>; Reason = <string, only set when Added is
-        $false> }
+        $false>; ExistingProfile = <the conflicting profile hashtable,
+        only set when Added is $false due to a duplicate hash - lets a
+        caller report which existing profile it collided with without
+        re-scanning for it itself> }
     #>
     param(
         [Parameter(Mandatory)]
@@ -276,9 +279,10 @@ function Add-UnwantedImageProfile {
     )
 
     $existing = Get-AllUnwantedImageProfiles -ProfilesPath $ProfilesPath
-    if (@($existing | Where-Object { $_.Hash -eq $Profile.Hash }).Count -gt 0) {
+    $conflict = $existing | Where-Object { $_.Hash -eq $Profile.Hash } | Select-Object -First 1
+    if ($conflict) {
         Write-Log ("Not adding unwanted-image profile '" + $Profile.Label + "' - a profile with the same hash already exists.") -Level Warn
-        return @{ Added = $false; Reason = "A profile with the same hash already exists." }
+        return @{ Added = $false; Reason = "A profile with the same hash already exists."; ExistingProfile = $conflict }
     }
 
     $userProfiles = Import-UnwantedImageProfiles -ProfilesPath $ProfilesPath
@@ -286,7 +290,7 @@ function Add-UnwantedImageProfile {
     Export-UnwantedImageProfiles -Profiles $userProfiles -ProfilesPath $ProfilesPath
 
     Write-Log ("Added unwanted-image profile '" + $Profile.Label + "' (" + $Profile.Width + "x" + $Profile.Height + ", " + $Profile.SizeBytes + " bytes) to '" + $ProfilesPath + "'.") -Level Summary
-    return @{ Added = $true; Reason = $null }
+    return @{ Added = $true; Reason = $null; ExistingProfile = $null }
 }
 
 function Add-UnwantedImageProfileFromFile {
@@ -395,26 +399,11 @@ function Show-AddUnwantedImageProfileFlow {
         return @{ Added = $true; Reason = $null; Profile = $profile }
     }
 
-    # Captured into a variable FIRST, then THAT variable is piped into
-    # Where-Object - not the function call directly. Get-AllUnwantedImageProfiles
-    # comma-guards its own return (`return ,(...)`, needed so a result
-    # that happens to be 0/1 elements doesn't collapse) - that makes it
-    # safe to ASSIGN (the caller just captures the one real array that
-    # crossed the function boundary), but piping the function call
-    # STRAIGHT into another cmdlet is a different, deeper trap: only ONE
-    # object crosses the pipeline boundary (the comma-protected array
-    # itself), so Where-Object's `$_` binds to that whole array as its
-    # single input item, not to each profile individually.
-    # PowerShell's collection-member-enumeration then makes `$_.Hash`
-    # return an ARRAY of every element's Hash, and `-eq` against an array
-    # does element-wise comparison - truthy (matches) the moment ANY one
-    # element matches, not just when $_ itself is the right profile - so
-    # every profile passes the filter and `.Label` afterward returns
-    # every Label concatenated. Live-caught this exact way twice while
-    # building this function (the @()-wrap first, then this) - see
-    # CHANGELOG.md.
-    $allProfiles = Get-AllUnwantedImageProfiles -ProfilesPath $ProfilesPath
-    $existingLabel = ($allProfiles | Where-Object { $_.Hash -eq $profile.Hash } | Select-Object -First 1).Label
+    # Add-UnwantedImageProfile already found the conflicting profile
+    # internally (it has to, to detect the duplicate in the first place)
+    # and returns it directly as -ExistingProfile - no need to re-scan
+    # Get-AllUnwantedImageProfiles a second time just to find it again.
+    $existingLabel = $addResult.ExistingProfile.Label
     Write-Host ("Not added - already tracked as '" + $existingLabel + "'.") -ForegroundColor Yellow
     return @{ Added = $false; Reason = $addResult.Reason; Profile = $profile; ExistingLabel = $existingLabel }
 }
@@ -491,6 +480,31 @@ function Test-UnwantedImageMatch {
     return @{ Status = 'NoMatch'; Profile = $null; Width = $null; Height = $null; Hash = $null }
 }
 
+function Get-ScannableFiles {
+    <#
+    .SYNOPSIS
+        Private helper - recursively lists files under $Path, excluding
+        anything in $ExcludePaths, optionally filtered to
+        $ImageExtensions. Shared by Invoke-UnwantedImageScan (image-only)
+        and Get-TrailingZeroGroups (every file type), which previously
+        each built the same exclude-set + Get-ChildItem -Recurse -File
+        scan by hand.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+        [string[]]$ExcludePaths = @(),
+        [string[]]$ImageExtensions = $null
+    )
+
+    $excludeSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$ExcludePaths, [System.StringComparer]::OrdinalIgnoreCase)
+
+    return Get-ChildItem -LiteralPath $Path -Recurse -File -ErrorAction SilentlyContinue | Where-Object {
+        (-not $excludeSet.Contains($_.FullName)) -and
+        ($null -eq $ImageExtensions -or $ImageExtensions -icontains $_.Extension)
+    }
+}
+
 function Invoke-UnwantedImageScan {
     <#
     .SYNOPSIS
@@ -527,10 +541,7 @@ function Invoke-UnwantedImageScan {
         HashMismatchCount = 0
     }
 
-    $excludeSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$ExcludePaths, [System.StringComparer]::OrdinalIgnoreCase)
-
-    $files = Get-ChildItem -LiteralPath $Path -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $ImageExtensions -icontains $_.Extension -and -not $excludeSet.Contains($_.FullName) }
+    $files = Get-ScannableFiles -Path $Path -ExcludePaths $ExcludePaths -ImageExtensions $ImageExtensions
 
     foreach ($file in $files) {
         $totals.ScannedCount++
@@ -610,13 +621,11 @@ function Get-TrailingZeroGroups {
         [string[]]$ExcludePaths = @()
     )
 
-    $excludeSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$ExcludePaths, [System.StringComparer]::OrdinalIgnoreCase)
     $seen          = [System.Collections.Generic.Dictionary[string, hashtable]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $orderedHashes = [System.Collections.Generic.List[string]]::new()
     $hashFailureCount = 0
 
-    $files = Get-ChildItem -LiteralPath $Path -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { -not $excludeSet.Contains($_.FullName) }
+    $files = Get-ScannableFiles -Path $Path -ExcludePaths $ExcludePaths
 
     foreach ($file in $files) {
         if (-not (Test-TrailingZeroName -File $file -Suffixes $Suffixes)) { continue }
