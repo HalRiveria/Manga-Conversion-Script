@@ -88,6 +88,41 @@ function Initialize-FileDeletion {
     $script:PermanentDelete = $PermanentDelete
 }
 
+function Invoke-DeleteTreatingVanishedAsFalse {
+    <#
+    .SYNOPSIS
+        Private helper - runs $Action (a delete), returning $true on
+        success. A TOCTOU race (the item vanishes between the caller's
+        own Test-Path check and here - a concurrent cleanup, antivirus,
+        or the user) is treated as $false ("nothing to do"), same as the
+        original Test-Path check itself would have returned, rather than
+        throwing. Verified live: Get-Item throws ItemNotFoundException
+        directly for a missing path; the static .NET/VB FileIO delete
+        calls throw MethodInvocationException wrapping a real
+        FileNotFoundException/DirectoryNotFoundException as
+        .InnerException (PowerShell's own wrapping of a static method
+        call's exception) - both shapes are checked here. Any OTHER
+        exception (a locked file, a permissions error) still propagates -
+        only a genuinely-vanished target is swallowed. Shared by
+        Move-ToRecycleBin and Remove-ItemPermanently, which previously
+        each carried this exact catch block by hand.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Action)
+
+    try {
+        & $Action
+        return $true
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        return $false
+    } catch {
+        if ($_.Exception.InnerException -is [System.IO.FileNotFoundException] -or
+            $_.Exception.InnerException -is [System.IO.DirectoryNotFoundException]) {
+            return $false
+        }
+        throw
+    }
+}
+
 function Move-ToRecycleBin {
     <#
     .SYNOPSIS
@@ -108,18 +143,7 @@ function Move-ToRecycleBin {
     )
     if (-not (Test-Path -LiteralPath $ItemPath)) { return $false }
 
-    # Everything below is wrapped so a TOCTOU race (the item vanishes
-    # between the Test-Path check above and here - a concurrent cleanup,
-    # antivirus, or the user) still returns $false like the Test-Path
-    # check itself would have, rather than throwing. Verified live: Get-Item
-    # throws ItemNotFoundException directly for a missing path;
-    # DeleteFile/DeleteDirectory throw MethodInvocationException wrapping a
-    # real FileNotFoundException/DirectoryNotFoundException as
-    # .InnerException (PowerShell's own wrapping of a static .NET method
-    # call's exception) - both cases are checked below. Any OTHER exception
-    # (a locked file, a permissions error) still propagates - only a
-    # genuinely-vanished target is treated as "nothing to do".
-    try {
+    return Invoke-DeleteTreatingVanishedAsFalse -Action {
         $attr = (Get-Item -LiteralPath $ItemPath).Attributes
         if ($attr -band [System.IO.FileAttributes]::Directory) {
             # Verified live (Harness Scenario L) against a real NTFS directory
@@ -139,15 +163,6 @@ function Move-ToRecycleBin {
                 [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin
             ) | Out-Null
         }
-        return $true
-    } catch [System.Management.Automation.ItemNotFoundException] {
-        return $false
-    } catch {
-        if ($_.Exception.InnerException -is [System.IO.FileNotFoundException] -or
-            $_.Exception.InnerException -is [System.IO.DirectoryNotFoundException]) {
-            return $false
-        }
-        throw
     }
 }
 
@@ -169,11 +184,7 @@ function Remove-ItemPermanently {
     )
     if (-not (Test-Path -LiteralPath $ItemPath)) { return $false }
 
-    # Same TOCTOU-safety wrapping as Move-ToRecycleBin above - see that
-    # function's own comment for the exact exception shapes this guards
-    # against (verified live) and why only a genuinely-vanished target
-    # (not a real delete failure) is treated as "nothing to do".
-    try {
+    return Invoke-DeleteTreatingVanishedAsFalse -Action {
         $attr           = (Get-Item -LiteralPath $ItemPath).Attributes
         $isDirectory    = [bool]($attr -band [System.IO.FileAttributes]::Directory)
         $isReparsePoint = [bool]($attr -band [System.IO.FileAttributes]::ReparsePoint)
@@ -196,15 +207,6 @@ function Remove-ItemPermanently {
             # removes just the link, no special case needed.
             [System.IO.File]::Delete($ItemPath)
         }
-        return $true
-    } catch [System.Management.Automation.ItemNotFoundException] {
-        return $false
-    } catch {
-        if ($_.Exception.InnerException -is [System.IO.FileNotFoundException] -or
-            $_.Exception.InnerException -is [System.IO.DirectoryNotFoundException]) {
-            return $false
-        }
-        throw
     }
 }
 
