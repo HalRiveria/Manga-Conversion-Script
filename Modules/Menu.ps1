@@ -488,13 +488,10 @@ function Show-PostRunPrompt {
     .SYNOPSIS
         After a run finishes: "Press any key to return to the main menu,
         or press Esc to exit." Applies broadly to any mode's run, not
-        just one (Todo.md, raised 2026-08-27) - a single primitive a
-        future run-loop wraps around Get-SelectedMode, so the menu
-        doesn't just dump back to a bare prompt or close the window
-        outright once a run completes. Not wired into a real run loop
-        yet - that's the same future implementation pass as the rest of
-        the menu loop (see Todo.md), this is the tested primitive it'll
-        call.
+        just one - called once per loop iteration by Controller.ps1's
+        Invoke-MainLoop, which wraps this around Get-SelectedMode/
+        Invoke-Mode so the menu doesn't just dump back to a bare prompt
+        or close the window outright once a run completes.
     .PARAMETER KeyReader
         Defaults to a real single-keypress read via $Host.UI.RawUI.
         Injectable so a harness can feed a fake key object (needs only a

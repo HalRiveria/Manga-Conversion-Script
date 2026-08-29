@@ -108,26 +108,47 @@ function Move-ToRecycleBin {
     )
     if (-not (Test-Path -LiteralPath $ItemPath)) { return $false }
 
-    $attr = (Get-Item -LiteralPath $ItemPath).Attributes
-    if ($attr -band [System.IO.FileAttributes]::Directory) {
-        # Verified live (Harness Scenario L) against a real NTFS directory
-        # junction: the Shell-based Recycle Bin operation this VB API goes
-        # through recycles the junction/link itself, not the target it
-        # points at - unlike System.IO.Directory.Delete's recursive=$true
-        # footgun below, this one doesn't need a reparse-point special case.
-        [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory(
-            $ItemPath,
-            [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs,
-            [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin
-        ) | Out-Null
-    } else {
-        [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(
-            $ItemPath,
-            [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs,
-            [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin
-        ) | Out-Null
+    # Everything below is wrapped so a TOCTOU race (the item vanishes
+    # between the Test-Path check above and here - a concurrent cleanup,
+    # antivirus, or the user) still returns $false like the Test-Path
+    # check itself would have, rather than throwing. Verified live: Get-Item
+    # throws ItemNotFoundException directly for a missing path;
+    # DeleteFile/DeleteDirectory throw MethodInvocationException wrapping a
+    # real FileNotFoundException/DirectoryNotFoundException as
+    # .InnerException (PowerShell's own wrapping of a static .NET method
+    # call's exception) - both cases are checked below. Any OTHER exception
+    # (a locked file, a permissions error) still propagates - only a
+    # genuinely-vanished target is treated as "nothing to do".
+    try {
+        $attr = (Get-Item -LiteralPath $ItemPath).Attributes
+        if ($attr -band [System.IO.FileAttributes]::Directory) {
+            # Verified live (Harness Scenario L) against a real NTFS directory
+            # junction: the Shell-based Recycle Bin operation this VB API goes
+            # through recycles the junction/link itself, not the target it
+            # points at - unlike System.IO.Directory.Delete's recursive=$true
+            # footgun below, this one doesn't need a reparse-point special case.
+            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory(
+                $ItemPath,
+                [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs,
+                [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin
+            ) | Out-Null
+        } else {
+            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(
+                $ItemPath,
+                [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs,
+                [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin
+            ) | Out-Null
+        }
+        return $true
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        return $false
+    } catch {
+        if ($_.Exception.InnerException -is [System.IO.FileNotFoundException] -or
+            $_.Exception.InnerException -is [System.IO.DirectoryNotFoundException]) {
+            return $false
+        }
+        throw
     }
-    return $true
 }
 
 function Remove-ItemPermanently {
@@ -148,29 +169,43 @@ function Remove-ItemPermanently {
     )
     if (-not (Test-Path -LiteralPath $ItemPath)) { return $false }
 
-    $attr           = (Get-Item -LiteralPath $ItemPath).Attributes
-    $isDirectory    = [bool]($attr -band [System.IO.FileAttributes]::Directory)
-    $isReparsePoint = [bool]($attr -band [System.IO.FileAttributes]::ReparsePoint)
+    # Same TOCTOU-safety wrapping as Move-ToRecycleBin above - see that
+    # function's own comment for the exact exception shapes this guards
+    # against (verified live) and why only a genuinely-vanished target
+    # (not a real delete failure) is treated as "nothing to do".
+    try {
+        $attr           = (Get-Item -LiteralPath $ItemPath).Attributes
+        $isDirectory    = [bool]($attr -band [System.IO.FileAttributes]::Directory)
+        $isReparsePoint = [bool]($attr -band [System.IO.FileAttributes]::ReparsePoint)
 
-    if ($isDirectory -and $isReparsePoint) {
-        # Directory junction/symlink - unlink the link itself only, do NOT
-        # recurse into whatever it points at. Directory.Delete(path, $true)
-        # on a reparse point is a known .NET footgun: recursive=$true can
-        # delete through the link into the real target's contents instead
-        # of just removing the link - non-recursive delete correctly
-        # removes just the link. Verified live against a real NTFS junction
-        # (Harness Scenario K): the target directory and its contents
-        # survive untouched.
-        [System.IO.Directory]::Delete($ItemPath, $false)
-    } elseif ($isDirectory) {
-        [System.IO.Directory]::Delete($ItemPath, $true)
-    } else {
-        # A file symlink also carries ReparsePoint, but not Directory, so
-        # it lands here - File.Delete on a file symlink already correctly
-        # removes just the link, no special case needed.
-        [System.IO.File]::Delete($ItemPath)
+        if ($isDirectory -and $isReparsePoint) {
+            # Directory junction/symlink - unlink the link itself only, do NOT
+            # recurse into whatever it points at. Directory.Delete(path, $true)
+            # on a reparse point is a known .NET footgun: recursive=$true can
+            # delete through the link into the real target's contents instead
+            # of just removing the link - non-recursive delete correctly
+            # removes just the link. Verified live against a real NTFS junction
+            # (Harness Scenario K): the target directory and its contents
+            # survive untouched.
+            [System.IO.Directory]::Delete($ItemPath, $false)
+        } elseif ($isDirectory) {
+            [System.IO.Directory]::Delete($ItemPath, $true)
+        } else {
+            # A file symlink also carries ReparsePoint, but not Directory, so
+            # it lands here - File.Delete on a file symlink already correctly
+            # removes just the link, no special case needed.
+            [System.IO.File]::Delete($ItemPath)
+        }
+        return $true
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        return $false
+    } catch {
+        if ($_.Exception.InnerException -is [System.IO.FileNotFoundException] -or
+            $_.Exception.InnerException -is [System.IO.DirectoryNotFoundException]) {
+            return $false
+        }
+        throw
     }
-    return $true
 }
 
 function Remove-Source {

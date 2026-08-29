@@ -89,12 +89,20 @@ function Test-Assert {
     }
 }
 
-function Reset-AbortState {
-    [ConsoleCtrl]::AbortRequested = $false
-    [ConsoleCtrl]::IsCloseEvent   = $false
-    [ConsoleCtrl]::DrainComplete.Reset()
-    $script:abortRequested = $false
-    $script:ctrlCloseAbort = $false
+function Reset-HarnessScenarioState {
+    # Renamed from this harness's own former "Reset-AbortState" (2026-08-28)
+    # once the real module gained a real function of that exact name - this
+    # harness dot-sources the real module BEFORE defining its own helpers
+    # (see top of file), so the harness's own same-named function was
+    # silently shadowing the real one for every scenario in this file,
+    # meaning NONE of them ever actually exercised it. Delegates the
+    # abort-flag reset to the real Reset-AbortState now instead of
+    # duplicating that logic by hand, so this harness's own per-scenario
+    # cleanup can never silently drift from what the real function does -
+    # only the extra test-isolation state below (CTS registry, CCR call
+    # tracking) stays local, since the real function has no reason to know
+    # about either.
+    Reset-AbortState
     $script:abortCancellationSources.Clear()
     $script:CleanConsoleOutputEnabled = $false
     $script:cleanConsoleMessageCalls.Clear()
@@ -106,7 +114,7 @@ function Reset-AbortState {
 #  cancels exactly the currently-registered set, exactly once.
 # ==============================================================================
 Write-Host "=== Scenario A: CTS registry + Test-AbortSignal ===" -ForegroundColor Cyan
-Reset-AbortState
+Reset-HarnessScenarioState
 
 $ctsKeep   = [System.Threading.CancellationTokenSource]::new()
 $ctsDrop   = [System.Threading.CancellationTokenSource]::new()
@@ -132,14 +140,14 @@ Write-Host ""
 #  Scenario B: Get-AbortTriggerLabel reflects Ctrl+C vs window-close.
 # ==============================================================================
 Write-Host "=== Scenario B: Get-AbortTriggerLabel ===" -ForegroundColor Cyan
-Reset-AbortState
+Reset-HarnessScenarioState
 
 [ConsoleCtrl]::AbortRequested = $true
 [ConsoleCtrl]::IsCloseEvent   = $false
 $null = Test-AbortSignal
 Test-Assert ((Get-AbortTriggerLabel) -eq "Ctrl+C") "label is 'Ctrl+C' for a Ctrl+C abort"
 
-Reset-AbortState
+Reset-HarnessScenarioState
 [ConsoleCtrl]::AbortRequested = $true
 [ConsoleCtrl]::IsCloseEvent   = $true
 $null = Test-AbortSignal
@@ -151,7 +159,7 @@ Write-Host ""
 #  timeout - results collected, ForceStoppedCount 0, DrainComplete signalled.
 # ==============================================================================
 Write-Host "=== Scenario C: Invoke-GracefulDrain, clean drain ===" -ForegroundColor Cyan
-Reset-AbortState
+Reset-HarnessScenarioState
 
 $fake = New-FakeHandles -DelaysMs @(100, 150, 120)
 $resultsC = [System.Collections.Generic.List[hashtable]]::new()
@@ -169,7 +177,7 @@ Write-Host ""
 #  -TimeoutSeconds so this runs in ~2s instead of the original 60s.
 # ==============================================================================
 Write-Host "=== Scenario D: Invoke-GracefulDrain, force-stop after timeout ===" -ForegroundColor Cyan
-Reset-AbortState
+Reset-HarnessScenarioState
 
 $fake = New-FakeHandles -DelaysMs @(100, 30000, 30000)   # 1 fast, 2 that will never finish in time
 $resultsD = [System.Collections.Generic.List[hashtable]]::new()
@@ -192,7 +200,7 @@ Write-Host ""
 #  against heavy system load.
 # ==============================================================================
 Write-Host "=== Scenario E: drain race - job finishing right at the timeout boundary ===" -ForegroundColor Cyan
-Reset-AbortState
+Reset-HarnessScenarioState
 
 $fake = New-FakeHandles -DelaysMs @(1900)
 $resultsE = [System.Collections.Generic.List[hashtable]]::new()
@@ -212,7 +220,7 @@ Write-Host ""
 #  DrainComplete (covers "abort detected but nothing was ever dispatched").
 # ==============================================================================
 Write-Host "=== Scenario F: Invoke-GracefulDrain with no in-flight jobs ===" -ForegroundColor Cyan
-Reset-AbortState
+Reset-HarnessScenarioState
 
 $emptyHandles = [System.Collections.Generic.List[hashtable]]::new()
 $outcomeF = Invoke-GracefulDrain -Handles $emptyHandles -TimeoutSeconds 60
@@ -226,7 +234,7 @@ Write-Host ""
 #  drain code this replaced had a bare `catch { }` here with no logging).
 # ==============================================================================
 Write-Host "=== Scenario G: worker throws during drain - reported, not silent ===" -ForegroundColor Cyan
-Reset-AbortState
+Reset-HarnessScenarioState
 
 $fake = New-FakeHandles -DelaysMs @(0) -Worker $fakeWorkerFail
 $errorsG = [System.Collections.Generic.List[string]]::new()
@@ -246,7 +254,7 @@ Write-Host ""
 #  real output was produced, not just that nothing threw.
 # ==============================================================================
 Write-Host "=== Scenario H: Clean Console Output off - unchanged raw Write-Host path ===" -ForegroundColor Cyan
-Reset-AbortState
+Reset-HarnessScenarioState
 [ConsoleCtrl]::AbortRequested = $true
 [ConsoleCtrl]::IsCloseEvent   = $false
 $outputH = & { Test-AbortSignal } 6>&1
@@ -263,7 +271,7 @@ Write-Host ""
 #  this call (not just "also called the stub" alongside the old path).
 # ==============================================================================
 Write-Host "=== Scenario I: Clean Console Output on - Test-AbortSignal routes through CCR ===" -ForegroundColor Cyan
-Reset-AbortState
+Reset-HarnessScenarioState
 $script:CleanConsoleOutputEnabled = $true
 [ConsoleCtrl]::AbortRequested = $true
 [ConsoleCtrl]::IsCloseEvent   = $true
@@ -285,7 +293,7 @@ Write-Host ""
 #  stragglers get force-stopped) also route through Write-CleanConsoleMessage.
 # ==============================================================================
 Write-Host "=== Scenario J: Clean Console Output on - Invoke-GracefulDrain messages route through CCR ===" -ForegroundColor Cyan
-Reset-AbortState
+Reset-HarnessScenarioState
 $script:CleanConsoleOutputEnabled = $true
 
 $fakeJ = New-FakeHandles -DelaysMs @(30000)   # will never finish before the 1s timeout
@@ -311,13 +319,13 @@ Write-Host ""
 #  loaded just because Complete-AbortDrain ran.
 # ==============================================================================
 Write-Host "=== Scenario K: Complete-AbortDrain finalizes CCR display when the toggle is on ===" -ForegroundColor Cyan
-Reset-AbortState
+Reset-HarnessScenarioState
 $script:CleanConsoleOutputEnabled = $true
 Complete-AbortDrain
 Test-Assert ($script:completeAllActiveSeriesProgressCallCount -eq 1) "Complete-AllActiveSeriesProgress was called once when the toggle is on"
 Test-Assert ([ConsoleCtrl]::DrainComplete.IsSet) "DrainComplete is still signalled afterward"
 
-Reset-AbortState
+Reset-HarnessScenarioState
 Complete-AbortDrain
 Test-Assert ($script:completeAllActiveSeriesProgressCallCount -eq 0) "Complete-AllActiveSeriesProgress is NOT called when the toggle is off"
 Test-Assert ([ConsoleCtrl]::DrainComplete.IsSet) "DrainComplete is still signalled either way"
@@ -331,7 +339,7 @@ Write-Host ""
 #  forward reference degrades gracefully rather than throwing.
 # ==============================================================================
 Write-Host "=== Scenario L: `$script:CleanConsoleOutputEnabled entirely undefined ===" -ForegroundColor Cyan
-Reset-AbortState
+Reset-HarnessScenarioState
 Remove-Variable -Name CleanConsoleOutputEnabled -Scope script -ErrorAction SilentlyContinue
 [ConsoleCtrl]::AbortRequested = $true
 [ConsoleCtrl]::IsCloseEvent   = $false
@@ -360,14 +368,14 @@ Write-Host ""
 #  the wrong reason - now works for the right one).
 # ==============================================================================
 Write-Host "=== Scenario M: default -AbortWaitMessage regression (was silently never printed) ===" -ForegroundColor Cyan
-Reset-AbortState
+Reset-HarnessScenarioState
 $fakeM1 = New-FakeHandles -DelaysMs @(100)
 $outputM1 = & { Invoke-GracefulDrain -Handles $fakeM1.Handles -TimeoutSeconds 10 } 6>&1
 $fakeM1.Pool.Close(); $fakeM1.Pool.Dispose()
 $outputTextM1 = ($outputM1 | ForEach-Object { $_.ToString() }) -join "`n"
 Test-Assert ($outputTextM1 -match [regex]::Escape("[ABORT] Waiting for current jobs")) "omitting -AbortWaitMessage now prints the default wait message (previously never printed at all, for any caller)"
 
-Reset-AbortState
+Reset-HarnessScenarioState
 $fakeM2 = New-FakeHandles -DelaysMs @(100)
 $outputM2 = & { Invoke-GracefulDrain -Handles $fakeM2.Handles -TimeoutSeconds 10 -AbortWaitMessage "" } 6>&1
 $fakeM2.Pool.Close(); $fakeM2.Pool.Dispose()
@@ -403,7 +411,7 @@ function New-FakeErrorRecord {
     return [System.Management.Automation.ErrorRecord]::new($Exception, "TestError", [System.Management.Automation.ErrorCategory]::NotSpecified, $null)
 }
 
-Reset-AbortState
+Reset-HarnessScenarioState
 $script:abortRequested = $true
 $errPipelineStopped = New-FakeErrorRecord -Exception ([System.Management.Automation.PipelineStoppedException]::new())
 Test-Assert ((Test-OwnAbortException -ErrorRecord $errPipelineStopped) -eq $true) "abortRequested + PipelineStoppedException -> true"
@@ -417,7 +425,7 @@ Test-Assert ((Test-OwnAbortException -ErrorRecord $errPipelineStopped) -eq $fals
 $script:abortRequested = $true
 $errUnrelated = New-FakeErrorRecord -Exception ([System.IO.IOException]::new("disk full"))
 Test-Assert ((Test-OwnAbortException -ErrorRecord $errUnrelated) -eq $false) "abortRequested true but an UNRELATED exception type -> false (a real crash mid-abort is still a real crash)"
-Reset-AbortState
+Reset-HarnessScenarioState
 Write-Host ""
 
 # ==============================================================================
@@ -426,7 +434,7 @@ Write-Host ""
 #  is a graceful abort, not something to report as an error.
 # ==============================================================================
 Write-Host "=== Scenario O: Invoke-AbortOrFatalHandler - own-abort branch ===" -ForegroundColor Cyan
-Reset-AbortState
+Reset-HarnessScenarioState
 $script:abortRequested = $true
 $script:CleanConsoleOutputEnabled = $true
 $logCallsO = [System.Collections.Generic.List[string]]::new()
@@ -438,7 +446,7 @@ Test-Assert ($resultO -eq $true) "returns `$true for our own abort"
 Test-Assert ($logCallsO.Count -eq 0) "-LogHandler was never invoked - a graceful abort is not a logged error"
 Test-Assert ([ConsoleCtrl]::DrainComplete.IsSet) "DrainComplete was signalled (via Complete-AbortDrain)"
 Test-Assert ($script:completeAllActiveSeriesProgressCallCount -eq 1) "Complete-AbortDrain's own CCR finalization fired too (CleanConsoleOutputEnabled was on) - proves this really called Complete-AbortDrain, not a reimplementation"
-Reset-AbortState
+Reset-HarnessScenarioState
 Write-Host ""
 
 # ==============================================================================
@@ -447,7 +455,7 @@ Write-Host ""
 #  -LogHandler; DrainComplete is untouched by this branch.
 # ==============================================================================
 Write-Host "=== Scenario P: Invoke-AbortOrFatalHandler - genuine crash branch ===" -ForegroundColor Cyan
-Reset-AbortState
+Reset-HarnessScenarioState
 $script:abortRequested = $true   # even mid-abort, an unrelated crash is still a crash
 $logCallsP = [System.Collections.Generic.List[string]]::new()
 $logHandlerP = { param($m) $logCallsP.Add($m) }.GetNewClosure()
@@ -459,7 +467,7 @@ Test-Assert ($logCallsP.Count -eq 1) "-LogHandler invoked exactly once"
 Test-Assert ($logCallsP[0] -match [regex]::Escape("FATAL ERROR:") -and $logCallsP[0] -match [regex]::Escape("disk full")) "the message names it a fatal error and includes the real exception text"
 Test-Assert ($logCallsP[0] -match [regex]::Escape("Stack Trace:")) "the message includes a stack trace section"
 Test-Assert (-not [ConsoleCtrl]::DrainComplete.IsSet) "DrainComplete was NOT touched by the fatal-error branch - only the own-abort branch finalizes the drain"
-Reset-AbortState
+Reset-HarnessScenarioState
 Write-Host ""
 
 # ==============================================================================
@@ -468,14 +476,62 @@ Write-Host ""
 #  Invoke-GracefulDrain's own -ErrorHandler default convention.
 # ==============================================================================
 Write-Host "=== Scenario Q: default -LogHandler needs no Logging.ps1 dependency ===" -ForegroundColor Cyan
-Reset-AbortState
+Reset-HarnessScenarioState
 $threwQ = $false
 try {
     $resultQ = Invoke-AbortOrFatalHandler -ErrorRecord $errUnrelated
 } catch { $threwQ = $true }
 Test-Assert (-not $threwQ) "no -LogHandler supplied, no Write-Log dot-sourced anywhere in this harness - does not throw"
 Test-Assert ($resultQ -eq $false) "still correctly identified as a genuine crash"
+Reset-HarnessScenarioState
+Write-Host ""
+
+# ==============================================================================
+#  Scenario R: Reset-AbortState (2026-08-28, closes the "abort state never
+#  reset" bug - Todo.md/CHANGELOG.md) - proves the REAL function itself,
+#  not just this harness's own Reset-HarnessScenarioState wrapper around
+#  it (that wrapper is exercised by every other scenario already; this one
+#  is the only scenario that would catch a regression in the real
+#  function's own body). Simulates the exact real-world sequence the bug
+#  report described: one abort, then a second "run" in the same process
+#  with no new Ctrl+C - without the fix, Test-AbortSignal's first poll of
+#  that second run would already be $true.
+# ==============================================================================
+Write-Host "=== Scenario R: Reset-AbortState clears every piece of abort state ===" -ForegroundColor Cyan
+Reset-HarnessScenarioState
+
+$ctsR = [System.Threading.CancellationTokenSource]::new()
+Register-AbortCancellationSource -Cts $ctsR
+[ConsoleCtrl]::AbortRequested = $true
+[ConsoleCtrl]::IsCloseEvent   = $true
+$null = Test-AbortSignal
+Complete-AbortDrain   # signals DrainComplete, same as a real caller's drain finishing
+
+Test-Assert ($script:abortRequested -eq $true) "sanity check: abort is genuinely in progress before reset"
+Test-Assert ($script:ctrlCloseAbort -eq $true) "sanity check: ctrlCloseAbort is set too"
+Test-Assert ([ConsoleCtrl]::DrainComplete.IsSet -eq $true) "sanity check: DrainComplete is signalled before reset"
+
 Reset-AbortState
+
+Test-Assert ($script:abortRequested -eq $false) "Reset-AbortState clears `$script:abortRequested"
+Test-Assert ($script:ctrlCloseAbort -eq $false) "Reset-AbortState clears `$script:ctrlCloseAbort"
+Test-Assert ([ConsoleCtrl]::AbortRequested -eq $false) "Reset-AbortState clears [ConsoleCtrl]::AbortRequested"
+Test-Assert ([ConsoleCtrl]::IsCloseEvent -eq $false) "Reset-AbortState clears [ConsoleCtrl]::IsCloseEvent"
+Test-Assert ([ConsoleCtrl]::DrainComplete.IsSet -eq $false) "Reset-AbortState un-signals DrainComplete"
+
+$pollAfterResetR = Test-AbortSignal
+Test-Assert ($pollAfterResetR -eq $false) "the exact bug this closes: a second 'run' in the same process, no new Ctrl+C - Test-AbortSignal's first poll is now `$false, not stuck `$true"
+
+# A genuinely NEW abort after the reset must still be detected correctly -
+# proves the reset didn't leave anything in a state that breaks detection
+# for whatever real run comes next.
+[ConsoleCtrl]::AbortRequested = $true
+$secondAbortR = Test-AbortSignal
+Test-Assert ($secondAbortR -eq $true) "a real NEW abort after the reset is still detected correctly"
+Test-Assert ($ctsR.IsCancellationRequested -eq $true) "and still cancels whatever's registered at the time"
+
+$ctsR.Dispose()
+Reset-HarnessScenarioState
 Write-Host ""
 
 # ==============================================================================

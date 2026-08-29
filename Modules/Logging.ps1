@@ -193,6 +193,12 @@ function Initialize-LogPaths {
         $oldLogs = Get-ChildItem -LiteralPath $ScriptDir -Filter $oldLogPattern -File -ErrorAction SilentlyContinue |
                    Where-Object { $_.FullName -ne $script:logFile }
         foreach ($oldLog in $oldLogs) {
+            # Swallowed deliberately: this is best-effort housekeeping of an
+            # OLD run's own already-complete log file, not this run's data -
+            # if it's locked/in use, next run's own cleanup pass gets
+            # another chance at it. Nothing this run writes is affected
+            # either way, since $script:logFile above is always a fresh,
+            # uniquely-timestamped path.
             try { Move-ToRecycleBin -ItemPath $oldLog.FullName } catch { }
         }
     } else {
@@ -204,7 +210,16 @@ function Initialize-LogPaths {
 
         foreach ($staleLog in @($script:logErrorFile, $script:logWarnFile)) {
             if (Test-Path -LiteralPath $staleLog) {
-                try { Remove-Item -LiteralPath $staleLog -Force } catch { }
+                # NOT swallowed silently, unlike the full-logging cleanup
+                # above - this file's whole point is separating THIS run's
+                # errors/warnings from a stale one. A failed removal (locked
+                # file, read-only, AV hold) means old content survives into
+                # this run with nothing marking it stale, which could read
+                # as this run's own output - worth a real warning, not just
+                # a swallow. Write-Log itself appends into this same file,
+                # so the warning lands exactly where someone would look.
+                try { Remove-Item -LiteralPath $staleLog -Force }
+                catch { Write-Log ("Could not clear stale log file '" + $staleLog + "' from a previous run - its old content may still be present below: " + $_) -Level Warn }
             }
         }
     }
@@ -309,14 +324,29 @@ function Write-Log {
     $line = (Get-Date -Format "yyyy-MM-dd HHmmss") + " [" + $Level + "] " + $Message
 
     if ($script:FullLogging) {
-        # Full-logging mode: every level goes to the single timestamped file
-        Invoke-MutexGuardedWrite { $line | Out-File -FilePath $script:logFile -Append -Encoding UTF8 }
+        # Full-logging mode: every level goes to the single timestamped file.
+        # Guarded the same way Write-SummaryLog already guards
+        # $script:logSummaryFile - Write-Log called before Initialize-LogPaths
+        # has run (a real, verified gap - see CHANGELOG.md/Todo.md) used to
+        # throw ParameterBindingValidationException on a null -FilePath
+        # instead of degrading like every other file-write path here does.
+        # Not reachable in the real script today (Initialize-LogPaths always
+        # runs first), but the console echo below still has real value even
+        # when the file write can't happen, so this only skips the file
+        # write, not the whole function.
+        if (-not [string]::IsNullOrEmpty($script:logFile)) {
+            Invoke-MutexGuardedWrite { $line | Out-File -FilePath $script:logFile -Append -Encoding UTF8 }
+        }
     } else {
-        # Split-log mode
+        # Split-log mode - same guard reasoning as above, per target file.
         if ($Level -eq "Error") {
-            Invoke-MutexGuardedWrite { $line | Out-File -FilePath $script:logErrorFile -Append -Encoding UTF8 }
+            if (-not [string]::IsNullOrEmpty($script:logErrorFile)) {
+                Invoke-MutexGuardedWrite { $line | Out-File -FilePath $script:logErrorFile -Append -Encoding UTF8 }
+            }
         } elseif ($Level -eq "Warn") {
-            Invoke-MutexGuardedWrite { $line | Out-File -FilePath $script:logWarnFile -Append -Encoding UTF8 }
+            if (-not [string]::IsNullOrEmpty($script:logWarnFile)) {
+                Invoke-MutexGuardedWrite { $line | Out-File -FilePath $script:logWarnFile -Append -Encoding UTF8 }
+            }
         } elseif ($Level -eq "Summary") {
             # Summary is written later in block form; nothing to do per-line here
         }

@@ -550,6 +550,43 @@ Test-Assert ($outputO2.Count -gt 0) "disabling the toggle again resumes normal c
 Write-Host ""
 
 # ==============================================================================
+#  Scenario P: Write-Log called before Initialize-LogPaths has ever run
+#  (2026-08-28, real bug fix - see CHANGELOG.md/Todo.md). Verified live
+#  before the fix: threw ParameterBindingValidationException ("Cannot
+#  bind argument to parameter 'FilePath' because it is null") in both
+#  full-logging and split-log mode - Write-SummaryLog already guarded the
+#  equivalent case, Write-Log didn't. Not reachable in the real script
+#  today (Initialize-LogPaths always runs first), but this proves the
+#  latent gap is actually closed, in both modes, for every level that
+#  writes to a file.
+# ==============================================================================
+Write-Host "=== Scenario P: Write-Log before Initialize-LogPaths degrades instead of throwing ===" -ForegroundColor Cyan
+Reset-LoggingState   # logFile/logErrorFile/logWarnFile/FullLogging all back to their un-initialized defaults
+
+$threwP1 = $false
+try { Write-Log "split-log mode, before init" -Level Error } catch { $threwP1 = $true }
+Test-Assert (-not $threwP1) "split-log mode, -Level Error, before Initialize-LogPaths - does not throw"
+
+$threwP2 = $false
+try { Write-Log "split-log mode, before init" -Level Warn } catch { $threwP2 = $true }
+Test-Assert (-not $threwP2) "split-log mode, -Level Warn, before Initialize-LogPaths - does not throw"
+
+$script:FullLogging = $true
+$threwP3 = $false
+try { Write-Log "full-logging mode, before init" -Level Info } catch { $threwP3 = $true }
+Test-Assert (-not $threwP3) "full-logging mode, before Initialize-LogPaths - does not throw"
+$script:FullLogging = $false
+
+# Once real paths ARE set, Write-Log still works normally - the guard
+# only skips the file write when the target path is genuinely unset, it
+# doesn't break the normal case.
+Initialize-LogPaths -TargetPath "C:\P\Path" -FullLogging $false -ScriptDir $scratchDir
+Write-Log "a real line after init" -Level Error
+$logContentP = Get-Content -LiteralPath $script:logErrorFile
+Test-Assert ($logContentP -like "*a real line after init*") "Write-Log still writes normally once Initialize-LogPaths has actually run"
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

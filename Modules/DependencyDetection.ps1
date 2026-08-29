@@ -53,6 +53,31 @@
     source, with original line numbers.
 #>
 
+function Test-PathSafely {
+    <#
+    .SYNOPSIS
+        Internal helper - Test-Path, but a malformed path (illegal
+        characters, etc.) is treated the same as "doesn't exist" ($false)
+        instead of throwing. Verified live: Test-Path throws a real
+        System.ArgumentException for a path containing characters like
+        "|"/"<"/">" under $ErrorActionPreference = 'Stop' (the real
+        script's own setting) - without this, Find-Exe/Find-ExeCached's
+        own documented "a stale/wrong -UserPath falls through" contract
+        only actually held for a NONEXISTENT path, not a malformed one.
+        A System.IO.PathTooLongException (an excessively long path) is
+        the same class of "can't evaluate this path" problem and is
+        caught here too.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        return (Test-Path -LiteralPath $Path)
+    } catch [System.ArgumentException] {
+        return $false
+    } catch [System.IO.PathTooLongException] {
+        return $false
+    }
+}
+
 function Find-Exe {
     <#
     .SYNOPSIS
@@ -77,13 +102,13 @@ function Find-Exe {
         [string[]]$Candidates = @()
     )
 
-    if ($UserPath -and (Test-Path -LiteralPath $UserPath)) { return $UserPath }
+    if ($UserPath -and (Test-PathSafely -Path $UserPath)) { return $UserPath }
 
     $inPath = Get-Command $ExeName -ErrorAction SilentlyContinue
     if ($inPath) { return $inPath.Source }
 
     foreach ($c in $Candidates) {
-        if (Test-Path -LiteralPath $c) { return $c }
+        if (Test-PathSafely -Path $c) { return $c }
     }
 
     return $null
@@ -128,12 +153,12 @@ function Find-ExeCached {
         [string[]]$Candidates = @()
     )
 
-    if ($UserPath -and (Test-Path -LiteralPath $UserPath)) {
+    if ($UserPath -and (Test-PathSafely -Path $UserPath)) {
         return $UserPath
     }
 
     $cached = $Settings[$SettingsKey]
-    if ($cached -and (Test-Path -LiteralPath $cached)) {
+    if ($cached -and (Test-PathSafely -Path $cached)) {
         return $cached
     }
 

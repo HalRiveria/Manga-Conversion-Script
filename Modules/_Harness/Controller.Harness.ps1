@@ -64,16 +64,6 @@ function Test-Assert {
     }
 }
 
-function Reset-AbortState {
-    [ConsoleCtrl]::AbortRequested = $false
-    [ConsoleCtrl]::IsCloseEvent   = $false
-    [ConsoleCtrl]::DrainComplete.Reset()
-    $script:abortRequested = $false
-    $script:ctrlCloseAbort = $false
-    $script:abortCancellationSources.Clear()
-    $script:CleanConsoleOutputEnabled = $false
-}
-
 $scratchDir = Join-Path ([System.IO.Path]::GetTempPath()) ("controller-harness-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $scratchDir -Force | Out-Null
 Write-Host ("Scratch dir: " + $scratchDir) -ForegroundColor DarkGray
@@ -612,12 +602,52 @@ $fakePostRunT = {
     if ($script:postRunCallsT -ge 3) { return 'Exit' }
     return 'ReturnToMenu'
 }
-$script:getModeCallsT = 0; $script:invokeModeCallsT = 0; $script:postRunCallsT = 0
+# 2026-08-28: proves Invoke-MainLoop calls -ResetAbortHandler once per
+# iteration, BEFORE resolving that iteration's mode (real bug fix - see
+# CHANGELOG.md/Todo.md, "abort state never reset" - a Ctrl+C used to
+# poison every later run in the same session). Order matters, not just
+# count: recorded here so the assertion below can confirm reset genuinely
+# happens before GetMode, not just somewhere in the iteration.
+$resetAbortCallsT = 0
+$resetOrderT = [System.Collections.Generic.List[string]]::new()
+$fakeResetAbortT = { $script:resetAbortCallsT++; $script:resetOrderT.Add("Reset") }
+$fakeGetModeTOrdered = { param($Settings, $SettingsPath) $script:resetOrderT.Add("GetMode"); & $fakeGetModeT -Settings $Settings -SettingsPath $SettingsPath }
+$script:getModeCallsT = 0; $script:invokeModeCallsT = 0; $script:postRunCallsT = 0; $script:resetAbortCallsT = 0
 Invoke-MainLoop -TargetPath "C:\fake\lib" -Settings $fakeSettings -SettingsPath "C:\fake\settings.json" -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" `
-    -GetModeHandler $fakeGetModeT -InvokeModeHandler $fakeInvokeModeT -PostRunPromptHandler $fakePostRunT
+    -GetModeHandler $fakeGetModeTOrdered -InvokeModeHandler $fakeInvokeModeT -PostRunPromptHandler $fakePostRunT -ResetAbortHandler $fakeResetAbortT
 
 Test-Assert ($script:getModeCallsT -eq 3 -and $script:invokeModeCallsT -eq 3) ("the loop ran exactly 3 iterations before Exit (got GetMode=" + $script:getModeCallsT + ", InvokeMode=" + $script:invokeModeCallsT + ")")
 Test-Assert ($script:postRunCallsT -eq 3) "Show-PostRunPrompt was consulted after every iteration, including the one that stopped the loop"
+Test-Assert ($script:resetAbortCallsT -eq 3) ("-ResetAbortHandler was called exactly once per iteration (got " + $script:resetAbortCallsT + ")")
+Test-Assert (@($resetOrderT)[0] -eq "Reset" -and @($resetOrderT)[1] -eq "GetMode") "abort state is reset BEFORE the mode is resolved, not after - so a stray abort can never carry into the mode this iteration picks"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario T2: Invoke-MainLoop's DEFAULT -ResetAbortHandler resolves to
+#  the real AbortPipeline.ps1 Reset-AbortState (this harness dot-sources
+#  the real module) - proves the wiring works end to end, not just that
+#  an injected fake gets called. Same real-world sequence as
+#  AbortPipeline.Harness.ps1's own Scenario R: one abort, then a second
+#  loop iteration with no new Ctrl+C.
+# ==============================================================================
+Write-Host "=== Scenario T2: Invoke-MainLoop's real default ResetAbortHandler actually clears abort state ===" -ForegroundColor Cyan
+[ConsoleCtrl]::AbortRequested = $true
+$null = Test-AbortSignal
+Test-Assert ($script:abortRequested -eq $true) "sanity check: an abort is genuinely in progress before the loop runs"
+
+$pollsT2 = [System.Collections.Generic.List[bool]]::new()
+$fakeGetModeT2 = { param($Settings, $SettingsPath) $script:pollsT2.Add($script:abortRequested); return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
+$fakeInvokeModeT2 = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) return New-StatsTracker }
+$callsT2 = 0
+$fakePostRunT2 = { $script:callsT2++; if ($script:callsT2 -ge 1) { return 'Exit' }; return 'ReturnToMenu' }
+$script:pollsT2 = [System.Collections.Generic.List[bool]]::new()
+$script:callsT2 = 0
+# No -ResetAbortHandler override here - relying on the REAL default.
+Invoke-MainLoop -TargetPath "C:\fake\lib" -Settings $fakeSettings -SettingsPath "C:\fake\settings.json" -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" `
+    -GetModeHandler $fakeGetModeT2 -InvokeModeHandler $fakeInvokeModeT2 -PostRunPromptHandler $fakePostRunT2
+
+Test-Assert (@($script:pollsT2)[0] -eq $false) "the real Reset-AbortState ran before GetModeHandler, so `$script:abortRequested already reads `$false by the time the mode is resolved - the exact bug this fix closes"
+Reset-AbortState
 Write-Host ""
 
 # ==============================================================================

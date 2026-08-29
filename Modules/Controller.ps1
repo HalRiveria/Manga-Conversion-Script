@@ -221,7 +221,10 @@
       - New-SeriesProvider, Get-SeriesChapters (LeafDirectoryDiscovery.ps1)
       - Invoke-ZipParallelProcessing (ZipParallelProcessing.ps1)
       - Register-AbortCancellationSource, Unregister-AbortCancellationSource,
-        Test-AbortSignal, Invoke-AbortOrFatalHandler (AbortPipeline.ps1)
+        Test-AbortSignal, Invoke-AbortOrFatalHandler, Reset-AbortState
+        (AbortPipeline.ps1) - the last one for Invoke-MainLoop only,
+        called once per loop iteration to clear any abort state left over
+        from a previous run (see "Invoke-MainLoop" above)
       - $script:CleanConsoleOutputEnabled, Start-SeriesProgress,
         Start-ChapterProgress, Complete-ChapterProgress,
         Complete-AllActiveSeriesProgress (CleanConsoleRendering.ps1)
@@ -1053,6 +1056,17 @@ function Invoke-MainLoop {
         Show-PostRunPrompt. A harness overriding all three never needs a
         real interactive prompt, real pipeline, or real keypress to test
         the loop's own control flow (how many iterations, when it stops).
+    .PARAMETER ResetAbortHandler
+        Injectable, defaults to the real AbortPipeline.ps1's
+        Reset-AbortState - called once per loop iteration, BEFORE
+        resolving the next mode. Closes a real bug (Todo.md/CHANGELOG.md):
+        nothing ever reset $script:abortRequested/[ConsoleCtrl]::AbortRequested/
+        DrainComplete between runs, so a single Ctrl+C (even one that fired
+        while idle at the menu, before any pipeline was running) left the
+        REST of the session's runs aborting immediately on their first
+        Test-AbortSignal poll, with no new Ctrl+C from the user. Resetting
+        here, at the top of every iteration, means every real dispatched
+        run starts from a genuinely clean slate.
     .OUTPUTS
         None - runs until exit, same as the main script's old inline loop.
     #>
@@ -1071,10 +1085,12 @@ function Invoke-MainLoop {
         [string]$LogWarnFile,
         [scriptblock]$GetModeHandler = ${function:Get-SelectedMode},
         [scriptblock]$InvokeModeHandler = ${function:Invoke-Mode},
-        [scriptblock]$PostRunPromptHandler = ${function:Show-PostRunPrompt}
+        [scriptblock]$PostRunPromptHandler = ${function:Show-PostRunPrompt},
+        [scriptblock]$ResetAbortHandler = ${function:Reset-AbortState}
     )
 
     while ($true) {
+        & $ResetAbortHandler
         $resolved = & $GetModeHandler -Settings $Settings -SettingsPath $SettingsPath
 
         $runStopwatch = [System.Diagnostics.Stopwatch]::StartNew()

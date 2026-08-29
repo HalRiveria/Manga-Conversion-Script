@@ -73,8 +73,13 @@
         this replaced the old Get-ZippableLeafDirs + -PerFolderBatching
         toggle)
       - Start-SeriesProgress, Start-ChapterProgress,
-        Complete-ChapterProgress, Complete-AllActiveSeriesProgress
-        (CleanConsoleRendering.ps1)
+        Complete-ChapterProgress, Complete-AllActiveSeriesProgress,
+        Write-CleanConsoleMessage (CleanConsoleRendering.ps1) - the last
+        one gates Convert-ImageBatch's own straggler-drain wait message,
+        matching how AbortPipeline.ps1's Invoke-GracefulDrain already
+        handles the same kind of message (this function has its own,
+        separate drain implementation - see PART 1 NOTE below - so it
+        needed the same CCR gate added explicitly)
       - Test-AvifAnimated (AnimatedConversionPipeline.ps1) - NEW
         2026-08-28, for the static-AVIF conversion path in
         Convert-ImageBatch (see "STATIC AVIF -> JXL" below). Spawns a
@@ -499,7 +504,21 @@ function Convert-ImageBatch {
     #  is a no-op.
     # ------------------------------------------------------------------
     if ($CancelToken.IsCancellationRequested -and $running.Count -gt 0) {
-        if ($AbortWaitMessage) { Write-Host $AbortWaitMessage -ForegroundColor Yellow }
+        if ($AbortWaitMessage) {
+            # Gated on Clean Console Output the same way AbortPipeline.ps1's
+            # own Invoke-GracefulDrain already handles its own wait message -
+            # a raw Write-Host here while CCR's live region is mid-redraw
+            # would land wherever the cursor happens to be and get mangled
+            # by the next redraw (see CleanConsoleRendering.ps1's header).
+            # This function's own straggler drain is a separate, independent
+            # implementation (not Invoke-GracefulDrain), so it needed this
+            # gate added explicitly rather than inheriting it for free.
+            if ($script:CleanConsoleOutputEnabled) {
+                Write-CleanConsoleMessage -Text $AbortWaitMessage -Color Yellow
+            } else {
+                Write-Host $AbortWaitMessage -ForegroundColor Yellow
+            }
+        }
         $abortDeadline = [System.Diagnostics.Stopwatch]::StartNew()
 
         while ($running.Count -gt 0 -and $abortDeadline.Elapsed.TotalSeconds -lt $AbortTimeoutSeconds) {

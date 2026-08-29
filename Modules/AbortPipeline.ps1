@@ -206,6 +206,46 @@ function Unregister-AbortCancellationSource {
     $null = $script:abortCancellationSources.Remove($Cts)
 }
 
+function Reset-AbortState {
+    <#
+    .SYNOPSIS
+        Clears every piece of abort state back to "no abort has happened" -
+        $script:abortRequested/$script:ctrlCloseAbort, the native handler's
+        own [ConsoleCtrl]::AbortRequested/IsCloseEvent flags, and
+        [ConsoleCtrl]::DrainComplete (a ManualResetEventSlim, reset back to
+        unsignalled). Call once per real dispatched run, before that run's
+        own Test-AbortSignal polling could ever see stale state from a
+        PREVIOUS run in the same process.
+    .DESCRIPTION
+        Real bug this closes (found and verified live during a code
+        review, see Todo.md/CHANGELOG.md): none of this state was EVER
+        reset anywhere in production code before this function existed -
+        only harness test setup ever reset it. Since Invoke-MainLoop
+        (Controller.ps1) runs multiple mode selections in the same
+        process (that's the whole point of "press any key to return to
+        the main menu" after a run), a single Ctrl+C - even one that
+        happened while idle at the menu, before any pipeline was even
+        running - left $script:abortRequested stuck $true for the rest
+        of the process's lifetime. Every subsequent run's very first
+        Test-AbortSignal poll then saw an abort already "in progress" and
+        aborted immediately, doing no real work, with no new Ctrl+C from
+        the user - until the whole script was closed and reopened.
+        Verified live: dot-source this module, trigger one abort, poll
+        Test-AbortSignal again with no new Ctrl+C (still $true), call
+        this function, poll again (now $false).
+
+        Does NOT touch $script:abortCancellationSources - that registry's
+        lifecycle is already handled per pipeline phase by
+        Register-/Unregister-AbortCancellationSource and has nothing to
+        do with whether a PAST abort happened.
+    #>
+    $script:abortRequested = $false
+    $script:ctrlCloseAbort = $false
+    [ConsoleCtrl]::AbortRequested = $false
+    [ConsoleCtrl]::IsCloseEvent   = $false
+    [ConsoleCtrl]::DrainComplete.Reset()
+}
+
 function Test-AbortSignal {
     <#
     .SYNOPSIS
