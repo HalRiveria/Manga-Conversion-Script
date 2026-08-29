@@ -4,9 +4,10 @@
     every pipeline mode.
 
 .DESCRIPTION
-    Not yet wired into Conversion Script Main.ps1 - built and verified in
-    isolation first, per this repo's development process (see CLAUDE.md).
-    Dot-source this file, then:
+    Wired into Conversion Script Main.ps1 (Register-AbortHandler at
+    bootstrap; Reset-AbortState called once per loop iteration by
+    Controller.ps1's Invoke-MainLoop) - built and verified standalone
+    first, per this repo's development process (see CLAUDE.md). Usage:
 
       1. Call Register-AbortHandler once, near script startup, to install
          the native Ctrl+C / window-close handler.
