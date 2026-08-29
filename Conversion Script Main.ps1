@@ -255,17 +255,26 @@ try {
     Initialize-CleanConsoleOutput -Enabled $settings.CleanConsoleOutputEnabled
     Initialize-FileDeletion -PermanentDelete $settings.PermanentDelete
 
+    # Version-agnostic ImageMagick fallback: glob-matched so a version bump
+    # (Q8/Q16/HDRI, or a future major version) doesn't silently make a
+    # hardcoded exact path stale - Find-Exe/DependencyDetection.ps1 only
+    # accepts exact -Candidates paths by design, so the glob is resolved
+    # here rather than taught to that module. Only matters when PATH
+    # lookup already failed, which is the common-case path for both tools.
+    $magickGlobCandidates = @(Get-ChildItem -Path (Join-Path $env:ProgramFiles "ImageMagick-*\magick.exe") -ErrorAction SilentlyContinue).FullName
+
     $resolvedCjxlPath = Find-ExeCached -Settings $settings -SettingsKey "CjxlPath" -UserPath $CjxlPath -ExeName "cjxl" -Candidates @(
         "C:\Program Files\libjxl\cjxl.exe",
-        "C:\libjxl\cjxl.exe"
+        "C:\libjxl\cjxl.exe",
+        (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Links\cjxl.exe")
     )
     if ([string]::IsNullOrWhiteSpace($resolvedCjxlPath)) {
         throw "cjxl.exe could not be found. Install libjxl, add it to PATH, or pass -CjxlPath."
     }
-    $resolvedMagickPath = Find-ExeCached -Settings $settings -SettingsKey "MagickPath" -UserPath $MagickPath -ExeName "magick" -Candidates @(
+    $resolvedMagickPath = Find-ExeCached -Settings $settings -SettingsKey "MagickPath" -UserPath $MagickPath -ExeName "magick" -Candidates ($magickGlobCandidates + @(
         "C:\Program Files\ImageMagick-7.1.1-Q16-HDRI\magick.exe",
         "C:\Program Files\ImageMagick-7.1.1-Q16\magick.exe"
-    )
+    ))
     Export-ScriptSettings -Settings $settings -Path $settingsPath
 
     Write-Log ("Conversion Script starting. Path: '" + $Path + "'. cjxl: '" + $resolvedCjxlPath + "'. magick: '" + $(if ($resolvedMagickPath) { $resolvedMagickPath } else { "(not found - WebP/AVIF input will fail)" }) + "'.")
