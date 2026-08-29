@@ -180,7 +180,7 @@ $pathH3 = Join-Path $scratchDir "animated-bad-settings.json"
 '{ "AnimatedQuality": 0, "AnimatedThreads": -1 }' | Set-Content -LiteralPath $pathH3 -Encoding UTF8
 $settingsH3 = Import-ScriptSettings -Path $pathH3
 Test-Assert ($settingsH3.AnimatedQuality -eq 90) "out-of-range AnimatedQuality (0) fell back to default (90)"
-Test-Assert ($settingsH3.AnimatedThreads -eq 4) "out-of-range AnimatedThreads (-1) fell back to default (4)"
+Test-Assert ($settingsH3.AnimatedThreads -eq 8) "out-of-range AnimatedThreads (-1) fell back to default (8)"
 Write-Host ""
 
 # ==============================================================================

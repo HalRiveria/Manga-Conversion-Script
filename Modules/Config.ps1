@@ -39,7 +39,8 @@
     by default, matching this project's other deletion toggles) -
     AnimatedThreads has no real prior default to inherit (the old script
     used [Environment]::ProcessorCount, not something a persisted static
-    setting can express) so it's set to a fixed 4.
+    setting can express) so it's set to a fixed value: 8, matching
+    MaxCjxlProcs and this machine's physical core count (Ryzen 7 7800X3D).
 
     ZipWithUnconvertedAnimated (added 2026-08-27 alongside the Menu
     redesign in Todo.md) gates the "Image Conversion + Zip" mode, which
@@ -124,7 +125,7 @@ function Get-DefaultScriptSettings {
         PermanentDelete                  = $false
         EnableModePrompt                 = $true
         DeleteExtractedFoldersAfterRezip = $true
-        AnimatedThreads                  = 4
+        AnimatedThreads                  = 8
         AnimatedQuality                  = 90
         AnimatedLossless                 = $false
         AnimatedOverwrite                = $false
