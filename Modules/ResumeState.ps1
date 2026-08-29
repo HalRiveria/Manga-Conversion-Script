@@ -86,6 +86,29 @@ function Get-ResumeStatePath {
     return (Join-Path $TargetPath "process_state.json")
 }
 
+function Get-ValidResumeStateEntries {
+    <#
+    .SYNOPSIS
+        Private helper - reads and parses $StateFile, returning only the
+        entries that have both a Path and a LastWriteTimeUtc property.
+        Empty array if the file doesn't exist. Any parse exception
+        PROPAGATES (not swallowed here) - callers decide how to handle a
+        corrupt file, since that differs by caller: Import-ResumeStateMap
+        logs a Warn and starts fresh; Merge-ResumeStateEntries silently
+        starts fresh (matching each function's own pre-existing
+        behavior, preserved when this was factored out of both).
+    .OUTPUTS
+        An array of the raw parsed entry objects (PSCustomObject, each
+        with .Path/.LastWriteTimeUtc) that passed validation.
+    #>
+    param([Parameter(Mandatory)][string]$StateFile)
+
+    if (-not (Test-Path -LiteralPath $StateFile)) { return @() }
+
+    $raw = [System.IO.File]::ReadAllText($StateFile) | ConvertFrom-Json
+    return @($raw | Where-Object { $_.PSObject.Properties['Path'] -and $_.PSObject.Properties['LastWriteTimeUtc'] })
+}
+
 function Import-ResumeStateMap {
     <#
     .SYNOPSIS
@@ -103,11 +126,8 @@ function Import-ResumeStateMap {
     if (-not (Test-Path -LiteralPath $StateFile)) { return $map }
 
     try {
-        $raw = [System.IO.File]::ReadAllText($StateFile) | ConvertFrom-Json
-        foreach ($entry in $raw) {
-            if ($entry.PSObject.Properties['Path'] -and $entry.PSObject.Properties['LastWriteTimeUtc']) {
-                $map[$entry.Path] = $entry.LastWriteTimeUtc
-            }
+        foreach ($entry in (Get-ValidResumeStateEntries -StateFile $StateFile)) {
+            $map[$entry.Path] = $entry.LastWriteTimeUtc
         }
         Write-Log ("Resume state loaded: " + $map.Count + " previously completed ZIP(s) tracked. Delete '" + $StateFile + "' to start completely fresh.")
     } catch {
@@ -158,20 +178,12 @@ function Merge-ResumeStateEntries {
         [System.Collections.Generic.IDictionary[string,string]]$NewEntries
     )
 
-    $existing = New-Object System.Collections.Generic.List[object]
-    if (Test-Path -LiteralPath $StateFile) {
-        try {
-            $parsed = [System.IO.File]::ReadAllText($StateFile) | ConvertFrom-Json
-            foreach ($e in $parsed) { $existing.Add($e) }
-        } catch { }
-    }
-
     $merged = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($e in $existing) {
-        if ($e.PSObject.Properties['Path'] -and $e.PSObject.Properties['LastWriteTimeUtc']) {
+    try {
+        foreach ($e in (Get-ValidResumeStateEntries -StateFile $StateFile)) {
             $merged[$e.Path] = $e.LastWriteTimeUtc
         }
-    }
+    } catch { }
     foreach ($kvp in $NewEntries.GetEnumerator()) { $merged[$kvp.Key] = $kvp.Value }
 
     $mergedArray = @($merged.GetEnumerator() | ForEach-Object { [pscustomobject]@{ Path = $_.Key; LastWriteTimeUtc = $_.Value } })
@@ -179,6 +191,42 @@ function Merge-ResumeStateEntries {
     Set-Content -LiteralPath $StateFile -Value $json -Encoding UTF8
 
     return $merged.Count
+}
+
+function Invoke-ResumeStateWrite {
+    <#
+    .SYNOPSIS
+        Private helper - wait on $StateMutex if one is supplied, call
+        Merge-ResumeStateEntries, release in finally, swallow any
+        exception (including a failed mutex wait) and return $null on
+        failure. Shared by Save-ResumeStateEntry (always passes a mutex)
+        and Save-ResumeStateBag's two branches (with and without one),
+        which previously each implemented this wait/merge/release/swallow
+        shape by hand. Not directly reusable as Logging.ps1's own
+        Invoke-MutexGuardedWrite - that one lets exceptions propagate,
+        this one needs to swallow and return $null instead.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$StateFile,
+        [Parameter(Mandatory)]
+        [System.Collections.Generic.IDictionary[string,string]]$NewEntries,
+        [System.Threading.Mutex]$StateMutex
+    )
+
+    try {
+        if ($StateMutex) {
+            $null = $StateMutex.WaitOne()
+            try {
+                return Merge-ResumeStateEntries -StateFile $StateFile -NewEntries $NewEntries
+            } finally {
+                $StateMutex.ReleaseMutex()
+            }
+        }
+        return Merge-ResumeStateEntries -StateFile $StateFile -NewEntries $NewEntries
+    } catch {
+        return $null
+    }
 }
 
 function Save-ResumeStateEntry {
@@ -209,16 +257,7 @@ function Save-ResumeStateEntry {
     $newEntries = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
     $newEntries[$ZipPath] = $LastWriteTimeUtc
 
-    try {
-        $null = $StateMutex.WaitOne()
-        try {
-            return Merge-ResumeStateEntries -StateFile $StateFile -NewEntries $newEntries
-        } finally {
-            $StateMutex.ReleaseMutex()
-        }
-    } catch {
-        return $null
-    }
+    return Invoke-ResumeStateWrite -StateFile $StateFile -NewEntries $newEntries -StateMutex $StateMutex
 }
 
 function Save-ResumeStateBag {
@@ -254,19 +293,7 @@ function Save-ResumeStateBag {
         } catch { }
     }
 
-    if ($StateMutex) {
-        try {
-            $null = $StateMutex.WaitOne()
-            try { return Merge-ResumeStateEntries -StateFile $StateFile -NewEntries $newEntries }
-            finally { $StateMutex.ReleaseMutex() }
-        } catch { return $null }
-    }
-
-    try {
-        return Merge-ResumeStateEntries -StateFile $StateFile -NewEntries $newEntries
-    } catch {
-        return $null
-    }
+    return Invoke-ResumeStateWrite -StateFile $StateFile -NewEntries $newEntries -StateMutex $StateMutex
 }
 
 function Write-ResumeStateRetainedNotice {
