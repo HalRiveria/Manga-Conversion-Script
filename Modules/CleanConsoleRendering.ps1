@@ -266,6 +266,34 @@ function Format-SeriesLines {
     return $lines
 }
 
+function Get-WrappedSeriesRows {
+    <#
+    .SYNOPSIS
+        Private helper - one series' lines (Format-SeriesLines), each
+        wrapped to $Width (Split-TextToWidth), as a flat list of
+        @{ Text; Color } rows. Shared by Update-CleanConsoleDisplay's
+        $NewlyFrozen loop and its live-series loop, which previously each
+        ran this identical "format then wrap" nested loop by hand,
+        differing only in which collection they iterated.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$SeriesName,
+        [Parameter(Mandatory)]
+        [hashtable]$Entry,
+        [Parameter(Mandatory)]
+        [int]$Width
+    )
+
+    $rows = [System.Collections.Generic.List[hashtable]]::new()
+    foreach ($logicalLine in (Format-SeriesLines -SeriesName $SeriesName -Entry $Entry)) {
+        foreach ($chunk in (Split-TextToWidth -Text $logicalLine.Text -Width $Width)) {
+            $rows.Add(@{ Text = $chunk; Color = $logicalLine.Color })
+        }
+    }
+    return ,$rows
+}
+
 function Update-CleanConsoleDisplay {
     <#
     .SYNOPSIS
@@ -311,21 +339,13 @@ function Update-CleanConsoleDisplay {
     }
     if ($NewlyFrozen) {
         foreach ($f in $NewlyFrozen) {
-            foreach ($logicalLine in (Format-SeriesLines -SeriesName $f.Name -Entry $f.Entry)) {
-                foreach ($chunk in (Split-TextToWidth -Text $logicalLine.Text -Width $effectiveWidth)) {
-                    $frozenRows.Add(@{ Text = $chunk; Color = $logicalLine.Color })
-                }
-            }
+            $frozenRows.AddRange((Get-WrappedSeriesRows -SeriesName $f.Name -Entry $f.Entry -Width $effectiveWidth))
         }
     }
 
     $liveRows = [System.Collections.Generic.List[hashtable]]::new()
     foreach ($seriesName in @($script:ccrActiveSeries.Keys)) {
-        foreach ($logicalLine in (Format-SeriesLines -SeriesName $seriesName -Entry $script:ccrActiveSeries[$seriesName])) {
-            foreach ($chunk in (Split-TextToWidth -Text $logicalLine.Text -Width $effectiveWidth)) {
-                $liveRows.Add(@{ Text = $chunk; Color = $logicalLine.Color })
-            }
-        }
+        $liveRows.AddRange((Get-WrappedSeriesRows -SeriesName $seriesName -Entry $script:ccrActiveSeries[$seriesName] -Width $effectiveWidth))
     }
 
     $newContentRows = [System.Collections.Generic.List[hashtable]]::new()
