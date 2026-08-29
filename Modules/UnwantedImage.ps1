@@ -75,10 +75,9 @@
     explicit Y confirmation before persisting -> report the outcome) - the
     design (preview+confirm, a duplicate just informs rather than offering
     a rename, one add per visit, fixed default tolerance) was settled with
-    the project owner before it was built. NOT wired into Menu.ps1 yet -
-    which mode number it gets, or whether it's standalone, is still an
-    open question (see Todo.md) - this is the flow a future menu entry
-    calls into, not the entry itself.
+    the project owner before it was built. Wired into Menu.ps1's "5 -
+    Cover Deletion" submenu (Show-CoverDeletionMenu) as its "2 - Add
+    Image" item.
 
     FORWARD REFERENCES (not defined in this module - callers must
     dot-source the owning module(s) first):
