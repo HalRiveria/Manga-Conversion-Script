@@ -45,14 +45,18 @@
 
     Clean Console Output touch point (2026-08-18): Test-AbortSignal's
     abort message and Invoke-GracefulDrain's wait/force-stop messages
-    now route through CleanConsoleRendering.ps1's Write-CleanConsoleMessage
+    now route through CleanConsoleRendering.ps1's Write-GatedConsoleMessage
     instead of a raw Write-Host, when the toggle is on - a raw Write-Host
     firing while CCR's live region is mid-redraw would land wherever the
-    cursor happens to be and get mangled by the next redraw. Two forward
-    references this required, both FROM Logging.ps1/CleanConsoleRendering.ps1
-    (both already built and tested, so both are confirmed against real
-    signatures now, not stubbed-forward like Logging.ps1's original
-    Move-ToRecycleBin reference was):
+    cursor happens to be and get mangled by the next redraw.
+    Write-GatedConsoleMessage (2026-08-29) centralizes the gate itself
+    (this module used to check the toggle and branch between
+    Write-CleanConsoleMessage/raw Write-Host at each of its 3 call sites
+    by hand - now each just calls Write-GatedConsoleMessage and passes
+    the toggle in). Two forward references this requires, both FROM
+    Logging.ps1/CleanConsoleRendering.ps1 (both already built and tested,
+    so both are confirmed against real signatures now, not stubbed-
+    forward like Logging.ps1's original Move-ToRecycleBin reference was):
       - $script:CleanConsoleOutputEnabled - owned by Logging.ps1, NOT
         redeclared here. Read directly via the shared script scope every
         dot-sourced module lives in (the same pattern ZipCreation.ps1
@@ -64,10 +68,15 @@
         behavior - this harness proves that by never dot-sourcing
         Logging.ps1 and getting the original raw-Write-Host behavior
         throughout.
-      - Write-CleanConsoleMessage - owned by CleanConsoleRendering.ps1.
-        Only actually called when $script:CleanConsoleOutputEnabled is
-        true, so a caller that leaves the toggle off never needs
-        CleanConsoleRendering.ps1 dot-sourced at all.
+      - Write-GatedConsoleMessage - owned by CleanConsoleRendering.ps1.
+        Takes the toggle as an explicit -CleanConsoleOutputEnabled
+        parameter rather than reading $script:CleanConsoleOutputEnabled
+        itself, since CleanConsoleRendering.ps1 documents itself as
+        having NO forward references - this call site is what supplies
+        that value, not the callee. Write-GatedConsoleMessage only does
+        real CCR work (calling Write-CleanConsoleMessage) when the
+        toggle passed in is true, so a caller that leaves the toggle off
+        never needs CleanConsoleRendering.ps1 dot-sourced at all.
     Core abort mechanics (CTS registry, drain loop, force-kill) are
     unchanged by any of this - only the console-output call sites.
     Complete-AbortDrain also now finalizes the CCR display (force-
@@ -268,11 +277,7 @@ function Test-AbortSignal {
         } else {
             "`n[ABORT] Window close detected - finishing current jobs, please wait..."
         }
-        if ($script:CleanConsoleOutputEnabled) {
-            Write-CleanConsoleMessage -Text $abortMessage -Color Yellow
-        } else {
-            Write-Host $abortMessage -ForegroundColor Yellow
-        }
+        Write-GatedConsoleMessage -Text $abortMessage -Color Yellow -CleanConsoleOutputEnabled ([bool]$script:CleanConsoleOutputEnabled)
     }
     return $script:abortRequested
 }
@@ -501,11 +506,7 @@ function Invoke-GracefulDrain {
         $AbortWaitMessage = "[ABORT] Waiting for current jobs to finish (up to " + $TimeoutSeconds + "s)..."
     }
     if ($AbortWaitMessage -ne "") {
-        if ($script:CleanConsoleOutputEnabled) {
-            Write-CleanConsoleMessage -Text $AbortWaitMessage -Color Yellow
-        } else {
-            Write-Host $AbortWaitMessage -ForegroundColor Yellow
-        }
+        Write-GatedConsoleMessage -Text $AbortWaitMessage -Color Yellow -CleanConsoleOutputEnabled ([bool]$script:CleanConsoleOutputEnabled)
     }
 
     $localHandles  = $Handles
@@ -531,11 +532,7 @@ function Invoke-GracefulDrain {
     if ($localHandles.Count -gt 0) {
         $forceStoppedCount = $localHandles.Count
         $forceStopMessage = "[ABORT] Force-stopping " + $forceStoppedCount + " job(s) that did not finish within " + $TimeoutSeconds + "s."
-        if ($script:CleanConsoleOutputEnabled) {
-            Write-CleanConsoleMessage -Text $forceStopMessage -Color Red
-        } else {
-            Write-Host $forceStopMessage -ForegroundColor Red
-        }
+        Write-GatedConsoleMessage -Text $forceStopMessage -Color Red -CleanConsoleOutputEnabled ([bool]$script:CleanConsoleOutputEnabled)
         foreach ($h in $localHandles) {
             try { $h.PS.Stop() } catch { }
             try { $h.PS.Dispose() } catch { }

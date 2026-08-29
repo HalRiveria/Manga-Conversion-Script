@@ -74,12 +74,15 @@
         toggle)
       - Start-SeriesProgress, Start-ChapterProgress,
         Complete-ChapterProgress, Complete-AllActiveSeriesProgress,
-        Write-CleanConsoleMessage (CleanConsoleRendering.ps1) - the last
+        Write-GatedConsoleMessage (CleanConsoleRendering.ps1) - the last
         one gates Convert-ImageBatch's own straggler-drain wait message,
         matching how AbortPipeline.ps1's Invoke-GracefulDrain already
         handles the same kind of message (this function has its own,
         separate drain implementation - see PART 1 NOTE below - so it
-        needed the same CCR gate added explicitly)
+        needed the same CCR gate added explicitly). Write-GatedConsoleMessage
+        takes the toggle as an explicit param rather than reading
+        $script:CleanConsoleOutputEnabled itself (CleanConsoleRendering.ps1
+        has no forward references of its own) - this call site supplies it.
       - Test-AvifAnimated (AnimatedConversionPipeline.ps1) - NEW
         2026-08-28, for the static-AVIF conversion path in
         Convert-ImageBatch (see "STATIC AVIF -> JXL" below). Spawns a
@@ -513,11 +516,7 @@ function Convert-ImageBatch {
             # This function's own straggler drain is a separate, independent
             # implementation (not Invoke-GracefulDrain), so it needed this
             # gate added explicitly rather than inheriting it for free.
-            if ($script:CleanConsoleOutputEnabled) {
-                Write-CleanConsoleMessage -Text $AbortWaitMessage -Color Yellow
-            } else {
-                Write-Host $AbortWaitMessage -ForegroundColor Yellow
-            }
+            Write-GatedConsoleMessage -Text $AbortWaitMessage -Color Yellow -CleanConsoleOutputEnabled ([bool]$script:CleanConsoleOutputEnabled)
         }
         $abortDeadline = [System.Diagnostics.Stopwatch]::StartNew()
 

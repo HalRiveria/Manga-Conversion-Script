@@ -34,15 +34,29 @@ function Flush-ConsoleQueue {
 # AbortPipeline.ps1 forward-references $script:CleanConsoleOutputEnabled
 # (owned by Logging.ps1, deliberately NOT redeclared here - this harness
 # proves the module still works standalone with it simply absent/falsy)
-# and Write-CleanConsoleMessage (owned by CleanConsoleRendering.ps1).
-# Stubbed here with call tracking, same pattern as Flush-ConsoleQueue
-# above, so scenarios can assert WHICH path (raw Write-Host vs. this
-# stub) actually fired for a given $script:CleanConsoleOutputEnabled
-# value - not just that neither one threw.
+# and Write-GatedConsoleMessage (owned by CleanConsoleRendering.ps1,
+# which itself calls Write-CleanConsoleMessage when its own
+# -CleanConsoleOutputEnabled param is true). Both stubbed here - real
+# CleanConsoleRendering.ps1 is deliberately never dot-sourced, to prove
+# this module still works standalone - with call tracking on the inner
+# stub, same pattern as Flush-ConsoleQueue above, so scenarios can assert
+# WHICH path (raw Write-Host vs. this stub) actually fired for a given
+# $script:CleanConsoleOutputEnabled value - not just that neither one
+# threw.
 $script:cleanConsoleMessageCalls = [System.Collections.Generic.List[hashtable]]::new()
 function Write-CleanConsoleMessage {
     param([string]$Text, [string]$Color)
     $script:cleanConsoleMessageCalls.Add(@{ Text = $Text; Color = $Color })
+}
+function Write-GatedConsoleMessage {
+    param([string]$Text, [string]$Color, [bool]$CleanConsoleOutputEnabled)
+    if ($CleanConsoleOutputEnabled) {
+        Write-CleanConsoleMessage -Text $Text -Color $Color
+    } elseif ($Color) {
+        Write-Host $Text -ForegroundColor $Color
+    } else {
+        Write-Host $Text
+    }
 }
 $script:completeAllActiveSeriesProgressCallCount = 0
 function Complete-AllActiveSeriesProgress {

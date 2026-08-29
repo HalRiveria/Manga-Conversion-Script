@@ -560,6 +560,40 @@ function Write-CleanConsoleMessage {
     Update-CleanConsoleDisplay -ExtraFrozenRows $rows
 }
 
+function Write-GatedConsoleMessage {
+    <#
+    .SYNOPSIS
+        Prints $Text through Write-CleanConsoleMessage when
+        -CleanConsoleOutputEnabled is true, else a raw
+        Write-Host -ForegroundColor $Color - centralizing the gate that
+        was duplicated across AbortPipeline.ps1 (3 call sites),
+        ImageConversionPipeline.ps1, and AnimatedConversionPipeline.ps1.
+        A raw Write-Host while CCR's live region is mid-redraw would land
+        wherever the cursor happens to be and get mangled by the next
+        redraw - see this module's own header.
+    .PARAMETER CleanConsoleOutputEnabled
+        Explicit parameter, not a read of $script:CleanConsoleOutputEnabled
+        (owned by Logging.ps1) - this module documents itself as having
+        NO forward references, and stays that way: every caller already
+        has that value in its own scope and passes it in directly.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Text,
+        [string]$Color,
+        [Parameter(Mandatory)]
+        [bool]$CleanConsoleOutputEnabled
+    )
+    if ($CleanConsoleOutputEnabled) {
+        Write-CleanConsoleMessage -Text $Text -Color $Color
+    } elseif ($Color) {
+        Write-Host $Text -ForegroundColor $Color
+    } else {
+        Write-Host $Text
+    }
+}
+
 function Complete-AllActiveSeriesProgress {
     <#
     .SYNOPSIS

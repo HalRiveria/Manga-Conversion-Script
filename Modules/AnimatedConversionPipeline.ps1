@@ -99,12 +99,15 @@
     dot-source the owning module(s) first):
       - Write-Log (Modules\Logging.ps1)
       - Remove-Source, $script:PermanentDelete (Modules\FileDeletion.ps1)
-      - $script:CleanConsoleOutputEnabled, Write-CleanConsoleMessage
+      - $script:CleanConsoleOutputEnabled, Write-GatedConsoleMessage
         (Modules\CleanConsoleRendering.ps1) - PART 1's own
         Convert-AnimatedBatch needs these too now, to gate its straggler-
         drain wait message the same way ImageConversionPipeline.ps1's
         Convert-ImageBatch does (a raw Write-Host there would corrupt
-        CCR's live region mid-redraw).
+        CCR's live region mid-redraw). Write-GatedConsoleMessage takes
+        the toggle as an explicit param rather than reading
+        $script:CleanConsoleOutputEnabled itself (CleanConsoleRendering.ps1
+        has no forward references of its own) - this call site supplies it.
       - PART 2 only: Test-AbortSignal, Register-AbortCancellationSource,
         Unregister-AbortCancellationSource (Modules\AbortPipeline.ps1);
         New-SeriesProvider, Get-SeriesChapters
@@ -375,11 +378,7 @@ function Convert-AnimatedBatch {
             # Same CCR gate as ImageConversionPipeline.ps1's Convert-ImageBatch
             # straggler drain - see that function's own comment for why (a
             # raw Write-Host here would corrupt CCR's live region mid-redraw).
-            if ($script:CleanConsoleOutputEnabled) {
-                Write-CleanConsoleMessage -Text $AbortWaitMessage -Color Yellow
-            } else {
-                Write-Host $AbortWaitMessage -ForegroundColor Yellow
-            }
+            Write-GatedConsoleMessage -Text $AbortWaitMessage -Color Yellow -CleanConsoleOutputEnabled ([bool]$script:CleanConsoleOutputEnabled)
         }
         $abortDeadline = [System.Diagnostics.Stopwatch]::StartNew()
 
