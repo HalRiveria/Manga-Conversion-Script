@@ -263,10 +263,23 @@ $script:rezipWorker = {
     } else {
         Write-Log ("Found " + $imgFiles.Count + " image(s) in '" + $extractDir + "' - converting.")
 
+        # No -AbortWaitMessage passed (2026-08-29) - this call runs inside
+        # $script:rezipWorker's own runspace, where CleanConsoleRendering.ps1's
+        # module-scope state (e.g. $script:ccrActiveSeries) is never
+        # initialized (only function definitions propagate into a fresh
+        # runspace via -SharedFunctionNames, not a module's top-level state).
+        # Passing a real message here would let Convert-ImageBatch's own
+        # internal straggler-drain try to call into CCR's live-region
+        # display machinery from an unsafe context if Clean Console Output
+        # is on - see CLAUDE.md's Known gaps. Matches Controller.ps1's own
+        # Full Pipeline worker, which never passed this either. The outer
+        # Invoke-ZipParallelProcessing call below already prints its own
+        # (CCR-safe, main-thread) default wait message via
+        # AbortPipeline.ps1's Invoke-GracefulDrain, so the user still sees
+        # an abort-in-progress message either way.
         $batchResult = Convert-ImageBatch -ImageFiles $imgFiles -CjxlExe $CjxlExe -MagickExe $MagickExe `
             -DoJpegLossless $DoJpegLossless -DoJpegQuality $DoJpegQuality -MaxCjxlProcs $MaxCjxlProcs `
-            -DoFullLogging $DoFullLogging -CancelToken $CancelToken -BatchLabel $result.ZipName `
-            -AbortWaitMessage "[ABORT] Waiting for current jobs to finish (up to 60s)..."
+            -DoFullLogging $DoFullLogging -CancelToken $CancelToken -BatchLabel $result.ZipName
 
         $result.ImgConverted     = $batchResult.ConvertedCount
         $result.ImgConvertFailed = $batchResult.FailedCount
