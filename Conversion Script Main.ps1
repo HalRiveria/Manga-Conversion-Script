@@ -18,19 +18,16 @@
     only job is bootstrap (find Modules\, load settings, dot-source
     everything) and the top-level dispatch loop.
 
-    MODULE-FINDING LOGIC IS INLINED, NOT DOT-SOURCED (2026-08-28): the
-    three functions right below (Get-ExpectedModuleFileNames,
-    Test-ModulesFolderCandidate, Resolve-ModulesPath) are a direct copy
-    of ModuleLoading.ps1's own functions. Dot-sourcing that file instead
-    was tried first and rejected - it would still leave this script
-    unable to find Modules\ without ALSO already knowing where
-    ModuleLoading.ps1 itself is, which doesn't actually solve the
-    bootstrap problem, just moves it one file sideways. ModuleLoading.ps1
-    stays in the repo as a standalone, separately harness-tested copy of
-    this same logic (project owner's explicit call) - if this logic ever
-    needs to change, update BOTH copies; Modules\_Harness\ModuleLoading.Harness.ps1
-    is what proves the logic itself is correct, this file just carries a
-    copy of it.
+    MODULE-FINDING LOGIC IS INLINED, NOT DOT-SOURCED: the three functions
+    right below (Get-ExpectedModuleFileNames, Test-ModulesFolderCandidate,
+    Resolve-ModulesPath) can't live in Modules\ - dot-sourcing anything
+    from there requires already knowing where Modules\ is, which is
+    exactly the problem this logic solves. They used to also exist as a
+    standalone, separately harness-tested copy (ModuleLoading.ps1, repo
+    root) built to prove the logic before this rewrite existed to call
+    it - removed once a review confirmed the logic had no open issues and
+    this inlined copy had already been proven via real runs. See
+    CLAUDE.md's "Module loading & settings persistence" section.
 
     DISPATCH AND MAIN LOOP (2026-08-28, Phases 3 and the following
     session): this file now just calls Controller.ps1's Invoke-MainLoop.
@@ -75,8 +72,7 @@ function Get-ExpectedModuleFileNames {
     .SYNOPSIS
         The real, current list of every module file Modules\ is expected
         to contain. Update by hand whenever a real module is added or
-        removed - kept in sync with ModuleLoading.ps1's own copy and its
-        drift-checking harness scenario.
+        removed.
     #>
     return @(
         "AbortPipeline.ps1"
