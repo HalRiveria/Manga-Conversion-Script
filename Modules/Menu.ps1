@@ -269,6 +269,25 @@ function Get-OptionsIntRangeText {
     return "(" + $Item.Min + "-" + $Item.Max + ")"
 }
 
+function Open-FolderInExplorer {
+    <#
+    .SYNOPSIS
+        Private helper - opens $Path's parent folder in Explorer,
+        creating it first if it doesn't exist yet (so there's something
+        to open). Shared by Invoke-OptionsMenuAction's
+        OpenSettingsLocation and Invoke-CoverDeletionAction's
+        OpenProfileLocation - both were running this identical block by
+        hand.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    $dir = Split-Path -Path $Path -Parent
+    if (-not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    Start-Process -FilePath "explorer.exe" -ArgumentList $dir
+}
+
 function Invoke-OptionsMenuAction {
     <#
     .SYNOPSIS
@@ -285,13 +304,7 @@ function Invoke-OptionsMenuAction {
     )
 
     switch ($ActionName) {
-        'OpenSettingsLocation' {
-            $dir = Split-Path -Path $SettingsPath -Parent
-            if (-not (Test-Path -LiteralPath $dir)) {
-                New-Item -ItemType Directory -Path $dir -Force | Out-Null
-            }
-            Start-Process -FilePath "explorer.exe" -ArgumentList $dir
-        }
+        'OpenSettingsLocation' { Open-FolderInExplorer -Path $SettingsPath }
     }
 }
 
@@ -398,13 +411,7 @@ function Invoke-CoverDeletionAction {
     )
 
     switch ($ActionName) {
-        'OpenProfileLocation' {
-            $dir = Split-Path -Path $ProfilesPath -Parent
-            if (-not (Test-Path -LiteralPath $dir)) {
-                New-Item -ItemType Directory -Path $dir -Force | Out-Null
-            }
-            Start-Process -FilePath "explorer.exe" -ArgumentList $dir
-        }
+        'OpenProfileLocation' { Open-FolderInExplorer -Path $ProfilesPath }
     }
 }
 
