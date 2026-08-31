@@ -5,12 +5,18 @@
 .DESCRIPTION
     Integration-style, like ZipPipeline.Harness.ps1 - dot-sources the real
     already-built dependency modules (FileDeletion, ZipCreation,
-    ZipValidation, ImageConversionPipeline, ResumeState, AbortPipeline,
-    Logging, ZipParallelProcessing) rather than stubbing them, since
-    RezipPipeline.ps1 is an orchestration-tier module that composes all of
-    them for real. A compiled fake_cjxl.exe (same technique as
-    ImageConversionPipeline.Harness.ps1) stands in for the real cjxl.exe
-    so real OS processes actually run end to end.
+    ZipValidation, AnimatedConversionPipeline, ImageConversionPipeline,
+    ResumeState, AbortPipeline, Logging, ZipParallelProcessing) rather
+    than stubbing them, since RezipPipeline.ps1 is an orchestration-tier
+    module that composes all of them for real. AnimatedConversionPipeline.ps1
+    is dot-sourced (2026-08-29) for Test-AvifAnimated - Convert-ImageBatch's
+    static-AVIF path forward-references it, a real dependency that was
+    latent/unexercised until Get-ImageConversionSharedFunctionNames made
+    RezipPipeline.ps1's own -SharedFunctionNames array honestly include it
+    (previously silently missing - see CHANGELOG.md 2026-08-29). A compiled
+    fake_cjxl.exe (same technique as ImageConversionPipeline.Harness.ps1)
+    stands in for the real cjxl.exe so real OS processes actually run end
+    to end.
 
     DOT-SOURCE ORDER: Logging.ps1/AbortPipeline.ps1 BEFORE
     ZipParallelProcessing.ps1 - same rule ZipPipeline.Harness.ps1
@@ -27,6 +33,7 @@ $modulesDir = Join-Path $PSScriptRoot ".."
 . (Join-Path $modulesDir "FileDeletion.ps1")
 . (Join-Path $modulesDir "ZipCreation.ps1")
 . (Join-Path $modulesDir "ZipValidation.ps1")
+. (Join-Path $modulesDir "AnimatedConversionPipeline.ps1")   # for Test-AvifAnimated - Convert-ImageBatch's static-AVIF path forward-references it
 . (Join-Path $modulesDir "ImageConversionPipeline.ps1")
 . (Join-Path $modulesDir "ResumeState.ps1")
 . (Join-Path $modulesDir "AbortPipeline.ps1")

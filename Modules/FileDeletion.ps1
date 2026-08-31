@@ -233,3 +233,15 @@ function Remove-Source {
         return Move-ToRecycleBin -ItemPath $ItemPath
     }
 }
+
+function Get-FileDeletionSharedFunctionNames {
+    <#
+    .SYNOPSIS
+        The function names a caller must add to its own -SharedFunctionNames
+        list (Invoke-ZipParallelProcessing) to safely call Remove-Source (or
+        Move-ToRecycleBin/Remove-ItemPermanently directly) from inside a
+        runspace worker. Single source of truth for this group - see
+        Logging.ps1's Get-LoggingSharedFunctionNames for why this exists.
+    #>
+    return @('Remove-Source', 'Move-ToRecycleBin', 'Remove-ItemPermanently', 'Invoke-DeleteTreatingVanishedAsFalse')
+}

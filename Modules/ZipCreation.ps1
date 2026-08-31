@@ -100,3 +100,18 @@ function Compress-FolderToZip {
         throw
     }
 }
+
+function Get-ZipCreationSharedFunctionNames {
+    <#
+    .SYNOPSIS
+        The function names a caller must add to its own -SharedFunctionNames
+        list (Invoke-ZipParallelProcessing) to safely call Compress-FolderToZip
+        from inside a runspace worker - single source of truth for this
+        group (see Logging.ps1's Get-LoggingSharedFunctionNames for why this
+        exists). Compress-FolderToZip's own cleanup path also calls
+        Remove-ItemPermanently (FileDeletion.ps1) - that's
+        Get-FileDeletionSharedFunctionNames's own responsibility, not
+        duplicated here; a caller needs both groups together.
+    #>
+    return @('Compress-FolderToZip')
+}

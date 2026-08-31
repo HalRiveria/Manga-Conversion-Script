@@ -203,19 +203,34 @@
 
     FORWARD REFERENCES (not defined in this module - callers must
     dot-source the owning module(s) first):
-      - Write-Log, Invoke-MutexGuardedWrite (Logging.ps1)
+      - Write-Log, Invoke-MutexGuardedWrite, Get-LoggingSharedFunctionNames
+        (Logging.ps1)
       - Remove-Source, Move-ToRecycleBin, Remove-ItemPermanently,
-        $script:PermanentDelete (FileDeletion.ps1) - the latter two
-        because Remove-Source itself calls one of them internally based
-        on $script:PermanentDelete, and a fresh runspace needs BOTH
+        Get-FileDeletionSharedFunctionNames, $script:PermanentDelete
+        (FileDeletion.ps1) - the latter two of the first three because
+        Remove-Source itself calls one of them internally based on
+        $script:PermanentDelete, and a fresh runspace needs BOTH
         propagated since it can't know ahead of time which branch a
         given deletion will take
-      - Convert-ImageBatch, Get-LooseImageCandidates,
-        Remove-StaleLooseSources, Get-ChapterProgressStatus,
-        Invoke-LooseImageConversionPipeline (ImageConversionPipeline.ps1)
-      - Convert-AnimatedBatch, Get-LooseAnimatedCandidates,
-        Get-ChapterAnimatedStatus, Invoke-LooseAnimatedConversionPipeline
+      - Convert-ImageBatch, Get-ImageConversionSharedFunctionNames,
+        Get-LooseImageCandidates, Remove-StaleLooseSources,
+        Get-ChapterProgressStatus, Invoke-LooseImageConversionPipeline
+        (ImageConversionPipeline.ps1)
+      - Convert-AnimatedBatch, Get-AnimatedConversionSharedFunctionNames,
+        Get-LooseAnimatedCandidates, Get-ChapterAnimatedStatus,
+        Invoke-LooseAnimatedConversionPipeline
         (AnimatedConversionPipeline.ps1)
+      - Get-*SharedFunctionNames (2026-08-29, one per group above) are
+        each module's own single source of truth for what a caller needs
+        in -SharedFunctionNames to call into it from a runspace worker -
+        $chapterWorkerSharedFunctionNames below concatenates all four
+        instead of hand-typing every individual name, so a future new
+        helper anywhere in this dependency chain only needs its own
+        group's getter updated, not every caller across this codebase
+        (the exact bug pattern that bit this project four times in one
+        session - see CHANGELOG.md 2026-08-29). Deliberately does NOT
+        cover Write-GatedConsoleMessage - see
+        Get-ImageConversionSharedFunctionNames's own docstring for why.
       - Compress-FolderToZip (ZipCreation.ps1), Test-ZipArchive
         (ZipValidation.ps1) - called directly, NOT via ZipPipeline.ps1's
         Invoke-LooseFolderZip (see "ZIP-BLOCKING POLICY" above for why)
@@ -449,8 +464,9 @@ function Invoke-FullPipelineChapter {
             if ($r.EngineType -eq 'Image') { $resultBox.Image = $r.Result } else { $resultBox.Animated = $r.Result }
         }.GetNewClosure()
 
+        $chapterWorkerSharedFunctionNames = @(Get-LoggingSharedFunctionNames) + @(Get-FileDeletionSharedFunctionNames) + @(Get-ImageConversionSharedFunctionNames) + @(Get-AnimatedConversionSharedFunctionNames)
         $null = Invoke-ZipParallelProcessing -WorkerScript $script:fullPipelineChapterWorker -JobParams $jobParams `
-            -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile', 'Remove-Source', 'Move-ToRecycleBin', 'Remove-ItemPermanently', 'Invoke-DeleteTreatingVanishedAsFalse', 'Convert-ImageBatch', 'Complete-ImageConversionJob', 'Invoke-IccStripRetryOrFail', 'Convert-AnimatedBatch', 'Complete-AnimatedConversionJob', 'Test-AvifAnimated') `
+            -SharedFunctionNames $chapterWorkerSharedFunctionNames `
             -MaxParallel 2 -Cts $Cts -ResultHandler $resultHandler `
             -AbortWaitMessage "[ABORT] Waiting for current image/animated jobs to finish (up to 60s)..."
 

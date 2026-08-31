@@ -1117,3 +1117,22 @@ function Invoke-LooseImageConversionPipeline {
 
     return $totals
 }
+
+function Get-ImageConversionSharedFunctionNames {
+    <#
+    .SYNOPSIS
+        The function names a caller must add to its own -SharedFunctionNames
+        list (Invoke-ZipParallelProcessing) to safely call Convert-ImageBatch
+        from inside a runspace worker - single source of truth for this
+        group (see Logging.ps1's Get-LoggingSharedFunctionNames for why this
+        exists). Includes Test-AvifAnimated (AnimatedConversionPipeline.ps1)
+        since Convert-ImageBatch's own static-AVIF path calls it directly -
+        a real cross-module dependency, not an oversight. Does NOT include
+        Write-GatedConsoleMessage: Convert-ImageBatch's own straggler-drain
+        can call it, but propagating it is unsafe (CleanConsoleRendering.ps1's
+        module-scope state is never initialized inside a fresh runspace) -
+        see CLAUDE.md's Known gaps / CHANGELOG.md 2026-08-29 for the real
+        gap this leaves (deliberately, not an oversight either).
+    #>
+    return @('Convert-ImageBatch', 'Complete-ImageConversionJob', 'Invoke-IccStripRetryOrFail', 'Test-AvifAnimated')
+}

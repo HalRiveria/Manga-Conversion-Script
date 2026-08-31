@@ -109,11 +109,18 @@
 
     FORWARD REFERENCES (not defined in this module - callers must
     dot-source the owning module(s) first):
-      - Write-Log, Invoke-MutexGuardedWrite (Logging.ps1)
-      - Move-ToRecycleBin, Remove-ItemPermanently, Remove-Source (FileDeletion.ps1)
-      - Compress-FolderToZip (ZipCreation.ps1)
-      - Test-ZipArchive (ZipValidation.ps1)
-      - Convert-ImageBatch (ImageConversionPipeline.ps1)
+      - Write-Log, Invoke-MutexGuardedWrite, Get-LoggingSharedFunctionNames
+        (Logging.ps1)
+      - Move-ToRecycleBin, Remove-ItemPermanently, Remove-Source,
+        Get-FileDeletionSharedFunctionNames (FileDeletion.ps1)
+      - Compress-FolderToZip, Get-ZipCreationSharedFunctionNames (ZipCreation.ps1)
+      - Test-ZipArchive, Get-ZipValidationSharedFunctionNames (ZipValidation.ps1)
+      - Convert-ImageBatch, Get-ImageConversionSharedFunctionNames
+        (ImageConversionPipeline.ps1)
+      - Get-*SharedFunctionNames (2026-08-29) are each module's own single
+        source of truth for what a caller needs in -SharedFunctionNames to
+        call into it from a runspace worker - see Controller.ps1's own
+        header for the full reasoning (same pattern, same reason).
       - Invoke-ZipParallelProcessing (ZipParallelProcessing.ps1)
       - Register-AbortCancellationSource, Unregister-AbortCancellationSource
         (AbortPipeline.ps1)
@@ -498,8 +505,9 @@ function Invoke-RezipPipeline {
         $script:rezipCts = [System.Threading.CancellationTokenSource]::new()
         Register-AbortCancellationSource -Cts $script:rezipCts
         try {
+            $rezipWorkerSharedFunctionNames = @(Get-LoggingSharedFunctionNames) + @(Get-FileDeletionSharedFunctionNames) + @(Get-ZipCreationSharedFunctionNames) + @(Get-ZipValidationSharedFunctionNames) + @(Get-ImageConversionSharedFunctionNames)
             $rzOutcome = Invoke-ZipParallelProcessing -WorkerScript $script:rezipWorker -NextJobProvider $rzJobProvider `
-                -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile', 'Move-ToRecycleBin', 'Remove-ItemPermanently', 'Invoke-DeleteTreatingVanishedAsFalse', 'Remove-Source', 'Compress-FolderToZip', 'Test-ZipArchive', 'Convert-ImageBatch', 'Complete-ImageConversionJob', 'Invoke-IccStripRetryOrFail') `
+                -SharedFunctionNames $rezipWorkerSharedFunctionNames `
                 -MaxParallel $MaxParallel -Cts $script:rezipCts -ResultHandler $rzResultHandler
 
             $totals.ForceStoppedCount = $rzOutcome.ForceStoppedCount

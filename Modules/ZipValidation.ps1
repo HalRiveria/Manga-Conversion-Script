@@ -60,3 +60,15 @@ function Test-ZipArchive {
     if ($RequireJxlEntry -and $jxlCount -eq 0) { throw ("ZIP archive contains no .jxl files after conversion: '" + $ZipPath + "'") }
     return @{ EntryCount = $entryCount; JxlCount = $jxlCount }
 }
+
+function Get-ZipValidationSharedFunctionNames {
+    <#
+    .SYNOPSIS
+        The function names a caller must add to its own -SharedFunctionNames
+        list (Invoke-ZipParallelProcessing) to safely call Test-ZipArchive
+        from inside a runspace worker - single source of truth for this
+        group (see Logging.ps1's Get-LoggingSharedFunctionNames for why this
+        exists).
+    #>
+    return @('Test-ZipArchive')
+}

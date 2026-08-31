@@ -29,11 +29,14 @@
 
     FORWARD REFERENCES (not defined in this module - callers must
     dot-source the owning module(s) first):
-      - Write-Log (Logging.ps1)
-      - Move-ToRecycleBin, Remove-ItemPermanently, Remove-Source
-        (FileDeletion.ps1)
-      - Compress-FolderToZip (ZipCreation.ps1)
-      - Test-ZipArchive (ZipValidation.ps1)
+      - Write-Log, Get-LoggingSharedFunctionNames (Logging.ps1)
+      - Move-ToRecycleBin, Remove-ItemPermanently, Remove-Source,
+        Get-FileDeletionSharedFunctionNames (FileDeletion.ps1)
+      - Compress-FolderToZip, Get-ZipCreationSharedFunctionNames (ZipCreation.ps1)
+      - Test-ZipArchive, Get-ZipValidationSharedFunctionNames (ZipValidation.ps1)
+      - Get-*SharedFunctionNames (2026-08-29) are each module's own single
+        source of truth for what a caller needs in -SharedFunctionNames -
+        see Controller.ps1's own header for the full reasoning.
       - New-ZippableLeafDirProvider (LeafDirectoryDiscovery.ps1) -
         incremental leaf discovery, not the full-scan Get-ZippableLeafDirs
         (see "INCREMENTAL SCANNING" below)
@@ -426,8 +429,9 @@ function Invoke-ZipOnlyPipeline {
                 Complete-CcrChapterProgressIfEnabled -SeriesName $r.SeriesName -ChapterName $r.FolderName -Status $zipStatus -Detail $zipDetail
             }.GetNewClosure()
 
+            $zipOnlyWorkerSharedFunctionNames = @(Get-LoggingSharedFunctionNames) + @(Get-FileDeletionSharedFunctionNames) + @(Get-ZipCreationSharedFunctionNames) + @(Get-ZipValidationSharedFunctionNames)
             $zoOutcome = Invoke-ZipParallelProcessing -WorkerScript $script:zipOnlyWorker -NextJobProvider $zoJobProvider `
-                -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile', 'Move-ToRecycleBin', 'Remove-ItemPermanently', 'Invoke-DeleteTreatingVanishedAsFalse', 'Remove-Source', 'Compress-FolderToZip', 'Test-ZipArchive') `
+                -SharedFunctionNames $zipOnlyWorkerSharedFunctionNames `
                 -MaxParallel $MaxParallel -Cts $script:zipOnlyCts -ResultHandler $zoResultHandler
 
             $totals.ForceStoppedCount = $zoOutcome.ForceStoppedCount

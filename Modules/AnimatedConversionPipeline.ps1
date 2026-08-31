@@ -747,3 +747,17 @@ function Invoke-LooseAnimatedConversionPipeline {
 
     return $totals
 }
+
+function Get-AnimatedConversionSharedFunctionNames {
+    <#
+    .SYNOPSIS
+        The function names a caller must add to its own -SharedFunctionNames
+        list (Invoke-ZipParallelProcessing) to safely call Convert-AnimatedBatch
+        from inside a runspace worker - single source of truth for this
+        group (see Logging.ps1's Get-LoggingSharedFunctionNames for why this
+        exists). Does NOT include Write-GatedConsoleMessage - see
+        Get-ImageConversionSharedFunctionNames's own docstring for why
+        (same reason, same deliberate gap).
+    #>
+    return @('Convert-AnimatedBatch', 'Complete-AnimatedConversionJob', 'Test-AvifAnimated')
+}

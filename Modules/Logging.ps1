@@ -474,3 +474,19 @@ function Write-LogFileSummary {
         if (Test-Path -LiteralPath $script:logWarnFile)  { Write-Host ("  Warnings : " + $script:logWarnFile)  -ForegroundColor Green }
     }
 }
+
+function Get-LoggingSharedFunctionNames {
+    <#
+    .SYNOPSIS
+        The function names a caller must add to its own -SharedFunctionNames
+        list (Invoke-ZipParallelProcessing) to safely call Write-Log from
+        inside a runspace worker. Single source of truth for this group -
+        added specifically so a future new Write-Log dependency only needs
+        updating HERE, not at every one of Controller.ps1/RezipPipeline.ps1/
+        ZipPipeline.ps1's own call sites by hand (the exact bug pattern that
+        bit this project four times in one session - see CHANGELOG.md
+        2026-08-29). Callers concatenate this with whatever other groups
+        (FileDeletion, image/animated conversion, zip creation) they need.
+    #>
+    return @('Write-Log', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile')
+}
