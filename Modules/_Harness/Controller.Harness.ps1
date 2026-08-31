@@ -361,6 +361,35 @@ Test-Assert ($totalsD.ZipCreatedSuccess -eq 1) "still zipped cleanly (a clean, e
 Write-Host ""
 
 # ==============================================================================
+#  Scenario D2 (2026-08-31 fix): a chapter Get-SeriesChapters discovers
+#  (it has a qualifying loose-image extension) but whose only loose file
+#  is a STALE leftover - a valid, same-basename .jxl already exists (e.g.
+#  a prior run's source-deletion failed after a real successful
+#  conversion). Get-LooseImageCandidates classifies it as StaleSources,
+#  Remove-StaleLooseSources cleans it up before the per-chapter loop runs,
+#  leaving $chImages.Count -eq 0 for a chapter that's otherwise completely
+#  ready to zip. Before the fix, ANY chapter reaching the per-chapter loop
+#  with 0 images and 0 animated files short-circuited straight to
+#  `Zipped = $false` without ever trying - stranding an already-fully-
+#  converted chapter as a loose folder forever, since a chapter with zero
+#  qualifying loose files left is never rediscovered by Get-SeriesChapters
+#  on any later run either.
+# ==============================================================================
+Write-Host "=== Scenario D2: a chapter with only a stale leftover source (0 NeedsConversion) still gets zipped ===" -ForegroundColor Cyan
+$chD2 = New-Dir "scenario-d2\Series\Chapter 1"
+New-FakeImageIn -DirPath $chD2 -Name "page1.jpg" | Out-Null
+Start-Sleep -Milliseconds 50
+[System.IO.File]::WriteAllText((Join-Path $chD2 "page1.jxl"), "already converted - source deletion failed on a prior run")
+
+$totalsD2 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-d2") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+
+Test-Assert ($totalsD2.ConvertedImageSuccess -eq 0 -and $totalsD2.ConvertedImageFail -eq 0) ("sanity check: nothing was actually converted this run - the chapter had 0 NeedsConversion candidates (got Success=" + $totalsD2.ConvertedImageSuccess + ", Fail=" + $totalsD2.ConvertedImageFail + ")")
+Test-Assert ($totalsD2.StaleImageCleanedSuccess -eq 1) "the stale leftover source was cleaned up"
+Test-Assert ($totalsD2.ZipCreatedSuccess -eq 1) ("the chapter was still zipped despite 0 conversion candidates - the exact gap this fix closes (got ZipCreatedSuccess=" + $totalsD2.ZipCreatedSuccess + ")")
+Test-Assert (-not (Test-Path -LiteralPath $chD2)) "the chapter folder was deleted after the successful zip, same as any other successfully-zipped chapter"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario E: a chapter with ONLY animated files - symmetric to D, the
 #  image engine is never dispatched.
 # ==============================================================================

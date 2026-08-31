@@ -860,18 +860,35 @@ function Invoke-FullPipeline {
                 $chImages   = @(); if ($imagesByDir.ContainsKey($chapterDir.FullName))   { $chImages   = @($imagesByDir[$chapterDir.FullName]) }
                 $chAnimated = @(); if ($animatedByDir.ContainsKey($chapterDir.FullName)) { $chAnimated = @($animatedByDir[$chapterDir.FullName]) }
 
+                # Always calls Invoke-FullPipelineChapter, even with zero
+                # files for both engines (2026-08-31 fix) - it already
+                # handles that case correctly on its own (both engines stay
+                # undispatched, $imageResult/$animatedResult stay $null,
+                # which Get-MergedChapterStatus correctly reads as a clean
+                # Success), and STILL attempts the zip step when
+                # -IsZippable is true. The removed special case here used
+                # to shortcut straight to `Zipped = $false` without ever
+                # trying - harmless for a chapter that had never been
+                # touched, but wrong for one that a PRIOR, Ctrl+C-interrupted
+                # run had already fully converted: with nothing left to
+                # convert, this branch always fired and the chapter was
+                # never zipped, on ANY future run, permanently stranding it
+                # loose - the "self-healing" claim this session's earlier
+                # Cts-based zip-gate fix made was false. Removing the
+                # special case in favor of the one general code path (which
+                # already gets this right) closes it for good instead of
+                # teaching the special case the same lesson twice.
                 if ($chImages.Count -eq 0 -and $chAnimated.Count -eq 0) {
-                    Write-Log ("Chapter '" + $chapterDir.FullName + "': no unconverted content - skipping conversion.")
-                    $chapterOutcome = @{ ImageResult = $null; AnimatedResult = $null; Status = 'Success'; Detail = $null; Zipped = $false; ZipResult = $null }
+                    Write-Log ("Chapter '" + $chapterDir.FullName + "': no unconverted content - checking whether it still needs zipping.")
                 } else {
                     Write-Log ("Processing chapter: '" + $chapterDir.FullName + "' (" + $chImages.Count + " image(s), " + $chAnimated.Count + " animated file(s))")
-                    $chapterOutcome = Invoke-FullPipelineChapter -ChapterDir $chapterDir.FullName -ChapterImageFiles $chImages -ChapterAnimatedFiles $chAnimated `
-                        -IsZippable $chapter.IsZippable -ZipOut $chapter.ZipOut -CjxlExe $CjxlExe -MagickExe $MagickExe `
-                        -JpegLossless $JpegLossless -JpegQuality $JpegQuality -AnimatedLossless $AnimatedLossless -AnimatedQuality $AnimatedQuality `
-                        -AnimatedOverwrite $AnimatedOverwrite -AnimatedDeleteSource $AnimatedDeleteSource -FullLogging $FullLogging `
-                        -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete $PermanentDelete `
-                        -SharedBudget $sharedBudget -Cts $fullCts
                 }
+                $chapterOutcome = Invoke-FullPipelineChapter -ChapterDir $chapterDir.FullName -ChapterImageFiles $chImages -ChapterAnimatedFiles $chAnimated `
+                    -IsZippable $chapter.IsZippable -ZipOut $chapter.ZipOut -CjxlExe $CjxlExe -MagickExe $MagickExe `
+                    -JpegLossless $JpegLossless -JpegQuality $JpegQuality -AnimatedLossless $AnimatedLossless -AnimatedQuality $AnimatedQuality `
+                    -AnimatedOverwrite $AnimatedOverwrite -AnimatedDeleteSource $AnimatedDeleteSource -FullLogging $FullLogging `
+                    -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete $PermanentDelete `
+                    -SharedBudget $sharedBudget -Cts $fullCts
 
                 if ($null -ne $chapterOutcome.ImageResult) {
                     $ir = $chapterOutcome.ImageResult
