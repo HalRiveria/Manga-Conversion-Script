@@ -478,6 +478,30 @@ function Invoke-FullPipelineChapter {
 
         $imageResult    = $resultBox.Image
         $animatedResult = $resultBox.Animated
+
+        # A DISPATCHED engine (Files.Count -gt 0, i.e. it has an entry in
+        # $jobParams above) whose result never arrived means its runspace
+        # was force-stopped past the graceful-drain timeout, or crashed
+        # with an uncaught exception that ZipParallelProcessing.ps1's own
+        # EndInvoke() try/catch swallowed into a log line without ever
+        # calling -ResultHandler - NOT "nothing to convert", which is the
+        # only legitimate reason Get-ChapterProgressStatus/
+        # Get-ChapterAnimatedStatus treat a $null result as a clean
+        # Success (an engine that was never dispatched at all because this
+        # chapter had zero files for it). Without this check, a crashed or
+        # force-stopped engine reads as a clean Success, so
+        # $imageActuallyConverted below reads $false, Test-ZipArchive
+        # doesn't even require a .jxl entry, and the chapter gets zipped
+        # with that engine's files completely untouched while the run
+        # silently reports success - see Todo.md.
+        if ($ChapterImageFiles.Count -gt 0 -and $null -eq $imageResult) {
+            Write-Log ("Image engine for chapter '" + $ChapterDir + "' never returned a result (crashed or force-stopped) - treating as a failure.") -Level Error
+            $imageResult = @{ FailedCount = 1 }
+        }
+        if ($ChapterAnimatedFiles.Count -gt 0 -and $null -eq $animatedResult) {
+            Write-Log ("Animated engine for chapter '" + $ChapterDir + "' never returned a result (crashed or force-stopped) - treating as a failure.") -Level Error
+            $animatedResult = @{ FailedCount = 1 }
+        }
     }
 
     $status, $detail = Get-MergedChapterStatus -ImageResult $imageResult -AnimatedResult $animatedResult

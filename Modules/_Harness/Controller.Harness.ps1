@@ -252,6 +252,31 @@ Test-Assert ($totalsC.ZipCreatedSuccess -eq 0 -and $totalsC.ZipSkippedDueToError
 Write-Host ""
 
 # ==============================================================================
+#  Scenario C2 (2026-08-31 fix): a DISPATCHED engine whose runspace crashes
+#  with an UNCAUGHT exception - not a normal "cjxl exited 1" failure
+#  (that's Scenario C above, already handled) but a genuine runspace-level
+#  crash (e.g. Process.Start() throwing because the exe path is bad) that
+#  ZipParallelProcessing.ps1's own EndInvoke() try/catch swallows into a
+#  log line without ever calling -ResultHandler. Before the fix, a missing
+#  result read as "nothing to convert" -> clean Success -> the chapter got
+#  zipped with the crashed engine's files completely untouched. Real
+#  -CjxlExe pointed at a nonexistent path - Convert-ImageBatch has no
+#  try/catch around its own Process.Start() call, so this reliably crashes
+#  the image engine's runspace outright rather than producing a normal,
+#  caught cjxl-exit-1 failure.
+# ==============================================================================
+Write-Host "=== Scenario C2: a crashed (not just failed) engine still blocks zipping, not read as Success ===" -ForegroundColor Cyan
+$chC2 = New-Dir "scenario-c2\Series\Chapter 1"
+New-FakeImageIn -DirPath $chC2 -Name "page1.jpg" | Out-Null
+
+$totalsC2 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-c2") -CjxlExe (Join-Path $scratchDir "does_not_exist_cjxl.exe") -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+
+Test-Assert ($totalsC2.ConvertedImageFail -eq 1 -and $totalsC2.ConvertedImageSuccess -eq 0) ("the crashed image engine is counted as a failure, not silently dropped (got Fail=" + $totalsC2.ConvertedImageFail + ", Success=" + $totalsC2.ConvertedImageSuccess + ")")
+Test-Assert ($totalsC2.ZipCreatedSuccess -eq 0 -and $totalsC2.ZipSkippedDueToError -eq 1) "zipping was skipped - the crashed engine correctly blocked it instead of reading as a clean Success"
+Test-Assert (Test-Path -LiteralPath $chC2) "the chapter folder still exists - never zipped, never deleted, despite the engine crash"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario D: a chapter with ONLY image files - the animated engine is
 #  never dispatched at all (AnimatedResult stays $null), not run with an
 #  empty file list.

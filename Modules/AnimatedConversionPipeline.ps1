@@ -333,6 +333,15 @@ function Convert-AnimatedBatch {
         while ($pending.Count -gt 0 -and (-not $CancelToken.IsCancellationRequested) -and `
                $(if ($SharedBudget) { $SharedBudget.Wait(0) } else { $running.Count -lt $AnimatedThreads })) {
             $j = $pending.Dequeue()
+            # Wrapped in try/catch (2026-08-31 fix) - see Convert-ImageBatch's
+            # identical fix (ImageConversionPipeline.ps1) for the full
+            # reasoning: a raw .NET exception from Process.Start() below (a
+            # stale cached -MagickExe path, etc.) is not a terminating error
+            # in this scriptblock, so without this it would keep going with
+            # $j.Proc left $null - that job then sits in $running forever
+            # (HasExited on $null never becomes true) and hangs the whole
+            # dispatch loop indefinitely instead of failing that one job.
+            try {
 
             if ((Test-Path -LiteralPath $j.WebpPath) -and -not $DoAnimatedOverwrite) {
                 Write-Log ("SKIPPING '" + $j.SrcPath + "': output '" + $j.WebpPath + "' already exists (Overwrite is off).")
@@ -375,6 +384,11 @@ function Convert-AnimatedBatch {
             $j.StartTime     = [System.Diagnostics.Stopwatch]::StartNew()
             $j.LastHeartbeat = [timespan]::Zero
             $running.Add($j)
+            } catch {
+                Write-Log ("FAILED to start conversion process for '" + $j.SrcPath + "': " + $_) -Level Error
+                $batchResult.FailedCount++
+                if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
+            }
         }
 
         # Poll for finished processes; heartbeat any still running past the threshold

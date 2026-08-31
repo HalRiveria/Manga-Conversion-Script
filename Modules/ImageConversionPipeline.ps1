@@ -448,6 +448,20 @@ function Convert-ImageBatch {
         while ($pending.Count -gt 0 -and (-not $CancelToken.IsCancellationRequested) -and `
                $(if ($SharedBudget) { $SharedBudget.Wait(0) } else { $running.Count -lt $MaxCjxlProcs })) {
             $j   = $pending.Dequeue()
+            # Everything from here through $running.Add($j) below is wrapped
+            # in one try/catch (2026-08-31 fix) - a raw .NET exception from
+            # either Process.Start() call in this block (magick's
+            # pre-conversion spawn or cjxl's own spawn - a stale cached exe
+            # path, a locked file, etc.) is NOT a terminating error in this
+            # scriptblock (no $ErrorActionPreference = "Stop" is set here),
+            # so without this it would print a non-terminating error and
+            # keep going with $j.Proc left $null - $null.HasExited then
+            # never becomes true, so that job sits in $running forever and
+            # the WHOLE dispatch loop (and the chapter, and the run) hangs
+            # indefinitely instead of failing that one job. Confirmed live:
+            # a stale/bad -CjxlExe path hung indefinitely before this fix.
+            $magickProcLocal = $null
+            try {
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName               = $CjxlExe
             $psi.UseShellExecute        = $false
@@ -530,9 +544,11 @@ function Convert-ImageBatch {
                 $magickPsi.RedirectStandardError  = $true
                 $magickPsi.CreateNoWindow         = $true
                 $magickProc = [System.Diagnostics.Process]::Start($magickPsi)
+                $magickProcLocal = $magickProc
                 $magickProc.WaitForExit()
                 $magickExitCode = $magickProc.ExitCode
                 $magickProc.Dispose()
+                $magickProcLocal = $null
                 if ($magickExitCode -ne 0 -or -not (Test-Path -LiteralPath $tempPng)) {
                     Write-Log ("FAILED " + $formatLabel + "->PNG pre-conversion for '" + $j.SrcPath + "': magick exited " + $magickExitCode) -Level Error
                     $batchResult.FailedCount++
@@ -567,6 +583,13 @@ function Convert-ImageBatch {
 
             $j.Proc = [System.Diagnostics.Process]::Start($psi)
             $running.Add($j)
+            } catch {
+                Write-Log ("FAILED to start conversion process for '" + $j.SrcPath + "': " + $_) -Level Error
+                $batchResult.FailedCount++
+                if ($magickProcLocal) { try { if (-not $magickProcLocal.HasExited) { $magickProcLocal.Kill() }; $magickProcLocal.Dispose() } catch { } }
+                if ($j.TempPng -and (Test-Path -LiteralPath $j.TempPng)) { try { [System.IO.File]::Delete($j.TempPng) } catch { } }
+                if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
+            }
         }
 
         # Poll for finished processes

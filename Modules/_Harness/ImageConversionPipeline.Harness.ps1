@@ -821,6 +821,28 @@ $totalsX = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "sce
 Test-Assert ($totalsX.ConvertedFail -eq 1 -and $totalsX.ConvertedSuccess -eq 0) ("a source that still fails after stripping is counted as ONE failure, not retried forever (got ConvertedFail=" + $totalsX.ConvertedFail + ", ConvertedSuccess=" + $totalsX.ConvertedSuccess + ")")
 Write-Host ""
 
+# ==============================================================================
+#  Scenario Y (2026-08-31 fix): Process.Start() throwing (a stale/bad
+#  -CjxlExe path) used to hang the dispatch loop indefinitely - a raw .NET
+#  exception there isn't terminating in this scriptblock, so execution
+#  continued with $j.Proc left $null, and $null.HasExited never becomes
+#  true, so that job sat in $running forever. Confirmed live before the fix
+#  (this exact repro hung past 40s with no progress). Now wrapped in
+#  try/catch, so it must fail fast and cleanly instead.
+# ==============================================================================
+Write-Host "=== Scenario Y: a bad -CjxlExe path fails fast instead of hanging the dispatch loop ===" -ForegroundColor Cyan
+$chY = New-Dir "scenario-y\Series\Chapter 1"
+New-FakeImage -DirPath $chY -Name "page1.jpg" | Out-Null
+$badCjxlExeY = Join-Path $scratchDir "does_not_exist_cjxl.exe"
+
+$swY = [System.Diagnostics.Stopwatch]::StartNew()
+$totalsY = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-y") -CjxlExe $badCjxlExeY -MagickExe $fakeMagickExe -MaxCjxlProcs 2 -FullLogging $false
+$swY.Stop()
+
+Test-Assert ($swY.Elapsed.TotalSeconds -lt 15) ("returned promptly instead of hanging (took " + [int]$swY.Elapsed.TotalSeconds + "s)")
+Test-Assert ($totalsY.ConvertedFail -eq 1 -and $totalsY.ConvertedSuccess -eq 0) ("the failed process start is counted as a real failure, not silently dropped (got ConvertedFail=" + $totalsY.ConvertedFail + ", ConvertedSuccess=" + $totalsY.ConvertedSuccess + ")")
+Write-Host ""
+
 if ($script:failCount -eq 0) {
     Write-Host ("ALL PASSED  (" + $script:passCount + " assertions)") -ForegroundColor Green
     exit 0
