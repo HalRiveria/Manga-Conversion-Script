@@ -410,6 +410,7 @@ $fakeSettings = @{
     JpegLossless = $false; JpegQuality = 77; MaxCjxlProcs = 6; FullLogging = $false
     AnimatedLossless = $false; AnimatedQuality = 88; AnimatedThreads = 3; AnimatedOverwrite = $false; AnimatedDeleteSource = $true
     ZipParallelThreads = 2; PermanentDelete = $true; DeleteExtractedFoldersAfterRezip = $true
+    CleanConsoleOutputEnabled = $false
 }
 
 Write-Host "=== Scenario J: Invoke-Mode / ImageConversion - param translation + result mapping ===" -ForegroundColor Cyan
@@ -664,6 +665,42 @@ Invoke-MainLoop -TargetPath "C:\fake\lib" -Settings $fakeSettings -SettingsPath 
     -GetModeHandler $fakeGetModeU -InvokeModeHandler $fakeInvokeModeU -PostRunPromptHandler $fakePostRunU
 
 Test-Assert ($script:postRunCallsU -eq 1) "a `$null Invoke-Mode result still reaches Show-PostRunPrompt - the loop doesn't crash or skip the prompt"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario U2: Invoke-MainLoop re-syncs PermanentDelete/CleanConsoleOutput
+#  from $Settings on every iteration (2026-08-31 fix) - an options-menu
+#  change made during one iteration's Get-SelectedMode call must take
+#  effect on THAT SAME iteration's run, not just the next process launch.
+#  Uses the real Initialize-FileDeletion/Initialize-CleanConsoleOutput
+#  (both dot-sourced for real by this harness), not fakes, so this proves
+#  the actual $script: state changes, not just that some function got called.
+# ==============================================================================
+Write-Host "=== Scenario U2: options-menu toggles re-apply every loop iteration, not just at bootstrap ===" -ForegroundColor Cyan
+$fakeSettingsU2 = @{ PermanentDelete = $true; CleanConsoleOutputEnabled = $false; FullLogging = $false }
+$script:permDeleteSeenU2 = [System.Collections.Generic.List[bool]]::new()
+$script:ccrSeenU2        = [System.Collections.Generic.List[bool]]::new()
+$fakeGetModeU2 = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
+$fakeInvokeModeU2 = {
+    param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile)
+    # Record what the module-level state actually is AT THE TIME this
+    # iteration's mode runs - the real bug was these staying stuck at
+    # their bootstrap values across iterations.
+    $script:permDeleteSeenU2.Add($script:PermanentDelete)
+    $script:ccrSeenU2.Add($script:CleanConsoleOutputEnabled)
+    # Simulate the user flipping both toggles in the options menu during
+    # THIS iteration, before the next one starts.
+    $Settings.PermanentDelete = -not $Settings.PermanentDelete
+    $Settings.CleanConsoleOutputEnabled = -not $Settings.CleanConsoleOutputEnabled
+    return New-StatsTracker
+}
+$script:postRunCallsU2 = 0
+$fakePostRunU2 = { $script:postRunCallsU2++; if ($script:postRunCallsU2 -ge 2) { return 'Exit' }; return 'ReturnToMenu' }
+Invoke-MainLoop -TargetPath "C:\fake\lib" -Settings $fakeSettingsU2 -SettingsPath "C:\fake\settings.json" -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" `
+    -GetModeHandler $fakeGetModeU2 -InvokeModeHandler $fakeInvokeModeU2 -PostRunPromptHandler $fakePostRunU2
+
+Test-Assert (@($script:permDeleteSeenU2)[0] -eq $true -and @($script:permDeleteSeenU2)[1] -eq $false) ("`$script:PermanentDelete reflected the CURRENT `$Settings value on both iterations, not just the first (got " + (@($script:permDeleteSeenU2) -join ',') + ")")
+Test-Assert (@($script:ccrSeenU2)[0] -eq $false -and @($script:ccrSeenU2)[1] -eq $true) ("`$script:CleanConsoleOutputEnabled reflected the CURRENT `$Settings value on both iterations, not just the first (got " + (@($script:ccrSeenU2) -join ',') + ")")
 Write-Host ""
 
 # ==============================================================================

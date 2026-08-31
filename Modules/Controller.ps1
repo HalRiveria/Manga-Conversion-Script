@@ -206,12 +206,15 @@
       - Write-Log, Invoke-MutexGuardedWrite, Get-LoggingSharedFunctionNames
         (Logging.ps1)
       - Remove-Source, Move-ToRecycleBin, Remove-ItemPermanently,
-        Get-FileDeletionSharedFunctionNames, $script:PermanentDelete
-        (FileDeletion.ps1) - the latter two of the first three because
-        Remove-Source itself calls one of them internally based on
-        $script:PermanentDelete, and a fresh runspace needs BOTH
-        propagated since it can't know ahead of time which branch a
-        given deletion will take
+        Get-FileDeletionSharedFunctionNames, $script:PermanentDelete,
+        Initialize-FileDeletion (FileDeletion.ps1) - the middle two of the
+        first three because Remove-Source itself calls one of them
+        internally based on $script:PermanentDelete, and a fresh runspace
+        needs BOTH propagated since it can't know ahead of time which
+        branch a given deletion will take. Initialize-FileDeletion is
+        called once per Invoke-MainLoop iteration (not just at bootstrap)
+        so an options-menu PermanentDelete change takes effect on the
+        very next run, not just the next process launch.
       - Convert-ImageBatch, Get-ImageConversionSharedFunctionNames,
         Get-LooseImageCandidates, Remove-StaleLooseSources,
         Get-ChapterProgressStatus, Invoke-LooseImageConversionPipeline
@@ -244,6 +247,9 @@
       - $script:CleanConsoleOutputEnabled, Start-SeriesProgress,
         Start-ChapterProgress, Complete-ChapterProgress,
         Complete-AllActiveSeriesProgress (CleanConsoleRendering.ps1)
+      - Initialize-CleanConsoleOutput (Logging.ps1) - same per-iteration
+        re-sync reasoning as Initialize-FileDeletion above, for the Clean
+        Console Output toggle
       - Invoke-ZipOnlyPipeline (ZipPipeline.ps1) - ONLY if a real caller
         of Invoke-Mode doesn't override -ZipFoldersHandler; not dot-
         sourced by this module's own harness, see above
@@ -1109,6 +1115,29 @@ function Invoke-MainLoop {
     while ($true) {
         & $ResetAbortHandler
         $resolved = & $GetModeHandler -Settings $Settings -SettingsPath $SettingsPath
+
+        # Re-sync the two options-menu toggles that are cheap, idempotent
+        # $script: assignments with no other side effect, so a change made
+        # in the options menu just now (Get-SelectedMode's own Show-
+        # OptionsMenuLevel flow mutates $Settings in place) takes effect on
+        # THIS iteration's run, not just the next process launch. Bug: these
+        # were only ever applied once, at bootstrap, before this loop
+        # existed - turning Permanent Delete off here did nothing until the
+        # whole script was relaunched, and worse, main-thread deletions kept
+        # using the stale bootstrap value while worker-runspace deletions
+        # (which read $Settings.PermanentDelete fresh per dispatch) already
+        # picked up the change, so a single run could silently mix
+        # Recycle-Bin and permanent deletions. Deliberately does NOT include
+        # Initialize-LogPaths/FullLogging here - that call also clears the
+        # PREVIOUS run's split-mode Error/Warn logs (or Recycle-Bins the
+        # full-logging file this run just wrote) as an intentional side
+        # effect of computing this run's own log paths, so blindly re-
+        # running it every iteration would delete/relocate the very log the
+        # user likely wants to look at right after the run that just
+        # finished - see Todo.md for that part of the gap, tracked
+        # separately rather than fixed here.
+        Initialize-CleanConsoleOutput -Enabled $Settings.CleanConsoleOutputEnabled
+        Initialize-FileDeletion -PermanentDelete $Settings.PermanentDelete
 
         $runStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         $stats = & $InvokeModeHandler -Resolved $resolved -TargetPath $TargetPath -Settings $Settings -CjxlExe $CjxlExe -MagickExe $MagickExe `

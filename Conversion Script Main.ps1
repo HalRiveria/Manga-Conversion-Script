@@ -249,6 +249,15 @@ try {
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
         throw ("-Path '" + $Path + "' does not exist or is not a directory.")
     }
+    # Resolve to a full path here, once, at the boundary - a relative -Path
+    # (e.g. ".") would otherwise validate against PowerShell's provider
+    # location but get walked/zipped/deleted against the process's own
+    # working directory by any .NET/VB call downstream (LeafDirectoryDiscovery.ps1's
+    # [System.IO.Directory] calls, Move-ToRecycleBin, etc.) - those two
+    # locations are never synced by PowerShell. Resolving once here means
+    # every downstream consumer, regardless of which API it uses, sees the
+    # same unambiguous absolute path.
+    $Path = (Resolve-Path -LiteralPath $Path).ProviderPath
 
     Initialize-LogPaths -TargetPath $Path -FullLogging $settings.FullLogging -DisableSummaryFile $settings.DisableSummaryFile -ScriptDir $scriptDir
     Initialize-LogMutex
