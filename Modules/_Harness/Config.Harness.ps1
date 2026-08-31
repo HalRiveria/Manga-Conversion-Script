@@ -129,6 +129,39 @@ Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*" }).Count -ge 
 Write-Host ""
 
 # ==============================================================================
+#  Scenario F2 (2026-08-31 fix): a settings file whose content is valid JSON
+#  but not a real settings OBJECT - the literal `null` (a realistic outcome
+#  of a truncated write, since Export-ScriptSettings's Set-Content isn't
+#  atomic) or a JSON array. ConvertFrom-Json doesn't throw on either, so
+#  the try/catch above never catches them - a prior version let $null
+#  reach ConvertTo-SettingsHashtable's [Parameter(Mandatory)] InputObject,
+#  throwing a ParameterBindingValidationException that escaped this
+#  function's own "never throws" contract entirely.
+# ==============================================================================
+Write-Host "=== Scenario F2: JSON `$null`/array (parses fine, not a settings object) -> defaults, no throw ===" -ForegroundColor Cyan
+$pathF2Null = Join-Path $scratchDir "null-settings.json"
+"null" | Set-Content -LiteralPath $pathF2Null -Encoding UTF8
+$script:logCalls.Clear()
+$threwF2Null = $false
+$settingsF2Null = $null
+try { $settingsF2Null = Import-ScriptSettings -Path $pathF2Null } catch { $threwF2Null = $true }
+Test-Assert (-not $threwF2Null) "Import-ScriptSettings does not throw on a JSON `null` settings file"
+Test-Assert ($null -ne $settingsF2Null -and $settingsF2Null.JpegQuality -eq 90) "a JSON `null` file yields default values"
+$backupsF2Null = @(Get-ChildItem -LiteralPath (Split-Path $pathF2Null -Parent) -Filter "null-settings.json.corrupt-*.bak")
+Test-Assert ($backupsF2Null.Count -eq 1) "the null-content file was preserved as a .bak rather than silently discarded"
+
+$pathF2Array = Join-Path $scratchDir "array-settings.json"
+'["not", "an", "object"]' | Set-Content -LiteralPath $pathF2Array -Encoding UTF8
+$script:logCalls.Clear()
+$threwF2Array = $false
+$settingsF2Array = $null
+try { $settingsF2Array = Import-ScriptSettings -Path $pathF2Array } catch { $threwF2Array = $true }
+Test-Assert (-not $threwF2Array) "Import-ScriptSettings does not throw on a JSON array settings file"
+Test-Assert ($null -ne $settingsF2Array -and $settingsF2Array.JpegQuality -eq 90) "a JSON array file yields default values"
+Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*Ignoring unknown setting*" }).Count -eq 0) "a JSON array does NOT spray one bogus 'unknown setting' warning per CLR array property"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario G: an unknown key in the file is ignored (not merged in), with
 #  a warning, rather than polluting the returned settings or crashing
 # ==============================================================================

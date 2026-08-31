@@ -246,6 +246,23 @@ function Import-ScriptSettings {
         return $settings
     }
 
+    if ($null -eq $parsed -or $parsed -isnot [System.Management.Automation.PSCustomObject]) {
+        # ConvertFrom-Json succeeds (no exception) on content that parses
+        # but isn't a real settings object - the literal JSON `null` (a
+        # realistic outcome of a truncated write, since Export-ScriptSettings's
+        # Set-Content isn't atomic) parses to $null, and a JSON array parses
+        # to an array. ConvertTo-SettingsHashtable's own [Parameter(Mandatory)]
+        # rejects $null outright - a ParameterBindingValidationException
+        # this function's own contract ("never throws") can't allow to
+        # escape - so this must be caught here, before that call, and
+        # routed through the same corrupt-file recovery as an actual parse
+        # failure above.
+        Write-Log ("Settings file at '" + $Path + "' did not contain a valid settings object - using defaults.") -Level Warn
+        $backupPath = $Path + ".corrupt-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".bak"
+        try { Copy-Item -LiteralPath $Path -Destination $backupPath -Force -ErrorAction Stop } catch { }
+        return $settings
+    }
+
     $loaded = ConvertTo-SettingsHashtable -InputObject $parsed
     foreach ($key in $loaded.Keys) {
         if (-not $settings.ContainsKey($key)) {
