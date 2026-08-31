@@ -393,6 +393,35 @@ $ctsL.Dispose()
 Write-Host ""
 
 # ==============================================================================
+#  Scenario L2 (2026-08-31 fix): the force-kill path (past -AbortTimeoutSeconds,
+#  NOT the graceful-drain-lets-it-finish path Scenario L covers) must not
+#  delete a pre-existing good .webp it was overwriting. Before the fix,
+#  this separate cleanup site deleted $j.WebpPath unconditionally whenever
+#  it existed - the same bug Scenario F2 (Convert-AnimatedBatch's own
+#  failure catch) already covers, left open on this different code path.
+#  SLEEP_MS deliberately exceeds -AbortTimeoutSeconds so the job is still
+#  running when the drain gives up and force-kills it.
+# ==============================================================================
+Write-Host "=== Scenario L2: a force-killed job does NOT delete the pre-existing good .webp it was overwriting ===" -ForegroundColor Cyan
+$fileL2 = New-FakeAvif -Name "chapter-l2\slow.avif" -Content "FRAMES:6`nSLEEP_MS:3000"
+$webpL2 = [System.IO.Path]::ChangeExtension($fileL2.FullName, ".webp")
+"pre-existing good webp bytes from a prior successful run" | Set-Content -LiteralPath $webpL2 -Encoding UTF8 -NoNewline
+$ctsL2 = New-Object System.Threading.CancellationTokenSource
+$pollCallbackL2 = {
+    param($inFlight)
+    if ($inFlight.Count -gt 0) { $ctsL2.Cancel() }
+}.GetNewClosure()
+
+$resultL2 = Convert-AnimatedBatch -AnimatedFiles @($fileL2) -MagickExe $fakeMagickExe -AnimatedThreads 1 -DoAnimatedOverwrite $true `
+    -CancelToken $ctsL2.Token -AbortPollCallback $pollCallbackL2 -AbortTimeoutSeconds 1
+$ctsL2.Dispose()
+
+Test-Assert ($resultL2.ForceKilledCount -eq 1) ("sanity check: the job was actually force-killed, not allowed to finish (got ForceKilledCount=" + $resultL2.ForceKilledCount + ")")
+Test-Assert (Test-Path -LiteralPath $webpL2) "the pre-existing .webp still exists - NOT deleted by the force-kill cleanup"
+Test-Assert ((Get-Content -LiteralPath $webpL2 -Raw) -eq "pre-existing good webp bytes from a prior successful run") "the pre-existing .webp's own content survives untouched"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario M: empty input returns a clean zeroed result, no error
 # ==============================================================================
 Write-Host "=== Scenario M: empty input ===" -ForegroundColor Cyan

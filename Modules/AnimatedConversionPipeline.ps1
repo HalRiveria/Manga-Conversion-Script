@@ -469,7 +469,17 @@ function Convert-AnimatedBatch {
             foreach ($j in $running) {
                 try { if (-not $j.Proc.HasExited) { $j.Proc.Kill() } } catch { }
                 try { $j.Proc.WaitForExit(5000) } catch { }
-                if (Test-Path -LiteralPath $j.WebpPath) { try { [System.IO.File]::Delete($j.WebpPath) } catch { } }
+                # -not $j.WebpExistedBeforeJob (2026-08-31 fix, caught by a
+                # same-day /code-review of the original fix): this
+                # force-kill path is a SEPARATE cleanup site from
+                # Complete-AnimatedConversionJob's own failure catch, and
+                # it still deleted $j.WebpPath unconditionally - the exact
+                # bug the WebpExistedBeforeJob check elsewhere in this file
+                # was written to close, left open here. A Ctrl+C during a
+                # -DoAnimatedOverwrite re-conversion pass could force-kill
+                # a job mid-flight and destroy a pre-existing good .webp
+                # from a prior successful run.
+                if (-not $j.WebpExistedBeforeJob -and (Test-Path -LiteralPath $j.WebpPath)) { try { [System.IO.File]::Delete($j.WebpPath) } catch { } }
                 $j.Proc.Dispose()
                 if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
             }
