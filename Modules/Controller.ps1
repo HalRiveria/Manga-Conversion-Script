@@ -619,7 +619,10 @@ function Invoke-FullPipeline {
            StaleImageCleanedSuccess; StaleImageCleanedFail;
            ConvertedAnimatedSuccess; ConvertedAnimatedFail; ConvertedAnimatedSkipped;
            DeletedAnimatedSuccess; DeletedAnimatedFail;
-           ZipCreatedSuccess; ZipCreatedFail; ZipSkippedDueToError;
+           ZipCreatedSuccess; ZipCreatedFail; ZipSkippedDueToError (despite
+           the name, also counts a zippable chapter skipped because the run
+           was aborted, not just a genuine Error-tier outcome - see this
+           function's own 2026-08-31 fix note below);
            FolderDeletedSuccess; FolderDeletedFail;
            ForceKilledCount; InspectFailedCount; SeriesCount; ChapterCount;
            Aborted } - InspectFailedCount (added 2026-08-28) sums BOTH
@@ -933,7 +936,21 @@ function Invoke-FullPipeline {
                     } else {
                         $totals.ZipCreatedFail++
                     }
-                } elseif ($chapter.IsZippable -and $chapterOutcome.Status -eq 'Error') {
+                } elseif ($chapter.IsZippable -and ($chapterOutcome.Status -eq 'Error' -or $fullCts.Token.IsCancellationRequested)) {
+                    # -or $fullCts.Token.IsCancellationRequested (2026-08-31
+                    # fix, caught by a same-day /code-review): the Cts-based
+                    # zip gate added earlier today blocks a zip whenever the
+                    # run is aborted, even when the chapter's own Status is
+                    # a clean 'Success' (the engines finished normally
+                    # before the abort was noticed) - that case fell through
+                    # this elseif entirely before, so an abort-blocked
+                    # chapter was invisible in the run's own summary beyond
+                    # the overall $totals.Aborted flag. Counted into the
+                    # SAME field as an Error-tier skip rather than a new one
+                    # - the two combined ($totals.Aborted also being set)
+                    # still correctly distinguishes "N zippable chapters
+                    # didn't get zipped, and the run was aborted" from a
+                    # genuine Error found on some chapter in a normal run.
                     $totals.ZipSkippedDueToError++
                 }
 

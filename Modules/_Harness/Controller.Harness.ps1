@@ -400,6 +400,46 @@ Test-Assert ($null -eq $resultC5.AnimatedResult) "the stray object did NOT get m
 Write-Host ""
 
 # ==============================================================================
+#  Scenario C6 (2026-08-31 fix): an abort-blocked zip (Scenario C4's own
+#  shape, but through the REAL Invoke-FullPipeline this time, not a direct
+#  Invoke-FullPipelineChapter call) used to be invisible in the run's own
+#  summary counters - Zipped is $false and Status is 'Success' (the
+#  engine finished cleanly before the abort was noticed), so neither the
+#  ZipCreated* nor the (pre-fix) ZipSkippedDueToError branch fired. Same
+#  real-runspace timing technique as Scenario C4: a background runspace
+#  sets the REAL [ConsoleCtrl]::AbortRequested flag ~50ms into a
+#  200ms-sleeping fake-cjxl job, so Test-AbortSignal (polled by
+#  Invoke-ZipParallelProcessing's own dispatch loop) cancels the
+#  chapter's real, registered Cts while the job still completes normally.
+# ==============================================================================
+Write-Host "=== Scenario C6: an abort-blocked zip is now counted in ZipSkippedDueToError ===" -ForegroundColor Cyan
+Reset-AbortState
+$chC6 = New-Dir "scenario-c6\Series\Chapter 1"
+New-FakeImageIn -DirPath $chC6 -Name "page1.jpg" -SleepMs 200 | Out-Null
+
+$cancelRunspaceC6 = [runspacefactory]::CreateRunspace()
+$cancelRunspaceC6.Open()
+$cancelPsC6 = [PowerShell]::Create()
+$cancelPsC6.Runspace = $cancelRunspaceC6
+$null = $cancelPsC6.AddScript({ Start-Sleep -Milliseconds 50; [ConsoleCtrl]::AbortRequested = $true })
+$cancelHandleC6 = $cancelPsC6.BeginInvoke()
+
+try {
+    $totalsC6 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-c6") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+} finally {
+    $cancelPsC6.EndInvoke($cancelHandleC6)
+    $cancelPsC6.Dispose()
+    $cancelRunspaceC6.Close()
+    $cancelRunspaceC6.Dispose()
+    Reset-AbortState
+}
+
+Test-Assert ($totalsC6.Aborted -eq $true) "sanity check: the run genuinely registered as aborted"
+Test-Assert ($totalsC6.ZipCreatedSuccess -eq 0) "sanity check: the chapter was not actually zipped"
+Test-Assert ($totalsC6.ZipSkippedDueToError -eq 1) ("the abort-blocked zip is now counted, not invisible (got ZipSkippedDueToError=" + $totalsC6.ZipSkippedDueToError + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario D: a chapter with ONLY image files - the animated engine is
 #  never dispatched at all (AnimatedResult stays $null), not run with an
 #  empty file list.
