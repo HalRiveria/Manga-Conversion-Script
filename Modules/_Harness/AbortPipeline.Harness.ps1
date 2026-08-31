@@ -32,15 +32,19 @@ function Flush-ConsoleQueue {
 }
 
 # AbortPipeline.ps1 forward-references $script:CleanConsoleOutputEnabled
-# (owned by Logging.ps1, deliberately NOT redeclared here - this harness
-# proves the module still works standalone with it simply absent/falsy)
-# and Write-GatedConsoleMessage (owned by CleanConsoleRendering.ps1,
-# which itself calls Write-CleanConsoleMessage when its own
-# -CleanConsoleOutputEnabled param is true). Both stubbed here - real
-# CleanConsoleRendering.ps1 is deliberately never dot-sourced, to prove
-# this module still works standalone - with call tracking on the inner
-# stub, same pattern as Flush-ConsoleQueue above, so scenarios can assert
-# WHICH path (raw Write-Host vs. this stub) actually fired for a given
+# (owned by Logging.ps1, deliberately NOT redeclared here - absent/falsy
+# on its own is harmless, no crash) and Write-GatedConsoleMessage (owned
+# by CleanConsoleRendering.ps1, which itself calls
+# Write-CleanConsoleMessage when its own -CleanConsoleOutputEnabled param
+# is true). Write-GatedConsoleMessage is NOT optional the way the toggle
+# variable is: Test-AbortSignal calls it unconditionally on a real abort,
+# so it must resolve to SOMETHING - real CleanConsoleRendering.ps1 is
+# deliberately never dot-sourced here, and this stub is what satisfies
+# that hard dependency instead (dot-sourcing only AbortPipeline.ps1 with
+# NEITHER the real module nor this stub throws CommandNotFoundException
+# the moment an abort fires). Call tracking on the inner stub, same
+# pattern as Flush-ConsoleQueue above, so scenarios can assert WHICH path
+# (raw Write-Host vs. this stub) actually fired for a given
 # $script:CleanConsoleOutputEnabled value - not just that neither one
 # threw.
 $script:cleanConsoleMessageCalls = [System.Collections.Generic.List[hashtable]]::new()

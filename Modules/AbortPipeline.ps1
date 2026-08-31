@@ -63,13 +63,17 @@
         already uses for FileDeletion.ps1's $script:PermanentDelete) -
         deliberately not a second parallel toggle, so there's only ever
         one on/off switch to keep in sync. Defaults to $null/falsy (same
-        as "off") if Logging.ps1 was never dot-sourced at all, so this
-        module still works completely standalone with its original
-        behavior - this harness proves that by never dot-sourcing
-        Logging.ps1 and getting the original raw-Write-Host behavior
-        throughout.
-      - Write-GatedConsoleMessage - owned by CleanConsoleRendering.ps1.
-        Takes the toggle as an explicit -CleanConsoleOutputEnabled
+        as "off") if Logging.ps1 was never dot-sourced at all - this half
+        of the toggle degrades gracefully on its own.
+      - Write-GatedConsoleMessage - owned by CleanConsoleRendering.ps1,
+        and NOT optional the way the toggle variable above is:
+        Test-AbortSignal calls it unconditionally the first time it
+        detects a real abort (see below), so CleanConsoleRendering.ps1
+        must actually be dot-sourced (or the function stubbed, as this
+        module's own harness does) for that to resolve - dot-sourcing
+        only THIS module and polling Test-AbortSignal without either
+        throws CommandNotFoundException. Takes the toggle as an explicit
+        -CleanConsoleOutputEnabled
         parameter rather than reading $script:CleanConsoleOutputEnabled
         itself, since CleanConsoleRendering.ps1 documents itself as
         having NO forward references - this call site is what supplies
