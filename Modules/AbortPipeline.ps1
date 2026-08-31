@@ -333,13 +333,31 @@ function Test-OwnAbortException {
         abort.
     .PARAMETER ErrorRecord
         The caught error - pass $_ from a catch block.
+    .DESCRIPTION
+        Calls Test-AbortSignal itself first, rather than reading
+        $script:abortRequested directly - a Ctrl+C/window-close that lands
+        during a stretch where nothing happens to be polling
+        Test-AbortSignal (chapter discovery, Compress-FolderToZip,
+        Test-ZipArchive, summary writing) left [ConsoleCtrl]::AbortRequested
+        (the native handler's own flag, set immediately and independent of
+        polling) true while $script:abortRequested (only ever set BY a
+        Test-AbortSignal call) stayed false - so PowerShell's own
+        PipelineStoppedException from that same Ctrl+C looked like a
+        genuine, unrelated crash instead of our own abort firing early:
+        logged as a FATAL ERROR, and Complete-AbortDrain never called,
+        leaking the native handler thread (parked in
+        DrainComplete.Wait(65000)). Calling Test-AbortSignal here brings
+        $script:abortRequested (and its one-time side effects - CTS
+        cancellation, the "[ABORT] ..." message) up to date from the native
+        flag before this check runs, regardless of whether anything else
+        polled first.
     #>
     param(
         [Parameter(Mandatory)]
         [System.Management.Automation.ErrorRecord]$ErrorRecord
     )
     $exType = $ErrorRecord.Exception.GetType().FullName
-    return ($script:abortRequested -and ($exType -like '*PipelineStoppedException*' -or $exType -like '*OperationCanceled*'))
+    return ((Test-AbortSignal) -and ($exType -like '*PipelineStoppedException*' -or $exType -like '*OperationCanceled*'))
 }
 
 function Invoke-AbortOrFatalHandler {

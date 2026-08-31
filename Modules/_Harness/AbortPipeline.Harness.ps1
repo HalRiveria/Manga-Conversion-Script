@@ -443,6 +443,29 @@ Reset-HarnessScenarioState
 Write-Host ""
 
 # ==============================================================================
+#  Scenario N2 (2026-08-31 fix): Ctrl+C landing during a stretch where
+#  nothing happens to be polling Test-AbortSignal (chapter discovery,
+#  Compress-FolderToZip, Test-ZipArchive, summary writing) - the NATIVE
+#  handler's own [ConsoleCtrl]::AbortRequested flag is set immediately and
+#  independent of polling, but $script:abortRequested (only ever set BY a
+#  Test-AbortSignal call) has not caught up yet. Before this fix,
+#  Test-OwnAbortException read $script:abortRequested directly and missed
+#  this - a genuine own-abort PipelineStoppedException looked like an
+#  unrelated crash. Simulates that exact gap: set the native flag directly
+#  (as [ConsoleCtrl]'s real P/Invoke callback would), leave
+#  $script:abortRequested false (as if nothing had polled yet).
+# ==============================================================================
+Write-Host "=== Scenario N2: Ctrl+C detected via the native flag even if nothing polled first ===" -ForegroundColor Cyan
+Reset-HarnessScenarioState
+[ConsoleCtrl]::AbortRequested = $true
+Test-Assert ($script:abortRequested -eq $false) "sanity check: script:abortRequested genuinely hasn't caught up yet"
+$errUnpolled = New-FakeErrorRecord -Exception ([System.Management.Automation.PipelineStoppedException]::new())
+Test-Assert ((Test-OwnAbortException -ErrorRecord $errUnpolled) -eq $true) "own-abort correctly recognized from the native flag alone, with nothing having polled Test-AbortSignal first"
+Test-Assert ($script:abortRequested -eq $true) "Test-OwnAbortException brought script:abortRequested up to date as a side effect, so a later Complete-AbortDrain-based cleanup path still sees a consistent state"
+Reset-HarnessScenarioState
+Write-Host ""
+
+# ==============================================================================
 #  Scenario O: Invoke-AbortOrFatalHandler - the own-abort branch finalizes
 #  the drain (Complete-AbortDrain) and does NOT invoke -LogHandler - this
 #  is a graceful abort, not something to report as an error.
