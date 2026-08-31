@@ -180,9 +180,22 @@ class Program {
     static int Main(string[] args) {
         string src = args[0];
         string dst = args[1];
-        string content = File.Exists(src) ? File.ReadAllText(src) : "";
+        if (!File.Exists(src)) {
+            // Real cjxl.exe fails outright on a missing input file - this
+            // matters for the ICC-strip retry test: a prior bug deleted
+            // the retry's own input PNG before it could be used, and a
+            // fake that quietly treats "missing" as "succeeded" would mask
+            // that bug entirely instead of catching it.
+            Console.Error.WriteLine("cannot open input file: " + src);
+            return 1;
+        }
+        string content = File.ReadAllText(src);
         if (content.Contains("FAIL_CJXL")) {
             Console.Error.WriteLine("simulated cjxl failure");
+            return 1;
+        }
+        if (content.Contains("ICC_MISMATCH") || content.Contains("ICC_UNFIXABLE")) {
+            Console.Error.WriteLine("Getting pixel data failed (simulated embedded ICC profile mismatch)");
             return 1;
         }
         Match m = Regex.Match(content, "SLEEP_MS:(\\d+)");
@@ -235,7 +248,14 @@ class Program {
             Console.Error.WriteLine("simulated magick pre-conversion failure");
             return 1;
         }
-        File.WriteAllText(dst, srcContent);
+        // Invoke-IccStripRetryOrFail's own call shape: "<src>" -colorspace
+        // Gray -strip "<dst>" - actually remove the ICC_MISMATCH marker
+        // here, simulating a real profile strip, so a retry against the
+        // resulting PNG behaves differently from the original (fake
+        // cjxl.exe's own ICC_MISMATCH sniff no longer fires on it).
+        bool isIccStrip = args.Length == 5 && args[1] == "-colorspace" && args[2] == "Gray" && args[3] == "-strip";
+        string outContent = isIccStrip ? srcContent.Replace("ICC_MISMATCH", "") : srcContent;
+        File.WriteAllText(dst, outContent);
         return 0;
     }
 }
@@ -745,6 +765,50 @@ try {
 }
 Test-Assert ($script:completeChapterProgressCalls.Count -eq 1 -and $script:completeChapterProgressCalls[0].Detail -notmatch "^Convert: ") ("Detail has no 'Convert: ' prefix when no callback ran (got '" + $script:completeChapterProgressCalls[0].Detail + "')")
 Reset-AbortState
+Write-Host ""
+
+# ==============================================================================
+#  Scenario W: the ICC-strip retry (2026-08-31 fix) - fake cjxl.exe fails
+#  the FIRST attempt with the exact "Getting pixel data failed" signature
+#  (ICC_MISMATCH marker), fake magick.exe's ICC-strip command actually
+#  removes that marker into a real temp PNG, and the RETRY against that
+#  PNG must succeed - proving the retry's own input file survives long
+#  enough to be used. A prior version deleted that file immediately after
+#  enqueuing the retry job, so the retry always failed instead.
+# ==============================================================================
+Write-Host "=== Scenario W: ICC-strip retry succeeds using its own (surviving) stripped PNG ===" -ForegroundColor Cyan
+$chW = New-Dir "scenario-w\Series\Chapter 1"
+$imgW = Join-Path $chW "cover.jpg"
+[System.IO.File]::WriteAllText($imgW, "ICC_MISMATCH")
+
+$totalsW = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-w") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -MaxCjxlProcs 2 -FullLogging $false
+
+Test-Assert ($totalsW.ConvertedSuccess -eq 1 -and $totalsW.ConvertedFail -eq 0) ("the ICC-mismatched image converted successfully via the retry, not counted as a failure (got ConvertedSuccess=" + $totalsW.ConvertedSuccess + ", ConvertedFail=" + $totalsW.ConvertedFail + ")")
+Test-Assert (Test-Path -LiteralPath (Join-Path $chW "cover.jxl")) "cover.jxl was created by the retry"
+Test-Assert (-not (Test-Path -LiteralPath $imgW)) "the original source was deleted after the retry's successful conversion"
+$leftoverTempPngsW = @(Get-ChildItem -LiteralPath $chW -Filter "*_tmp_iccstrip.png" -File -ErrorAction SilentlyContinue)
+Test-Assert (@($leftoverTempPngsW).Count -eq 0) "the stripped temp PNG was cleaned up after the retry finished, not left behind"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario X: an ICC-strip retry that ALSO hits the same failure signature
+#  falls through to a normal failure instead of retrying forever (2026-08-31
+#  fix) - without the -not $Job.IccRetried guard, Complete-ImageConversionJob
+#  would strip-and-retry the same source indefinitely.
+# ==============================================================================
+Write-Host "=== Scenario X: a retry that fails the same way does NOT retry again ===" -ForegroundColor Cyan
+$chX = New-Dir "scenario-x\Series\Chapter 1"
+$imgX = Join-Path $chX "stubborn.jpg"
+# ICC_UNFIXABLE (distinct from ICC_MISMATCH) trips fake cjxl.exe's same
+# failure sniff, but fake magick.exe's ICC-strip step only ever removes
+# the literal "ICC_MISMATCH" text - it never touches this marker, so the
+# retry's own stripped PNG still contains it and fails the same way,
+# simulating a source the strip genuinely can't fix.
+[System.IO.File]::WriteAllText($imgX, "ICC_UNFIXABLE")
+
+$totalsX = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-x") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -MaxCjxlProcs 2 -FullLogging $false
+
+Test-Assert ($totalsX.ConvertedFail -eq 1 -and $totalsX.ConvertedSuccess -eq 0) ("a source that still fails after stripping is counted as ONE failure, not retried forever (got ConvertedFail=" + $totalsX.ConvertedFail + ", ConvertedSuccess=" + $totalsX.ConvertedSuccess + ")")
 Write-Host ""
 
 if ($script:failCount -eq 0) {

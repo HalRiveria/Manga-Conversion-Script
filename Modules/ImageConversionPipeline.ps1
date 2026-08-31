@@ -210,13 +210,20 @@ function Invoke-IccStripRetryOrFail {
         # the stragglers drain below (or left for the next run). Enqueue
         # unconditionally either way.
         $retryJob = @{
-            SrcPath = $Job.SrcPath
-            JxlPath = $Job.JxlPath
-            Proc    = $null
-            TempPng = $strippedPng
+            SrcPath    = $Job.SrcPath
+            JxlPath    = $Job.JxlPath
+            Proc       = $null
+            TempPng    = $strippedPng
+            IccRetried = $true
         }
         $Pending.Enqueue($retryJob)
-        if (Test-Path -LiteralPath $strippedPng) { try { [System.IO.File]::Delete($strippedPng) } catch { } }
+        # Deliberately does NOT delete $strippedPng here (a prior version
+        # did, immediately after enqueuing this exact job as the retry's
+        # only input - the retry could never succeed since cjxl would be
+        # pointed at a file that no longer existed by the time it was
+        # dequeued). Cleanup of TempPng happens once, after the retry job
+        # itself finishes, via Complete-ImageConversionJob's own TempPng
+        # cleanup (below) - same as every other TempPng-bearing job.
         return $true
     }
 
@@ -282,7 +289,14 @@ function Complete-ImageConversionJob {
     $convOk = $false
     try {
         if ($code -ne 0) {
-            if ($code -eq 1 -and $stderr -imatch 'Getting pixel data failed' -and $MagickExe) {
+            # -not $Job.IccRetried: a job that's ALREADY the ICC-strip
+            # retry (its own SrcPath is the ORIGINAL source, not the
+            # stripped PNG - see Invoke-IccStripRetryOrFail's retryJob
+            # shape) hitting the same "Getting pixel data failed" signature
+            # again must fall through to the normal failure path instead of
+            # retrying forever - without this guard, a source that still
+            # fails after stripping would re-strip-and-retry indefinitely.
+            if ($code -eq 1 -and $stderr -imatch 'Getting pixel data failed' -and $MagickExe -and -not $Job.IccRetried) {
                 if (Invoke-IccStripRetryOrFail -Job $Job -Pending $Pending -MagickExe $MagickExe) {
                     return $true
                 }
