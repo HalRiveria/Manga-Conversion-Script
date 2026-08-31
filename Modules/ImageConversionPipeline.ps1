@@ -589,9 +589,18 @@ function Convert-ImageBatch {
         }
         $running = $stillRunning
 
-        if ($running.Count -ge $MaxCjxlProcs -or ($pending.Count -eq 0 -and $running.Count -gt 0)) {
-            Start-Sleep -Milliseconds 50
-        }
+        # Always sleep briefly here - the outer while's own condition
+        # ($pending.Count -gt 0 -or $running.Count -gt 0) already
+        # guarantees there's work left every time execution reaches this
+        # point, so a conditional check for "is dispatch actually blocked"
+        # was redundant in the plain $MaxCjxlProcs case and outright wrong
+        # for -SharedBudget: with a shared budget smaller than
+        # $MaxCjxlProcs (the normal Full Pipeline case - Controller.ps1
+        # passes -MaxCjxlProcs $Files.Count), $running.Count never reaches
+        # $MaxCjxlProcs, so the old condition was false on every pass and
+        # this loop busy-spun at ~100% CPU polling Wait(0)/HasExited
+        # instead of sleeping between polls.
+        Start-Sleep -Milliseconds 50
     }
 
     # ------------------------------------------------------------------

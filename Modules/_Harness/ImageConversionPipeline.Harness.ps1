@@ -645,6 +645,16 @@ $resultP = Convert-ImageBatch -ImageFiles $filesP -CjxlExe $fakeCjxlExe -MaxCjxl
 Test-Assert ($resultP.ConvertedCount -eq 5 -and $resultP.FailedCount -eq 0) "all 5 converted correctly through the shared budget"
 Test-Assert (($script:budgetSnapshotsP | Where-Object { $_ -eq 0 }).Count -gt 0) "the 2-slot budget was actually driven to 0 at some point - proves dispatch was really gated to 2 concurrent, not just passed through unused (MaxCjxlProcs=5 would have let all 5 start at once otherwise)"
 Test-Assert ($budgetP.CurrentCount -eq 2) "the budget is back to its full initial count after the call - no leaked slots"
+# 2026-08-31 fix: -AbortPollCallback fires once per outer dispatch-loop
+# pass, so its call count is a direct proxy for how many passes the loop
+# actually made. -MaxCjxlProcs 5 with a 2-slot SharedBudget is exactly the
+# shape that busy-spun before this fix (the old sleep-gate never saw
+# running.Count reach MaxCjxlProcs, since the budget - not MaxCjxlProcs -
+# was the real ceiling) - a prior version made tens of thousands of passes
+# in the same wall-clock window; a real 50ms sleep between passes bounds
+# this to roughly (total wall time / 50ms), generously under 100 even with
+# scheduler jitter.
+Test-Assert ($script:budgetSnapshotsP.Count -lt 100) ("the dispatch loop slept between passes instead of busy-spinning (got " + $script:budgetSnapshotsP.Count + " passes for ~450ms of simulated work)")
 $budgetP.Dispose()
 Write-Host ""
 

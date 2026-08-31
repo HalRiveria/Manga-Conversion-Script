@@ -395,9 +395,13 @@ function Convert-AnimatedBatch {
         }
         $running = $stillRunning
 
-        if ($running.Count -ge $AnimatedThreads -or ($pending.Count -eq 0 -and $running.Count -gt 0)) {
-            Start-Sleep -Milliseconds 50
-        }
+        # Always sleep briefly here - see Convert-ImageBatch's identical
+        # fix (ImageConversionPipeline.ps1) for the full reasoning: the
+        # outer while's own condition already guarantees there's work left
+        # whenever execution reaches this point, and the old conditional
+        # check busy-spun at ~100% CPU whenever -SharedBudget was smaller
+        # than $AnimatedThreads (the normal Full Pipeline case).
+        Start-Sleep -Milliseconds 50
     }
 
     # ------------------------------------------------------------------

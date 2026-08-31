@@ -570,6 +570,12 @@ $resultV = Convert-AnimatedBatch -AnimatedFiles $filesV -MagickExe $fakeMagickEx
 Test-Assert ($resultV.ConvertedCount -eq 5 -and $resultV.FailedCount -eq 0) "all 5 converted correctly through the shared budget"
 Test-Assert (($script:budgetSnapshotsV | Where-Object { $_ -eq 0 }).Count -gt 0) "the 2-slot budget was actually driven to 0 at some point - proves dispatch was really gated to 2 concurrent, not just passed through unused (AnimatedThreads=5 would have let all 5 start at once otherwise)"
 Test-Assert ($budgetV.CurrentCount -eq 2) "the budget is back to its full initial count after the call - no leaked slots"
+# 2026-08-31 fix: same busy-spin bug and same proof technique as
+# ImageConversionPipeline.Harness.ps1's Scenario P - AnimatedThreads=5 with
+# a 2-slot SharedBudget is exactly the shape that spun at ~100% CPU before
+# this fix (the old sleep-gate never saw running.Count reach
+# AnimatedThreads, since the budget was the real ceiling).
+Test-Assert ($script:budgetSnapshotsV.Count -lt 100) ("the dispatch loop slept between passes instead of busy-spinning (got " + $script:budgetSnapshotsV.Count + " passes for ~450ms of simulated work)")
 $budgetV.Dispose()
 Write-Host ""
 
