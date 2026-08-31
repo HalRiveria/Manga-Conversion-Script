@@ -186,6 +186,38 @@ Test-Assert ((@($resultsA | ForEach-Object { $_.JobId } | Sort-Object -Unique)).
 Write-Host ""
 
 # ==============================================================================
+#  Scenario A2 (2026-08-31 fix): the caller's own $script:logMutex (e.g.
+#  the bootstrap's, from Initialize-LogMutex) must be RESTORED after the
+#  call, not left $null - Invoke-ZipParallelProcessing creates its own
+#  fresh, LOCAL mutex object to seed the worker runspaces' initial state,
+#  which used to unconditionally null out $script:logMutex afterward
+#  instead of putting the caller's own reference back, silently
+#  unsynchronizing every main-thread Write-Log/Write-SummaryLog call for
+#  the rest of the run (Invoke-MutexGuardedWrite no-ops the locking on a
+#  $null mutex rather than erroring, so this was never visibly broken).
+# ==============================================================================
+Write-Host "=== Scenario A2: the caller's own log mutex is restored after the call, not left null ===" -ForegroundColor Cyan
+Initialize-LogMutex
+$callerMutexA2 = $script:logMutex
+Test-Assert ($null -ne $callerMutexA2) "sanity check: the caller (simulating bootstrap) genuinely has a mutex before the call"
+
+$script:cts2 = [System.Threading.CancellationTokenSource]::new()
+$resultsA2 = [System.Collections.Generic.List[hashtable]]::new()
+$jobParamsA2 = [System.Collections.Generic.List[hashtable]]::new()
+$jobParamsA2.Add(@{ JobId = 1; DelayMs = 50; DoFullLogging = $FullLogging; LogFile = $logFile; LogErrorFile = $logErrorFile; LogWarnFile = $logWarnFile })
+$handlerA2 = { param($r) $resultsA2.Add($r) }
+$null = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -JobParams $jobParamsA2 `
+    -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile') -MaxParallel 3 -Cts $script:cts2 -ResultHandler $handlerA2
+$script:cts2.Dispose()
+
+Test-Assert ($null -ne $script:logMutex) "the caller's log mutex is not left `$null after the call"
+Test-Assert ([object]::ReferenceEquals($script:logMutex, $callerMutexA2)) "the EXACT SAME mutex object the caller had before the call is restored, not a different/stale one"
+$stillUsableA2 = $false
+try { $null = $script:logMutex.WaitOne(0); $script:logMutex.ReleaseMutex(); $stillUsableA2 = $true } catch { }
+Test-Assert $stillUsableA2 "the restored mutex is still genuinely usable (not disposed) - a later main-thread Write-Log call would succeed, not throw ObjectDisposedException"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario B: -NextJobProvider, some items skipped inside the provider, no
 #  abort. Mirrors the pattern mode 4 (ZIP-extraction) would use: peek an
 #  item, decide to skip or dispatch, loop internally past skips.

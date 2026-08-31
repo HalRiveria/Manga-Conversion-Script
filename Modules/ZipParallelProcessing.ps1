@@ -107,6 +107,12 @@ function Invoke-ZipParallelProcessing {
     # Was its own inline "JxlLogMutex_" + $pathHash construction - now
     # Logging.ps1's Initialize-LogMutex (same naming convention, single
     # implementation instead of a third copy of it - see CLAUDE.md).
+    # $previousLogMutex saved BEFORE overwriting (2026-08-31 fix): this
+    # call always creates a brand-new Mutex object regardless of what was
+    # already there, so the caller's own (e.g. bootstrap's) mutex
+    # reference needs to be restored afterward, not discarded - see the
+    # `finally` block below.
+    $previousLogMutex = $script:logMutex
     Initialize-LogMutex
     $localLogMutex = $script:logMutex
     $localConsoleQueue = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
@@ -221,7 +227,20 @@ function Invoke-ZipParallelProcessing {
         # -ResultHandler throws - the previous version of this function had
         # no such guarantee and could leak the pool/mutex on an exception.
         if ($null -ne $localPool) { try { $localPool.Close() } catch { }; try { $localPool.Dispose() } catch { } }
-        $script:logMutex = $null   # stop Write-Log from acquiring a disposed mutex
+        # Restore the caller's own mutex reference (2026-08-31 fix) rather
+        # than nulling it - this function's own $localLogMutex is disposed
+        # below (it was only ever needed to seed the worker runspaces'
+        # InitialSessionState), but $script:logMutex is shared, main-thread
+        # state the CALLER still needs for its own Write-Log calls after
+        # this function returns (e.g. Controller.ps1's zip/delete steps
+        # between chapters, or the run's final summary write). Nulling it
+        # unconditionally left every main-thread log write after the FIRST
+        # parallel phase in a run silently unsynchronized -
+        # Invoke-MutexGuardedWrite no-ops the locking on a $null mutex
+        # rather than erroring, so this was never visibly broken, just
+        # quietly unprotected against another concurrent instance writing
+        # to the same log/summary file.
+        $script:logMutex = $previousLogMutex
         if ($null -ne $localLogMutex) { try { $localLogMutex.Dispose() } catch { } }
     }
 
