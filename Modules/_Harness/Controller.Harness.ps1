@@ -345,6 +345,61 @@ Test-Assert (-not (Test-Path -LiteralPath (Join-Path $scratchDir "scenario-c4.zi
 Write-Host ""
 
 # ==============================================================================
+#  Scenario C5 (2026-08-31 fix): $resultHandler's else branch used to
+#  treat ANY non-Image object as the animated result - Invoke-ZipParallelProcessing
+#  passes every object a worker's runspace emits to -ResultHandler, not
+#  just its own explicit return value, so a stray unsuppressed object
+#  anywhere in the real worker's call chain would silently overwrite
+#  $resultBox.Animated with $null. Temporarily swaps the REAL
+#  $script:fullPipelineChapterWorker for a fake that emits a stray string
+#  BEFORE its real return value, for an image-only chapter (no animated
+#  job dispatched at all) - proves the stray object is correctly ignored
+#  (Animated stays $null, its untouched starting value) rather than being
+#  mistaken for a real Animated result.
+# ==============================================================================
+Write-Host "=== Scenario C5: a stray object from the worker's own output is ignored, not mistaken for the Animated result ===" -ForegroundColor Cyan
+$chC5 = New-Dir "scenario-c5\Series\Chapter 1"
+$imgC5 = New-FakeImageIn -DirPath $chC5 -Name "page1.jpg"
+$budgetC5 = [System.Threading.SemaphoreSlim]::new(2, 2)
+$ctsC5 = [System.Threading.CancellationTokenSource]::new()
+
+$realWorkerC5 = $script:fullPipelineChapterWorker
+$script:fullPipelineChapterWorker = {
+    param(
+        [string]$EngineType, [System.IO.FileInfo[]]$Files, [string]$CjxlExe, [string]$MagickExe,
+        [bool]$DoJpegLossless, [int]$DoJpegQuality, [bool]$DoAnimatedLossless, [int]$AnimatedQuality,
+        [bool]$DoAnimatedOverwrite, [bool]$DoAnimatedDeleteSource, [bool]$DoFullLogging,
+        [string]$LogFile, [string]$LogErrorFile, [string]$LogWarnFile, [bool]$DoPermanentDelete,
+        [bool]$CleanConsoleOutputEnabled, [System.Threading.SemaphoreSlim]$SharedBudget,
+        [System.Threading.Mutex]$LogMutex, [System.Collections.Concurrent.ConcurrentQueue[object]]$ConsoleQueue,
+        [System.Threading.CancellationToken]$CancelToken
+    )
+    # A stray, unsuppressed object - simulating an accidental cmdlet
+    # output somewhere in a real worker's call chain - emitted BEFORE the
+    # real, expected return value. Invoke-ZipParallelProcessing's own
+    # dispatch loop passes BOTH to -ResultHandler, one at a time. Carries
+    # its own non-null, recognizable .Result so a wrongly-attributed
+    # write is distinguishable from AnimatedResult's correct, untouched
+    # $null starting value - a stray value that itself evaluated to $null
+    # would make "corrupted" and "correctly untouched" look identical.
+    @{ EngineType = 'SomethingElse'; Result = 'STRAY-NOT-A-REAL-RESULT' }
+    return @{ EngineType = $EngineType; Result = @{ ConvertedCount = 1; FailedCount = 0 } }
+}
+
+try {
+    $resultC5 = Invoke-FullPipelineChapter -ChapterDir $chC5 -ChapterImageFiles @((Get-Item -LiteralPath $imgC5)) -IsZippable $false `
+        -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullLogging $false -PermanentDelete $true -SharedBudget $budgetC5 -Cts $ctsC5
+} finally {
+    $script:fullPipelineChapterWorker = $realWorkerC5
+    $budgetC5.Dispose()
+    $ctsC5.Dispose()
+}
+
+Test-Assert ($null -ne $resultC5.ImageResult -and $resultC5.ImageResult.ConvertedCount -eq 1) "the real Image result still came through correctly despite the stray object sharing its runspace's output"
+Test-Assert ($null -eq $resultC5.AnimatedResult) "the stray object did NOT get mistaken for the Animated result - AnimatedResult stays `$null (no animated job was even dispatched), not the stray object's own 'STRAY-NOT-A-REAL-RESULT' value"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario D: a chapter with ONLY image files - the animated engine is
 #  never dispatched at all (AnimatedResult stays $null), not run with an
 #  empty file list.

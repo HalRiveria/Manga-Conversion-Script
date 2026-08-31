@@ -467,7 +467,21 @@ function Invoke-FullPipelineChapter {
         $resultBox = @{ Image = $null; Animated = $null }
         $resultHandler = {
             param($r)
-            if ($r.EngineType -eq 'Image') { $resultBox.Image = $r.Result } else { $resultBox.Animated = $r.Result }
+            # elseif, not else (2026-08-31 fix, caught by a same-day
+            # /code-review): Invoke-ZipParallelProcessing's own dispatch
+            # loop passes EVERY object a worker's runspace emits to
+            # -ResultHandler, not just its own explicit `return` value -
+            # any stray, unsuppressed object anywhere in Convert-ImageBatch's
+            # call chain would land here too. A bare `else` treated ANY
+            # non-Image object as the animated result, silently overwriting
+            # $resultBox.Animated (with $null, since a stray object's own
+            # .Result is typically $null) - harmless-looking before today's
+            # other fix, but that fix now turns a $null Animated result
+            # into a synthesized "crashed" failure that blocks the
+            # chapter's zip, so a false positive here got a real
+            # consequence. No live repro exists (nothing today emits stray
+            # output) - a pure robustness hardening, not a demonstrated bug.
+            if ($r.EngineType -eq 'Image') { $resultBox.Image = $r.Result } elseif ($r.EngineType -eq 'Animated') { $resultBox.Animated = $r.Result }
         }.GetNewClosure()
 
         $chapterWorkerSharedFunctionNames = @(Get-LoggingSharedFunctionNames) + @(Get-FileDeletionSharedFunctionNames) + @(Get-ImageConversionSharedFunctionNames) + @(Get-AnimatedConversionSharedFunctionNames)
