@@ -702,20 +702,30 @@ function Get-LooseImageCandidates {
         staging/extraction directory), classifying each as needing
         conversion or stale (a valid non-zero-byte .jxl counterpart
         already exists, and isn't OLDER than this source - see 2026-08-31
-        fix note below - safe to delete without converting).
+        fix note below - safe to delete without converting). A third,
+        unreturned case (2026-08-31): a source NEWER than its same-basename
+        .jxl is a real naming collision this function can't safely resolve
+        either way - excluded from both NeedsConversion and StaleSources,
+        logged as an Error, left untouched on disk.
     .DESCRIPTION
         Staleness is matched by basename alone (same directory, same name
         minus extension) - there's no persisted link between a .jxl and
-        which source produced it. A source newer than its same-basename
-        .jxl is treated as needing conversion instead: a genuine leftover
-        from a real conversion can't be newer than the output it produced,
-        so a newer file is a real, different source that happens to share
-        a name with an old, unrelated conversion (e.g. photo.jpg converted
-        and deleted, then a later, different photo.png added) - without
-        this check that file was silently deleted, never converted. Not a
-        perfect signal (a source touched/copied without content changing
-        would still look "newer"), but a real improvement over matching by
-        name alone with no signal at all.
+        which source produced it. A genuine leftover from a real conversion
+        can't be newer than the output it produced, so a source NEWER than
+        its same-basename .jxl is a real, different file that happens to
+        share a name with an old, unrelated conversion (e.g. photo.jpg
+        converted and deleted, then a later, different photo.png added) -
+        not the source that produced that .jxl. Such a file is deliberately
+        left OUT of both returned lists rather than being routed to either
+        one: NeedsConversion would let cjxl's own output silently OVERWRITE
+        the pre-existing .jxl in place (a plain file write, not a delete -
+        not even Recycle-Bin-recoverable), and StaleSources would delete a
+        genuinely unconverted source. Neither destructive action is safe
+        when this function can't tell which of the two files is the "real"
+        one - logged as an Error instead, left for the user to resolve by
+        renaming. Not a perfect signal (a source touched/copied without
+        content changing would still look "newer"), but a real improvement
+        over matching by basename alone with no signal at all.
     .PARAMETER KnownZipPaths
         Full paths of ZIPs whose extraction staging directory (same
         parent dir, same base name) should be excluded from the scan -
@@ -776,17 +786,31 @@ function Get-LooseImageCandidates {
                 # tell "photo.jpg, already converted and deleted, and this
                 # is a stray leftover copy" apart from "photo.jpg was
                 # converted, deleted, and an UNRELATED photo.png was later
-                # added with the same name" (a real extension collision -
-                # a genuinely unconverted source would then get silently
-                # deleted, never converted). A source newer than the
-                # existing .jxl is a strong signal it's the latter case -
-                # the .jxl a real conversion of THIS file would produce
-                # can't predate the file itself. Treat it as needing
-                # conversion instead of stale - Convert-ImageBatch's own
-                # output-path-collision guard (two sources mapping to the
-                # same .jxl in one batch) still applies if another source
-                # in this same scan also targets this .jxl path.
-                $needsConversion.Add($img)
+                # added with the same name" (a real extension collision).
+                # A source newer than the existing .jxl is a strong signal
+                # it's the latter case - the .jxl a real conversion of THIS
+                # file would produce can't predate the file itself.
+                #
+                # 2026-08-31 correction: an EARLIER version of this fix
+                # routed this case to $needsConversion instead, reasoning
+                # that Convert-ImageBatch's own output-path-collision guard
+                # (two sources in the same batch mapping to the same .jxl)
+                # would cover it. It doesn't - that guard only compares
+                # sources against EACH OTHER within one batch; it never
+                # checks an existing .jxl already on disk. Routing here to
+                # NeedsConversion meant cjxl's own output silently
+                # OVERWROTE the pre-existing .jxl in place - a plain file
+                # write, not a delete, so not even Recycle-Bin-recoverable.
+                # That trade one data-loss direction (an unconverted
+                # source wrongly deleted, at least Recycle-Bin-recoverable)
+                # for a worse one (a converted output silently, permanently
+                # destroyed - live-caught by /code-review). This is a
+                # genuine, unresolvable naming collision this function
+                # cannot safely act on either way - excluded from BOTH
+                # lists (no delete, no conversion, no overwrite) and logged
+                # as a real problem needing the user to rename one of the
+                # two files by hand.
+                Write-Log ("'" + $img.FullName + "' shares a basename with an existing, OLDER '" + $jxlCounterpart + "' it did not produce (this source is newer) - a real naming collision, not a stale leftover. Left untouched - neither converted (would silently overwrite the existing .jxl) nor deleted (would lose an unconverted source). Rename one of the two files to resolve.") -Level Error
             } else {
                 $staleSources.Add($img)
             }

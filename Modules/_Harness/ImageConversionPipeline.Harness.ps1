@@ -332,27 +332,43 @@ Test-Assert ($totalsC.ConvertedSuccess -eq 0) "nothing sent to cjxl for the stal
 Test-Assert (-not (Test-Path -LiteralPath $staleSrcC)) "stale source deleted"
 
 # ==============================================================================
-#  Scenario C2 (2026-08-31 fix): a same-basename extension collision - the
-#  .jxl exists FIRST (from a real, earlier conversion of a NOW-GONE source),
-#  then a genuinely different, unconverted file with the same basename
-#  shows up LATER (e.g. photo.jpg converted+deleted, then an unrelated
-#  photo.png added). Before the fix this was silently deleted as "stale"
-#  without ever being converted, purely because the basenames matched -
-#  the fix uses the new file being NEWER than the existing .jxl as the
-#  signal that it can't be what produced that .jxl.
+#  Scenario C2 (2026-08-31, corrected same day): a same-basename extension
+#  collision - the .jxl exists FIRST (from a real, earlier conversion of a
+#  NOW-GONE source), then a genuinely different, unconverted file with the
+#  same basename shows up LATER (e.g. photo.jpg converted+deleted, then an
+#  unrelated photo.png added).
+#
+#  Before the FIRST fix, this was silently deleted as "stale" without ever
+#  being converted, purely because the basenames matched (loses the new,
+#  unconverted source - Recycle-Bin-recoverable at least).
+#
+#  The FIRST fix's own attempt (routing a newer source to NeedsConversion)
+#  was ITSELF wrong, caught by a same-day /code-review: converting
+#  photo.png writes cjxl's output to the SAME photo.jxl path, silently
+#  OVERWRITING the pre-existing .jxl - the only remaining copy of the
+#  ORIGINAL photo.jpg's content, permanently destroyed by a plain file
+#  write (not even Recycle-Bin-recoverable). Worse than the bug it
+#  replaced.
+#
+#  The actual fix: neither action is safe without knowing which file
+#  produced the existing .jxl, so a newer same-basename source is now
+#  excluded from BOTH lists entirely - not converted (would overwrite),
+#  not deleted (would lose an unconverted source) - logged as an Error and
+#  left for the user to resolve by hand.
 # ==============================================================================
-Write-Host "=== Scenario C2: a newer same-basename file is converted, not wrongly deleted as stale ===" -ForegroundColor Cyan
+Write-Host "=== Scenario C2: a newer same-basename file is left untouched (neither converted nor deleted) ===" -ForegroundColor Cyan
 $chC2 = New-Dir "scenario-c2\Series\Chapter 1"
-[System.IO.File]::WriteAllText((Join-Path $chC2 "photo.jxl"), "real jxl bytes from a since-deleted photo.jpg")
+$originalJxlBytesC2 = "real jxl bytes from a since-deleted photo.jpg"
+[System.IO.File]::WriteAllText((Join-Path $chC2 "photo.jxl"), $originalJxlBytesC2)
 Start-Sleep -Milliseconds 50
 $collidingSrcC2 = New-FakeImage -DirPath $chC2 -Name "photo.png"
 
 $totalsC2 = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-c2") -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
 
-Test-Assert ($totalsC2.ConvertedSuccess -eq 1) ("the newer, genuinely unconverted photo.png was actually converted, not skipped as stale (got ConvertedSuccess=" + $totalsC2.ConvertedSuccess + ")")
-Test-Assert ($totalsC2.StaleCleanedSuccess -eq 0) "not counted as a stale-source cleanup"
-Test-Assert ((Get-Content -LiteralPath (Join-Path $chC2 "photo.jxl") -Raw) -eq "fake-jxl-bytes") "the .jxl was actually REWRITTEN by a real cjxl run, not just left as the old placeholder - proves real conversion happened, not just a source deletion"
-Test-Assert (-not (Test-Path -LiteralPath $collidingSrcC2)) "the source was deleted (normal post-conversion cleanup, now that it's genuinely been converted)"
+Test-Assert ($totalsC2.ConvertedSuccess -eq 0 -and $totalsC2.ConvertedFail -eq 0) ("the colliding source was neither converted nor counted as a failure - just left alone (got ConvertedSuccess=" + $totalsC2.ConvertedSuccess + ", ConvertedFail=" + $totalsC2.ConvertedFail + ")")
+Test-Assert ($totalsC2.StaleCleanedSuccess -eq 0) "not counted as a stale-source cleanup either - not deleted"
+Test-Assert (Test-Path -LiteralPath $collidingSrcC2) "the colliding source survives untouched on disk - not deleted"
+Test-Assert ((Get-Content -LiteralPath (Join-Path $chC2 "photo.jxl") -Raw) -eq $originalJxlBytesC2) "the pre-existing .jxl survives byte-for-byte untouched - NOT silently overwritten by a conversion of the unrelated colliding source"
 
 # ==============================================================================
 #  Scenario D: a series with zero qualifying chapters is counted and skipped
