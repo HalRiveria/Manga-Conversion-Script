@@ -319,13 +319,22 @@ function Get-MissingSharedFunctionNames {
 
 # Every $script:XXX = { ... } scriptblock assignment, so a -WorkerScript/
 # -NextJobProvider $script:XXX argument can be resolved to its real body.
+# Also unwraps $script:XXX = { ... }.GetNewClosure() - that shape parses
+# as an InvokeMemberExpressionAst wrapping the ScriptBlockExpressionAst,
+# not a bare ScriptBlockExpressionAst, and this codebase's own
+# ResultHandler callbacks already use .GetNewClosure() elsewhere.
 $scriptBlockVars = @{}
 foreach ($name in $fileText.Keys) {
     foreach ($assign in $fileAsts[$name].FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
         if ($assign.Right -is [System.Management.Automation.Language.CommandExpressionAst] -and
-            $assign.Right.Expression -is [System.Management.Automation.Language.ScriptBlockExpressionAst] -and
             $assign.Left -is [System.Management.Automation.Language.VariableExpressionAst]) {
-            $scriptBlockVars[$assign.Left.VariablePath.UserPath] = $assign.Right.Expression.ScriptBlock
+            $rhsExpr = $assign.Right.Expression
+            if ($rhsExpr -is [System.Management.Automation.Language.InvokeMemberExpressionAst]) {
+                $rhsExpr = $rhsExpr.Expression
+            }
+            if ($rhsExpr -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+                $scriptBlockVars[$assign.Left.VariablePath.UserPath] = $rhsExpr.ScriptBlock
+            }
         }
     }
 }
@@ -340,7 +349,12 @@ foreach ($name in $fileText.Keys) {
             if ($el -is [System.Management.Automation.Language.CommandParameterAst] -and ($i + 1) -lt $call.CommandElements.Count) {
                 if ($el.ParameterName -eq 'SharedFunctionNames') {
                     $sharedNamesArg = $call.CommandElements[$i + 1]
-                } elseif ($el.ParameterName -eq 'WorkerScript' -or $el.ParameterName -eq 'NextJobProvider') {
+                } elseif ($el.ParameterName -eq 'WorkerScript') {
+                    # NextJobProvider deliberately excluded - it's invoked via
+                    # `& $NextJobProvider` in Invoke-ZipParallelProcessing's own
+                    # main dispatch loop (ZipParallelProcessing.ps1), never
+                    # marshalled into the runspace pool, so its callees don't
+                    # need -SharedFunctionNames coverage.
                     $valEl = $call.CommandElements[$i + 1]
                     if ($valEl -is [System.Management.Automation.Language.VariableExpressionAst]) {
                         $workerScriptVarName = $valEl.VariablePath.UserPath
