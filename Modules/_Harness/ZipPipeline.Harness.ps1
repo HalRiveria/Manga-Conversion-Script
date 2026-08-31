@@ -331,6 +331,24 @@ New-FileIn -DirPath $dirL4 -Name "page1.jxl" | Out-Null
 $resultL4 = Invoke-LooseFolderZip -FolderPath $dirL4 -ZipOut (Join-Path $scratchDir "scenario-l4.zip") -LooseImageExtensions @(".jpg")
 Test-Assert ($resultL4.Status -eq "Success") "omitting -SeriesName/-ChapterName still works normally (no CCR involvement)"
 
+# 2026-08-31 fix: the case above ($script:CleanConsoleOutputEnabled already
+# reset to $false by the time it runs) never actually exercised the real
+# trigger - Controller.ps1's own real call site omits both names AND runs
+# with Clean Console Output ON. An omitted [string] parameter binds to ""
+# not $null, so a $null-based "were these supplied" check was $true for
+# EVERY caller and crashed on -SeriesName "" the first time a chapter with
+# CCR enabled reached this function. Re-run the exact same omitted-params
+# call, this time with CCR actually on, and assert it doesn't throw.
+$script:CleanConsoleOutputEnabled = $true
+try {
+    $dirL5 = New-Dir "scenario-l5"
+    New-FileIn -DirPath $dirL5 -Name "page1.jxl" | Out-Null
+    $resultL5 = Invoke-LooseFolderZip -FolderPath $dirL5 -ZipOut (Join-Path $scratchDir "scenario-l5.zip") -LooseImageExtensions @(".jpg")
+    Test-Assert ($resultL5.Status -eq "Success") "omitting -SeriesName/-ChapterName with Clean Console Output ON does not throw (real Controller.ps1 call shape)"
+} finally {
+    $script:CleanConsoleOutputEnabled = $false
+}
+
 Write-Host ""
 
 # ==============================================================================

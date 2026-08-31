@@ -521,7 +521,15 @@ function Invoke-LooseFolderZip {
     }
 
     $folderName = Split-Path -Path $FolderPath -Leaf
-    $reportCcr  = ($null -ne $SeriesName -and $null -ne $ChapterName)
+    # $PSBoundParameters.ContainsKey(...), not "$null -ne $SeriesName" - an
+    # omitted [string] parameter binds to "", never $null (this project's
+    # own documented lessons-learned trap #5), so the $null-based check was
+    # $true for EVERY caller, including the one real caller (Controller.ps1)
+    # that deliberately omits both names to avoid a second CCR transition -
+    # crashing the whole run the first time it zipped a chapter with Clean
+    # Console Output on, since Start-CcrChapterProgressIfEnabled then got
+    # called with -SeriesName "".
+    $reportCcr  = ($PSBoundParameters.ContainsKey('SeriesName') -and $PSBoundParameters.ContainsKey('ChapterName'))
     if ($reportCcr) { Start-CcrChapterProgressIfEnabled -SeriesName $SeriesName -ChapterName $ChapterName }
 
     try {
