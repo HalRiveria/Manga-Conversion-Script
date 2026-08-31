@@ -861,6 +861,31 @@ Test-Assert ($totalsX.ConvertedFail -eq 1 -and $totalsX.ConvertedSuccess -eq 0) 
 Write-Host ""
 
 # ==============================================================================
+#  Scenario X2 (2026-08-31 fix, caught by a same-day /code-review of the
+#  original ICC-retry fix): the ICC-strip retry must be reused directly
+#  for a .webp/.avif source, not re-run through the webp/avif-to-PNG
+#  pre-conversion branch a second time. $j.SrcPath still ends in .webp
+#  even for the retry job, so before this fix the isWebp/isAvif check
+#  fired again on redispatch, redoing an entirely separate, NON-stripped
+#  pre-conversion from the (untouched) original .webp - overwriting
+#  TempPng, orphaning the real stripped PNG Invoke-IccStripRetryOrFail
+#  produced, and failing the retry the same way every time since the
+#  fresh pre-conversion was never actually ICC-stripped.
+# ==============================================================================
+Write-Host "=== Scenario X2: ICC-strip retry succeeds for a .webp source (reuses the stripped PNG, not a fresh pre-conversion) ===" -ForegroundColor Cyan
+$chX2 = New-Dir "scenario-x2\Series\Chapter 1"
+$imgX2 = Join-Path $chX2 "cover.webp"
+[System.IO.File]::WriteAllText($imgX2, "ICC_MISMATCH")
+
+$totalsX2 = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-x2") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -MaxCjxlProcs 2 -FullLogging $false
+
+Test-Assert ($totalsX2.ConvertedSuccess -eq 1 -and $totalsX2.ConvertedFail -eq 0) ("the .webp source converted successfully via the retry, not counted as a failure (got ConvertedSuccess=" + $totalsX2.ConvertedSuccess + ", ConvertedFail=" + $totalsX2.ConvertedFail + ")")
+Test-Assert (Test-Path -LiteralPath (Join-Path $chX2 "cover.jxl")) "cover.jxl was created by the retry"
+$leftoverTempPngsX2 = @(Get-ChildItem -LiteralPath $chX2 -Filter "*_tmp_*.png" -File -ErrorAction SilentlyContinue)
+Test-Assert (@($leftoverTempPngsX2).Count -eq 0) ("no orphaned temp PNG (neither the ICC-strip PNG nor a redundant webp2png one) was left behind (found: " + (($leftoverTempPngsX2 | ForEach-Object { $_.Name }) -join ', ') + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario Y (2026-08-31 fix): Process.Start() throwing (a stale/bad
 #  -CjxlExe path) used to hang the dispatch loop indefinitely - a raw .NET
 #  exception there isn't terminating in this scriptblock, so execution

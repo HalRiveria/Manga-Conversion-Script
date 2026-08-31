@@ -298,6 +298,17 @@ function Complete-ImageConversionJob {
             # fails after stripping would re-strip-and-retry indefinitely.
             if ($code -eq 1 -and $stderr -imatch 'Getting pixel data failed' -and $MagickExe -and -not $Job.IccRetried) {
                 if (Invoke-IccStripRetryOrFail -Job $Job -Pending $Pending -MagickExe $MagickExe) {
+                    # THIS job's own TempPng (the webp/avif pre-conversion
+                    # PNG that fed the now-failed cjxl attempt, if any) is
+                    # done being needed - the retry enqueued above is a
+                    # SEPARATE job with its own (already-stripped) TempPng.
+                    # Cleaned up here (2026-08-31 fix, caught by a same-day
+                    # /code-review) since this early `return` skips the
+                    # normal TempPng cleanup below entirely - without this,
+                    # every webp/avif source that ever hit an ICC-strip
+                    # retry left its first attempt's own pre-conversion PNG
+                    # orphaned on disk.
+                    if ($Job.TempPng -and (Test-Path -LiteralPath $Job.TempPng)) { try { [System.IO.File]::Delete($Job.TempPng) } catch { } }
                     return $true
                 }
             }
@@ -479,7 +490,25 @@ function Convert-ImageBatch {
             # "STATIC AVIF -> JXL").
             $isWebp = ($j.SrcPath -imatch '\.webp$')
             $isAvif = ($j.SrcPath -imatch '\.avif$')
-            if ($isWebp -or $isAvif) {
+            if ($j.TempPng) {
+                # Retry job (ICC-strip): TempPng already points to a
+                # complete, ready-to-use PNG that Invoke-IccStripRetryOrFail
+                # produced directly from the ORIGINAL source in one step
+                # (magick reads webp/avif/anything natively for that single
+                # strip+grayscale command - see that function). Checked
+                # BEFORE the isWebp/isAvif branch below (2026-08-31 fix,
+                # caught by a same-day /code-review) - $j.SrcPath still
+                # carries the original extension even for a webp/avif
+                # retry, so checking isWebp/isAvif first redid an entirely
+                # separate, non-ICC-stripped pre-conversion every time,
+                # silently overwriting this TempPng value, orphaning the
+                # real stripped PNG on disk (a stray file a later run's
+                # Get-LooseImageCandidates would pick up as a real loose
+                # image), and failing the retry the same way every time
+                # since the fresh pre-conversion was never actually
+                # ICC-stripped.
+                $cjxlSrc = $j.TempPng
+            } elseif ($isWebp -or $isAvif) {
                 $formatLabel = if ($isAvif) { "AVIF" } else { "WebP" }
                 if (-not $MagickExe) {
                     Write-Log ("SKIPPING " + $formatLabel + " '" + $j.SrcPath + "': ImageMagick not found. Install ImageMagick or pass -MagickPath.") -Level Error
@@ -558,11 +587,6 @@ function Convert-ImageBatch {
                 }
                 $j.TempPng = $tempPng
                 $cjxlSrc   = $tempPng
-            } elseif ($j.TempPng) {
-                # Retry job: TempPng already points to a pre-processed PNG
-                # (e.g. ICC-stripped). Use it directly as the cjxl source;
-                # do not overwrite TempPng so cleanup logic still fires.
-                $cjxlSrc = $j.TempPng
             } else {
                 $j.TempPng = $null
                 $cjxlSrc   = $j.SrcPath
@@ -685,8 +709,20 @@ function Convert-ImageBatch {
 
     # Anything left un-dispatched (only possible if cancelled before it could
     # be started) - callers that surface a "still pending" count need this,
-    # since $pending itself is local to this function.
-    foreach ($j in $pending.ToArray()) { $batchResult.PendingPaths.Add($j.SrcPath) }
+    # since $pending itself is local to this function. A job here can only
+    # have a non-null TempPng if it's an ICC-strip retry enqueued by
+    # Invoke-IccStripRetryOrFail during the abort-drain above (2026-08-31
+    # fix) - that retry never gets dispatched once cancelled (the drain
+    # only waits for ALREADY-running processes, it doesn't start new ones),
+    # so without this cleanup the real, already-stripped PNG it produced
+    # was orphaned on disk with nothing to ever delete it - a stray file a
+    # later run's Get-LooseImageCandidates would pick up as a real loose
+    # image. The source itself is correctly left alone here (still
+    # reported as pending, retried fresh on the next run).
+    foreach ($j in $pending.ToArray()) {
+        $batchResult.PendingPaths.Add($j.SrcPath)
+        if ($j.TempPng -and (Test-Path -LiteralPath $j.TempPng)) { try { [System.IO.File]::Delete($j.TempPng) } catch { } }
+    }
 
     return $batchResult
 }
