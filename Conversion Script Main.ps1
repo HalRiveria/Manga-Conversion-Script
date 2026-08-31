@@ -261,7 +261,7 @@ try {
     # accepts exact -Candidates paths by design, so the glob is resolved
     # here rather than taught to that module. Only matters when PATH
     # lookup already failed, which is the common-case path for both tools.
-    $magickGlobCandidates = @(Get-ChildItem -Path (Join-Path $env:ProgramFiles "ImageMagick-*\magick.exe") -ErrorAction SilentlyContinue).FullName
+    $magickGlobCandidates = @(Get-ChildItem -Path (Join-Path $env:ProgramFiles "ImageMagick-*\magick.exe") -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
 
     $resolvedCjxlPath = Find-ExeCached -Settings $settings -SettingsKey "CjxlPath" -UserPath $CjxlPath -ExeName "cjxl" -Candidates @(
         "C:\Program Files\libjxl\cjxl.exe",
