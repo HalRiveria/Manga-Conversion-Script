@@ -218,6 +218,36 @@ Test-Assert $stillUsableA2 "the restored mutex is still genuinely usable (not di
 Write-Host ""
 
 # ==============================================================================
+#  Scenario A3 (2026-08-31 fix): the mutex save/restore must hold even
+#  when the call throws BEFORE the runspace pool is ever built - a bad
+#  -SharedFunctionNames entry (not a real defined function) makes the
+#  Get-Item ("Function:\" + $sharedFn) lookup throw. Before the fix, that
+#  line sat OUTSIDE the try/finally that restores $script:logMutex, so an
+#  exception there left it pointed at this call's own local mutex forever
+#  (a handle leak - still a valid reference to the same NAMED mutex, so
+#  not a correctness break, but the fix's own invariant didn't hold here).
+# ==============================================================================
+Write-Host "=== Scenario A3: the mutex is still restored even when the call throws before the runspace pool is built ===" -ForegroundColor Cyan
+$callerMutexA3 = $script:logMutex
+Test-Assert ($null -ne $callerMutexA3) "sanity check: the caller still has a mutex before this call (same one Scenario A2 restored)"
+
+$script:cts3 = [System.Threading.CancellationTokenSource]::new()
+$jobParamsA3 = [System.Collections.Generic.List[hashtable]]::new()
+$jobParamsA3.Add(@{ JobId = 1; DelayMs = 10; DoFullLogging = $FullLogging; LogFile = $logFile; LogErrorFile = $logErrorFile; LogWarnFile = $logWarnFile })
+$threwA3 = $false
+try {
+    $null = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -JobParams $jobParamsA3 `
+        -SharedFunctionNames @('This-Function-Does-Not-Exist') -MaxParallel 3 -Cts $script:cts3 -ResultHandler { param($r) }
+} catch {
+    $threwA3 = $true
+}
+$script:cts3.Dispose()
+
+Test-Assert $threwA3 "sanity check: the bad -SharedFunctionNames entry genuinely made the call throw"
+Test-Assert ([object]::ReferenceEquals($script:logMutex, $callerMutexA3)) "the caller's mutex is still restored even though the call threw before the runspace pool was ever built"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario B: -NextJobProvider, some items skipped inside the provider, no
 #  abort. Mirrors the pattern mode 4 (ZIP-extraction) would use: peek an
 #  item, decide to skip or dispatch, loop internally past skips.

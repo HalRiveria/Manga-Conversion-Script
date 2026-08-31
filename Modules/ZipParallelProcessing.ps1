@@ -104,33 +104,48 @@ function Invoke-ZipParallelProcessing {
     # the docstring for why that distinction matters here).
     $fixedListIndex = 0
 
-    # Was its own inline "JxlLogMutex_" + $pathHash construction - now
-    # Logging.ps1's Initialize-LogMutex (same naming convention, single
-    # implementation instead of a third copy of it - see CLAUDE.md).
-    # $previousLogMutex saved BEFORE overwriting (2026-08-31 fix): this
-    # call always creates a brand-new Mutex object regardless of what was
-    # already there, so the caller's own (e.g. bootstrap's) mutex
-    # reference needs to be restored afterward, not discarded - see the
-    # `finally` block below.
-    $previousLogMutex = $script:logMutex
-    Initialize-LogMutex
-    $localLogMutex = $script:logMutex
-    $localConsoleQueue = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
-
-    $localIss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-    foreach ($sharedFn in $SharedFunctionNames) {
-        $fnDef = (Get-Item ("Function:\" + $sharedFn)).Definition
-        $localIss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList $sharedFn, $fnDef))
-    }
-
-    $localPool = [RunspaceFactory]::CreateRunspacePool(1, $MaxParallel, $localIss, $Host)
-    $localPool.Open()
-
+    # $previousLogMutex declared here (outside the try) so the `finally`
+    # below can always see it, even if something inside the try throws
+    # before ever reaching the assignment - left $null in that case, which
+    # is what $script:logMutex should become anyway (nothing valid was
+    # ever saved to restore).
+    $previousLogMutex  = $null
+    $localLogMutex     = $null
+    $localPool         = $null
     $localHandles      = [System.Collections.Generic.List[hashtable]]::new()
     $scanExhausted     = $false
     $forceStoppedCount = 0
 
     try {
+        # Was its own inline "JxlLogMutex_" + $pathHash construction - now
+        # Logging.ps1's Initialize-LogMutex (same naming convention,
+        # single implementation instead of a third copy of it - see
+        # CLAUDE.md). $previousLogMutex saved BEFORE overwriting
+        # (2026-08-31 fix): this call always creates a brand-new Mutex
+        # object regardless of what was already there, so the caller's
+        # own (e.g. bootstrap's) mutex reference needs to be restored
+        # afterward, not discarded - see the `finally` block below. Moved
+        # inside the try (2026-08-31 fix, caught by a same-day
+        # /code-review of the original fix) - this line and everything
+        # through $localPool.Open() below used to sit BEFORE the try, so
+        # an exception here (or from the -SharedFunctionNames Get-Item
+        # lookup, or from CreateRunspacePool/Open() failing) skipped the
+        # `finally` entirely, leaving $script:logMutex pointed at this
+        # call's own local mutex forever with its handle never disposed.
+        $previousLogMutex = $script:logMutex
+        Initialize-LogMutex
+        $localLogMutex = $script:logMutex
+        $localConsoleQueue = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+
+        $localIss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+        foreach ($sharedFn in $SharedFunctionNames) {
+            $fnDef = (Get-Item ("Function:\" + $sharedFn)).Definition
+            $localIss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList $sharedFn, $fnDef))
+        }
+
+        $localPool = [RunspaceFactory]::CreateRunspacePool(1, $MaxParallel, $localIss, $Host)
+        $localPool.Open()
+
         # ==================================================================
         #  Combined get-next-job + dispatch + collect loop. Exits once the
         #  job source is exhausted and every dispatched job has returned, or
