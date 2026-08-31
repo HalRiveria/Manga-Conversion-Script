@@ -139,6 +139,10 @@ class Program {
         }
         PeakBump(1);
         try {
+            // Written before the sleep so a test can poll for "the job has
+            // actually started" instead of guessing a wall-clock delay -
+            // see Scenario C4/C6's own comments in Controller.Harness.ps1.
+            File.WriteAllText(dst + ".started", "");
             Match m = Regex.Match(content, "SLEEP_MS:(\\d+)");
             if (m.Success) { Thread.Sleep(int.Parse(m.Groups[1].Value)); }
             File.WriteAllText(dst, "fake-jxl-bytes");
@@ -307,9 +311,15 @@ Write-Host ""
 #  abort check that would just skip the chapter entirely, never reaching
 #  this function). The image job runs for real (SLEEP_MS:200, a genuine OS
 #  process) while a background runspace cancels the SAME $ctsC4 object
-#  ~50ms in - the job still dispatches and completes normally (Cts wasn't
-#  cancelled when it started, and a running process has no cancellation
-#  check of its own), so -ResultHandler fires for real and the merged
+#  once the fake-cjxl process's own ".started" marker file appears (2026-08-31
+#  correction: originally a flat 50ms Start-Sleep, which was a real timing
+#  race - a cold/loaded machine's RunspacePool/ISS setup is not reliably
+#  under 50ms, so the cancel could land before the job even dispatched or
+#  miss its 200ms window entirely; polling for the job's own start signal
+#  makes the ordering deterministic instead of guessed) - the job still
+#  dispatches and completes normally (Cts wasn't cancelled when it
+#  started, and a running process has no cancellation check of its own),
+#  so -ResultHandler fires for real and the merged
 #  status reads a clean Success. The zip gate is reached with the run
 #  already aborted - the exact "engine says Success, but the run is
 #  already aborted" case: before the fix, the zip gate had no
@@ -322,11 +332,21 @@ $imgC4 = New-FakeImageIn -DirPath $chC4 -Name "page1.jpg" -SleepMs 200
 $budgetC4 = [System.Threading.SemaphoreSlim]::new(2, 2)
 $ctsC4 = [System.Threading.CancellationTokenSource]::new()
 
+$markerC4 = [System.IO.Path]::ChangeExtension($imgC4, ".jxl") + ".started"
 $cancelRunspaceC4 = [runspacefactory]::CreateRunspace()
 $cancelRunspaceC4.Open()
 $cancelPsC4 = [PowerShell]::Create()
 $cancelPsC4.Runspace = $cancelRunspaceC4
-$null = $cancelPsC4.AddScript({ param($Cts) Start-Sleep -Milliseconds 50; $Cts.Cancel() }).AddArgument($ctsC4)
+$null = $cancelPsC4.AddScript({
+    param($Cts, $MarkerPath)
+    # Poll for the fake-cjxl process's own started-marker instead of a flat
+    # Start-Sleep - a fixed guess would either cancel before the job even
+    # dispatches (on a slow/cold machine) or blow past its 200ms sleep
+    # entirely, making the scenario flaky rather than a reliable proof.
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    while (-not (Test-Path -LiteralPath $MarkerPath) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 5 }
+    $Cts.Cancel()
+}).AddArgument($ctsC4).AddArgument($markerC4)
 $cancelHandleC4 = $cancelPsC4.BeginInvoke()
 
 $resultC4 = Invoke-FullPipelineChapter -ChapterDir $chC4 -ChapterImageFiles @((Get-Item -LiteralPath $imgC4)) -IsZippable $true -ZipOut (Join-Path $scratchDir "scenario-c4.zip") `
@@ -406,22 +426,31 @@ Write-Host ""
 #  summary counters - Zipped is $false and Status is 'Success' (the
 #  engine finished cleanly before the abort was noticed), so neither the
 #  ZipCreated* nor the (pre-fix) ZipSkippedDueToError branch fired. Same
-#  real-runspace timing technique as Scenario C4: a background runspace
-#  sets the REAL [ConsoleCtrl]::AbortRequested flag ~50ms into a
-#  200ms-sleeping fake-cjxl job, so Test-AbortSignal (polled by
+#  real-runspace timing technique as Scenario C4 (marker-polling, not a
+#  flat sleep): a background runspace sets the REAL
+#  [ConsoleCtrl]::AbortRequested flag once the 200ms-sleeping fake-cjxl
+#  job's own ".started" marker appears, so Test-AbortSignal (polled by
 #  Invoke-ZipParallelProcessing's own dispatch loop) cancels the
 #  chapter's real, registered Cts while the job still completes normally.
 # ==============================================================================
 Write-Host "=== Scenario C6: an abort-blocked zip is now counted in ZipSkippedDueToError ===" -ForegroundColor Cyan
 Reset-AbortState
 $chC6 = New-Dir "scenario-c6\Series\Chapter 1"
-New-FakeImageIn -DirPath $chC6 -Name "page1.jpg" -SleepMs 200 | Out-Null
+$imgC6 = New-FakeImageIn -DirPath $chC6 -Name "page1.jpg" -SleepMs 200
+$markerC6 = [System.IO.Path]::ChangeExtension($imgC6, ".jxl") + ".started"
 
 $cancelRunspaceC6 = [runspacefactory]::CreateRunspace()
 $cancelRunspaceC6.Open()
 $cancelPsC6 = [PowerShell]::Create()
 $cancelPsC6.Runspace = $cancelRunspaceC6
-$null = $cancelPsC6.AddScript({ Start-Sleep -Milliseconds 50; [ConsoleCtrl]::AbortRequested = $true })
+$null = $cancelPsC6.AddScript({
+    param($MarkerPath)
+    # Same started-marker polling as Scenario C4 - see its comment for why
+    # a flat Start-Sleep is not a reliable way to land a mid-flight cancel.
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    while (-not (Test-Path -LiteralPath $MarkerPath) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 5 }
+    [ConsoleCtrl]::AbortRequested = $true
+}).AddArgument($markerC6)
 $cancelHandleC6 = $cancelPsC6.BeginInvoke()
 
 try {
