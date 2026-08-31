@@ -275,6 +275,41 @@ Test-Assert (Test-Path -LiteralPath $canaryL) "the canary file inside the real t
 Write-Host ""
 
 # ==============================================================================
+#  Scenario M: a Hidden/System file or directory can actually be deleted
+#  (2026-08-31 fix) - Get-Item -LiteralPath without -Force can't see a
+#  Hidden/System item even though Test-Path (the guard both functions
+#  already have) can, so it used to throw "Could not find item" for
+#  something sitting right there, on all three real-world shapes: a
+#  hidden file, a system file, and a hidden directory.
+# ==============================================================================
+Write-Host "=== Scenario M: Move-ToRecycleBin/Remove-ItemPermanently on Hidden/System items ===" -ForegroundColor Cyan
+
+$hiddenFileM = Join-Path $scratchDir "scenario-m-hidden.txt"
+"hidden content" | Out-File -FilePath $hiddenFileM -Encoding UTF8
+(Get-Item -LiteralPath $hiddenFileM -Force).Attributes = [System.IO.FileAttributes]::Hidden
+$null = Remove-ItemPermanently -ItemPath $hiddenFileM
+Test-Assert (-not (Test-Path -LiteralPath $hiddenFileM)) "Remove-ItemPermanently deletes a Hidden file instead of throwing"
+
+$systemFileM = Join-Path $scratchDir "scenario-m-system.txt"
+"system content" | Out-File -FilePath $systemFileM -Encoding UTF8
+(Get-Item -LiteralPath $systemFileM -Force).Attributes = [System.IO.FileAttributes]::System
+$null = Remove-ItemPermanently -ItemPath $systemFileM
+Test-Assert (-not (Test-Path -LiteralPath $systemFileM)) "Remove-ItemPermanently deletes a System file instead of throwing"
+
+$hiddenDirM = Join-Path $scratchDir "scenario-m-hiddendir"
+New-Item -ItemType Directory -Path $hiddenDirM | Out-Null
+(Get-Item -LiteralPath $hiddenDirM -Force).Attributes = [System.IO.FileAttributes]::Hidden -bor [System.IO.FileAttributes]::Directory
+$null = Remove-ItemPermanently -ItemPath $hiddenDirM
+Test-Assert (-not (Test-Path -LiteralPath $hiddenDirM)) "Remove-ItemPermanently deletes a Hidden directory instead of throwing"
+
+$hiddenFileM2 = Join-Path $scratchDir "scenario-m-hidden-recycle.txt"
+"hidden content 2" | Out-File -FilePath $hiddenFileM2 -Encoding UTF8
+(Get-Item -LiteralPath $hiddenFileM2 -Force).Attributes = [System.IO.FileAttributes]::Hidden
+$null = Move-ToRecycleBin -ItemPath $hiddenFileM2
+Test-Assert (-not (Test-Path -LiteralPath $hiddenFileM2)) "Move-ToRecycleBin deletes a Hidden file instead of throwing"
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

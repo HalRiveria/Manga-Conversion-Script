@@ -144,7 +144,11 @@ function Move-ToRecycleBin {
     if (-not (Test-Path -LiteralPath $ItemPath)) { return $false }
 
     return Invoke-DeleteTreatingVanishedAsFalse -Action {
-        $attr = (Get-Item -LiteralPath $ItemPath).Attributes
+        # -Force: without it, Get-Item can't see a Hidden/System item even
+        # though the Test-Path guard above can, so it throws "Could not
+        # find item" for something that's sitting right there (a cloud-sync
+        # artifact, desktop.ini, anything previously marked hidden).
+        $attr = (Get-Item -LiteralPath $ItemPath -Force).Attributes
         if ($attr -band [System.IO.FileAttributes]::Directory) {
             # Verified live (Harness Scenario L) against a real NTFS directory
             # junction: the Shell-based Recycle Bin operation this VB API goes
@@ -185,7 +189,10 @@ function Remove-ItemPermanently {
     if (-not (Test-Path -LiteralPath $ItemPath)) { return $false }
 
     return Invoke-DeleteTreatingVanishedAsFalse -Action {
-        $attr           = (Get-Item -LiteralPath $ItemPath).Attributes
+        # -Force: see Move-ToRecycleBin's own comment above - Get-Item
+        # without it can't see a Hidden/System item and throws instead of
+        # reading its Attributes.
+        $attr           = (Get-Item -LiteralPath $ItemPath -Force).Attributes
         $isDirectory    = [bool]($attr -band [System.IO.FileAttributes]::Directory)
         $isReparsePoint = [bool]($attr -band [System.IO.FileAttributes]::ReparsePoint)
 
