@@ -701,7 +701,21 @@ function Get-LooseImageCandidates {
         Scans $ScanPath for loose image files (outside any known ZIP's
         staging/extraction directory), classifying each as needing
         conversion or stale (a valid non-zero-byte .jxl counterpart
-        already exists - safe to delete without converting).
+        already exists, and isn't OLDER than this source - see 2026-08-31
+        fix note below - safe to delete without converting).
+    .DESCRIPTION
+        Staleness is matched by basename alone (same directory, same name
+        minus extension) - there's no persisted link between a .jxl and
+        which source produced it. A source newer than its same-basename
+        .jxl is treated as needing conversion instead: a genuine leftover
+        from a real conversion can't be newer than the output it produced,
+        so a newer file is a real, different source that happens to share
+        a name with an old, unrelated conversion (e.g. photo.jpg converted
+        and deleted, then a later, different photo.png added) - without
+        this check that file was silently deleted, never converted. Not a
+        perfect signal (a source touched/copied without content changing
+        would still look "newer"), but a real improvement over matching by
+        name alone with no signal at all.
     .PARAMETER KnownZipPaths
         Full paths of ZIPs whose extraction staging directory (same
         parent dir, same base name) should be excluded from the scan -
@@ -752,12 +766,29 @@ function Get-LooseImageCandidates {
     foreach ($img in $allCandidates) {
         $jxlCounterpart = [System.IO.Path]::ChangeExtension($img.FullName, ".jxl")
         if (Test-Path -LiteralPath $jxlCounterpart) {
-            $existingJxlSize = (Get-Item -LiteralPath $jxlCounterpart).Length
-            if ($existingJxlSize -gt 0) {
-                $staleSources.Add($img)
-            } else {
+            $jxlItem = Get-Item -LiteralPath $jxlCounterpart
+            if ($jxlItem.Length -eq 0) {
                 Write-Log ("Existing .jxl counterpart for '" + $img.FullName + "' is 0 bytes - treating as incomplete and re-converting source.") -Level Warn
                 $needsConversion.Add($img)
+            } elseif ($img.LastWriteTimeUtc -gt $jxlItem.LastWriteTimeUtc) {
+                # A same-basename .jxl existing is not, by itself, proof
+                # THIS source produced it - basename matching alone can't
+                # tell "photo.jpg, already converted and deleted, and this
+                # is a stray leftover copy" apart from "photo.jpg was
+                # converted, deleted, and an UNRELATED photo.png was later
+                # added with the same name" (a real extension collision -
+                # a genuinely unconverted source would then get silently
+                # deleted, never converted). A source newer than the
+                # existing .jxl is a strong signal it's the latter case -
+                # the .jxl a real conversion of THIS file would produce
+                # can't predate the file itself. Treat it as needing
+                # conversion instead of stale - Convert-ImageBatch's own
+                # output-path-collision guard (two sources mapping to the
+                # same .jxl in one batch) still applies if another source
+                # in this same scan also targets this .jxl path.
+                $needsConversion.Add($img)
+            } else {
+                $staleSources.Add($img)
             }
         } else {
             $needsConversion.Add($img)
