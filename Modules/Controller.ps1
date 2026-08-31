@@ -715,9 +715,44 @@ function Invoke-FullPipeline {
                         $avifClassification[$img.FullName] = "Failed"
                     }
                 }
+                # Also classify .avif entries the image side considers
+                # STALE (2026-08-31 fix) - Get-LooseImageCandidates matches
+                # staleness purely by basename (ANY source with a same-
+                # basename non-zero .jxl counts, regardless of which source
+                # actually produced it - see ImageConversionPipeline.ps1's
+                # own known gap), so an animated .avif kept around on
+                # purpose (AnimatedDeleteSource=$false) can look "stale" the
+                # moment an unrelated same-basename file (e.g. its own
+                # already-converted .webp) gets its .jxl. Without this pass,
+                # that .avif was deleted by Remove-StaleLooseSources below
+                # while still sitting unfiltered in $animatedCandidates -
+                # deleted out from under the engine that still owned it,
+                # despite the setting whose entire point is to keep it.
+                foreach ($img in $imageCandidates.StaleSources) {
+                    if ($img.Extension -ine ".avif" -or -not $animatedPathSet.Contains($img.FullName) -or $avifClassification.ContainsKey($img.FullName)) {
+                        continue   # not .avif, not claimed by both scans, or already classified above
+                    }
+                    try {
+                        $isAnimated = Test-AvifAnimated -AvifPath $img.FullName -MagickExe $MagickExe
+                        $avifClassification[$img.FullName] = if ($isAnimated) { "Animated" } else { "Static" }
+                    } catch {
+                        Write-Log ("Could not determine if AVIF '" + $img.FullName + "' is animated - excluding it from BOTH engines this run: " + $_) -Level Error
+                        $totals.InspectFailedCount++
+                        $avifClassification[$img.FullName] = "Failed"
+                    }
+                }
 
                 if ($avifClassification.Count -gt 0) {
                     $imageCandidates.NeedsConversion = @($imageCandidates.NeedsConversion | Where-Object {
+                        -not $avifClassification.ContainsKey($_.FullName) -or $avifClassification[$_.FullName] -eq "Static"
+                    })
+                    # A "Static" AVIF genuinely IS safe to delete as stale
+                    # (its own .jxl already exists) - only "Animated"/"Failed"
+                    # need to be pulled OUT of StaleSources so
+                    # Remove-StaleLooseSources below doesn't delete a file
+                    # the animated engine (Animated) or neither engine
+                    # (Failed, ownership unresolved) should be touching.
+                    $imageCandidates.StaleSources = @($imageCandidates.StaleSources | Where-Object {
                         -not $avifClassification.ContainsKey($_.FullName) -or $avifClassification[$_.FullName] -eq "Static"
                     })
                     $animatedCandidates = @($animatedCandidates | Where-Object {

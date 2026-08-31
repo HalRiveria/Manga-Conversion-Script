@@ -277,6 +277,31 @@ Test-Assert (Test-Path -LiteralPath $chC2) "the chapter folder still exists - ne
 Write-Host ""
 
 # ==============================================================================
+#  Scenario C3 (2026-08-31 fix): AVIF classification used to only look at
+#  $imageCandidates.NeedsConversion, never .StaleSources - Get-LooseImageCandidates
+#  matches staleness purely by basename (ANY same-basename non-zero .jxl
+#  counts, regardless of which source produced it), so an animated AVIF
+#  can look "stale" the moment an UNRELATED file with the same basename
+#  already has a .jxl. Before the fix, that AVIF was deleted by
+#  Remove-StaleLooseSources while still sitting unfiltered in
+#  $animatedCandidates - deleted out from under the engine that still
+#  owned it.
+# ==============================================================================
+Write-Host "=== Scenario C3: an animated AVIF wrongly matched as a stale image source is preserved, not deleted ===" -ForegroundColor Cyan
+$chC3 = New-Dir "scenario-c3\Series\Chapter 1"
+New-FakeAvifIn -DirPath $chC3 -Name "anim1.avif" -Frames 5 | Out-Null
+# Pre-existing anim1.jxl with the SAME basename, simulating an unrelated
+# earlier conversion (e.g. from a since-deleted anim1.webp) - this is
+# exactly what makes Get-LooseImageCandidates classify anim1.avif as stale.
+New-FakeImageIn -DirPath $chC3 -Name "anim1.jxl" | Out-Null
+
+$totalsC3 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-c3") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+
+Test-Assert ($totalsC3.ConvertedAnimatedSuccess -eq 1 -and $totalsC3.ConvertedAnimatedFail -eq 0) ("the animated AVIF was actually converted by the animated engine, not deleted out from under it (got Success=" + $totalsC3.ConvertedAnimatedSuccess + ", Fail=" + $totalsC3.ConvertedAnimatedFail + ")")
+Test-Assert ($totalsC3.StaleImageCleanedSuccess -eq 0) "the AVIF was NOT deleted as a stale image source despite sharing a basename with an unrelated pre-existing .jxl"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario D: a chapter with ONLY image files - the animated engine is
 #  never dispatched at all (AnimatedResult stays $null), not run with an
 #  empty file list.
