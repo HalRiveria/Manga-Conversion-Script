@@ -1255,8 +1255,22 @@ function Invoke-MainLoop {
         # user likely wants to look at right after the run that just
         # finished - see Todo.md for that part of the gap, tracked
         # separately rather than fixed here.
-        Initialize-CleanConsoleOutput -Enabled $Settings.CleanConsoleOutputEnabled
-        Initialize-FileDeletion -PermanentDelete $Settings.PermanentDelete
+        # [bool](...) casts (2026-08-31 fix, caught by a same-day
+        # /code-review): both -Enabled/-PermanentDelete are
+        # [Parameter(Mandatory)][bool] - a $Settings hashtable missing
+        # either key passes $null, which fails PowerShell's own boolean
+        # type coercion with a hard, uncaught terminating error (this
+        # loop has no local try/catch), killing the WHOLE run loop
+        # instead of just degrading gracefully. Config.ps1 always defaults
+        # both keys today, so this can't fire against a real settings
+        # file - but any future caller building $Settings by hand (a
+        # test, a script, a partial hashtable) hit a hard crash on the
+        # very first iteration instead of a graceful $false. [bool]$null
+        # correctly coerces to $false, same as PowerShell's own default
+        # falsy treatment of a missing/null value everywhere else in this
+        # project.
+        Initialize-CleanConsoleOutput -Enabled ([bool]$Settings.CleanConsoleOutputEnabled)
+        Initialize-FileDeletion -PermanentDelete ([bool]$Settings.PermanentDelete)
 
         $runStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         $stats = & $InvokeModeHandler -Resolved $resolved -TargetPath $TargetPath -Settings $Settings -CjxlExe $CjxlExe -MagickExe $MagickExe `

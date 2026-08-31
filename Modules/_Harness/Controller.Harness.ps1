@@ -869,6 +869,40 @@ Reset-AbortState
 Write-Host ""
 
 # ==============================================================================
+#  Scenario T3 (2026-08-31 fix): the per-iteration re-sync
+#  (Initialize-CleanConsoleOutput/-FileDeletion) must not hard-crash the
+#  whole run loop just because $Settings is missing one of the two keys
+#  it reads - both are [Parameter(Mandatory)][bool], and an omitted
+#  hashtable key is $null, which used to fail PowerShell's own boolean
+#  type coercion with an uncaught terminating error. Uses a $Settings
+#  hashtable with NEITHER CleanConsoleOutputEnabled nor PermanentDelete
+#  set - Config.ps1 always defaults both in real use, so this only
+#  matters for a future caller building $Settings by hand, but the loop
+#  should still degrade gracefully (treat missing as $false) rather than
+#  crash outright.
+# ==============================================================================
+Write-Host "=== Scenario T3: a `$Settings hashtable missing CleanConsoleOutputEnabled/PermanentDelete does not crash the loop ===" -ForegroundColor Cyan
+# FullLogging deliberately included (unlike the other two) - Write-SummaryReport
+# has its own separate Mandatory bool on that key, a pre-existing, unrelated
+# requirement this scenario isn't testing; omitting it would make this
+# scenario throw for the wrong reason.
+$fakeSettingsT3 = @{ FullLogging = $false }
+$fakeGetModeT3 = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
+$fakeInvokeModeT3 = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) return New-StatsTracker }
+$script:callsT3 = 0
+$fakePostRunT3 = { $script:callsT3++; return 'Exit' }
+$threwT3 = $false
+try {
+    Invoke-MainLoop -TargetPath "C:\fake\lib" -Settings $fakeSettingsT3 -SettingsPath "C:\fake\settings.json" -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" `
+        -GetModeHandler $fakeGetModeT3 -InvokeModeHandler $fakeInvokeModeT3 -PostRunPromptHandler $fakePostRunT3
+} catch {
+    $threwT3 = $true
+}
+Test-Assert (-not $threwT3) "the loop did not crash despite `$Settings missing both CleanConsoleOutputEnabled and PermanentDelete"
+Test-Assert ($script:callsT3 -eq 1) "the loop still ran a full iteration and reached Show-PostRunPrompt"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario U: Invoke-MainLoop - a $null Invoke-Mode result (a run that
 #  didn't complete) is logged, not treated as a clean summary, and does
 #  NOT stop the loop by itself - only Show-PostRunPrompt's own Exit does.
