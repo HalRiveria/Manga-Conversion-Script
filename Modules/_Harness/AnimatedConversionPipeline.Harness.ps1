@@ -288,6 +288,26 @@ Test-Assert (-not (Test-Path -LiteralPath $webpF)) "no leftover partial .webp"
 Write-Host ""
 
 # ==============================================================================
+#  Scenario F2 (2026-08-31 fix): -DoAnimatedOverwrite $true points a
+#  (now-failing) re-conversion at an already-existing, good .webp from a
+#  prior successful run - the failure must NOT delete that pre-existing
+#  file. Before the fix, the failure catch deleted $Job.WebpPath
+#  unconditionally whenever it existed, destroying a previously-good
+#  output over an unrelated later failure.
+# ==============================================================================
+Write-Host "=== Scenario F2: a failed re-conversion does NOT delete the pre-existing good .webp it was overwriting ===" -ForegroundColor Cyan
+$fileF2 = New-FakeAvif -Name "chapter-f2\page1.avif" -Content "FRAMES:8`nFAIL_MAGICK"
+$webpF2 = [System.IO.Path]::ChangeExtension($fileF2.FullName, ".webp")
+"pre-existing good webp bytes from a prior successful run" | Set-Content -LiteralPath $webpF2 -Encoding UTF8 -NoNewline
+
+$resultF2 = Convert-AnimatedBatch -AnimatedFiles @($fileF2) -MagickExe $fakeMagickExe -AnimatedThreads 2 -DoAnimatedOverwrite $true -CancelToken ([System.Threading.CancellationToken]::None)
+
+Test-Assert ($resultF2.FailedCount -eq 1 -and $resultF2.ConvertedCount -eq 0) "counted as failed"
+Test-Assert (Test-Path -LiteralPath $webpF2) "the pre-existing .webp still exists - NOT deleted by the failed re-conversion attempt"
+Test-Assert ((Get-Content -LiteralPath $webpF2 -Raw) -eq "pre-existing good webp bytes from a prior successful run") "the pre-existing .webp's own content survives untouched"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario G: identify (inspection) failure - counted distinctly, no
 #  conversion attempted, source untouched
 # ==============================================================================

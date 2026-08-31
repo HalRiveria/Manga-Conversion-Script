@@ -233,7 +233,13 @@ function Complete-AnimatedConversionJob {
     } catch {
         Write-Log ("FAILED conversion of animated AVIF '" + $Job.SrcPath + "': " + $_) -Level Error
         $BatchResult.FailedCount++
-        if (Test-Path -LiteralPath $Job.WebpPath) { try { [System.IO.File]::Delete($Job.WebpPath) } catch { } }
+        # Only delete $Job.WebpPath if it did NOT exist before THIS job
+        # started (a genuine partial/corrupt file this attempt itself
+        # created) - if it already existed (e.g. -DoAnimatedOverwrite
+        # pointed this now-failed re-conversion at an already-good .webp
+        # from a prior successful run), deleting it would destroy a
+        # previously-good output over an unrelated later failure.
+        if (-not $Job.WebpExistedBeforeJob -and (Test-Path -LiteralPath $Job.WebpPath)) { try { [System.IO.File]::Delete($Job.WebpPath) } catch { } }
     }
 
     if ($convOk -and $DoAnimatedDeleteSource) {
@@ -380,6 +386,15 @@ function Convert-AnimatedBatch {
 
             Write-Log ("Converting animated: '" + $j.SrcPath + "'")
 
+            # Captured BEFORE Process.Start() (2026-08-31 fix) - Complete-
+            # AnimatedConversionJob's own failure cleanup needs to know
+            # whether $j.WebpPath already existed going into THIS attempt,
+            # so it can tell "a partial file THIS run just created" (safe
+            # to delete) apart from "an already-existing, valid .webp from
+            # a prior successful run that -DoAnimatedOverwrite pointed this
+            # (now-failed) re-conversion at" (must NOT be deleted just
+            # because a later, unrelated attempt failed).
+            $j.WebpExistedBeforeJob = Test-Path -LiteralPath $j.WebpPath
             $j.Proc          = [System.Diagnostics.Process]::Start($psi)
             $j.StartTime     = [System.Diagnostics.Stopwatch]::StartNew()
             $j.LastHeartbeat = [timespan]::Zero
