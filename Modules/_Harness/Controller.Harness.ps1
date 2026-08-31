@@ -302,6 +302,49 @@ Test-Assert ($totalsC3.StaleImageCleanedSuccess -eq 0) "the AVIF was NOT deleted
 Write-Host ""
 
 # ==============================================================================
+#  Scenario C4 (2026-08-31 fix): calls Invoke-FullPipelineChapter DIRECTLY
+#  (not through Invoke-FullPipeline, which has its own EARLIER per-chapter
+#  abort check that would just skip the chapter entirely, never reaching
+#  this function). The image job runs for real (SLEEP_MS:200, a genuine OS
+#  process) while a background runspace cancels the SAME $ctsC4 object
+#  ~50ms in - the job still dispatches and completes normally (Cts wasn't
+#  cancelled when it started, and a running process has no cancellation
+#  check of its own), so -ResultHandler fires for real and the merged
+#  status reads a clean Success. The zip gate is reached with the run
+#  already aborted - the exact "engine says Success, but the run is
+#  already aborted" case: before the fix, the zip gate had no
+#  Cts-awareness at all and zipped anyway, producing a misleadingly
+#  "successful", permanently-archived, potentially half-converted chapter.
+# ==============================================================================
+Write-Host "=== Scenario C4: a Cts cancelled mid-flight still blocks zipping even though the engine reports Success ===" -ForegroundColor Cyan
+$chC4 = New-Dir "scenario-c4\Series\Chapter 1"
+$imgC4 = New-FakeImageIn -DirPath $chC4 -Name "page1.jpg" -SleepMs 200
+$budgetC4 = [System.Threading.SemaphoreSlim]::new(2, 2)
+$ctsC4 = [System.Threading.CancellationTokenSource]::new()
+
+$cancelRunspaceC4 = [runspacefactory]::CreateRunspace()
+$cancelRunspaceC4.Open()
+$cancelPsC4 = [PowerShell]::Create()
+$cancelPsC4.Runspace = $cancelRunspaceC4
+$null = $cancelPsC4.AddScript({ param($Cts) Start-Sleep -Milliseconds 50; $Cts.Cancel() }).AddArgument($ctsC4)
+$cancelHandleC4 = $cancelPsC4.BeginInvoke()
+
+$resultC4 = Invoke-FullPipelineChapter -ChapterDir $chC4 -ChapterImageFiles @((Get-Item -LiteralPath $imgC4)) -IsZippable $true -ZipOut (Join-Path $scratchDir "scenario-c4.zip") `
+    -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullLogging $false -PermanentDelete $true -SharedBudget $budgetC4 -Cts $ctsC4
+
+$cancelPsC4.EndInvoke($cancelHandleC4)
+$cancelPsC4.Dispose()
+$cancelRunspaceC4.Close()
+$cancelRunspaceC4.Dispose()
+$budgetC4.Dispose()
+$ctsC4.Dispose()
+
+Test-Assert ($resultC4.Status -ne 'Error') ("sanity check: the engine itself reported a clean status, not an Error - proves the zip block below is really about the cancelled Cts, not a conversion failure (got " + $resultC4.Status + ")")
+Test-Assert ($resultC4.Zipped -eq $false) "zipping was blocked because the Cts was cancelled mid-flight, even though the engine reported a clean status"
+Test-Assert (-not (Test-Path -LiteralPath (Join-Path $scratchDir "scenario-c4.zip"))) "no zip file was actually created"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario D: a chapter with ONLY image files - the animated engine is
 #  never dispatched at all (AnimatedResult stays $null), not run with an
 #  empty file list.

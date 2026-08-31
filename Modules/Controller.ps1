@@ -508,7 +508,19 @@ function Invoke-FullPipelineChapter {
 
     $zipped    = $false
     $zipResult = $null
-    if ($IsZippable -and $status -ne 'Error') {
+    # -not $Cts.Token.IsCancellationRequested (2026-08-31 fix): a Ctrl+C
+    # landing between conversion finishing and this gate (or mid-batch,
+    # draining cleanly with 0 failures - Convert-ImageBatch returns
+    # normally either way) previously still zipped a chapter that's only
+    # partially converted, then deleted its source folder - the abort
+    # produced a misleadingly "successful", permanently-archived
+    # half-converted chapter. Self-healing without this: any file left
+    # loose (not yet converted) is picked up correctly on the next run's
+    # scan (it's not .jxl yet, so it's still a NeedsConversion candidate);
+    # already-converted files just aren't loose anymore, so a later run
+    # with nothing left to convert zips the (by-then fully converted)
+    # chapter normally.
+    if ($IsZippable -and $status -ne 'Error' -and -not $Cts.Token.IsCancellationRequested) {
         # Compress-FolderToZip/Test-ZipArchive directly, NOT
         # Invoke-LooseFolderZip - its own "any remaining
         # $LooseImageExtensions file blocks zipping" guard treats .webp
