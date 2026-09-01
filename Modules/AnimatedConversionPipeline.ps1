@@ -260,8 +260,38 @@ function Complete-AnimatedConversionJob {
         # is only ever replaced HERE, after full verification, never by
         # magick itself - so a crash/force-kill mid-encode can no longer
         # damage the original.
+        #
+        # [System.IO.File]::Replace, NOT Move-Item -Force (2026-08-31
+        # correction, found by a same-day /code-review re-review):
+        # confirmed directly against PowerShell's own real source
+        # (FileSystemProvider's MoveFileInfoItem) that Move-Item -Force
+        # onto an EXISTING destination is NOT atomic - it deletes the
+        # destination, then makes a SEPARATE MoveTo call to rename the
+        # source into place. A crash, kill, or a locked-file/out-of-space
+        # error landing in that gap deletes the original good .webp
+        # without ever completing the rename - BOTH files gone, strictly
+        # worse than the in-place-corruption bug this whole mechanism
+        # exists to prevent. File.Replace wraps the Win32 ReplaceFile API,
+        # which performs the swap as one atomic operation on NTFS - always
+        # safe here since $Job.MagickOutputPath is always in the same
+        # directory (and therefore volume) as $Job.WebpPath, and this
+        # branch is only reached when WebpPath is already known to exist
+        # (that's the entire reason a temp path was used in the first
+        # place).
+        #
+        # A real (non-$null) -destinationBackupFileName is required
+        # (verified directly on this machine's real PowerShell 5.1/.NET
+        # Framework): passing $null throws "The path is not of a legal
+        # form", even though .NET's own documentation says null should be
+        # accepted to skip the backup. A throwaway backup path is used and
+        # then best-effort deleted immediately after - it's a byte-for-byte
+        # copy of the .webp being replaced, which is exactly the file
+        # already fully verified above, so there's nothing worth keeping
+        # once the atomic swap has actually completed.
         if ($Job.MagickOutputPath -ne $Job.WebpPath) {
-            Move-Item -LiteralPath $Job.MagickOutputPath -Destination $Job.WebpPath -Force
+            $webpReplaceBackup = $Job.WebpPath + "_replace_backup.tmp"
+            [System.IO.File]::Replace($Job.MagickOutputPath, $Job.WebpPath, $webpReplaceBackup)
+            try { [System.IO.File]::Delete($webpReplaceBackup) } catch { }
         }
         if ($IsAbortDrain) {
             Write-Log ("Conversion OK (abort drain): '" + $Job.WebpPath + "'")
@@ -445,34 +475,31 @@ function Convert-AnimatedBatch {
             }
 
             # Captured BEFORE Process.Start() - Complete-AnimatedConversionJob's
-            # own failure cleanup needs to know whether $j.WebpPath already
-            # existed going into THIS attempt, so it can tell "a partial
-            # file THIS run just created" (safe to delete) apart from "an
-            # already-existing, valid .webp from a prior successful run
-            # that -DoAnimatedOverwrite pointed this (now-failed)
-            # re-conversion at" (must NOT be deleted just because a later,
-            # unrelated attempt failed).
-            $j.WebpExistedBeforeJob = $webpPathExists
-
             # $j.MagickOutputPath (2026-08-31 fix, from a same-day
-            # /code-review): the WebpExistedBeforeJob guard above only ever
-            # protected a pre-existing .webp from THIS SCRIPT's own Delete
-            # calls - it did nothing to stop magick.exe itself from opening
-            # and overwriting that same path as ITS OWN output target. With
-            # -DoAnimatedOverwrite on (a real, menu-exposed setting), magick
-            # writing straight to an existing good .webp and then crashing/
-            # being force-killed/exiting non-zero PARTWAY through encoding
-            # already destroys the original - by the time the cleanup code
-            # correctly declines to delete it, the damage is done. Fixed at
-            # the actual mechanism: when overwriting an existing file,
-            # magick targets a TEMP path instead of the real one; the real
-            # WebpPath is only replaced (via Move-Item, in
-            # Complete-AnimatedConversionJob) after a verified-successful
-            # conversion. When there's no pre-existing file to protect,
-            # magick still writes directly to WebpPath as before - nothing
-            # to lose in that case, and no temp-file/move overhead added
-            # for the common (non-overwrite) path.
-            $j.MagickOutputPath = if ($j.WebpExistedBeforeJob) {
+            # /code-review): a plain WebpExistedBeforeJob delete-guard
+            # (this attempt's own failure cleanup checking whether
+            # $j.WebpPath already existed before deciding it's safe to
+            # delete) only ever protected a pre-existing .webp from THIS
+            # SCRIPT's own Delete calls - it did nothing to stop magick.exe
+            # itself from opening and overwriting that same path as ITS OWN
+            # output target. With -DoAnimatedOverwrite on (a real,
+            # menu-exposed setting), magick writing straight to an existing
+            # good .webp and then crashing/being force-killed/exiting
+            # non-zero PARTWAY through encoding already destroys the
+            # original - by the time cleanup code declines to delete it,
+            # the damage is done. Fixed at the actual mechanism: when
+            # overwriting an existing file, magick targets a TEMP path
+            # instead of the real one; the real WebpPath is only replaced
+            # (via File.Replace, in Complete-AnimatedConversionJob) after a
+            # verified-successful conversion. When there's no pre-existing
+            # file to protect, magick still writes directly to WebpPath as
+            # before - nothing to lose in that case, and no temp-file/move
+            # overhead added for the common (non-overwrite) path.
+            # ($webpPathExists, computed just above, doubles as this
+            # decision - no separate job-hashtable field needed once
+            # Complete-AnimatedConversionJob stopped consuming one
+            # directly, per this same fix.)
+            $j.MagickOutputPath = if ($webpPathExists) {
                 [System.IO.Path]::Combine(
                     [System.IO.Path]::GetDirectoryName($j.WebpPath),
                     [System.IO.Path]::GetFileNameWithoutExtension($j.WebpPath) + "_tmp_overwrite.webp"
