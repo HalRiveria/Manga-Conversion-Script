@@ -883,10 +883,17 @@ function Get-LooseImageCandidates {
         Convert-ImageBatch was never even dispatched for it and the
         chapter's own ChapterResult stayed $null - Get-ChapterProgressStatus
         maps a $null result to a clean Success with no way to know a real,
-        unconverted file was sitting there. Callers should count this and
-        block that chapter from zipping the same way an AVIF classification
-        failure already does (see Controller.ps1's own
-        $failedClassificationDirs mechanism).
+        unconverted file was sitting there. Both real callers (this
+        module's own Invoke-LooseImageConversionPipeline, and
+        Controller.ps1's Invoke-FullPipeline) count it and block that
+        chapter from zipping the same way an AVIF classification failure
+        already does (see Controller.ps1's own $failedClassificationDirs
+        mechanism) - a NEW caller should do the same. Known remaining gap
+        in both existing callers (not fixed by this field, tracked in
+        Todo.md): the chapter's own reported Status/Detail still comes
+        back a clean Success in this case (nothing left to convert once
+        the collision is excluded), so IsZippable correctly blocks the
+        zip but the live per-chapter display doesn't reflect the problem.
     #>
     param(
         [Parameter(Mandatory)]
