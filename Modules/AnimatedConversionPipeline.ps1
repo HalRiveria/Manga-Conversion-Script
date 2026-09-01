@@ -367,15 +367,6 @@ function Convert-AnimatedBatch {
             # the caller skips the re-check entirely; anything NOT in the
             # set (standalone mode 3, or any caller that never classified)
             # falls through to the real check unchanged.
-            # -KnownAnimatedPaths (2026-08-31 efficiency fix): Controller.ps1's
-            # Full Pipeline already ran Test-AvifAnimated on every ambiguous
-            # .avif during its own per-series ownership classification,
-            # before ever dispatching to this function - re-running it here
-            # for every one of those files was a pure redundant magick
-            # identify spawn per file. A file already confirmed animated by
-            # the caller skips the re-check entirely; anything NOT in the
-            # set (standalone mode 3, or any caller that never classified)
-            # falls through to the real check unchanged.
             $isAnimated = $false
             if ($KnownAnimatedPaths -and $KnownAnimatedPaths.Contains($j.SrcPath)) {
                 $isAnimated = $true

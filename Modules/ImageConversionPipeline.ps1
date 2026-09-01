@@ -233,6 +233,18 @@ function Invoke-IccStripRetryOrFail {
     $stripProc.Dispose()
 
     if ($stripExitCode -eq 0 -and (Test-Path -LiteralPath $strippedPng)) {
+        # Clean up any partial/corrupt .jxl the ORIGINAL failed attempt
+        # may have already written to this same path (2026-08-31 fix,
+        # PLAUSIBLE finding from a same-day /code-review) - the retry
+        # below targets the identical $Job.JxlPath, and this function's
+        # own early `return $true` skips the normal failure path's own
+        # partial-.jxl cleanup entirely. Real cjxl.exe was confirmed to
+        # overwrite an existing file at this path cleanly (no error, no
+        # prompt) on this machine, so this wasn't causing live harm - but
+        # nothing in this file's own contract guarantees that, and this
+        # matches the same defensive cleanup every other failure path
+        # here already does before writing again.
+        if (Test-Path -LiteralPath $Job.JxlPath) { try { [System.IO.File]::Delete($Job.JxlPath) } catch { } }
         # Cancel/abort may be in progress - the dispatch loop won't run
         # again in that case, so this retry will simply be picked up by
         # the stragglers drain below (or left for the next run). Enqueue
@@ -514,6 +526,16 @@ function Convert-ImageBatch {
             # indefinitely instead of failing that one job. Confirmed live:
             # a stale/bad -CjxlExe path hung indefinitely before this fix.
             $magickProcLocal = $null
+            # Reset per-iteration, same reasoning as $magickProcLocal above
+            # (2026-08-31 fix): $j.TempPng is only assigned AFTER the
+            # magick Process.Start/WaitForExit calls below succeed, so if
+            # either throws, the catch block's own cleanup (which checks
+            # $j.TempPng) can't see a temp file magick may have already
+            # written - this local variable, reset every iteration so a
+            # PREVIOUS job's leftover value can't be mistaken for this
+            # job's own temp file, gives the catch block a fallback that's
+            # set as soon as the path is computed, before Start() ever runs.
+            $tempPngLocal = $null
             try {
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName               = $CjxlExe
@@ -564,9 +586,17 @@ function Convert-ImageBatch {
                     # Animated WebPs carry a VP8X extended-format chunk at offset 12.
                     # Bit 1 (0x02) of its flags field (offset 20) is the Animation flag.
                     # Simple lossy (VP8 ) and lossless (VP8L) files cannot be animated.
-                    $webpBytes  = [System.IO.File]::ReadAllBytes($j.SrcPath)
+                    # Reads only the first 24 bytes via a FileStream, not
+                    # ReadAllBytes (2026-08-31 efficiency fix) - the whole
+                    # file was previously loaded into memory just to
+                    # inspect this header, real waste for a large animated
+                    # WebP (common for scanned manga pages).
+                    $webpBytes  = New-Object byte[] 24
+                    $webpBytesRead = 0
+                    $webpStream = [System.IO.File]::OpenRead($j.SrcPath)
+                    try { $webpBytesRead = $webpStream.Read($webpBytes, 0, 24) } finally { $webpStream.Dispose() }
                     $isAnimated = $false
-                    if ($webpBytes.Length -ge 24) {
+                    if ($webpBytesRead -ge 24) {
                         $chunkId = [System.Text.Encoding]::ASCII.GetString($webpBytes, 12, 4)
                         if ($chunkId -eq 'VP8X') {
                             $flags      = [System.BitConverter]::ToUInt32($webpBytes, 20)
@@ -623,6 +653,7 @@ function Convert-ImageBatch {
                     [System.IO.Path]::GetDirectoryName($j.SrcPath),
                     [System.IO.Path]::GetFileNameWithoutExtension($j.SrcPath) + "_tmp_" + $formatLabel.ToLowerInvariant() + "2png.png"
                 )
+                $tempPngLocal = $tempPng
                 $magickPsi = New-Object System.Diagnostics.ProcessStartInfo
                 $magickPsi.FileName               = $MagickExe
                 $magickPsi.Arguments              = "`"" + $j.SrcPath + "[0]`" `"" + $tempPng + "`""
@@ -668,8 +699,20 @@ function Convert-ImageBatch {
             } catch {
                 Write-Log ("FAILED to start conversion process for '" + $j.SrcPath + "': " + $_) -Level Error
                 $batchResult.FailedCount++
+                # Swallowed deliberately (2026-08-31, from a same-day
+                # /code-review): a TOCTOU race between the HasExited check
+                # and Kill() (or an access-denied Kill()) would otherwise
+                # propagate out of an already-failing job's own cleanup -
+                # best-effort only, matching this file's established
+                # best-effort file-cleanup idiom used throughout.
                 if ($magickProcLocal) { try { if (-not $magickProcLocal.HasExited) { $magickProcLocal.Kill() }; $magickProcLocal.Dispose() } catch { } }
+                # $j.TempPng is only set after Start/WaitForExit succeed
+                # (see the reset comment above) - $tempPngLocal is the
+                # fallback for a throw landing before that assignment ever
+                # happens, so a temp PNG magick already wrote isn't
+                # orphaned just because the crash landed one line early.
                 if ($j.TempPng -and (Test-Path -LiteralPath $j.TempPng)) { try { [System.IO.File]::Delete($j.TempPng) } catch { } }
+                elseif ($tempPngLocal -and (Test-Path -LiteralPath $tempPngLocal)) { try { [System.IO.File]::Delete($tempPngLocal) } catch { } }
                 if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
             }
         }
@@ -831,7 +874,19 @@ function Get-LooseImageCandidates {
         a "stale" source silently deleted out of it just because this
         function has no other concept of it.
     .OUTPUTS
-        @{ NeedsConversion = List[FileInfo]; StaleSources = List[FileInfo] }
+        @{ NeedsConversion = List[FileInfo]; StaleSources = List[FileInfo];
+           NamingCollisions = List[FileInfo] } - NamingCollisions (added
+        2026-08-31, from a same-day /code-review) makes the naming-
+        collision exclusion described above VISIBLE to callers: before
+        this field existed, a chapter whose only loose image was such a
+        collision had zero entries in either returned list, so
+        Convert-ImageBatch was never even dispatched for it and the
+        chapter's own ChapterResult stayed $null - Get-ChapterProgressStatus
+        maps a $null result to a clean Success with no way to know a real,
+        unconverted file was sitting there. Callers should count this and
+        block that chapter from zipping the same way an AVIF classification
+        failure already does (see Controller.ps1's own
+        $failedClassificationDirs mechanism).
     #>
     param(
         [Parameter(Mandatory)]
@@ -867,14 +922,33 @@ function Get-LooseImageCandidates {
 
     $needsConversion = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
     $staleSources     = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+    $namingCollisions = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
     foreach ($img in $allCandidates) {
         $jxlCounterpart = [System.IO.Path]::ChangeExtension($img.FullName, ".jxl")
-        if (Test-Path -LiteralPath $jxlCounterpart) {
-            $jxlItem = Get-Item -LiteralPath $jxlCounterpart
+        # Get-Item -ErrorAction SilentlyContinue instead of a separate
+        # Test-Path + Get-Item pair (2026-08-31 efficiency fix) - one stat
+        # instead of two, for every candidate with an existing .jxl
+        # counterpart.
+        $jxlItem = Get-Item -LiteralPath $jxlCounterpart -ErrorAction SilentlyContinue
+        if ($null -ne $jxlItem) {
             if ($jxlItem.Length -eq 0) {
                 Write-Log ("Existing .jxl counterpart for '" + $img.FullName + "' is 0 bytes - treating as incomplete and re-converting source.") -Level Warn
                 $needsConversion.Add($img)
-            } elseif ($img.LastWriteTimeUtc -gt $jxlItem.LastWriteTimeUtc) {
+            } elseif ($img.LastWriteTimeUtc -ge $jxlItem.LastWriteTimeUtc) {
+                # -ge, not -gt (2026-08-31 fix, found by a same-day
+                # /code-review): a source whose LastWriteTimeUtc is
+                # EXACTLY EQUAL to its .jxl's fell through to the stale
+                # branch below and got permanently deleted without ever
+                # being converted - a real risk in this project's domain,
+                # since ZIP extraction commonly produces coarse (or
+                # identical) timestamps, letting an unrelated same-basename
+                # file from a different archive collide exactly with an
+                # old unrelated .jxl's mtime. Treating equal the same as
+                # newer (an unresolvable collision, excluded from both
+                # lists) trades a rare false-positive "please rename one of
+                # these" prompt for eliminating a silent, unconverted-
+                # source data-loss path - the same conservative direction
+                # this fix's own history above already established.
                 # A same-basename .jxl existing is not, by itself, proof
                 # THIS source produced it - basename matching alone can't
                 # tell "photo.jpg, already converted and deleted, and this
@@ -904,7 +978,8 @@ function Get-LooseImageCandidates {
                 # lists (no delete, no conversion, no overwrite) and logged
                 # as a real problem needing the user to rename one of the
                 # two files by hand.
-                Write-Log ("'" + $img.FullName + "' shares a basename with an existing, OLDER '" + $jxlCounterpart + "' it did not produce (this source is newer) - a real naming collision, not a stale leftover. Left untouched - neither converted (would silently overwrite the existing .jxl) nor deleted (would lose an unconverted source). Rename one of the two files to resolve.") -Level Error
+                Write-Log ("'" + $img.FullName + "' shares a basename with an existing '" + $jxlCounterpart + "' it did not produce (this source is not older than it) - a real naming collision, not a stale leftover. Left untouched - neither converted (would silently overwrite the existing .jxl) nor deleted (would lose an unconverted source). Rename one of the two files to resolve.") -Level Error
+                $namingCollisions.Add($img)
             } else {
                 $staleSources.Add($img)
             }
@@ -913,7 +988,7 @@ function Get-LooseImageCandidates {
         }
     }
 
-    return @{ NeedsConversion = $needsConversion; StaleSources = $staleSources }
+    return @{ NeedsConversion = $needsConversion; StaleSources = $staleSources; NamingCollisions = $namingCollisions }
 }
 
 function Remove-StaleLooseSources {
@@ -964,13 +1039,6 @@ function Get-ChapterProgressStatus {
     )
     if ($null -eq $ChapterResult) { return "Success", $null }
 
-    # InspectFailedCount is Error-tier: it means Test-AvifAnimated couldn't
-    # even determine whether an AVIF needs converting, so it was left as a
-    # raw, completely unconverted file on disk - previously not checked
-    # here AT ALL, so it was silently treated as a clean Success, letting
-    # the zip gate proceed with an unconverted file in the chapter. Same
-    # underlying issue as AnimatedConversionPipeline.ps1's own
-    # Get-ChapterAnimatedStatus, fixed there the same day (2026-08-31).
     # InspectFailedCount is Error-tier: it means Test-AvifAnimated couldn't
     # even determine whether an AVIF needs converting, so it was left as a
     # raw, completely unconverted file on disk - previously not checked
@@ -1054,7 +1122,11 @@ function Invoke-LooseImageConversionPipeline {
            LastCompletedPaths; LastSkippedPaths; StillPendingPaths;
            SeriesCount; ChapterCount; Aborted } - InspectFailedCount is
         the sum of every chapter's Convert-ImageBatch InspectFailedCount
-        (AVIF files whose animation status couldn't be determined).
+        (AVIF files whose animation status couldn't be determined) PLUS
+        any Get-LooseImageCandidates NamingCollisions this run hit
+        directly (2026-08-31) - both mean "a real file this run couldn't
+        safely act on", counted the same way Controller.ps1's own
+        Full Pipeline combines its AVIF-classification failures.
     #>
     param(
         [Parameter(Mandatory)]
@@ -1132,6 +1204,22 @@ function Invoke-LooseImageConversionPipeline {
             $totals.StaleCleanedSuccess += $staleResult.Success
             $totals.StaleCleanedFail    += $staleResult.Fail
 
+            # NamingCollisions (2026-08-31 fix, from a same-day
+            # /code-review): counted into the same combined
+            # InspectFailedCount field the AVIF-classification-failure
+            # case already uses (both mean "a real file this run couldn't
+            # safely act on"), and its directory tracked so the chapter
+            # holding it isn't treated as zippable below - without this, a
+            # chapter whose only loose image was a naming collision had
+            # zero entries in $seriesCandidates.NeedsConversion, so
+            # Convert-ImageBatch was never dispatched for it and
+            # Get-ChapterProgressStatus mapped the resulting $null
+            # ChapterResult to a clean Success, letting the raw,
+            # unconverted collision file get zipped anyway.
+            $totals.InspectFailedCount += $seriesCandidates.NamingCollisions.Count
+            $namingCollisionDirs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($nc in $seriesCandidates.NamingCollisions) { $null = $namingCollisionDirs.Add($nc.DirectoryName) }
+
             # Get-SeriesChapters is a thin wrapper on the zip-domain
             # Get-ZippableLeafDirs (see LeafDirectoryDiscovery.ps1) - its
             # former-container guard (skip a dir with a stray .zip inside)
@@ -1187,7 +1275,11 @@ function Invoke-LooseImageConversionPipeline {
             $chapterEntries = [System.Collections.Generic.List[hashtable]]::new()
             foreach ($c in $chapters) {
                 $null = $chapterDirSet.Add($c.Dir.FullName)
-                $chapterEntries.Add(@{ Dir = $c.Dir; ZipOut = $c.ZipOut; IsZippable = $true })
+                # -not $namingCollisionDirs.Contains(...) (2026-08-31 fix):
+                # a chapter holding an unresolvable naming collision must
+                # not be zipped this run - see the comment above where
+                # $namingCollisionDirs is built.
+                $chapterEntries.Add(@{ Dir = $c.Dir; ZipOut = $c.ZipOut; IsZippable = (-not $namingCollisionDirs.Contains($c.Dir.FullName)) })
             }
             foreach ($extraDirPath in $imagesByDir.Keys) {
                 if ($chapterDirSet.Contains($extraDirPath)) { continue }

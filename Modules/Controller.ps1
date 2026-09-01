@@ -684,8 +684,10 @@ function Invoke-FullPipeline {
         Convert-AnimatedBatch's pre-existing one) PLUS any AVIF
         classification failure this function's own per-series
         reconciliation hits directly (see "AVIF CLASSIFICATION" in this
-        module's header) - matches Summary.ps1's new InspectFailed row,
-        which reads from this one combined total either way.
+        module's header) PLUS any Get-LooseImageCandidates
+        NamingCollisions this run hit directly (2026-08-31) - matches
+        Summary.ps1's new InspectFailed row, which reads from this one
+        combined total either way.
     #>
     param(
         [Parameter(Mandatory)]
@@ -762,11 +764,17 @@ function Invoke-FullPipeline {
             if ($null -eq $series) { break }
             $totals.SeriesCount++
 
-            # Directories holding a file the AVIF classification step
-            # below couldn't resolve - populated during that step,
-            # consulted when building $chapterEntries further down to
-            # force IsZippable=$false for any chapter affected. Reset
-            # per series, same lifetime as $avifClassification.
+            # Directories holding a file this series couldn't safely act
+            # on - either the AVIF classification step below couldn't
+            # resolve it, OR (2026-08-31 fix) Get-LooseImageCandidates
+            # flagged it as an unresolvable naming collision (see its own
+            # NamingCollisions field). Populated during/right after those
+            # two steps, consulted when building $chapterEntries further
+            # down to force IsZippable=$false for any chapter affected -
+            # same reasoning for both: a real, unconverted file that must
+            # not be zipped, and this run has no safe way to fix it
+            # automatically. Reset per series, same lifetime as
+            # $avifClassification.
             $failedClassificationDirs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             # Populated below, once classification runs - threaded into
             # every Invoke-FullPipelineChapter call this series so
@@ -784,6 +792,17 @@ function Invoke-FullPipeline {
                 -KnownZipPaths $KnownZipPaths -ExcludeStagingDirs $FolderExcludeStagingDirs
             $animatedCandidates = Get-LooseAnimatedCandidates -ScanPath $series.FullName -AnimatedFileExtensions $AnimatedFileExtensions `
                 -KnownZipPaths $KnownZipPaths -ExcludeStagingDirs $FolderExcludeStagingDirs
+
+            # NamingCollisions (2026-08-31 fix, from a same-day
+            # /code-review): counted into the same combined
+            # InspectFailedCount field the AVIF classification failure
+            # case below already uses, and its directory added to
+            # $failedClassificationDirs so the chapter holding it isn't
+            # treated as zippable - see that variable's own comment above,
+            # and ImageConversionPipeline.ps1's Get-LooseImageCandidates
+            # docstring for the full "why" of this exclusion.
+            $totals.InspectFailedCount += $imageCandidates.NamingCollisions.Count
+            foreach ($nc in $imageCandidates.NamingCollisions) { $null = $failedClassificationDirs.Add($nc.DirectoryName) }
 
             # AVIF CLASSIFICATION (2026-08-28) - see this module's header.
             # When -LooseImageExtensions includes .avif (the default,

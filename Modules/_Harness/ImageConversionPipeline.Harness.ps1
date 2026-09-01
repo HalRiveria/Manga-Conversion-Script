@@ -418,6 +418,41 @@ Test-Assert ($totalsC2.ConvertedSuccess -eq 0 -and $totalsC2.ConvertedFail -eq 0
 Test-Assert ($totalsC2.StaleCleanedSuccess -eq 0) "not counted as a stale-source cleanup either - not deleted"
 Test-Assert (Test-Path -LiteralPath $collidingSrcC2) "the colliding source survives untouched on disk - not deleted"
 Test-Assert ((Get-Content -LiteralPath (Join-Path $chC2 "photo.jxl") -Raw) -eq $originalJxlBytesC2) "the pre-existing .jxl survives byte-for-byte untouched - NOT silently overwritten by a conversion of the unrelated colliding source"
+# 2026-08-31 fix (from a second same-day /code-review): the collision used
+# to be completely invisible outside its own log line - not counted
+# anywhere, and (since it's this chapter's ONLY loose image) the chapter's
+# ChapterResult stayed $null, mapping to a clean Success with no zip-block
+# at all. Get-LooseImageCandidates now returns it via NamingCollisions,
+# counted into InspectFailedCount and used to force IsZippable=$false.
+Test-Assert ($totalsC2.InspectFailedCount -eq 1) ("the naming collision is now counted in InspectFailedCount, not invisible (got " + $totalsC2.InspectFailedCount + ")")
+
+$zipCallsC2 = [System.Collections.Generic.List[hashtable]]::new()
+$zipCallbackC2 = { param($payload) $zipCallsC2.Add($payload); return @{ Status = "Success"; Detail = $null } }
+$null = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-c2") -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false -ZipStepCallback $zipCallbackC2
+Test-Assert ($zipCallsC2.Count -eq 0) "the chapter holding the naming collision is never treated as zippable - ZipStepCallback (mode 8's own zip-step wiring) is never invoked for it"
+
+# ==============================================================================
+#  Scenario C2b (2026-08-31 fix, found by a second same-day /code-review):
+#  same collision shape as C2, but with the colliding source's timestamp
+#  EXACTLY EQUAL to the pre-existing .jxl's, not newer. The comparison was
+#  strict -gt, so an equal timestamp fell through to the stale branch and
+#  got permanently deleted without ever being converted - a real risk here
+#  since ZIP extraction commonly produces coarse or identical timestamps.
+#  Fixed by changing -gt to -ge.
+# ==============================================================================
+Write-Host "=== Scenario C2b: a same-basename file with an EQUAL timestamp is also left untouched, not deleted as stale ===" -ForegroundColor Cyan
+$chC2b = New-Dir "scenario-c2b\Series\Chapter 1"
+$originalJxlBytesC2b = "real jxl bytes from a since-deleted photo.jpg"
+[System.IO.File]::WriteAllText((Join-Path $chC2b "photo.jxl"), $originalJxlBytesC2b)
+$jxlTimeC2b = (Get-Item -LiteralPath (Join-Path $chC2b "photo.jxl")).LastWriteTimeUtc
+$collidingSrcC2b = New-FakeImage -DirPath $chC2b -Name "photo.png"
+[System.IO.File]::SetLastWriteTimeUtc($collidingSrcC2b, $jxlTimeC2b)   # forced EXACTLY equal, not just close
+
+$totalsC2b = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-c2b") -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
+
+Test-Assert ($totalsC2b.ConvertedSuccess -eq 0 -and $totalsC2b.ConvertedFail -eq 0) ("the colliding source was neither converted nor counted as a failure (got ConvertedSuccess=" + $totalsC2b.ConvertedSuccess + ", ConvertedFail=" + $totalsC2b.ConvertedFail + ")")
+Test-Assert ($totalsC2b.StaleCleanedSuccess -eq 0) "not counted as a stale-source cleanup either - not deleted despite the equal timestamp"
+Test-Assert (Test-Path -LiteralPath $collidingSrcC2b) "the colliding source survives untouched on disk - not deleted"
 
 # ==============================================================================
 #  Scenario D: a series with zero qualifying chapters is counted and skipped

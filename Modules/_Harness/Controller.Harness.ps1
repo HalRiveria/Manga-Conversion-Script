@@ -1216,6 +1216,35 @@ Test-Assert ($totalsW.ZipSkippedDueToError -eq 1) ("the classification-blocked c
 Write-Host ""
 
 # ==============================================================================
+#  Scenario X (2026-08-31 fix, from ImageConversionPipeline.ps1's own
+#  dedicated per-module /code-review): a same-basename naming collision
+#  (a source not older than a pre-existing, unrelated .jxl it did not
+#  produce) used to be completely invisible to Full Pipeline - Get-
+#  LooseImageCandidates excluded it from both NeedsConversion and
+#  StaleSources with no counter and no zip-block, so a chapter whose only
+#  loose file was such a collision reported a clean Success and could get
+#  zipped with the raw, unconverted collision file still inside it.
+#  Get-LooseImageCandidates now returns it via NamingCollisions, and
+#  Controller.ps1 folds it into InspectFailedCount and
+#  $failedClassificationDirs the same way an AVIF classification failure
+#  already was.
+# ==============================================================================
+Write-Host "=== Scenario X: a naming collision blocks its own chapter from zipping, same as an AVIF classification failure ===" -ForegroundColor Cyan
+$chX = New-Dir "scenario-x\Series\Chapter 1"
+[System.IO.File]::WriteAllText((Join-Path $chX "photo.jxl"), "real jxl bytes from a since-deleted photo.jpg")
+Start-Sleep -Milliseconds 50
+New-FakeImageIn -DirPath $chX -Name "photo.png" | Out-Null
+
+$totalsX = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-x") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+
+Test-Assert ($totalsX.ConvertedImageSuccess -eq 0 -and $totalsX.ConvertedImageFail -eq 0) "the colliding source was neither converted nor counted as a failure - just left alone"
+Test-Assert ($totalsX.InspectFailedCount -eq 1) ("the naming collision was counted in Invoke-FullPipeline's own InspectFailedCount, not invisible (got " + $totalsX.InspectFailedCount + ")")
+Test-Assert (Test-Path -LiteralPath (Join-Path $chX "photo.png")) "the colliding source survives untouched on disk - not deleted"
+Test-Assert ($totalsX.ZipCreatedSuccess -eq 0) "the chapter was NOT zipped - the raw, unconverted collision file did not get swept into an archive"
+Test-Assert ($totalsX.ZipSkippedDueToError -eq 1) ("the naming-collision-blocked chapter is counted in ZipSkippedDueToError, same as the AVIF classification case (got " + $totalsX.ZipSkippedDueToError + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="
