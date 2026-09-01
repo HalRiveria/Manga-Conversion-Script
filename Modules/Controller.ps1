@@ -1190,17 +1190,27 @@ function Invoke-Mode {
                 # [Parameter(Mandatory)][bool] on
                 # Invoke-LooseImageConversionPipeline.
                 $r = & $ImageConversionHandler -Path $TargetPath -CjxlExe $CjxlExe -MagickExe $MagickExe `
-                    -JpegLossless $Settings.JpegLossless -JpegQuality $Settings.JpegQuality -MaxCjxlProcs $Settings.MaxCjxlProcs -FullLogging ([bool]$Settings.FullLogging)
+                    -JpegLossless ([bool]$Settings.JpegLossless) -JpegQuality $Settings.JpegQuality -MaxCjxlProcs $Settings.MaxCjxlProcs -FullLogging ([bool]$Settings.FullLogging)
                 $stats.LooseImgConverted.Success = $r.ConvertedSuccess; $stats.LooseImgConverted.Fail = $r.ConvertedFail; $stats.LooseImgConverted.Skipped = $r.ConvertedSkipped
                 $stats.LooseImgDeleted.Success   = $r.DeletedSuccess;   $stats.LooseImgDeleted.Fail   = $r.DeletedFail
                 $stats.LooseStaleCleaned.Success = $r.StaleCleanedSuccess; $stats.LooseStaleCleaned.Fail = $r.StaleCleanedFail
                 $stats.InspectFailed.Count       = $r.InspectFailedCount
             }
             'AnimatedConversion' {
-                # [bool](...) cast - same reasoning as ImageConversion above.
+                # [bool](...) casts (2026-08-31 fix, from a FOURTH same-day
+                # /code-review pass): NOT limited to Mandatory params -
+                # confirmed directly that a non-Mandatory [bool]$X = $false
+                # parameter ALSO throws on an explicitly-passed $null (the
+                # Mandatory attribute only affects whether OMITTING the
+                # param is allowed; the [bool] type coercion runs
+                # regardless of Mandatory once a value - even $null - is
+                # actually passed). Every bool-typed $Settings property
+                # passed as a param anywhere in this switch needed the
+                # same cast, not just the ones already flagged as
+                # Mandatory on the receiving end.
                 $r = & $AnimatedConversionHandler -Path $TargetPath -MagickExe $MagickExe `
-                    -AnimatedLossless $Settings.AnimatedLossless -AnimatedQuality $Settings.AnimatedQuality -AnimatedThreads $Settings.AnimatedThreads `
-                    -AnimatedOverwrite $Settings.AnimatedOverwrite -AnimatedDeleteSource $Settings.AnimatedDeleteSource -FullLogging ([bool]$Settings.FullLogging)
+                    -AnimatedLossless ([bool]$Settings.AnimatedLossless) -AnimatedQuality $Settings.AnimatedQuality -AnimatedThreads $Settings.AnimatedThreads `
+                    -AnimatedOverwrite ([bool]$Settings.AnimatedOverwrite) -AnimatedDeleteSource ([bool]$Settings.AnimatedDeleteSource) -FullLogging ([bool]$Settings.FullLogging)
                 $stats.LooseAnimatedConverted.Success = $r.ConvertedSuccess; $stats.LooseAnimatedConverted.Fail = $r.ConvertedFail; $stats.LooseAnimatedConverted.Skipped = $r.ConvertedSkipped
                 $stats.LooseAnimatedDeleted.Success   = $r.DeletedSuccess;   $stats.LooseAnimatedDeleted.Fail   = $r.DeletedFail
                 $stats.InspectFailed.Count            = $r.InspectFailedCount
@@ -1219,9 +1229,9 @@ function Invoke-Mode {
             }
             'ConvertZipped' {
                 # [bool](...) casts - same reasoning as the ZipFolders case above.
-                $r = & $ConvertZippedHandler -Path $TargetPath -MaxParallel $Settings.ZipParallelThreads -DeleteFolders $Settings.DeleteExtractedFoldersAfterRezip `
+                $r = & $ConvertZippedHandler -Path $TargetPath -MaxParallel $Settings.ZipParallelThreads -DeleteFolders ([bool]$Settings.DeleteExtractedFoldersAfterRezip) `
                     -FullLogging ([bool]$Settings.FullLogging) -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete ([bool]$Settings.PermanentDelete) `
-                    -CjxlExe $CjxlExe -MagickExe $MagickExe -MaxCjxlProcs $Settings.MaxCjxlProcs -JpegLossless $Settings.JpegLossless -JpegQuality $Settings.JpegQuality
+                    -CjxlExe $CjxlExe -MagickExe $MagickExe -MaxCjxlProcs $Settings.MaxCjxlProcs -JpegLossless ([bool]$Settings.JpegLossless) -JpegQuality $Settings.JpegQuality
                 $stats.ZipExtracted.Success  = $r.ZipExtractedSuccess;  $stats.ZipExtracted.Fail  = $r.ZipExtractedFail
                 $stats.ImgConverted.Success  = $r.ImgConvertedSuccess; $stats.ImgConverted.Fail  = $r.ImgConvertedFail; $stats.ImgConverted.Skipped = $r.ImgConvertedSkipped
                 $stats.ImgDeleted.Success    = $r.ImgDeletedSuccess;   $stats.ImgDeleted.Fail    = $r.ImgDeletedFail
@@ -1231,8 +1241,8 @@ function Invoke-Mode {
             'FullPipeline' {
                 # [bool](...) casts - same reasoning as the ZipFolders case above.
                 $r = & $FullPipelineHandler -Path $TargetPath -CjxlExe $CjxlExe -MagickExe $MagickExe `
-                    -JpegLossless $Settings.JpegLossless -JpegQuality $Settings.JpegQuality -AnimatedLossless $Settings.AnimatedLossless -AnimatedQuality $Settings.AnimatedQuality `
-                    -AnimatedOverwrite $Settings.AnimatedOverwrite -AnimatedDeleteSource $Settings.AnimatedDeleteSource -FullPipelineMaxConcurrentProcs $Settings.MaxCjxlProcs `
+                    -JpegLossless ([bool]$Settings.JpegLossless) -JpegQuality $Settings.JpegQuality -AnimatedLossless ([bool]$Settings.AnimatedLossless) -AnimatedQuality $Settings.AnimatedQuality `
+                    -AnimatedOverwrite ([bool]$Settings.AnimatedOverwrite) -AnimatedDeleteSource ([bool]$Settings.AnimatedDeleteSource) -FullPipelineMaxConcurrentProcs $Settings.MaxCjxlProcs `
                     -FullLogging ([bool]$Settings.FullLogging) -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete ([bool]$Settings.PermanentDelete)
                 $stats.LooseImgConverted.Success      = $r.ConvertedImageSuccess;    $stats.LooseImgConverted.Fail      = $r.ConvertedImageFail;    $stats.LooseImgConverted.Skipped = $r.ConvertedImageSkipped
                 $stats.LooseImgDeleted.Success        = $r.DeletedImageSuccess;      $stats.LooseImgDeleted.Fail        = $r.DeletedImageFail
@@ -1294,7 +1304,7 @@ function Invoke-Mode {
                 # switch case in this function; this one (mode 8) was
                 # missed by both earlier passes.
                 $r = & $ImageConversionHandler -Path $TargetPath -CjxlExe $CjxlExe -MagickExe $MagickExe `
-                    -JpegLossless $Settings.JpegLossless -JpegQuality $Settings.JpegQuality -MaxCjxlProcs $Settings.MaxCjxlProcs -FullLogging ([bool]$Settings.FullLogging) `
+                    -JpegLossless ([bool]$Settings.JpegLossless) -JpegQuality $Settings.JpegQuality -MaxCjxlProcs $Settings.MaxCjxlProcs -FullLogging ([bool]$Settings.FullLogging) `
                     -ZipStepCallback $zipStep
                 $stats.LooseImgConverted.Success = $r.ConvertedSuccess; $stats.LooseImgConverted.Fail = $r.ConvertedFail; $stats.LooseImgConverted.Skipped = $r.ConvertedSkipped
                 $stats.LooseImgDeleted.Success   = $r.DeletedSuccess;   $stats.LooseImgDeleted.Fail   = $r.DeletedFail

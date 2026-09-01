@@ -807,6 +807,18 @@ $fakeFullHandlerN2 = { param([string]$Path, [string]$CjxlExe, [string]$MagickExe
 $statsN2Full = Invoke-Mode -Resolved @{ Mode = 'FullPipeline' } -TargetPath "C:\fake\lib" -Settings $fakeSettingsN2 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -FullPipelineHandler $fakeFullHandlerN2
 Test-Assert ($null -ne $statsN2Full -and $statsN2Full.LooseImgConverted.Success -eq 7) "FullPipeline completes normally (not swallowed into the fatal-handler `$null path) despite `$Settings missing FullLogging/PermanentDelete"
 
+# 2026-08-31 fix (found by a FOURTH-pass re-review): confirmed directly
+# that a non-Mandatory [bool]$X = $false parameter ALSO throws on an
+# explicitly-passed $null - Mandatory only affects whether OMITTING the
+# param is allowed, not the [bool] type coercion once a value (even
+# $null) is actually passed. $fakeSettingsN2 above still includes
+# JpegLossless/AnimatedLossless/AnimatedOverwrite/AnimatedDeleteSource
+# (matching real defaults), so it never exercised THIS specific class -
+# this scenario uses a $Settings missing those entirely.
+$fakeSettingsN3 = @{ MaxCjxlProcs = 2; JpegQuality = 90; AnimatedQuality = 90; AnimatedThreads = 2 }
+$statsN3Full = Invoke-Mode -Resolved @{ Mode = 'FullPipeline' } -TargetPath "C:\fake\lib" -Settings $fakeSettingsN3 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -FullPipelineHandler $fakeFullHandlerN2
+Test-Assert ($null -ne $statsN3Full -and $statsN3Full.LooseImgConverted.Success -eq 7) "FullPipeline completes normally despite `$Settings missing JpegLossless/AnimatedLossless/AnimatedOverwrite/AnimatedDeleteSource/FullLogging/PermanentDelete entirely (non-Mandatory bool params, not just Mandatory ones)"
+
 # 2026-08-31 fix (found by a re-review after the first N2 pass): the
 # ImageConversion/AnimatedConversion cases were missed by the original
 # bool-cast fix - same species, same file, just two more switch cases.
