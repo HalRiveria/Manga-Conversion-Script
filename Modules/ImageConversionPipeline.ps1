@@ -328,15 +328,42 @@ function Complete-ImageConversionJob {
         [bool]$IsAbortDrain = $false
     )
 
-    $stdout = $Job.Proc.StandardOutput.ReadToEnd()
-    $stderr = $Job.Proc.StandardError.ReadToEnd()
-    $code   = $Job.Proc.ExitCode
-    $Job.Proc.Dispose()
-    # This job is leaving the caller's running list for good in every path
-    # below (including the ICC-retry re-enqueue - the RETRY job acquires
-    # its own fresh slot later when it's actually dispatched) - release
-    # its slot exactly once, here, regardless of outcome.
-    if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
+    # try/finally (2026-08-31 fix, caught by a same-day /code-review 4th
+    # pass): this is the one place a RUNNING job's process handle and
+    # SharedBudget slot get released - unlike every other resource-release
+    # path in this file, it wasn't guarded. A throw from ReadToEnd/ExitCode
+    # (unlikely on an already-exited process, but not impossible) used to
+    # skip Dispose() AND Release() entirely and propagate straight out of
+    # Convert-ImageBatch - a permanently leaked SemaphoreSlim slot for the
+    # rest of the run under Controller.ps1's Full Pipeline, where the
+    # budget is shared with the animated engine.
+    try {
+        $stdout = $Job.Proc.StandardOutput.ReadToEnd()
+        $stderr = $Job.Proc.StandardError.ReadToEnd()
+        $code   = $Job.Proc.ExitCode
+    } finally {
+        $Job.Proc.Dispose()
+        # This job is leaving the caller's running list for good in every
+        # path below (including the ICC-retry re-enqueue - the RETRY job
+        # acquires its own fresh slot later when it's actually dispatched) -
+        # release its slot exactly once, here, regardless of outcome.
+        if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
+        # SlotReleased marker (2026-08-31 fix, caught by verifying this same
+        # day's /code-review 4th pass): Convert-ImageBatch's own dispatch-
+        # loop try/catch (see that function's header comment) does its own
+        # bulk cleanup of every job still in $running if something throws -
+        # but the poll loop that calls this function only reassigns
+        # $running AFTER its whole foreach pass completes. If THIS call
+        # throws (e.g. a Write-Log below failing on a locked log file)
+        # partway through that pass, the outer catch sees the STALE
+        # $running list, which still includes every job THIS finally
+        # already released earlier in the same pass - without this marker,
+        # the outer catch would release their slots a second time,
+        # permanently inflating the shared budget's ceiling for the rest
+        # of the run (the same leak species fix 3 set out to prevent,
+        # running in the opposite direction).
+        $Job.SlotReleased = $true
+    }
 
     if (-not $IsAbortDrain -and $DoFullLogging -and -not [string]::IsNullOrWhiteSpace($stdout)) {
         Write-Log ("cjxl stdout for '" + $Job.SrcPath + "': " + $stdout.Trim())
@@ -480,13 +507,93 @@ function Convert-ImageBatch {
     # Build job list, skipping output-path collisions (e.g. "photo.jpg" and
     # "photo.webp" both mapping to "photo.jxl" - converting both would let one
     # silently overwrite the other's output while both sources get deleted).
-    $allJobs = foreach ($img in $ImageFiles) {
-        @{
-            SrcPath = $img.FullName
-            JxlPath = [System.IO.Path]::ChangeExtension($img.FullName, ".jxl")
+    #
+    # Animated WebP/AVIF are classified HERE, before the collision count
+    # below, not later inside the dispatch loop where the per-job animated
+    # checks used to live (2026-08-31 fix, caught by a same-day /code-review
+    # 4th pass). The collision pre-pass only knows extensions, not animation
+    # status - an animated file sitting next to a same-basename convertible
+    # source (e.g. animated "foo.avif" + "foo.jpg") was being counted as a
+    # real collision and BOTH sources failed with "Resolve the name clash
+    # manually", even though the animated file was never actually a
+    # candidate for "foo.jxl" in the first place. Classifying animation
+    # status first and excluding animated files from $allJobs entirely means
+    # the collision count only ever sees genuine candidates. Only run this
+    # when $MagickExe is present, matching the dispatch loop's own prior
+    # behavior of erroring "ImageMagick not found" before ever reaching an
+    # animated check when magick isn't available - untouched below.
+    $allJobs = [System.Collections.Generic.List[hashtable]]::new()
+    foreach ($img in $ImageFiles) {
+        $srcPath = $img.FullName
+        # Cancellation check (2026-08-31 fix, caught by verifying this same
+        # day's /code-review 4th pass): without this, cancelling mid-run
+        # left this pre-pass running unabated - every remaining .avif in
+        # the batch still got a real `magick identify` spawn before the
+        # (now-pointless) dispatch loop below declined to run, since
+        # $CancelToken was never checked here. Matches the same
+        # already-pending reporting the drain path below uses.
+        if ($CancelToken.IsCancellationRequested) {
+            $batchResult.PendingPaths.Add($srcPath)
+            continue
+        }
+        if ($MagickExe -and $srcPath -imatch '\.webp$') {
+            # Same cheap VP8X-chunk read as the (now-removed) in-loop check -
+            # no magick spawn needed for WebP. try/catch (2026-08-31 fix,
+            # caught by verifying this same day's /code-review 4th pass):
+            # this read used to sit INSIDE the dispatch loop's own per-job
+            # try/catch (added earlier the same day for Process.Start
+            # failures) - hoisting it into this pre-pass without its own
+            # guard meant a locked/deleted/inaccessible .webp threw
+            # straight out of Convert-ImageBatch and ended the whole run,
+            # instead of failing just that one file the way every other
+            # per-file I/O error in this function does.
+            $isAnimatedWebp = $false
+            try {
+                $webpBytes  = New-Object byte[] 24
+                $webpBytesRead = 0
+                $webpStream = [System.IO.File]::OpenRead($srcPath)
+                try { $webpBytesRead = $webpStream.Read($webpBytes, 0, 24) } finally { $webpStream.Dispose() }
+            } catch {
+                Write-Log ("FAILED to read '" + $srcPath + "' to check for WebP animation: " + $_) -Level Error
+                $batchResult.FailedCount++
+                continue
+            }
+            if ($webpBytesRead -ge 24) {
+                $chunkId = [System.Text.Encoding]::ASCII.GetString($webpBytes, 12, 4)
+                if ($chunkId -eq 'VP8X') {
+                    $flags          = [System.BitConverter]::ToUInt32($webpBytes, 20)
+                    $isAnimatedWebp = ($flags -band 0x02) -ne 0
+                }
+            }
+            if ($isAnimatedWebp) {
+                Write-Log ("SKIPPING animated WebP '" + $srcPath + "': Animation flag set in VP8X chunk - animated WebP cannot be converted to JXL (no multi-frame support). File left untouched.") -Level Warn
+                $batchResult.SkippedCount++
+                $batchResult.SkippedPaths.Add($srcPath)
+                continue
+            }
+        } elseif ($MagickExe -and $srcPath -imatch '\.avif$') {
+            if (-not ($KnownStaticPaths -and $KnownStaticPaths.Contains($srcPath))) {
+                try {
+                    $isAnimatedAvif = Test-AvifAnimated -AvifPath $srcPath -MagickExe $MagickExe
+                } catch {
+                    Write-Log ("Could not determine if AVIF '" + $srcPath + "' is animated - skipping: " + $_) -Level Warn
+                    $batchResult.InspectFailedCount++
+                    continue
+                }
+                if ($isAnimatedAvif) {
+                    Write-Log ("SKIPPING animated AVIF '" + $srcPath + "': has its own conversion pipeline (AnimatedConversionPipeline.ps1) - not converted here.") -Level Warn
+                    $batchResult.SkippedCount++
+                    $batchResult.SkippedPaths.Add($srcPath)
+                    continue
+                }
+            }
+        }
+        $allJobs.Add(@{
+            SrcPath = $srcPath
+            JxlPath = [System.IO.Path]::ChangeExtension($srcPath, ".jxl")
             Proc    = $null
             TempPng = $null
-        }
+        })
     }
     $jxlPathCounts = [System.Collections.Generic.Dictionary[string,int]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($j in $allJobs) {
@@ -506,6 +613,18 @@ function Convert-ImageBatch {
     foreach ($j in $jobs) { $pending.Enqueue($j) }
     $running = [System.Collections.Generic.List[hashtable]]::new()
 
+    # try/catch around the whole dispatch loop (2026-08-31 fix, caught by a
+    # same-day /code-review 4th pass): every OTHER exit from this loop
+    # (normal completion, or cancellation via the straggler-drain/force-kill
+    # block below) already releases every running job's process handle and
+    # SharedBudget slot. An unexpected throw from inside the loop itself
+    # (-AbortPollCallback, Write-Log on a locked log file, a rethrow from
+    # Complete-ImageConversionJob) had no such guarantee - it propagated
+    # straight out of Convert-ImageBatch with $running jobs' handles
+    # undisposed and their budget slots unreleased. Under Controller.ps1's
+    # Full Pipeline that budget is shared with the animated engine, so a
+    # leak here permanently shrinks the ceiling for the rest of the run.
+    try {
     while (($pending.Count -gt 0 -or $running.Count -gt 0) -and (-not $CancelToken.IsCancellationRequested)) {
 
         if ($AbortPollCallback) {
@@ -589,80 +708,19 @@ function Convert-ImageBatch {
                 # ICC-stripped.
                 $cjxlSrc = $j.TempPng
             } elseif ($isWebp -or $isAvif) {
+                # Animation classification for WebP/AVIF now happens in the
+                # pre-pass that builds $allJobs, before the collision count -
+                # see that pre-pass's own comment (2026-08-31 fix). A job
+                # reaching here is therefore already known non-animated
+                # (unless $MagickExe was missing at pre-pass time too, in
+                # which case it falls through to the same error below,
+                # matching prior behavior).
                 $formatLabel = if ($isAvif) { "AVIF" } else { "WebP" }
                 if (-not $MagickExe) {
                     Write-Log ("SKIPPING " + $formatLabel + " '" + $j.SrcPath + "': ImageMagick not found. Install ImageMagick or pass -MagickPath.") -Level Error
                     $batchResult.FailedCount++
                     if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
                     continue
-                }
-
-                if ($isWebp) {
-                    # --- Animated WebP check (VP8X chunk, no process spawn) ---
-                    # Animated WebPs carry a VP8X extended-format chunk at offset 12.
-                    # Bit 1 (0x02) of its flags field (offset 20) is the Animation flag.
-                    # Simple lossy (VP8 ) and lossless (VP8L) files cannot be animated.
-                    # Reads only the first 24 bytes via a FileStream, not
-                    # ReadAllBytes (2026-08-31 efficiency fix) - the whole
-                    # file was previously loaded into memory just to
-                    # inspect this header, real waste for a large animated
-                    # WebP (common for scanned manga pages).
-                    $webpBytes  = New-Object byte[] 24
-                    $webpBytesRead = 0
-                    $webpStream = [System.IO.File]::OpenRead($j.SrcPath)
-                    try { $webpBytesRead = $webpStream.Read($webpBytes, 0, 24) } finally { $webpStream.Dispose() }
-                    $isAnimated = $false
-                    if ($webpBytesRead -ge 24) {
-                        $chunkId = [System.Text.Encoding]::ASCII.GetString($webpBytes, 12, 4)
-                        if ($chunkId -eq 'VP8X') {
-                            $flags      = [System.BitConverter]::ToUInt32($webpBytes, 20)
-                            $isAnimated = ($flags -band 0x02) -ne 0
-                        }
-                    }
-
-                    if ($isAnimated) {
-                        Write-Log ("SKIPPING animated WebP '" + $j.SrcPath + "': Animation flag set in VP8X chunk - animated WebP cannot be converted to JXL (no multi-frame support). File left untouched.") -Level Warn
-                        $batchResult.SkippedCount++
-                        $batchResult.SkippedPaths.Add($j.SrcPath)
-                        if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
-                        continue
-                    }
-                    # --- End animated WebP check ---
-                } else {
-                    # --- Animated AVIF check (real magick identify spawn) ---
-                    # -KnownStaticPaths (2026-08-31 efficiency fix, mirrors
-                    # Convert-AnimatedBatch's own -KnownAnimatedPaths):
-                    # Controller.ps1's Full Pipeline already ran
-                    # Test-AvifAnimated on every ambiguous .avif during its
-                    # own per-series ownership classification, before ever
-                    # dispatching to this function - re-running it here for
-                    # a file already confirmed Static was a pure redundant
-                    # magick identify spawn, the mirror-image half of the
-                    # double-classification bug fixed on the animated side
-                    # earlier the same day. A file already confirmed static
-                    # by the caller skips the re-check entirely; anything
-                    # NOT in the set (standalone mode 1/2, or any caller
-                    # that never classified) falls through to the real
-                    # check unchanged.
-                    $isAnimatedAvif = $false
-                    if (-not ($KnownStaticPaths -and $KnownStaticPaths.Contains($j.SrcPath))) {
-                        try {
-                            $isAnimatedAvif = Test-AvifAnimated -AvifPath $j.SrcPath -MagickExe $MagickExe
-                        } catch {
-                            Write-Log ("Could not determine if AVIF '" + $j.SrcPath + "' is animated - skipping: " + $_) -Level Warn
-                            $batchResult.InspectFailedCount++
-                            if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
-                            continue
-                        }
-                    }
-                    if ($isAnimatedAvif) {
-                        Write-Log ("SKIPPING animated AVIF '" + $j.SrcPath + "': has its own conversion pipeline (AnimatedConversionPipeline.ps1) - not converted here.") -Level Warn
-                        $batchResult.SkippedCount++
-                        $batchResult.SkippedPaths.Add($j.SrcPath)
-                        if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
-                        continue
-                    }
-                    # --- End animated AVIF check ---
                 }
 
                 $tempPng = [System.IO.Path]::Combine(
@@ -777,6 +835,52 @@ function Convert-ImageBatch {
         # this loop busy-spun at ~100% CPU polling Wait(0)/HasExited
         # instead of sleeping between polls.
         Start-Sleep -Milliseconds 50
+    }
+    } catch {
+        # Force-cleanup mirrors the force-kill block below (own try/catch
+        # per step, same as every other cleanup path in this file, INCLUDING
+        # the partial/corrupt .jxl deletion - 2026-08-31 fix, caught by
+        # verifying this same day's /code-review 4th pass, this block
+        # originally dropped that one step despite the comment claiming
+        # parity: a killed cjxl can leave a non-zero-byte truncated .jxl
+        # NEWER than its source, which the NEXT run's Get-LooseImageCandidates
+        # then classifies as a stale leftover and deletes the real source,
+        # keeping only the garbage output) - best effort, since we're
+        # already unwinding from an unexpected failure and must not let a
+        # cleanup error mask or replace the real one.
+        # $j.SlotReleased guards the Release() call AND the .jxl deletion
+        # (2026-08-31 fix, corrected after a third verification pass found
+        # a real DATA-LOSS bug in the second pass's own fix: this $running
+        # list is STALE - the poll loop only reassigns it after its whole
+        # foreach pass completes - so it can still list a job that ALREADY
+        # completed successfully earlier in the SAME pass, source deleted
+        # and all. SlotReleased is set in Complete-ImageConversionJob's own
+        # finally block, true for exactly those already-finished jobs
+        # (success OR failure, doesn't matter which - either way their
+        # OWN cleanup already ran and this block must leave their .jxl
+        # alone) and false for the genuinely-still-running jobs this
+        # force-kill path exists for. Verified live: without this guard, a
+        # job that converted successfully and had its source already
+        # deleted lost its .jxl too the moment a LATER job in the same
+        # poll pass threw - the image was gone entirely, not just its
+        # source. TempPng cleanup is intentionally NOT guarded by this
+        # flag - Complete-ImageConversionJob's own TempPng cleanup runs
+        # AFTER its SlotReleased-setting finally, so a job marked
+        # SlotReleased via an early throw (the unguarded "cjxl stdout for"
+        # Write-Log call) can still have a real, undeleted TempPng.
+        foreach ($j in $running) {
+            try { if ($j.Proc -and -not $j.Proc.HasExited) { $j.Proc.Kill() } } catch { }
+            try { if ($j.Proc) { $j.Proc.WaitForExit(5000) } } catch { }
+            if ($j.TempPng -and (Test-Path -LiteralPath $j.TempPng)) {
+                try { [System.IO.File]::Delete($j.TempPng) } catch { }
+            }
+            if ((-not $j.SlotReleased) -and (Test-Path -LiteralPath $j.JxlPath)) {
+                try { [System.IO.File]::Delete($j.JxlPath) } catch { }
+            }
+            try { if ($j.Proc) { $j.Proc.Dispose() } } catch { }
+            if ($SharedBudget -and -not $j.SlotReleased) { try { $SharedBudget.Release() | Out-Null } catch { } }
+        }
+        throw
     }
 
     # ------------------------------------------------------------------
@@ -945,6 +1049,25 @@ function Get-LooseImageCandidates {
     $allCandidates = @(Get-ChildItem -LiteralPath $ScanPath -Recurse -File -ErrorAction SilentlyContinue |
         Where-Object {
             if ($LooseImageExtensions -inotcontains $_.Extension) { return $false }
+            # Orphaned scratch files (2026-08-31 fix, caught by a same-day
+            # /code-review 4th pass) - "_tmp_iccstrip.png" (this file's own
+            # Invoke-IccStripRetryOrFail), "_tmp_<fmt>2png.png" (this file's
+            # own WebP/AVIF pre-conversion detour), and "_tmp_overwrite.webp"
+            # (AnimatedConversionPipeline.ps1's own -DoAnimatedOverwrite
+            # staging file) all carry extensions in $LooseImageExtensions.
+            # Every real leak path for these already has its own cleanup
+            # (retry-enqueue, failed-strip, force-kill drain, still-pending
+            # sweep) - this is the boundary-level backstop for the case
+            # cleanup itself can't run (force-killed process, machine power
+            # loss, a locked file swallowed by a bare `catch {}`): without
+            # it, a leaked scratch file gets treated as a real loose image
+            # by the very next run, converted, and left behind permanently
+            # instead of being recognized as debris.
+            if ($_.Name -imatch '_tmp_iccstrip\.png$' -or
+                $_.Name -imatch '_tmp_(webp|avif)2png\.png$' -or
+                $_.Name -imatch '_tmp_overwrite\.webp$') {
+                return $false
+            }
             $fileDir = $_.DirectoryName
             foreach ($stagingDir in $zipBaseDirs) {
                 if ($fileDir.Equals($stagingDir, [System.StringComparison]::OrdinalIgnoreCase) -or

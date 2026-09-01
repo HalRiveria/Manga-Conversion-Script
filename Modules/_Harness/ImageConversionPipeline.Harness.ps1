@@ -211,6 +211,27 @@ class Program {
         if (m.Success) {
             Thread.Sleep(int.Parse(m.Groups[1].Value));
         }
+        Match pm = Regex.Match(content, "PARTIAL_THEN_SLEEP:(\\d+)");
+        if (pm.Success) {
+            // Simulates a real cjxl that has already flushed a partial
+            // output file mid-encode and is still genuinely running - lets
+            // a test force-kill it (via the dispatch-loop's own outer
+            // catch) WHILE a partial .jxl is already sitting on disk, to
+            // prove that catch cleans it up rather than leaving a
+            // truncated-but-non-zero-byte .jxl behind (a future stale-
+            // source trap - see this file's own header, Scenario B2).
+            File.WriteAllText(dst, "partial-in-flight-bytes");
+            Thread.Sleep(int.Parse(pm.Groups[1].Value));
+            return 0;
+        }
+        if (content.Contains("STDOUT_MARKER")) {
+            // Real cjxl writes progress info to stdout - normally empty
+            // here, so Complete-ImageConversionJob's own "cjxl stdout for"
+            // Write-Log call (gated on -DoFullLogging) never fires. This
+            // marker lets a test force that specific, UNGUARDED Write-Log
+            // call to actually run (and, for that test, throw).
+            Console.WriteLine("simulated cjxl progress output");
+        }
         File.WriteAllText(dst, "fake-jxl-bytes");
         return 0;
     }
@@ -238,6 +259,19 @@ class Program {
     static int Main(string[] args) {
         if (args.Length > 0 && args[0] == "identify") {
             string path = args[args.Length - 1];
+            // Logs each identify call's target path (gated on an env var so
+            // unrelated scenarios pay nothing) - lets a test count how many
+            // times an identify spawn actually happened, proving the
+            // 2026-08-31 cancellation-check fix (an already-cancelled
+            // -CancelToken must short-circuit the collision-guard pre-pass
+            // BEFORE it ever spawns magick for AVIF classification).
+            string identifyLog = Environment.GetEnvironmentVariable("HARNESS_IDENTIFY_LOG");
+            if (identifyLog != null) {
+                using (var mtx = new System.Threading.Mutex(false, "ICPHarnessIdentifyLogMutex")) {
+                    mtx.WaitOne();
+                    try { File.AppendAllText(identifyLog, path + Environment.NewLine); } finally { mtx.ReleaseMutex(); }
+                }
+            }
             string content = File.Exists(path) ? File.ReadAllText(path) : "";
             if (content.Contains("FAIL_IDENTIFY")) {
                 Console.Error.WriteLine("simulated identify failure");
@@ -385,6 +419,14 @@ $rootC = New-Dir "scenario-c"
 $chC = New-Dir "scenario-c\Series\Chapter 1"
 $staleSrcC = New-FakeImage -DirPath $chC -Name "already_done.jpg"
 [System.IO.File]::WriteAllText((Join-Path $chC "already_done.jxl"), "real jxl bytes")
+# Force the source's timestamp strictly OLDER than the .jxl's (2026-08-31
+# fix, caught by verifying this same day's /code-review 4th pass) - both
+# writes above happen back-to-back and can land in the same filesystem
+# timestamp tick, making $img.LastWriteTimeUtc -ge $jxlItem.LastWriteTimeUtc
+# true on EQUALITY and misrouting this scenario into NamingCollisions
+# instead of StaleSources - an intermittent (~1-in-6) harness flake, not a
+# real product bug. Same technique Scenario C2b already uses below.
+[System.IO.File]::SetLastWriteTimeUtc($staleSrcC, ([DateTime]::UtcNow.AddMinutes(-5)))
 
 $totalsC = Invoke-LooseImageConversionPipeline -Path $rootC -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
 
@@ -1073,6 +1115,244 @@ Test-Assert ($null -ne $script:capturedCtsZ) "sanity check: the fake actually ca
 $disposedZ = $false
 try { $script:capturedCtsZ.Cancel() } catch { $disposedZ = ($_.Exception.InnerException -is [System.ObjectDisposedException]) }
 Test-Assert $disposedZ "the Cts was disposed via the finally block despite the throw happening before the old try's own opening brace"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario AA (2026-08-31 fix, caught by a same-day /code-review 4th pass):
+#  an animated AVIF/WebP sitting next to a same-basename convertible source
+#  (e.g. animated "foo.avif" + static "foo.jpg") used to be misclassified as
+#  a genuine output-path collision, since the collision pre-pass ran BEFORE
+#  the per-job animated-skip checks and only knew extensions, not animation
+#  status - both sources failed with "Resolve the name clash manually" and
+#  neither the real conversion nor the animated-skip ever happened. Animation
+#  classification now runs in the SAME pre-pass that builds the collision
+#  count, so "foo.jpg" converts cleanly and "foo.avif" is a Warning-tier
+#  skip, not an Error-tier false collision.
+# ==============================================================================
+Write-Host "=== Scenario AA: an animated file does not false-positive as a name clash with a same-basename convertible source ===" -ForegroundColor Cyan
+$chAA = New-Dir "scenario-aa\Series\Chapter 1"
+$avifAA = New-FakeAvif -DirPath $chAA -Name "foo.avif" -Content "FRAMES:12"
+$jpgAA  = New-FakeImage -DirPath $chAA -Name "foo.jpg"
+
+$totalsAA = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-aa") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -MaxCjxlProcs 2 -FullLogging $false
+
+Test-Assert ($totalsAA.ConvertedSuccess -eq 1 -and $totalsAA.ConvertedFail -eq 0) ("the static same-basename source converted cleanly, not counted as a collision failure (got ConvertedSuccess=" + $totalsAA.ConvertedSuccess + ", ConvertedFail=" + $totalsAA.ConvertedFail + ")")
+Test-Assert ($totalsAA.ConvertedSkipped -eq 1) ("the animated AVIF is a Warning-tier skip, not a collision failure (got ConvertedSkipped=" + $totalsAA.ConvertedSkipped + ")")
+Test-Assert (-not (Test-Path -LiteralPath $jpgAA)) "foo.jpg was deleted after a successful conversion"
+Test-Assert (Test-Path -LiteralPath (Join-Path $chAA "foo.jxl")) "foo.jxl was created"
+Test-Assert (Test-Path -LiteralPath $avifAA) "the animated foo.avif source was left untouched, not deleted"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario AB (2026-08-31 fix, caught by a same-day /code-review 4th pass):
+#  an unexpected throw from INSIDE the dispatch loop (here, -AbortPollCallback
+#  throwing on its second pass, once a job is genuinely in flight) used to
+#  propagate straight out of Convert-ImageBatch with the still-running job's
+#  process handle undisposed and its SharedBudget slot unreleased - a
+#  permanent leak under Controller.ps1's Full Pipeline, where the budget is
+#  shared with the animated engine. The dispatch loop's own try/catch now
+#  force-kills/disposes/releases anything left in $running before rethrowing.
+# ==============================================================================
+Write-Host "=== Scenario AB: an unexpected throw mid-dispatch still releases the running job's process and budget slot ===" -ForegroundColor Cyan
+$chAB = New-Dir "scenario-ab\Series\Chapter 1"
+$fileAB = Get-Item -LiteralPath (New-FakeImage -DirPath $chAB -Name "page1.jpg" -SleepMs 300)
+$budgetAB = [System.Threading.SemaphoreSlim]::new(1, 1)
+$script:pollCountAB = 0
+$pollAB = {
+    param($inFlight)
+    $script:pollCountAB++
+    if ($script:pollCountAB -ge 2) { throw "simulated AbortPollCallback failure" }
+}
+
+$threwAB = $false
+try {
+    $null = Convert-ImageBatch -ImageFiles @($fileAB) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 5 -DoFullLogging $false `
+        -CancelToken ([System.Threading.CancellationToken]::None) -SharedBudget $budgetAB -AbortPollCallback $pollAB
+} catch {
+    $threwAB = $true
+}
+
+Test-Assert $threwAB "the injected failure propagated out of Convert-ImageBatch, not silently swallowed"
+Test-Assert ($budgetAB.CurrentCount -eq 1) ("the running job's SharedBudget slot was released despite the throw (got CurrentCount=" + $budgetAB.CurrentCount + ")")
+$budgetAB.Dispose()
+Write-Host ""
+
+# ==============================================================================
+#  Scenario AC (2026-08-31 fix, caught by a same-day /code-review 4th pass):
+#  a leaked "_tmp_*" scratch file (one whose owning cleanup path couldn't
+#  run - force-killed process, locked file swallowed by a bare catch) used
+#  to be indistinguishable from a real loose image at Get-LooseImageCandidates'
+#  own discovery boundary, since its extension (.png/.webp) is in
+#  $LooseImageExtensions - the NEXT run would convert it and leave the
+#  garbage output behind permanently. Now excluded by name pattern.
+# ==============================================================================
+Write-Host "=== Scenario AC: orphaned _tmp_* scratch files are excluded from loose-image discovery ===" -ForegroundColor Cyan
+$chAC = New-Dir "scenario-ac\Series\Chapter 1"
+[System.IO.File]::WriteAllText((Join-Path $chAC "photo_tmp_iccstrip.png"), "orphaned strip scratch")
+[System.IO.File]::WriteAllText((Join-Path $chAC "photo_tmp_webp2png.png"), "orphaned webp scratch")
+[System.IO.File]::WriteAllText((Join-Path $chAC "photo_tmp_avif2png.png"), "orphaned avif scratch")
+[System.IO.File]::WriteAllText((Join-Path $chAC "photo_tmp_overwrite.webp"), "orphaned overwrite scratch")
+$realAC = New-FakeImage -DirPath $chAC -Name "real.jpg"
+
+$candidatesAC = Get-LooseImageCandidates -ScanPath (Join-Path $scratchDir "scenario-ac")
+
+Test-Assert ($candidatesAC.NeedsConversion.Count -eq 1 -and $candidatesAC.NeedsConversion[0].Name -eq "real.jpg") ("only the real loose image was returned, all 4 scratch-file patterns excluded (got " + $candidatesAC.NeedsConversion.Count + " candidate(s): " + (($candidatesAC.NeedsConversion | ForEach-Object { $_.Name }) -join ", ") + ")")
+Test-Assert ($candidatesAC.StaleSources.Count -eq 0) "no scratch file was misclassified as a stale source either"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario AD (2026-08-31 fix, caught by verifying this same day's
+#  /code-review 4th pass): the WebP VP8X-header read moved into the
+#  collision-guard pre-pass (fix 1, Scenario AA above) lost the try/catch it
+#  had inside the dispatch loop's own per-job error handling - an
+#  inaccessible .webp (locked by another process, here) used to throw
+#  straight out of Convert-ImageBatch and end the whole run, instead of
+#  failing just that one file like every other per-file I/O error here.
+# ==============================================================================
+Write-Host "=== Scenario AD: a locked/unreadable .webp fails just that file, not the whole batch ===" -ForegroundColor Cyan
+$chAD = New-Dir "scenario-ad\Series\Chapter 1"
+$webpAD = Join-Path $chAD "locked.webp"
+[System.IO.File]::WriteAllText($webpAD, "fake webp bytes")
+$lockAD = [System.IO.File]::Open($webpAD, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+$threwAD = $false
+$resultAD = $null
+try {
+    $resultAD = Convert-ImageBatch -ImageFiles @(Get-Item -LiteralPath $webpAD) -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -MaxCjxlProcs 2 -DoFullLogging $false `
+        -CancelToken ([System.Threading.CancellationToken]::None)
+} catch {
+    $threwAD = $true
+} finally {
+    $lockAD.Dispose()
+}
+
+Test-Assert (-not $threwAD) "did NOT throw out of Convert-ImageBatch - the batch survives one unreadable file"
+Test-Assert ($null -ne $resultAD -and $resultAD.FailedCount -eq 1) ("the locked file was counted as a real failure, not silently dropped (got FailedCount=" + $(if ($resultAD) { $resultAD.FailedCount } else { "<null>" }) + ")")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario AE (2026-08-31 fix, caught by verifying this same day's
+#  /code-review 4th pass): the collision-guard pre-pass (fix 1) never
+#  checked $CancelToken, so cancelling mid-run still ran a real `magick
+#  identify` spawn for every remaining .avif before the (by-then pointless)
+#  dispatch loop declined to run - potentially thousands of spawns after
+#  the user asked the run to stop. A token already cancelled BEFORE the
+#  call is the simplest deterministic repro of "cancelled mid-batch."
+# ==============================================================================
+Write-Host "=== Scenario AE: an already-cancelled token short-circuits the pre-pass - no classification work, everything reported pending ===" -ForegroundColor Cyan
+$chAE = New-Dir "scenario-ae\Series\Chapter 1"
+$avifAE = New-FakeAvif -DirPath $chAE -Name "cover.avif" -Content "FRAMES:1"
+$identifyLogAE = Join-Path $scratchDir "scenario-ae-identify.log"
+[System.IO.File]::WriteAllText($identifyLogAE, "")
+$env:HARNESS_IDENTIFY_LOG = $identifyLogAE
+$ctsAE = [System.Threading.CancellationTokenSource]::new()
+$ctsAE.Cancel()
+
+try {
+    $resultAE = Convert-ImageBatch -ImageFiles @(Get-Item -LiteralPath $avifAE) -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -MaxCjxlProcs 2 -DoFullLogging $false `
+        -CancelToken $ctsAE.Token
+} finally {
+    $env:HARNESS_IDENTIFY_LOG = $null
+    $ctsAE.Dispose()
+}
+
+$identifyCallsAE = @(Get-Content -LiteralPath $identifyLogAE | Where-Object { $_ -like "*cover.avif" })
+Test-Assert ($identifyCallsAE.Count -eq 0) ("the cancelled token stopped the pre-pass BEFORE it ever spawned magick identify for classification (got " + $identifyCallsAE.Count + " identify call(s))")
+Test-Assert ($resultAE.PendingPaths.Count -eq 1 -and $resultAE.PendingPaths[0] -eq $avifAE) ("the AVIF was reported pending, not classified or converted (got PendingPaths=[" + ($resultAE.PendingPaths -join ", ") + "])")
+Test-Assert ($resultAE.ConvertedCount -eq 0 -and $resultAE.FailedCount -eq 0 -and $resultAE.SkippedCount -eq 0 -and $resultAE.InspectFailedCount -eq 0) "no classification or conversion work happened at all"
+Test-Assert (Test-Path -LiteralPath $avifAE) "the source was left untouched"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario AF (2026-08-31 fix, caught by verifying this same day's
+#  /code-review 4th pass, then CORRECTED by a second verification pass that
+#  showed the fix WAS observably testable after all): the outer dispatch-
+#  loop catch's own bulk cleanup (fix 3) iterates a $running list that can
+#  be STALE if Complete-ImageConversionJob throws partway through the poll
+#  loop's per-pass foreach - it may still list jobs that function's own
+#  finally already released. A same-budget scenario can't show the bug
+#  (SemaphoreSlim self-caps at max once every acquired slot is legitimately
+#  released), but a SHARED budget with real headroom (simulating the
+#  animated engine holding some slots, the actual Full Pipeline shape) can:
+#  a double-release there doesn't hit the ceiling, it erroneously refunds
+#  slots that belong to jobs OUTSIDE this batch entirely.
+# ==============================================================================
+Write-Host "=== Scenario AF: a same-pass throw does not double-release an EARLIER job's already-released shared-budget slot, or delete its already-converted output ===" -ForegroundColor Cyan
+$chAF = New-Dir "scenario-af\Series\Chapter 1"
+$fileAF1 = Get-Item -LiteralPath (New-FakeImage -DirPath $chAF -Name "jobA_af.jpg")
+$expectedJxlAF = Join-Path $chAF "jobA_af.jxl"
+$fileAF2 = Get-Item -LiteralPath (New-FakeImage -DirPath $chAF -Name "jobB_af.jpg" -SleepMs 0)
+[System.IO.File]::WriteAllText($fileAF2.FullName, "STDOUT_MARKER")
+$budgetAF = [System.Threading.SemaphoreSlim]::new(4, 4)
+# Pre-acquire 2 slots to stand in for the animated engine's own real,
+# still-in-use share of the budget - the exact condition under which the
+# bug's damage (refunding slots that were never this batch's to release)
+# is actually observable.
+$budgetAF.Wait(0) | Out-Null
+$budgetAF.Wait(0) | Out-Null
+
+$realWriteLogFnAF = ${function:Write-Log}
+function Write-Log {
+    param([string]$Message, [ValidateSet("Info", "Warn", "Error", "Summary")][string]$Level = "Info")
+    if ($Message -like "*cjxl stdout for*jobB_af.jpg*") { throw "simulated Write-Log failure on jobB's own UNGUARDED stdout-log call" }
+    & $script:realWriteLogFnAF -Message $Message -Level $Level
+}
+$script:realWriteLogFnAF = $realWriteLogFnAF
+
+$threwAF = $false
+try {
+    $null = Convert-ImageBatch -ImageFiles @($fileAF1, $fileAF2) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 5 -DoFullLogging $true `
+        -CancelToken ([System.Threading.CancellationToken]::None) -SharedBudget $budgetAF
+} catch {
+    $threwAF = $true
+} finally {
+    ${function:Write-Log} = $realWriteLogFnAF
+}
+
+Test-Assert $threwAF "the injected Write-Log failure propagated out of Convert-ImageBatch"
+Test-Assert ($budgetAF.CurrentCount -eq 2) ("only this batch's own 2 acquired slots were released, not the 2 pre-acquired ones standing in for the OTHER engine (got CurrentCount=" + $budgetAF.CurrentCount + ", would be 4 if both jobs were double-released)")
+Test-Assert (Test-Path -LiteralPath $expectedJxlAF) "jobA's already-converted .jxl survived - the outer catch's force-cleanup must not touch a job that already completed successfully earlier in the same poll pass (a real data-loss bug found and fixed by a third verification pass: the SAME stale-$running condition that causes the double-release also let the outer catch delete a completed job's real output)"
+$budgetAF.Dispose()
+Write-Host ""
+
+# ==============================================================================
+#  Scenario AG (2026-08-31 fix, caught by verifying this same day's
+#  /code-review 4th pass): the outer dispatch-loop catch's own force-kill
+#  cleanup (fix 3, Scenario AB above) claimed to mirror the force-kill
+#  block below but dropped ONE step - deleting a partial/corrupt .jxl a
+#  killed cjxl process may have already written. Left behind, that's a
+#  non-zero-byte .jxl NEWER than its source - the NEXT run's
+#  Get-LooseImageCandidates classifies the source as stale and deletes it,
+#  keeping only the garbage output (same species Scenario B2 already
+#  covers for the ORDINARY failure path).
+# ==============================================================================
+Write-Host "=== Scenario AG: the outer catch deletes a partial .jxl left by a force-killed job, not just the temp PNG ===" -ForegroundColor Cyan
+$chAG = New-Dir "scenario-ag\Series\Chapter 1"
+$fileAG1 = Get-Item -LiteralPath (New-FakeImage -DirPath $chAG -Name "stillrunning_ag.jpg" -SleepMs 0)
+[System.IO.File]::WriteAllText($fileAG1.FullName, "PARTIAL_THEN_SLEEP:5000")
+$fileAG2 = Get-Item -LiteralPath (New-FakeImage -DirPath $chAG -Name "throws_ag.jpg" -SleepMs 0)
+[System.IO.File]::WriteAllText($fileAG2.FullName, "STDOUT_MARKER")
+$expectedJxlAG = Join-Path $chAG "stillrunning_ag.jxl"
+
+$realWriteLogFnAG = ${function:Write-Log}
+function Write-Log {
+    param([string]$Message, [ValidateSet("Info", "Warn", "Error", "Summary")][string]$Level = "Info")
+    if ($Message -like "*cjxl stdout for*throws_ag.jpg*") { throw "simulated Write-Log failure on the second job's UNGUARDED stdout-log call" }
+    & $script:realWriteLogFnAG -Message $Message -Level $Level
+}
+$script:realWriteLogFnAG = $realWriteLogFnAG
+
+$threwAG = $false
+try {
+    $null = Convert-ImageBatch -ImageFiles @($fileAG1, $fileAG2) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 5 -DoFullLogging $true `
+        -CancelToken ([System.Threading.CancellationToken]::None)
+} catch {
+    $threwAG = $true
+} finally {
+    ${function:Write-Log} = $realWriteLogFnAG
+}
+
+Test-Assert $threwAG "the injected failure propagated out of Convert-ImageBatch"
+Test-Assert (-not (Test-Path -LiteralPath $expectedJxlAG)) "the partial .jxl left by the force-killed still-running job was deleted, not left as a future stale-source trap"
 Write-Host ""
 
 if ($script:failCount -eq 0) {

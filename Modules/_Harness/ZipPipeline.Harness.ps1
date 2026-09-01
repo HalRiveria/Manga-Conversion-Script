@@ -203,6 +203,41 @@ Test-Assert (Test-Path -LiteralPath $dirG) "the source folder was left alone (no
 Write-Host ""
 
 # ==============================================================================
+#  Scenario G2 (2026-08-31 fix, corrected after a same-day /code-review 4th
+#  pass verification): an orphaned "_tmp_*" scratch file (its owning
+#  cleanup couldn't run) carries an extension in $LooseImageExtensions, so
+#  this guard used to treat it as a real unconverted source and skip
+#  zipping forever. A first fix just excluded it from the guard - but this
+#  function zips the WHOLE folder and deletes the source folder right
+#  after, so the excluded-but-not-deleted file ended up permanently
+#  archived as a junk page instead. This guard now DELETES the orphan
+#  (a job-generated intermediate, always safe to delete permanently) before
+#  scanning/zipping - the zip succeeds AND the debris is gone, not
+#  smuggled into the archive.
+# ==============================================================================
+Write-Host "=== Scenario G2: an orphaned _tmp_* scratch file is deleted, not archived or block-forever ===" -ForegroundColor Cyan
+$dirG2 = New-Dir "scenario-g2"
+New-FileIn -DirPath $dirG2 -Name "page1.jxl" | Out-Null
+New-FileIn -DirPath $dirG2 -Name "photo_tmp_iccstrip.png" | Out-Null
+New-FileIn -DirPath $dirG2 -Name "photo_tmp_webp2png.png" | Out-Null
+New-FileIn -DirPath $dirG2 -Name "photo_tmp_overwrite.webp" | Out-Null
+$zipOutG2 = Join-Path $scratchDir "scenario-g2.zip"
+
+$resultG2 = Invoke-LooseFolderZip -FolderPath $dirG2 -ZipOut $zipOutG2 -LooseImageExtensions @(".jpg", ".png", ".webp")
+
+Test-Assert ($resultG2.Status -eq "Success") ("Status is Success, not blocked by scratch files (got " + $resultG2.Status + ")")
+Test-Assert (Test-Path -LiteralPath $zipOutG2) "the zip file was created"
+$zipEntriesG2 = [System.IO.Compression.ZipFile]::OpenRead($zipOutG2)
+try {
+    $entryNamesG2 = @($zipEntriesG2.Entries | ForEach-Object { $_.Name })
+} finally {
+    $zipEntriesG2.Dispose()
+}
+Test-Assert ($entryNamesG2 -notcontains "photo_tmp_iccstrip.png" -and $entryNamesG2 -notcontains "photo_tmp_webp2png.png" -and $entryNamesG2 -notcontains "photo_tmp_overwrite.webp") ("none of the 3 scratch files were archived into the zip (got entries: " + ($entryNamesG2 -join ", ") + ")")
+Test-Assert ($entryNamesG2 -contains "page1.jxl") "the real .jxl entry is still there"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario H: Invoke-LooseFolderZip - zip succeeds but has no .jxl
 #  entries and RequireJxlEntry defaults to $true - Test-ZipArchive throws,
 #  Status is Fail.

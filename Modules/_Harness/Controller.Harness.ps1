@@ -1310,6 +1310,39 @@ Test-Assert ($totalsX.ZipSkippedDueToError -eq 1) ("the naming-collision-blocked
 Write-Host ""
 
 # ==============================================================================
+#  Scenario Y (2026-08-31 fix, caught by verifying a same-day /code-review
+#  4th pass on ImageConversionPipeline.ps1): an orphaned "_tmp_*" scratch
+#  file (its owning cleanup couldn't run) sitting in a chapter this
+#  function is about to zip. Full Pipeline calls Compress-FolderToZip
+#  DIRECTLY (this function's own comment above explains why - .webp is
+#  ambiguous here, both a possible leftover source AND the animated
+#  engine's own real output, so it can't reuse Invoke-LooseFolderZip's
+#  guard) - without a matching sweep, the debris gets permanently archived
+#  into the .cbz as a junk page, the only mode able to produce
+#  "_tmp_overwrite.webp" in the first place (-DoAnimatedOverwrite only
+#  ever runs here).
+# ==============================================================================
+Write-Host "=== Scenario Y: an orphaned _tmp_* scratch file is deleted before zipping, not archived ===" -ForegroundColor Cyan
+$chY = New-Dir "scenario-y\Series\Chapter 1"
+New-FakeImageIn -DirPath $chY -Name "page1.jpg" | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $chY "photo_tmp_iccstrip.png"), "orphaned strip scratch")
+[System.IO.File]::WriteAllText((Join-Path $chY "photo_tmp_overwrite.webp"), "orphaned overwrite scratch")
+
+$totalsY = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-y") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+
+Test-Assert ($totalsY.ZipCreatedSuccess -eq 1) ("the chapter still zipped cleanly, not blocked by the scratch files (got ZipCreatedSuccess=" + $totalsY.ZipCreatedSuccess + ")")
+$zipOutY = Join-Path $scratchDir "scenario-y\Series\Chapter 1.zip"
+Test-Assert (Test-Path -LiteralPath $zipOutY) "the zip file was created"
+$zipEntriesY = [System.IO.Compression.ZipFile]::OpenRead($zipOutY)
+try {
+    $entryNamesY = @($zipEntriesY.Entries | ForEach-Object { $_.Name })
+} finally {
+    $zipEntriesY.Dispose()
+}
+Test-Assert ($entryNamesY -notcontains "photo_tmp_iccstrip.png" -and $entryNamesY -notcontains "photo_tmp_overwrite.webp") ("neither scratch file was archived into the zip (got entries: " + ($entryNamesY -join ", ") + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

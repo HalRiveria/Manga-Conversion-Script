@@ -542,6 +542,36 @@ function Invoke-LooseFolderZip {
     if ($reportCcr) { Start-CcrChapterProgressIfEnabled -SeriesName $SeriesName -ChapterName $ChapterName }
 
     try {
+        # Orphaned "_tmp_*" scratch files are actually DELETED here, not
+        # just excluded from the guard below (2026-08-31 fix, corrected
+        # after a same-day /code-review 4th pass verification found that a
+        # plain exclusion let the debris survive to get zipped: this
+        # function's own Compress-FolderToZip call archives the WHOLE
+        # folder, and a successful zip deletes the source folder right
+        # after, so an excluded-but-not-deleted scratch file ended up
+        # permanently embedded in the .cbz as a junk page with no record
+        # anywhere it happened). These are job-generated intermediates -
+        # always safe to delete permanently regardless of $PermanentDelete,
+        # per this project's own established deletion semantics (only
+        # ORIGINAL/source files respect that toggle) - the owning module
+        # (ImageConversionPipeline.ps1's Invoke-IccStripRetryOrFail, its
+        # WebP/AVIF pre-conversion detour, and
+        # AnimatedConversionPipeline.ps1's -DoAnimatedOverwrite staging)
+        # already has its own cleanup for every real leak path; this is the
+        # boundary-level backstop for when that cleanup couldn't run (a
+        # force-killed process, a locked file swallowed by a bare
+        # `catch {}`).
+        $orphanedScratchFiles = @(Get-ChildItem -LiteralPath $FolderPath -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.Name -imatch '_tmp_iccstrip\.png$' -or
+                $_.Name -imatch '_tmp_(webp|avif)2png\.png$' -or
+                $_.Name -imatch '_tmp_overwrite\.webp$'
+            })
+        foreach ($orphan in $orphanedScratchFiles) {
+            Write-Log ("Deleting orphaned scratch file (its owning cleanup could not run earlier): '" + $orphan.FullName + "'") -Level Warn
+            try { [System.IO.File]::Delete($orphan.FullName) } catch { }
+        }
+
         $remainingSrcImages = @(Get-ChildItem -LiteralPath $FolderPath -Recurse -File -ErrorAction SilentlyContinue |
             Where-Object { $LooseImageExtensions -icontains $_.Extension })
 

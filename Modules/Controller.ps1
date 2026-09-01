@@ -587,6 +587,32 @@ function Invoke-FullPipelineChapter {
         # function owns the chapter's one merged CCR transition itself).
         $zipResult = @{ Status = $null; ZipSize = 0; EntryCount = 0; FolderDeleted = $false; FolderDeleteFailed = $false }
         try {
+            # Orphaned "_tmp_*" scratch files are deleted before zipping
+            # here too (2026-08-31 fix, caught by verifying a same-day
+            # /code-review 4th pass on ImageConversionPipeline.ps1, which
+            # added the identical sweep to ZipPipeline.ps1's
+            # Invoke-LooseFolderZip - Full Pipeline calls Compress-FolderToZip
+            # DIRECTLY, per this function's own comment above, so it never
+            # goes through that sweep) - job-generated intermediates (their
+            # owning cleanup couldn't run - a force-killed process, a
+            # locked file swallowed by a bare `catch {}`), always safe to
+            # delete permanently regardless of $PermanentDelete, per this
+            # project's own established deletion semantics. Without this,
+            # Compress-FolderToZip below (a raw archive of the WHOLE
+            # folder) permanently embeds the debris as a junk page, and the
+            # only mode that produces "_tmp_overwrite.webp" in the first
+            # place (-DoAnimatedOverwrite) only ever runs here.
+            $orphanedScratchFiles = @(Get-ChildItem -LiteralPath $ChapterDir -Recurse -File -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.Name -imatch '_tmp_iccstrip\.png$' -or
+                    $_.Name -imatch '_tmp_(webp|avif)2png\.png$' -or
+                    $_.Name -imatch '_tmp_overwrite\.webp$'
+                })
+            foreach ($orphan in $orphanedScratchFiles) {
+                Write-Log ("Deleting orphaned scratch file (its owning cleanup could not run earlier): '" + $orphan.FullName + "'") -Level Warn
+                try { [System.IO.File]::Delete($orphan.FullName) } catch { }
+            }
+
             Write-Log ("Zipping '" + $ChapterDir + "' -> '" + $ZipOut + "'")
             $zipSize = Compress-FolderToZip -SourceDir $ChapterDir -ZipOut $ZipOut
             # -RequireJxlEntry only when the image engine actually
