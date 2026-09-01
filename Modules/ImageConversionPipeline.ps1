@@ -227,10 +227,26 @@ function Invoke-IccStripRetryOrFail {
     $stripPsi.RedirectStandardOutput = $true
     $stripPsi.RedirectStandardError  = $true
     $stripPsi.CreateNoWindow         = $true
+    # ReadToEndAsync + try/finally (2026-08-31 fix, from a THIRD same-day
+    # /code-review pass - same species already found and fixed in
+    # AnimatedConversionPipeline.ps1's Test-AvifAnimated, confirmed live
+    # there via a harness revert that genuinely hung): both streams
+    # redirected but never read is the classic Process redirect deadlock -
+    # if magick writes enough combined stdout+stderr to fill the OS pipe
+    # buffer, it blocks writing while nothing ever drains the pipes, so
+    # WaitForExit() never returns. Draining both asynchronously before
+    # WaitForExit() prevents either buffer from ever filling.
     $stripProc = [System.Diagnostics.Process]::Start($stripPsi)
-    $stripProc.WaitForExit()
-    $stripExitCode = $stripProc.ExitCode
-    $stripProc.Dispose()
+    try {
+        $stripStdoutTask = $stripProc.StandardOutput.ReadToEndAsync()
+        $stripStderrTask = $stripProc.StandardError.ReadToEndAsync()
+        $stripProc.WaitForExit()
+        $null = $stripStdoutTask.GetAwaiter().GetResult()
+        $null = $stripStderrTask.GetAwaiter().GetResult()
+        $stripExitCode = $stripProc.ExitCode
+    } finally {
+        $stripProc.Dispose()
+    }
 
     if ($stripExitCode -eq 0 -and (Test-Path -LiteralPath $strippedPng)) {
         # Clean up any partial/corrupt .jxl the ORIGINAL failed attempt
@@ -661,9 +677,21 @@ function Convert-ImageBatch {
                 $magickPsi.RedirectStandardOutput = $true
                 $magickPsi.RedirectStandardError  = $true
                 $magickPsi.CreateNoWindow         = $true
+                # ReadToEndAsync (2026-08-31 fix, from a THIRD same-day
+                # /code-review pass) - same redirect-deadlock species as
+                # Invoke-IccStripRetryOrFail's own fix above and
+                # AnimatedConversionPipeline.ps1's Test-AvifAnimated: both
+                # streams were redirected but never read, and this call
+                # runs synchronously INLINE in the main dispatch loop (not
+                # polled via HasExited like the cjxl job below) - a hang
+                # here blocks the entire batch, not just one job.
                 $magickProc = [System.Diagnostics.Process]::Start($magickPsi)
                 $magickProcLocal = $magickProc
+                $magickStdoutTask = $magickProc.StandardOutput.ReadToEndAsync()
+                $magickStderrTask = $magickProc.StandardError.ReadToEndAsync()
                 $magickProc.WaitForExit()
+                $null = $magickStdoutTask.GetAwaiter().GetResult()
+                $null = $magickStderrTask.GetAwaiter().GetResult()
                 $magickExitCode = $magickProc.ExitCode
                 $magickProc.Dispose()
                 $magickProcLocal = $null

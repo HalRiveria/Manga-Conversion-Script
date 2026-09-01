@@ -253,6 +253,18 @@ class Program {
         string src = srcArg.EndsWith("[0]") ? srcArg.Substring(0, srcArg.Length - 3) : srcArg;
         string dst = args[args.Length - 1];
         string srcContent = File.Exists(src) ? File.ReadAllText(src) : "";
+        if (srcContent.Contains("HUGE_STDERR")) {
+            // Writes a large stderr dump (well over a typical OS pipe
+            // buffer) BEFORE doing anything else - proves the 2026-08-31
+            // redirect-deadlock fix (both streams now drained
+            // asynchronously before WaitForExit in both
+            // Invoke-IccStripRetryOrFail and the WebP/AVIF-to-PNG
+            // pre-conversion call) actually prevents a hang, rather than
+            // just reproducing the already-fixed Test-AvifAnimated case
+            // in the sibling module.
+            string line = new string('X', 200) + Environment.NewLine;
+            for (int i = 0; i < 2000; i++) { Console.Error.Write(line); }
+        }
         if (srcContent.Contains("FAIL_MAGICK")) {
             Console.Error.WriteLine("simulated magick pre-conversion failure");
             return 1;
@@ -973,6 +985,35 @@ Test-Assert ($totalsX2.ConvertedSuccess -eq 1 -and $totalsX2.ConvertedFail -eq 0
 Test-Assert (Test-Path -LiteralPath (Join-Path $chX2 "cover.jxl")) "cover.jxl was created by the retry"
 $leftoverTempPngsX2 = @(Get-ChildItem -LiteralPath $chX2 -Filter "*_tmp_*.png" -File -ErrorAction SilentlyContinue)
 Test-Assert (@($leftoverTempPngsX2).Count -eq 0) ("no orphaned temp PNG (neither the ICC-strip PNG nor a redundant webp2png one) was left behind (found: " + (($leftoverTempPngsX2 | ForEach-Object { $_.Name }) -join ', ') + ")")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario X3 (2026-08-31 fix, found by a THIRD same-day /code-review
+#  pass): both the ICC-strip magick call (Invoke-IccStripRetryOrFail) and
+#  the WebP/AVIF-to-PNG pre-conversion magick call had both stdout/stderr
+#  redirected but never read - the same Process redirect deadlock species
+#  already found and fixed in AnimatedConversionPipeline.ps1's
+#  Test-AvifAnimated, just never applied here. A huge stderr dump (well
+#  over a typical OS pipe buffer) proves neither call site hangs anymore.
+# ==============================================================================
+Write-Host "=== Scenario X3: a huge stderr dump does not hang the ICC-strip magick call ===" -ForegroundColor Cyan
+$imgX3 = Join-Path (New-Dir "scenario-x3\Series\Chapter 1") "cover.jpg"
+[System.IO.File]::WriteAllText($imgX3, "ICC_MISMATCH`nHUGE_STDERR")
+$swX3 = [System.Diagnostics.Stopwatch]::StartNew()
+$totalsX3 = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-x3") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -MaxCjxlProcs 2 -FullLogging $false
+$swX3.Stop()
+Test-Assert ($totalsX3.ConvertedSuccess -eq 1 -and $totalsX3.ConvertedFail -eq 0) "the ICC-strip retry still succeeded despite the huge stderr dump"
+Test-Assert ($swX3.Elapsed.TotalSeconds -lt 15) ("returned promptly instead of deadlocking on the ICC-strip magick call (took " + [int]$swX3.Elapsed.TotalSeconds + "s)")
+Write-Host ""
+
+Write-Host "=== Scenario X4: a huge stderr dump does not hang the WebP-to-PNG pre-conversion magick call ===" -ForegroundColor Cyan
+$imgX4 = Join-Path (New-Dir "scenario-x4\Series\Chapter 1") "cover.webp"
+[System.IO.File]::WriteAllText($imgX4, "HUGE_STDERR")
+$swX4 = [System.Diagnostics.Stopwatch]::StartNew()
+$totalsX4 = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-x4") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -MaxCjxlProcs 2 -FullLogging $false
+$swX4.Stop()
+Test-Assert ($totalsX4.ConvertedSuccess -eq 1 -and $totalsX4.ConvertedFail -eq 0) "the WebP pre-conversion still succeeded despite the huge stderr dump"
+Test-Assert ($swX4.Elapsed.TotalSeconds -lt 15) ("returned promptly instead of deadlocking on the WebP-to-PNG magick call (took " + [int]$swX4.Elapsed.TotalSeconds + "s)")
 Write-Host ""
 
 # ==============================================================================
