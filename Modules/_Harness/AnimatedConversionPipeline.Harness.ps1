@@ -168,6 +168,19 @@ class Program {
         if (args.Length > 0 && args[0] == "identify") {
             string path = args[args.Length - 1];
             string content = File.Exists(path) ? File.ReadAllText(path) : "";
+            if (content.Contains("FAIL_IDENTIFY_HUGE_STDERR")) {
+                // Simulates a malformed AVIF producing a large stderr
+                // warning/error dump - large enough to fill the OS pipe
+                // buffer (typically 4-64KB) if the parent isn't actively
+                // draining stderr while this process is still running.
+                // Proves the 2026-08-31 deadlock fix (Test-AvifAnimated
+                // now reads both streams asynchronously before
+                // WaitForExit) - without it, this would hang the whole
+                // test instead of completing quickly.
+                string line = new string('X', 200) + Environment.NewLine;
+                for (int i = 0; i < 2000; i++) { Console.Error.Write(line); }
+                return 1;
+            }
             if (content.Contains("FAIL_IDENTIFY")) {
                 Console.Error.WriteLine("simulated identify failure");
                 return 1;
@@ -182,6 +195,19 @@ class Program {
         string dst = args[args.Length - 1];
         string srcContent = File.Exists(src) ? File.ReadAllText(src) : "";
 
+        if (srcContent.Contains("FAIL_MAGICK_AFTER_PARTIAL_WRITE")) {
+            // Simulates magick actually opening/writing to its output
+            // path before crashing mid-encode - proves the 2026-08-31
+            // fix (magick is pointed at a temp path when overwriting a
+            // pre-existing file, not the real path directly) actually
+            // protects the original: without the fix, this would
+            // overwrite dst (the real .webp) with garbage BEFORE failing,
+            // corrupting it regardless of what the failure-cleanup code
+            // decides afterward.
+            File.WriteAllText(dst, "garbage-partial-write-from-a-crashed-magick");
+            Console.Error.WriteLine("simulated magick crash after partial write");
+            return 1;
+        }
         if (srcContent.Contains("FAIL_MAGICK")) {
             Console.Error.WriteLine("simulated magick conversion failure");
             return 1;
@@ -213,6 +239,24 @@ $failA = New-FakeAvif -Name "fail-identify-a.avif" -Content "FAIL_IDENTIFY"
 $threwA = $false
 try { Test-AvifAnimated -AvifPath $failA.FullName -MagickExe $fakeMagickExe } catch { $threwA = $true }
 Test-Assert $threwA "a failed identify call throws, letting the caller decide how to handle it"
+
+# 2026-08-31 fix: Test-AvifAnimated used to read stdout to completion,
+# then stderr, then call WaitForExit - the classic Process redirect
+# deadlock ordering. A huge stderr dump (simulating a malformed AVIF's
+# real identify output) large enough to fill the OS pipe buffer would
+# hang this call forever before the fix (both async reads draining
+# concurrently now prevent either pipe from ever filling). Same
+# precedent as this file's own Scenario Y-equivalent hang-fix tests -
+# a real regression here would hang the whole harness run, not just fail
+# an assertion, same tradeoff already accepted elsewhere in this project
+# for this exact class of fix.
+$hugeStderrA = New-FakeAvif -Name "fail-identify-huge-a.avif" -Content "FAIL_IDENTIFY_HUGE_STDERR"
+$swA = [System.Diagnostics.Stopwatch]::StartNew()
+$threwHugeA = $false
+try { Test-AvifAnimated -AvifPath $hugeStderrA.FullName -MagickExe $fakeMagickExe } catch { $threwHugeA = $true }
+$swA.Stop()
+Test-Assert $threwHugeA "a huge-stderr identify failure still throws (not silently swallowed)"
+Test-Assert ($swA.Elapsed.TotalSeconds -lt 15) ("returned promptly instead of deadlocking on a full stderr pipe (took " + [int]$swA.Elapsed.TotalSeconds + "s)")
 Write-Host ""
 
 # ==============================================================================
@@ -305,6 +349,31 @@ $resultF2 = Convert-AnimatedBatch -AnimatedFiles @($fileF2) -MagickExe $fakeMagi
 Test-Assert ($resultF2.FailedCount -eq 1 -and $resultF2.ConvertedCount -eq 0) "counted as failed"
 Test-Assert (Test-Path -LiteralPath $webpF2) "the pre-existing .webp still exists - NOT deleted by the failed re-conversion attempt"
 Test-Assert ((Get-Content -LiteralPath $webpF2 -Raw) -eq "pre-existing good webp bytes from a prior successful run") "the pre-existing .webp's own content survives untouched"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario F3 (2026-08-31 fix): -DoAnimatedOverwrite $true points a
+#  re-conversion at an already-existing, good .webp - the conversion
+#  attempt actually WRITES PARTIAL GARBAGE to its output path before
+#  crashing (unlike F2's FAIL_MAGICK, which fails before writing
+#  anything). Scenario F2's own "not deleted" guard is not enough here -
+#  WebpExistedBeforeJob only ever stopped THIS SCRIPT from deleting the
+#  file, it never stopped magick.exe itself from overwriting it in
+#  place. Fixed by pointing magick at a temp path when overwriting an
+#  existing file, only replacing the real path after a verified success.
+# ==============================================================================
+Write-Host "=== Scenario F3: a crash mid-write does NOT corrupt the pre-existing good .webp (magick targets a temp path, not the original) ===" -ForegroundColor Cyan
+$fileF3 = New-FakeAvif -Name "chapter-f3\page1.avif" -Content "FRAMES:8`nFAIL_MAGICK_AFTER_PARTIAL_WRITE"
+$webpF3 = [System.IO.Path]::ChangeExtension($fileF3.FullName, ".webp")
+"pre-existing good webp bytes from a prior successful run" | Set-Content -LiteralPath $webpF3 -Encoding UTF8 -NoNewline
+
+$resultF3 = Convert-AnimatedBatch -AnimatedFiles @($fileF3) -MagickExe $fakeMagickExe -AnimatedThreads 2 -DoAnimatedOverwrite $true -CancelToken ([System.Threading.CancellationToken]::None)
+
+Test-Assert ($resultF3.FailedCount -eq 1 -and $resultF3.ConvertedCount -eq 0) "counted as failed"
+Test-Assert (Test-Path -LiteralPath $webpF3) "the pre-existing .webp still exists"
+Test-Assert ((Get-Content -LiteralPath $webpF3 -Raw) -eq "pre-existing good webp bytes from a prior successful run") "the pre-existing .webp's own content survives BYTE-FOR-BYTE untouched - magick's crash-mid-write landed on a temp file, never the original"
+$leftoverTempF3 = @(Get-ChildItem -LiteralPath (Split-Path -Path $webpF3 -Parent) -Filter "*_tmp_overwrite.webp" -File -ErrorAction SilentlyContinue)
+Test-Assert (@($leftoverTempF3).Count -eq 0) "the temp file magick actually wrote garbage to was cleaned up, not left behind"
 Write-Host ""
 
 # ==============================================================================

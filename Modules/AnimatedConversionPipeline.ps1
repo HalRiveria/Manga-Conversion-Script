@@ -161,12 +161,39 @@ function Test-AvifAnimated {
     $psi.RedirectStandardError  = $true
     $psi.CreateNoWindow         = $true
 
+    # ReadToEndAsync (2026-08-31 fix, from a same-day /code-review) - both
+    # streams redirected, both read synchronously to completion BEFORE
+    # WaitForExit(), used to risk the classic Process redirect deadlock:
+    # magick identify on a malformed/corrupt AVIF (a real, expected input
+    # here, since this function exists specifically to classify
+    # ambiguous files) can write enough to stderr to fill the OS pipe
+    # buffer before closing stdout - the child then blocks writing to a
+    # full, unread stderr pipe while this synchronous ReadToEnd() blocks
+    # waiting for stdout to close, a true deadlock hanging the entire
+    # calling thread (this function runs inline in the main dispatch
+    # loop's slot-filling loop, so a hang here stalls the whole batch).
+    # Every OTHER completion path in this project's two conversion
+    # pipelines only reads output after HasExited is already observed
+    # true, so the child's pipes can't still be filling - this was the
+    # one place reading while the process could still be running. Fixed
+    # by draining both streams asynchronously (so neither pipe can fill
+    # up unread) before WaitForExit(), the standard .NET-recommended
+    # pattern for this exact problem.
     $proc = [System.Diagnostics.Process]::Start($psi)
-    $stdout = $proc.StandardOutput.ReadToEnd()
-    $stderr = $proc.StandardError.ReadToEnd()
-    $proc.WaitForExit()
-    $code = $proc.ExitCode
-    $proc.Dispose()
+    try {
+        $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+        $stderrTask = $proc.StandardError.ReadToEndAsync()
+        $proc.WaitForExit()
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        $code = $proc.ExitCode
+    } finally {
+        # try/finally (2026-08-31 fix): Dispose() used to only run after
+        # every read/wait call above succeeded - a throw from any of them
+        # (e.g. an I/O error reading a redirected stream) skipped it
+        # entirely, leaking the process handle.
+        $proc.Dispose()
+    }
 
     if ($code -ne 0) {
         throw ("magick identify exited " + $code + ". Stderr: " + $stderr.Trim())
@@ -219,9 +246,23 @@ function Complete-AnimatedConversionJob {
     $convOk = $false
     try {
         if ($code -ne 0) { throw ("magick exited with code " + $code + ". Stderr: " + $stderr) }
-        if (-not (Test-Path -LiteralPath $Job.WebpPath)) { throw ("Output .webp was not created: '" + $Job.WebpPath + "'") }
-        $webpSize = (Get-Item -LiteralPath $Job.WebpPath).Length
-        if ($webpSize -eq 0) { throw ("Output .webp is 0 bytes: '" + $Job.WebpPath + "'") }
+        # Get-Item -ErrorAction SilentlyContinue instead of a separate
+        # Test-Path + Get-Item pair (2026-08-31 efficiency fix) - one stat
+        # instead of two, for every completed job.
+        $webpItem = Get-Item -LiteralPath $Job.MagickOutputPath -ErrorAction SilentlyContinue
+        if ($null -eq $webpItem) { throw ("Output .webp was not created: '" + $Job.MagickOutputPath + "'") }
+        $webpSize = $webpItem.Length
+        if ($webpSize -eq 0) { throw ("Output .webp is 0 bytes: '" + $Job.MagickOutputPath + "'") }
+        # Move the verified-good temp file into place (2026-08-31 fix) -
+        # only when magick was pointed at a temp path in the first place
+        # (an overwrite of a pre-existing file - see $j.MagickOutputPath's
+        # own comment in Convert-AnimatedBatch for why). The real WebpPath
+        # is only ever replaced HERE, after full verification, never by
+        # magick itself - so a crash/force-kill mid-encode can no longer
+        # damage the original.
+        if ($Job.MagickOutputPath -ne $Job.WebpPath) {
+            Move-Item -LiteralPath $Job.MagickOutputPath -Destination $Job.WebpPath -Force
+        }
         if ($IsAbortDrain) {
             Write-Log ("Conversion OK (abort drain): '" + $Job.WebpPath + "'")
         } else {
@@ -233,13 +274,23 @@ function Complete-AnimatedConversionJob {
     } catch {
         Write-Log ("FAILED conversion of animated AVIF '" + $Job.SrcPath + "': " + $_) -Level Error
         $BatchResult.FailedCount++
-        # Only delete $Job.WebpPath if it did NOT exist before THIS job
-        # started (a genuine partial/corrupt file this attempt itself
-        # created) - if it already existed (e.g. -DoAnimatedOverwrite
-        # pointed this now-failed re-conversion at an already-good .webp
-        # from a prior successful run), deleting it would destroy a
-        # previously-good output over an unrelated later failure.
-        if (-not $Job.WebpExistedBeforeJob -and (Test-Path -LiteralPath $Job.WebpPath)) { try { [System.IO.File]::Delete($Job.WebpPath) } catch { } }
+        # Always safe to delete $Job.MagickOutputPath on failure now
+        # (2026-08-31 fix): it's either a dedicated temp path magick wrote
+        # to (an overwrite case - never the original file, safe
+        # unconditionally) or, when there was no pre-existing file to
+        # protect, it's $Job.WebpPath itself, which is exactly the
+        # "genuine partial/corrupt file this attempt itself created" case
+        # that was already safe to delete before this fix. Either way,
+        # the ORIGINAL good .webp (when one existed) was never touched by
+        # magick in the first place, so there's nothing to preserve here
+        # the way the old WebpExistedBeforeJob check on $Job.WebpPath had
+        # to. The inner catch is swallowed deliberately - best-effort
+        # cleanup of a temp/partial file; a locked-file delete failure
+        # here just leaves that harmless leftover for a later run to
+        # pick up, not worth failing the whole batch over. No Test-Path
+        # guard needed (2026-08-31 efficiency fix) - File.Delete on a
+        # missing path is already a safe no-op, confirmed directly.
+        try { [System.IO.File]::Delete($Job.MagickOutputPath) } catch { }
     }
 
     if ($convOk -and $DoAnimatedDeleteSource) {
@@ -350,7 +401,11 @@ function Convert-AnimatedBatch {
             # dispatch loop indefinitely instead of failing that one job.
             try {
 
-            if ((Test-Path -LiteralPath $j.WebpPath) -and -not $DoAnimatedOverwrite) {
+            # Computed once, reused below for WebpExistedBeforeJob
+            # (2026-08-31 efficiency fix) - this same path was being
+            # stat'd twice per dispatched job.
+            $webpPathExists = Test-Path -LiteralPath $j.WebpPath
+            if ($webpPathExists -and -not $DoAnimatedOverwrite) {
                 Write-Log ("SKIPPING '" + $j.SrcPath + "': output '" + $j.WebpPath + "' already exists (Overwrite is off).")
                 $batchResult.SkippedCount++
                 $batchResult.SkippedPaths.Add($j.SrcPath)
@@ -389,10 +444,47 @@ function Convert-AnimatedBatch {
                 continue
             }
 
+            # Captured BEFORE Process.Start() - Complete-AnimatedConversionJob's
+            # own failure cleanup needs to know whether $j.WebpPath already
+            # existed going into THIS attempt, so it can tell "a partial
+            # file THIS run just created" (safe to delete) apart from "an
+            # already-existing, valid .webp from a prior successful run
+            # that -DoAnimatedOverwrite pointed this (now-failed)
+            # re-conversion at" (must NOT be deleted just because a later,
+            # unrelated attempt failed).
+            $j.WebpExistedBeforeJob = $webpPathExists
+
+            # $j.MagickOutputPath (2026-08-31 fix, from a same-day
+            # /code-review): the WebpExistedBeforeJob guard above only ever
+            # protected a pre-existing .webp from THIS SCRIPT's own Delete
+            # calls - it did nothing to stop magick.exe itself from opening
+            # and overwriting that same path as ITS OWN output target. With
+            # -DoAnimatedOverwrite on (a real, menu-exposed setting), magick
+            # writing straight to an existing good .webp and then crashing/
+            # being force-killed/exiting non-zero PARTWAY through encoding
+            # already destroys the original - by the time the cleanup code
+            # correctly declines to delete it, the damage is done. Fixed at
+            # the actual mechanism: when overwriting an existing file,
+            # magick targets a TEMP path instead of the real one; the real
+            # WebpPath is only replaced (via Move-Item, in
+            # Complete-AnimatedConversionJob) after a verified-successful
+            # conversion. When there's no pre-existing file to protect,
+            # magick still writes directly to WebpPath as before - nothing
+            # to lose in that case, and no temp-file/move overhead added
+            # for the common (non-overwrite) path.
+            $j.MagickOutputPath = if ($j.WebpExistedBeforeJob) {
+                [System.IO.Path]::Combine(
+                    [System.IO.Path]::GetDirectoryName($j.WebpPath),
+                    [System.IO.Path]::GetFileNameWithoutExtension($j.WebpPath) + "_tmp_overwrite.webp"
+                )
+            } else {
+                $j.WebpPath
+            }
+
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName = $MagickExe
             $qualityArg = if ($DoAnimatedLossless) { "-define webp:lossless=true" } else { "-quality " + $AnimatedQuality }
-            $psi.Arguments = "`"" + $j.SrcPath + "`" -coalesce -loop 0 " + $qualityArg + " `"" + $j.WebpPath + "`""
+            $psi.Arguments = "`"" + $j.SrcPath + "`" -coalesce -loop 0 " + $qualityArg + " `"" + $j.MagickOutputPath + "`""
             $psi.UseShellExecute        = $false
             $psi.RedirectStandardOutput = $true
             $psi.RedirectStandardError  = $true
@@ -400,15 +492,6 @@ function Convert-AnimatedBatch {
 
             Write-Log ("Converting animated: '" + $j.SrcPath + "'")
 
-            # Captured BEFORE Process.Start() (2026-08-31 fix) - Complete-
-            # AnimatedConversionJob's own failure cleanup needs to know
-            # whether $j.WebpPath already existed going into THIS attempt,
-            # so it can tell "a partial file THIS run just created" (safe
-            # to delete) apart from "an already-existing, valid .webp from
-            # a prior successful run that -DoAnimatedOverwrite pointed this
-            # (now-failed) re-conversion at" (must NOT be deleted just
-            # because a later, unrelated attempt failed).
-            $j.WebpExistedBeforeJob = Test-Path -LiteralPath $j.WebpPath
             $j.Proc          = [System.Diagnostics.Process]::Start($psi)
             $j.StartTime     = [System.Diagnostics.Stopwatch]::StartNew()
             $j.LastHeartbeat = [timespan]::Zero
@@ -481,19 +564,29 @@ function Convert-AnimatedBatch {
             $labelSuffix = if ($BatchLabel) { " in '" + $BatchLabel + "'" } else { "" }
             Write-Log ("Force-stopping " + $running.Count + " job(s) that did not finish within " + $AbortTimeoutSeconds + "s" + $labelSuffix + ".") -Level Warn
             foreach ($j in $running) {
+                # Swallowed deliberately: a TOCTOU race between the
+                # HasExited check and Kill() (or an access-denied Kill()/
+                # WaitForExit()) would otherwise propagate out of an
+                # already-aborting run's own cleanup - best-effort only,
+                # matching this file's established best-effort cleanup
+                # idiom used throughout.
                 try { if (-not $j.Proc.HasExited) { $j.Proc.Kill() } } catch { }
                 try { $j.Proc.WaitForExit(5000) } catch { }
-                # -not $j.WebpExistedBeforeJob (2026-08-31 fix, caught by a
-                # same-day /code-review of the original fix): this
-                # force-kill path is a SEPARATE cleanup site from
-                # Complete-AnimatedConversionJob's own failure catch, and
-                # it still deleted $j.WebpPath unconditionally - the exact
-                # bug the WebpExistedBeforeJob check elsewhere in this file
-                # was written to close, left open here. A Ctrl+C during a
-                # -DoAnimatedOverwrite re-conversion pass could force-kill
-                # a job mid-flight and destroy a pre-existing good .webp
-                # from a prior successful run.
-                if (-not $j.WebpExistedBeforeJob -and (Test-Path -LiteralPath $j.WebpPath)) { try { [System.IO.File]::Delete($j.WebpPath) } catch { } }
+                # Always safe to delete $j.MagickOutputPath (2026-08-31
+                # fix, mirrors Complete-AnimatedConversionJob's own failure
+                # cleanup - see that function's comment): it's either a
+                # dedicated temp path magick was writing to (an overwrite
+                # case, never the original file) or, when there was no
+                # pre-existing file, $j.WebpPath itself. A Ctrl+C during a
+                # -DoAnimatedOverwrite re-conversion pass force-killing a
+                # job mid-flight can no longer damage the pre-existing
+                # good .webp, since magick was never pointed at it
+                # directly in that case. The inner catch is swallowed
+                # deliberately, same reasoning as the identical cleanup in
+                # Complete-AnimatedConversionJob - best-effort only. No
+                # Test-Path guard needed - File.Delete on a missing path
+                # is already a safe no-op.
+                try { [System.IO.File]::Delete($j.MagickOutputPath) } catch { }
                 $j.Proc.Dispose()
                 if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
             }
@@ -585,14 +678,6 @@ function Get-ChapterAnimatedStatus {
     )
     if ($null -eq $ChapterResult) { return "Success", $null }
 
-    # InspectFailedCount is Error-tier, not Warning: unlike SkippedCount (a
-    # file deliberately left alone because its output already exists - a
-    # non-problem), an inspect failure means Test-AvifAnimated couldn't even
-    # determine whether the file needs converting, so it was left as a raw,
-    # completely unconverted .avif on disk. A Warning-tier chapter still
-    # passes the zip gate (Controller.ps1's Invoke-FullPipelineChapter only
-    # blocks on 'Error') - left as Warning, that raw file would get zipped
-    # into the archive and its source folder deleted anyway. 2026-08-31 fix.
     # InspectFailedCount is Error-tier, not Warning: unlike SkippedCount (a
     # file deliberately left alone because its output already exists - a
     # non-problem), an inspect failure means Test-AvifAnimated couldn't even
