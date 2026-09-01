@@ -781,7 +781,7 @@ Write-Host ""
 #  and returning $null.
 # ==============================================================================
 Write-Host "=== Scenario N2: Invoke-Mode completes normally despite a `$Settings missing FullLogging/PermanentDelete (ZipFolders/ConvertZipped/FullPipeline) ===" -ForegroundColor Cyan
-$fakeSettingsN2 = @{ ZipParallelThreads = 2; DeleteExtractedFoldersAfterRezip = $false; MaxCjxlProcs = 2; JpegLossless = $false; JpegQuality = 90; AnimatedLossless = $false; AnimatedQuality = 90; AnimatedOverwrite = $false; AnimatedDeleteSource = $true }
+$fakeSettingsN2 = @{ ZipParallelThreads = 2; DeleteExtractedFoldersAfterRezip = $false; MaxCjxlProcs = 2; JpegLossless = $false; JpegQuality = 90; AnimatedLossless = $false; AnimatedQuality = 90; AnimatedThreads = 2; AnimatedOverwrite = $false; AnimatedDeleteSource = $true }
 
 $fakeZipHandlerN2 = { param([string]$Path, [int]$MaxParallel, [bool]$DeleteFolders, [Parameter(Mandatory)][bool]$FullLogging, [string]$LogFile, [string]$LogErrorFile, [string]$LogWarnFile, [Parameter(Mandatory)][bool]$PermanentDelete)
     return @{ CandidateCount = 3; ZippedSuccess = 3; ZippedFail = 0; FolderDeletedSuccess = 3; FolderDeletedFail = 0; ForceStoppedCount = 0 }
@@ -806,6 +806,21 @@ $fakeFullHandlerN2 = { param([string]$Path, [string]$CjxlExe, [string]$MagickExe
 }
 $statsN2Full = Invoke-Mode -Resolved @{ Mode = 'FullPipeline' } -TargetPath "C:\fake\lib" -Settings $fakeSettingsN2 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -FullPipelineHandler $fakeFullHandlerN2
 Test-Assert ($null -ne $statsN2Full -and $statsN2Full.LooseImgConverted.Success -eq 7) "FullPipeline completes normally (not swallowed into the fatal-handler `$null path) despite `$Settings missing FullLogging/PermanentDelete"
+
+# 2026-08-31 fix (found by a re-review after the first N2 pass): the
+# ImageConversion/AnimatedConversion cases were missed by the original
+# bool-cast fix - same species, same file, just two more switch cases.
+$fakeImageHandlerN2 = { param([string]$Path, [string]$CjxlExe, [string]$MagickExe, [bool]$JpegLossless, [int]$JpegQuality, [int]$MaxCjxlProcs, [Parameter(Mandatory)][bool]$FullLogging)
+    return @{ ConvertedSuccess = 4; ConvertedFail = 0; ConvertedSkipped = 0; DeletedSuccess = 4; DeletedFail = 0; StaleCleanedSuccess = 0; StaleCleanedFail = 0; ForceKilledCount = 0; InspectFailedCount = 0 }
+}
+$statsN2Image = Invoke-Mode -Resolved @{ Mode = 'ImageConversion' } -TargetPath "C:\fake\lib" -Settings $fakeSettingsN2 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ImageConversionHandler $fakeImageHandlerN2
+Test-Assert ($null -ne $statsN2Image -and $statsN2Image.LooseImgConverted.Success -eq 4) "ImageConversion completes normally (not swallowed into the fatal-handler `$null path) despite `$Settings missing FullLogging"
+
+$fakeAnimHandlerN2 = { param([string]$Path, [string]$MagickExe, [bool]$AnimatedLossless, [int]$AnimatedQuality, [int]$AnimatedThreads, [bool]$AnimatedOverwrite, [bool]$AnimatedDeleteSource, [Parameter(Mandatory)][bool]$FullLogging)
+    return @{ ConvertedSuccess = 2; ConvertedFail = 0; ConvertedSkipped = 0; DeletedSuccess = 2; DeletedFail = 0; ForceKilledCount = 0; InspectFailedCount = 0 }
+}
+$statsN2Anim = Invoke-Mode -Resolved @{ Mode = 'AnimatedConversion' } -TargetPath "C:\fake\lib" -Settings $fakeSettingsN2 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -AnimatedConversionHandler $fakeAnimHandlerN2
+Test-Assert ($null -ne $statsN2Anim -and $statsN2Anim.LooseAnimatedConverted.Success -eq 2) "AnimatedConversion completes normally (not swallowed into the fatal-handler `$null path) despite `$Settings missing FullLogging"
 Write-Host ""
 
 Write-Host "=== Scenario O: Invoke-Mode / ImageConversionZip (mode 8) - real zip-step wiring, 2026-08-28 ===" -ForegroundColor Cyan

@@ -535,21 +535,6 @@ function Invoke-FullPipelineChapter {
         # $animatedResult at $null here (mapped to a clean Status by
         # Get-MergedChapterStatus) doesn't risk a cancelled chapter
         # getting zipped anyway.
-        # -not $Cts.Token.IsCancellationRequested guard on the "treat as a
-        # failure" branch (2026-08-31 fix): a Ctrl+C landing right at/before
-        # this chapter's dispatch is a THIRD, legitimate reason a result
-        # can be $null - Invoke-ZipParallelProcessing's own dispatch loop
-        # never even starts a job once cancellation is already signaled,
-        # and Invoke-GracefulDrain only drains what's already running, not
-        # what was never dispatched. That's a normal, expected outcome of
-        # a user-requested abort, not a crash - without this guard, a
-        # clean cancellation was logged as a false "-Level Error" crash
-        # and inflated ConvertedImageFail/ConvertedAnimatedFail for a run
-        # that was never actually broken. The zip gate below already has
-        # its own independent Cts check, so leaving $imageResult/
-        # $animatedResult at $null here (mapped to a clean Status by
-        # Get-MergedChapterStatus) doesn't risk a cancelled chapter
-        # getting zipped anyway.
         if ($ChapterImageFiles.Count -gt 0 -and $null -eq $imageResult) {
             if ($Cts.Token.IsCancellationRequested) {
                 Write-Log ("Image engine for chapter '" + $ChapterDir + "' never returned a result because the run was aborted before/during dispatch - not counted as a failure.") -Level Warn
@@ -1068,16 +1053,23 @@ function Invoke-FullPipeline {
                     # genuine Error found on some chapter in a normal run.
                     $totals.ZipSkippedDueToError++
                 } elseif (-not $chapter.IsZippable -and $failedClassificationDirs.Contains($chapterDir.FullName)) {
-                    # 2026-08-31 fix: a chapter forced un-zippable specifically
-                    # because an AVIF in it couldn't be classified (IsZippable
-                    # was already $false at line ~872, so the elseif above
+                    # 2026-08-31 fix: a chapter forced un-zippable because
+                    # $failedClassificationDirs contains its directory
+                    # (IsZippable was already $false, so the elseif above
                     # never fires for it - it requires IsZippable) was
                     # invisible in every one of this run's own zip-outcome
-                    # counters, even though the classification failure itself
-                    # IS independently counted in InspectFailedCount. Counted
-                    # into the same ZipSkippedDueToError field, same
+                    # counters, even though the underlying failure itself IS
+                    # independently counted in InspectFailedCount. Despite
+                    # the field's own name, $failedClassificationDirs now
+                    # collects TWO distinct reasons (an AVIF classification
+                    # failure, or a Get-LooseImageCandidates naming
+                    # collision - see where each is added to this set,
+                    # above) - both mean the same thing here: a real,
+                    # unconverted file this chapter can't safely zip.
+                    # Counted into the same ZipSkippedDueToError field, same
                     # reasoning as the abort case above - it correctly
-                    # reflects "this chapter should have zipped and didn't."
+                    # reflects "this chapter should have zipped and didn't,"
+                    # regardless of which of the two reasons caused it.
                     $totals.ZipSkippedDueToError++
                 }
 
@@ -1191,17 +1183,24 @@ function Invoke-Mode {
 
         switch ($Resolved.Mode) {
             'ImageConversion' {
+                # [bool](...) cast (2026-08-31 fix, from a same-day
+                # /code-review re-review) - same reasoning as the
+                # ZipFolders/ConvertZipped/FullPipeline cases below,
+                # missed here in the original pass: FullLogging is
+                # [Parameter(Mandatory)][bool] on
+                # Invoke-LooseImageConversionPipeline.
                 $r = & $ImageConversionHandler -Path $TargetPath -CjxlExe $CjxlExe -MagickExe $MagickExe `
-                    -JpegLossless $Settings.JpegLossless -JpegQuality $Settings.JpegQuality -MaxCjxlProcs $Settings.MaxCjxlProcs -FullLogging $Settings.FullLogging
+                    -JpegLossless $Settings.JpegLossless -JpegQuality $Settings.JpegQuality -MaxCjxlProcs $Settings.MaxCjxlProcs -FullLogging ([bool]$Settings.FullLogging)
                 $stats.LooseImgConverted.Success = $r.ConvertedSuccess; $stats.LooseImgConverted.Fail = $r.ConvertedFail; $stats.LooseImgConverted.Skipped = $r.ConvertedSkipped
                 $stats.LooseImgDeleted.Success   = $r.DeletedSuccess;   $stats.LooseImgDeleted.Fail   = $r.DeletedFail
                 $stats.LooseStaleCleaned.Success = $r.StaleCleanedSuccess; $stats.LooseStaleCleaned.Fail = $r.StaleCleanedFail
                 $stats.InspectFailed.Count       = $r.InspectFailedCount
             }
             'AnimatedConversion' {
+                # [bool](...) cast - same reasoning as ImageConversion above.
                 $r = & $AnimatedConversionHandler -Path $TargetPath -MagickExe $MagickExe `
                     -AnimatedLossless $Settings.AnimatedLossless -AnimatedQuality $Settings.AnimatedQuality -AnimatedThreads $Settings.AnimatedThreads `
-                    -AnimatedOverwrite $Settings.AnimatedOverwrite -AnimatedDeleteSource $Settings.AnimatedDeleteSource -FullLogging $Settings.FullLogging
+                    -AnimatedOverwrite $Settings.AnimatedOverwrite -AnimatedDeleteSource $Settings.AnimatedDeleteSource -FullLogging ([bool]$Settings.FullLogging)
                 $stats.LooseAnimatedConverted.Success = $r.ConvertedSuccess; $stats.LooseAnimatedConverted.Fail = $r.ConvertedFail; $stats.LooseAnimatedConverted.Skipped = $r.ConvertedSkipped
                 $stats.LooseAnimatedDeleted.Success   = $r.DeletedSuccess;   $stats.LooseAnimatedDeleted.Fail   = $r.DeletedFail
                 $stats.InspectFailed.Count            = $r.InspectFailedCount
