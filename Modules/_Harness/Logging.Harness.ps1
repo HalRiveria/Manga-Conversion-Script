@@ -59,6 +59,13 @@ function Move-ToRecycleBin {
     param([string]$ItemPath)
     $script:recycleBinCalls.Add($ItemPath)
     if (Test-Path -LiteralPath $ItemPath) { Remove-Item -LiteralPath $ItemPath -Force }
+    # Returns $true, matching the real FileDeletion.ps1 function (2026-08-31
+    # addition) - a same-day /code-review verification pass found that an
+    # unguarded call inside Initialize-LogPaths leaked this return value
+    # onto its own output stream (a stray "True"/"False" line printed at
+    # its real bare-statement call site). The old stub returned nothing at
+    # all, so it couldn't have caught that - it now can.
+    return $true
 }
 
 # ==============================================================================
@@ -420,9 +427,19 @@ Write-Log "target B, only run"
 
 Start-Sleep -Milliseconds 1100   # distinct HHmmss timestamp for target A's second run
 Reset-LoggingState
-Initialize-LogPaths -TargetPath "C:\M-TargetA\Path" -FullLogging $true -ScriptDir $scratchDir
+# Captured (2026-08-31 addition, caught by verifying a same-day
+# /code-review full-codebase pass) - Move-ToRecycleBin returns
+# $true/$false, and the unguarded call at this exact call site (clearing
+# target A's OLD log below) used to leak it onto Initialize-LogPaths' own
+# output stream, printing a stray "True" during bootstrap on every run
+# after the first against a given target (the real call site is a bare
+# statement in Conversion Script Main.ps1). The stub above now returns
+# $true like the real function, so this is the first version of this
+# scenario able to catch that.
+$outputM = Initialize-LogPaths -TargetPath "C:\M-TargetA\Path" -FullLogging $true -ScriptDir $scratchDir
 $aSecondLogFile = $script:logFile
 
+Test-Assert ($null -eq $outputM) ("Initialize-LogPaths produced no stray output while Recycle-Binning target A's old log (got: " + ($outputM -join ", ") + ")")
 Test-Assert ($aSecondLogFile -ne $aFirstLogFile) "target A's second run got its own distinct timestamped file"
 Test-Assert ($script:recycleBinCalls.Count -eq 1 -and $script:recycleBinCalls[0] -eq $aFirstLogFile) ("target A's old log was passed to Move-ToRecycleBin exactly once (got " + $script:recycleBinCalls.Count + " call(s))")
 Test-Assert (-not (Test-Path -LiteralPath $aFirstLogFile)) "target A's old log file is gone from disk after cleanup"
@@ -450,6 +467,67 @@ try { Initialize-LogPaths -TargetPath "C:\M2\Path" -FullLogging $true -ScriptDir
 Test-Assert (-not $initThrew) "Initialize-LogPaths does not propagate an exception from a failing Move-ToRecycleBin call"
 
 ${function:Move-ToRecycleBin} = $originalMoveToRecycleBin
+Write-Host ""
+
+# ==============================================================================
+#  Scenario M3 (2026-08-31 fix, caught by a same-day /code-review
+#  full-codebase pass): split-log mode's own stale Error/Warn log cleanup
+#  now (a) Recycle-Bins them via Move-ToRecycleBin instead of a permanent
+#  Remove-Item, matching the full-logging branch's own stated policy for
+#  the identical kind of file, and (b) attempts both clears BEFORE writing
+#  any warning about a failed one, so a warning about the Errors file
+#  failing to clear survives into the (by-then-cleared) Warnings file
+#  instead of being wiped by that same loop's own next iteration.
+# ==============================================================================
+Write-Host "=== Scenario M3: split-mode stale logs are Recycle-Binned, and a failed clear's warning survives ===" -ForegroundColor Cyan
+$script:recycleBinCalls.Clear()
+Reset-LoggingState
+Initialize-LogPaths -TargetPath "C:\M3\Path" -FullLogging $false -ScriptDir $scratchDir
+$m3ErrorFile = $script:logErrorFile
+$m3WarnFile  = $script:logWarnFile
+Write-Log "will become stale error content" -Level Error
+Write-Log "will become stale warn content" -Level Warn
+
+# Make the ERRORS file (processed FIRST in Initialize-LogPaths' own
+# @($script:logErrorFile, $script:logWarnFile) order) fail to clear -
+# proves its warning isn't lost when the Warnings file is cleared right
+# after it in the same pass.
+$originalMoveToRecycleBinM3 = ${function:Move-ToRecycleBin}
+function Move-ToRecycleBin {
+    param([string]$ItemPath)
+    $script:recycleBinCalls.Add($ItemPath)
+    if ($ItemPath -eq $script:logErrorFile) { throw "simulated locked Errors file" }
+    if (Test-Path -LiteralPath $ItemPath) { Remove-Item -LiteralPath $ItemPath -Force }
+}
+
+Initialize-LogPaths -TargetPath "C:\M3\Path" -FullLogging $false -ScriptDir $scratchDir
+${function:Move-ToRecycleBin} = $originalMoveToRecycleBinM3
+
+Test-Assert ($script:recycleBinCalls -contains $m3ErrorFile -and $script:recycleBinCalls -contains $m3WarnFile) "both stale files were passed to Move-ToRecycleBin, not a permanent Remove-Item"
+Test-Assert (Test-Path -LiteralPath $m3ErrorFile) "the Errors file that failed to clear is still on disk (the simulated lock), not silently lost either way"
+$m3WarnContent = if (Test-Path -LiteralPath $script:logWarnFile) { @(Get-Content -LiteralPath $script:logWarnFile) } else { @() }
+Test-Assert (($m3WarnContent | Where-Object { $_ -like "*Could not clear stale log file*" -and $_ -like "*Errors*" }).Count -eq 1) "the warning about the Errors file failing to clear survived into the (freshly-cleared) Warnings file, not deleted by that same file's own clear"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario M4 (2026-08-31 fix, caught by verifying a same-day
+#  /code-review full-codebase pass's own M3 fix): Move-ToRecycleBin
+#  returns $true/$false - an unguarded call inside Initialize-LogPaths
+#  leaks that value onto its own output stream. Initialize-LogPaths is
+#  called as a bare statement at its real call site (Conversion Script
+#  Main.ps1), so this would print a stray "True" line during bootstrap on
+#  every run with a stale log to clear (the split-log/default path, after
+#  the first run against a given target). The base Move-ToRecycleBin stub
+#  now returns $true like the real function (a plain Remove-Item, what
+#  the old stub did, returns nothing - it couldn't have caught this).
+# ==============================================================================
+Write-Host "=== Scenario M4: Initialize-LogPaths produces no stray output when clearing a stale log ===" -ForegroundColor Cyan
+Reset-LoggingState
+Initialize-LogPaths -TargetPath "C:\M4\Path" -FullLogging $false -ScriptDir $scratchDir
+Write-Log "will become stale, cleared cleanly next call" -Level Warn
+
+$outputM4 = Initialize-LogPaths -TargetPath "C:\M4\Path" -FullLogging $false -ScriptDir $scratchDir
+Test-Assert ($null -eq $outputM4) ("Initialize-LogPaths produced no output while clearing a stale log (got: " + ($outputM4 -join ", ") + ")")
 Write-Host ""
 
 # ==============================================================================

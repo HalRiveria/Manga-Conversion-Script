@@ -259,7 +259,18 @@ try {
     # same unambiguous absolute path.
     $Path = (Resolve-Path -LiteralPath $Path).ProviderPath
 
-    Initialize-LogPaths -TargetPath $Path -FullLogging $settings.FullLogging -DisableSummaryFile $settings.DisableSummaryFile -ScriptDir $scriptDir
+    # [bool](...) casts (2026-08-31 fix, caught by a same-day /code-review
+    # full-codebase pass - missed by the original sweep because it only
+    # covered Controller.ps1) - same reasoning as the two calls below:
+    # -FullLogging is Mandatory, -DisableSummaryFile isn't, but a
+    # non-Mandatory [bool] param throws on an explicitly-passed $null just
+    # as hard (Mandatory only controls whether OMITTING the param is
+    # allowed, not the type coercion once a value is passed - see
+    # CLAUDE.md's own record of this discovery). Import-ScriptSettings
+    # defaults both keys today so this can't fire against a real settings
+    # file, but the two calls below already got this exact cast for the
+    # identical reason - this call was the one the original sweep missed.
+    Initialize-LogPaths -TargetPath $Path -FullLogging ([bool]$settings.FullLogging) -DisableSummaryFile ([bool]$settings.DisableSummaryFile) -ScriptDir $scriptDir
     Initialize-LogMutex
     # [bool](...) casts (2026-08-31 fix, from a same-day /code-review): both
     # parameters are [Parameter(Mandatory)][bool] - Import-ScriptSettings

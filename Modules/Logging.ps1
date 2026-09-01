@@ -52,12 +52,15 @@
     a successful acquire, not a failure) so every WaitOne() call site
     doesn't need to repeat that handling itself.
 
-    Initialize-LogPaths's full-logging branch Recycle-Bins old log files
-    left over from previous runs against the same target, via
-    Move-ToRecycleBin - now a real function in Modules\FileDeletion.ps1
-    (confirmed matching signature, see the comment at that call site).
-    Callers that dot-source Logging.ps1 standalone (as the harness does)
-    still need to stub that function out, or dot-source FileDeletion.ps1
+    Initialize-LogPaths Recycle-Bins old/stale log files left over from
+    previous runs against the same target, via Move-ToRecycleBin - now a
+    real function in Modules\FileDeletion.ps1 (confirmed matching
+    signature, see the comment at that call site). BOTH branches call it
+    (2026-08-31 fix - split-log mode used to permanently Remove-Item its
+    own stale Errors/Warnings logs instead, an inconsistent policy for
+    the identical kind of file). Callers that dot-source Logging.ps1
+    standalone (as the harness does) still need to stub that function
+    out, or dot-source FileDeletion.ps1
     too.
 
     Log files are written UTF-8, not ASCII - the historical ASCII-only
@@ -199,7 +202,14 @@ function Initialize-LogPaths {
             # another chance at it. Nothing this run writes is affected
             # either way, since $script:logFile above is always a fresh,
             # uniquely-timestamped path.
-            try { Move-ToRecycleBin -ItemPath $oldLog.FullName } catch { }
+            # $null = (2026-08-31 fix, caught by verifying a same-day
+            # /code-review full-codebase pass's own fixes) - Move-ToRecycleBin
+            # returns $true/$false; an unguarded call leaks that onto this
+            # function's own output stream, and Initialize-LogPaths is
+            # called as a bare statement at its real call site
+            # (Conversion Script Main.ps1), so an unguarded return value
+            # here would print a stray "True"/"False" line during bootstrap.
+            try { $null = Move-ToRecycleBin -ItemPath $oldLog.FullName } catch { }
         }
     } else {
         $script:logFile            = $null
@@ -208,19 +218,43 @@ function Initialize-LogPaths {
         $script:logErrorFile       = Join-Path $ScriptDir ("Conversion Log - Errors - "   + $pathHashShort + ".log")
         $script:logWarnFile        = Join-Path $ScriptDir ("Conversion Log - Warnings - " + $pathHashShort + ".log")
 
+        # Move-ToRecycleBin, not a permanent Remove-Item (2026-08-31 fix,
+        # caught by a same-day /code-review full-codebase pass) - matches
+        # the full-logging branch above's own stated policy: these are the
+        # user's own log history, not a job-generated intermediate (see
+        # CLAUDE.md's deletion-semantics convention), so they get the
+        # safer default unconditionally, same as that branch already does
+        # for ITS OWN stale-log cleanup. There was no stated reason for
+        # split-mode to treat the identical kind of file differently.
+        #
+        # Both clears attempt FIRST, any warnings are collected and only
+        # written AFTER the loop (2026-08-31 fix, same pass) - the old
+        # code warned inline, inside the loop, via Write-Log, which in
+        # split mode appends into $script:logWarnFile. Clearing the Errors
+        # file first, then the Warnings file SECOND in the SAME loop, meant
+        # a real warning about the Errors file failing to clear got written
+        # into the Warnings file and then DELETED moments later by that
+        # same loop's own next iteration - the one case this warning
+        # exists for (a locked/read-only/AV-held log) silently lost the
+        # warning that was supposed to flag it.
+        $staleLogWarnings = New-Object System.Collections.Generic.List[string]
         foreach ($staleLog in @($script:logErrorFile, $script:logWarnFile)) {
             if (Test-Path -LiteralPath $staleLog) {
-                # NOT swallowed silently, unlike the full-logging cleanup
-                # above - this file's whole point is separating THIS run's
-                # errors/warnings from a stale one. A failed removal (locked
-                # file, read-only, AV hold) means old content survives into
-                # this run with nothing marking it stale, which could read
-                # as this run's own output - worth a real warning, not just
-                # a swallow. Write-Log itself appends into this same file,
-                # so the warning lands exactly where someone would look.
-                try { Remove-Item -LiteralPath $staleLog -Force }
-                catch { Write-Log ("Could not clear stale log file '" + $staleLog + "' from a previous run - its old content may still be present below: " + $_) -Level Warn }
+                # NOT swallowed silently - this file's whole point is
+                # separating THIS run's errors/warnings from a stale one. A
+                # failed removal (locked file, read-only, AV hold) means
+                # old content survives into this run with nothing marking
+                # it stale, which could read as this run's own output -
+                # worth a real warning, not just a swallow.
+                try { $null = Move-ToRecycleBin -ItemPath $staleLog }
+                catch { $staleLogWarnings.Add("Could not clear stale log file '" + $staleLog + "' from a previous run - its old content may still be present below: " + $_) }
             }
+        }
+        # Write-Log itself appends into $script:logWarnFile (by now
+        # already cleared above, so the warning lands in a fresh file, not
+        # one about to be wiped by a later iteration of the loop above).
+        foreach ($warning in $staleLogWarnings) {
+            Write-Log $warning -Level Warn
         }
     }
 }

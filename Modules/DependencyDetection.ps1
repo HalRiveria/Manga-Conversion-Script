@@ -104,8 +104,19 @@ function Find-Exe {
 
     if ($UserPath -and (Test-PathSafely -Path $UserPath)) { return $UserPath }
 
-    $inPath = Get-Command $ExeName -ErrorAction SilentlyContinue
-    if ($inPath) { return $inPath.Source }
+    # -CommandType Application, and a non-empty .Source check (2026-08-31
+    # fix, caught by a same-day /code-review full-codebase pass) - without
+    # -CommandType, Get-Command also matches a function or alias that
+    # happens to share $ExeName (a "magick"/"cjxl" helper in the user's
+    # own PowerShell profile is a real, not hypothetical, case) - its
+    # .Source is an EMPTY STRING, not $null, which is still truthy for
+    # $inPath's own if-check, so this returned "" instead of falling
+    # through to -Candidates: a real exe sitting at a candidate path was
+    # never found, and the docstring's "Returns $null if none of those
+    # found it" contract broke (a caller checking $null -eq $result saw a
+    # false hit on "").
+    $inPath = Get-Command $ExeName -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($inPath -and $inPath.Source) { return $inPath.Source }
 
     foreach ($c in $Candidates) {
         if (Test-PathSafely -Path $c) { return $c }

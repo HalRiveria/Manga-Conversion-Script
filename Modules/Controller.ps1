@@ -1215,8 +1215,38 @@ function Invoke-Mode {
                 # missed here in the original pass: FullLogging is
                 # [Parameter(Mandatory)][bool] on
                 # Invoke-LooseImageConversionPipeline.
+                #
+                # $script:FullLogging, NOT [bool]$Settings.FullLogging
+                # (2026-08-31 fix, caught by a same-day /code-review
+                # full-codebase pass): every -FullLogging/-DoFullLogging
+                # argument in this switch (and Write-SummaryReport's own
+                # call, further down) now reads the FROZEN value
+                # Initialize-LogPaths set in $script:FullLogging at
+                # bootstrap, not the LIVE $Settings.FullLogging - because
+                # $LogFile/$LogErrorFile/$LogWarnFile (passed alongside,
+                # unchanged) are ALSO frozen bootstrap snapshots
+                # (Conversion Script Main.ps1 computes them once, before
+                # this loop exists, and this loop deliberately never
+                # re-runs Initialize-LogPaths mid-session - see this
+                # function's own Invoke-MainLoop header comment for why).
+                # Reading the FullLogging flag live while the paths stay
+                # frozen let them drift out of sync the moment a user
+                # toggled Full Logging in the Options menu mid-session: a
+                # worker runspace (Convert-ImageBatch/Convert-AnimatedBatch,
+                # dispatched by Invoke-FullPipelineChapter) sets its OWN
+                # fresh $script:FullLogging from whatever value THIS
+                # switch passed it, so a live, post-toggle value there
+                # paired with the OLD, pre-toggle paths - live-reproduced:
+                # every worker-side Write-Log call after a toggle went to
+                # a $null path (split-mode's $logFile is never set) and
+                # was silently dropped, with no error, no console line,
+                # nothing on disk. Using the same frozen source for both
+                # keeps them consistent, matching this project's own
+                # already-documented, deliberate design: the toggle
+                # doesn't take effect until the next relaunch, rather than
+                # partially applying and breaking logging outright.
                 $r = & $ImageConversionHandler -Path $TargetPath -CjxlExe $CjxlExe -MagickExe $MagickExe `
-                    -JpegLossless ([bool]$Settings.JpegLossless) -JpegQuality $Settings.JpegQuality -MaxCjxlProcs $Settings.MaxCjxlProcs -FullLogging ([bool]$Settings.FullLogging)
+                    -JpegLossless ([bool]$Settings.JpegLossless) -JpegQuality $Settings.JpegQuality -MaxCjxlProcs $Settings.MaxCjxlProcs -FullLogging $script:FullLogging
                 $stats.LooseImgConverted.Success = $r.ConvertedSuccess; $stats.LooseImgConverted.Fail = $r.ConvertedFail; $stats.LooseImgConverted.Skipped = $r.ConvertedSkipped
                 $stats.LooseImgDeleted.Success   = $r.DeletedSuccess;   $stats.LooseImgDeleted.Fail   = $r.DeletedFail
                 $stats.LooseStaleCleaned.Success = $r.StaleCleanedSuccess; $stats.LooseStaleCleaned.Fail = $r.StaleCleanedFail
@@ -1236,7 +1266,7 @@ function Invoke-Mode {
                 # Mandatory on the receiving end.
                 $r = & $AnimatedConversionHandler -Path $TargetPath -MagickExe $MagickExe `
                     -AnimatedLossless ([bool]$Settings.AnimatedLossless) -AnimatedQuality $Settings.AnimatedQuality -AnimatedThreads $Settings.AnimatedThreads `
-                    -AnimatedOverwrite ([bool]$Settings.AnimatedOverwrite) -AnimatedDeleteSource ([bool]$Settings.AnimatedDeleteSource) -FullLogging ([bool]$Settings.FullLogging)
+                    -AnimatedOverwrite ([bool]$Settings.AnimatedOverwrite) -AnimatedDeleteSource ([bool]$Settings.AnimatedDeleteSource) -FullLogging $script:FullLogging
                 $stats.LooseAnimatedConverted.Success = $r.ConvertedSuccess; $stats.LooseAnimatedConverted.Fail = $r.ConvertedFail; $stats.LooseAnimatedConverted.Skipped = $r.ConvertedSkipped
                 $stats.LooseAnimatedDeleted.Success   = $r.DeletedSuccess;   $stats.LooseAnimatedDeleted.Fail   = $r.DeletedFail
                 $stats.InspectFailed.Count            = $r.InspectFailedCount
@@ -1249,14 +1279,14 @@ function Invoke-Mode {
                 # PowerShell's own boolean coercion with a hard crash, the
                 # same species already fixed at other call sites today.
                 $r = & $ZipFoldersHandler -Path $TargetPath -MaxParallel $Settings.ZipParallelThreads -DeleteFolders $true `
-                    -FullLogging ([bool]$Settings.FullLogging) -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete ([bool]$Settings.PermanentDelete)
+                    -FullLogging $script:FullLogging -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete ([bool]$Settings.PermanentDelete)
                 $stats.ZipOnlyZipped.Success        = $r.ZippedSuccess;        $stats.ZipOnlyZipped.Fail        = $r.ZippedFail
                 $stats.ZipOnlyFolderDeleted.Success = $r.FolderDeletedSuccess; $stats.ZipOnlyFolderDeleted.Fail = $r.FolderDeletedFail
             }
             'ConvertZipped' {
                 # [bool](...) casts - same reasoning as the ZipFolders case above.
                 $r = & $ConvertZippedHandler -Path $TargetPath -MaxParallel $Settings.ZipParallelThreads -DeleteFolders ([bool]$Settings.DeleteExtractedFoldersAfterRezip) `
-                    -FullLogging ([bool]$Settings.FullLogging) -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete ([bool]$Settings.PermanentDelete) `
+                    -FullLogging $script:FullLogging -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete ([bool]$Settings.PermanentDelete) `
                     -CjxlExe $CjxlExe -MagickExe $MagickExe -MaxCjxlProcs $Settings.MaxCjxlProcs -JpegLossless ([bool]$Settings.JpegLossless) -JpegQuality $Settings.JpegQuality
                 $stats.ZipExtracted.Success  = $r.ZipExtractedSuccess;  $stats.ZipExtracted.Fail  = $r.ZipExtractedFail
                 $stats.ImgConverted.Success  = $r.ImgConvertedSuccess; $stats.ImgConverted.Fail  = $r.ImgConvertedFail; $stats.ImgConverted.Skipped = $r.ImgConvertedSkipped
@@ -1269,7 +1299,7 @@ function Invoke-Mode {
                 $r = & $FullPipelineHandler -Path $TargetPath -CjxlExe $CjxlExe -MagickExe $MagickExe `
                     -JpegLossless ([bool]$Settings.JpegLossless) -JpegQuality $Settings.JpegQuality -AnimatedLossless ([bool]$Settings.AnimatedLossless) -AnimatedQuality $Settings.AnimatedQuality `
                     -AnimatedOverwrite ([bool]$Settings.AnimatedOverwrite) -AnimatedDeleteSource ([bool]$Settings.AnimatedDeleteSource) -FullPipelineMaxConcurrentProcs $Settings.MaxCjxlProcs `
-                    -FullLogging ([bool]$Settings.FullLogging) -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete ([bool]$Settings.PermanentDelete)
+                    -FullLogging $script:FullLogging -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete ([bool]$Settings.PermanentDelete)
                 $stats.LooseImgConverted.Success      = $r.ConvertedImageSuccess;    $stats.LooseImgConverted.Fail      = $r.ConvertedImageFail;    $stats.LooseImgConverted.Skipped = $r.ConvertedImageSkipped
                 $stats.LooseImgDeleted.Success        = $r.DeletedImageSuccess;      $stats.LooseImgDeleted.Fail        = $r.DeletedImageFail
                 $stats.LooseStaleCleaned.Success      = $r.StaleImageCleanedSuccess; $stats.LooseStaleCleaned.Fail      = $r.StaleImageCleanedFail
@@ -1330,7 +1360,7 @@ function Invoke-Mode {
                 # switch case in this function; this one (mode 8) was
                 # missed by both earlier passes.
                 $r = & $ImageConversionHandler -Path $TargetPath -CjxlExe $CjxlExe -MagickExe $MagickExe `
-                    -JpegLossless ([bool]$Settings.JpegLossless) -JpegQuality $Settings.JpegQuality -MaxCjxlProcs $Settings.MaxCjxlProcs -FullLogging ([bool]$Settings.FullLogging) `
+                    -JpegLossless ([bool]$Settings.JpegLossless) -JpegQuality $Settings.JpegQuality -MaxCjxlProcs $Settings.MaxCjxlProcs -FullLogging $script:FullLogging `
                     -ZipStepCallback $zipStep
                 $stats.LooseImgConverted.Success = $r.ConvertedSuccess; $stats.LooseImgConverted.Fail = $r.ConvertedFail; $stats.LooseImgConverted.Skipped = $r.ConvertedSkipped
                 $stats.LooseImgDeleted.Success   = $r.DeletedSuccess;   $stats.LooseImgDeleted.Fail   = $r.DeletedFail
@@ -1470,7 +1500,7 @@ function Invoke-MainLoop {
             # both earlier passes even though the two calls right above
             # this one (Initialize-CleanConsoleOutput/Initialize-FileDeletion)
             # already got this exact cast.
-            Write-SummaryReport -Lines $summaryLines -FullLogging ([bool]$Settings.FullLogging)
+            Write-SummaryReport -Lines $summaryLines -FullLogging $script:FullLogging
         }
 
         $postRun = & $PostRunPromptHandler

@@ -1343,6 +1343,38 @@ Test-Assert ($entryNamesY -notcontains "photo_tmp_iccstrip.png" -and $entryNames
 Write-Host ""
 
 # ==============================================================================
+#  Scenario Z2 (2026-08-31 fix, caught by a same-day /code-review
+#  full-codebase pass): every -FullLogging/-DoFullLogging argument Invoke-Mode
+#  passes now reads $script:FullLogging (the value Initialize-LogPaths froze
+#  at bootstrap, matching the ALSO-frozen $LogFile/$LogErrorFile/$LogWarnFile
+#  paths threaded alongside it), NOT live $Settings.FullLogging. Before this
+#  fix, a user toggling Full Logging in the Options menu mid-session changed
+#  ONLY the live flag - the frozen paths never moved - so a worker runspace
+#  (which sets its OWN fresh $script:FullLogging from whatever this switch
+#  passed it) ended up with a live post-toggle flag paired against the OLD
+#  pre-toggle paths, sending every worker-side Write-Log call to a $null
+#  path in split-mode and silently dropping it. This scenario simulates a
+#  toggle having happened: $script:FullLogging (frozen, pre-toggle) is
+#  $true, $fakeSettings.FullLogging (live, post-toggle) is $false - the
+#  handler must see the FROZEN value, not the live one.
+# ==============================================================================
+Write-Host "=== Scenario Z2: Invoke-Mode passes the FROZEN `$script:FullLogging, not live `$Settings.FullLogging ===" -ForegroundColor Cyan
+$fakeSettingsZ2 = $fakeSettings.Clone()
+$fakeSettingsZ2.FullLogging = $false
+$script:FullLogging = $true
+$capturedZ2 = @{}
+$fakeImageHandlerZ2 = {
+    param($Path, $CjxlExe, $MagickExe, $JpegLossless, $JpegQuality, $MaxCjxlProcs, $FullLogging)
+    $capturedZ2.FullLogging = $FullLogging
+    return @{ ConvertedSuccess = 1; ConvertedFail = 0; ConvertedSkipped = 0; DeletedSuccess = 1; DeletedFail = 0; StaleCleanedSuccess = 0; StaleCleanedFail = 0; InspectFailedCount = 0 }
+}.GetNewClosure()
+$null = Invoke-Mode -Resolved @{ Mode = 'ImageConversion' } -TargetPath "C:\fake\lib" -Settings $fakeSettingsZ2 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ImageConversionHandler $fakeImageHandlerZ2
+$script:FullLogging = $false
+
+Test-Assert ($capturedZ2.FullLogging -eq $true) ("the handler received the frozen `$script:FullLogging (`$true), not the live `$Settings.FullLogging (`$false) (got " + $capturedZ2.FullLogging + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

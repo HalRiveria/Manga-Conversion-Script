@@ -150,6 +150,35 @@ Test-Assert ($totalsD.CandidateCount -eq 0) "the up-to-date leaf was excluded be
 Write-Host ""
 
 # ==============================================================================
+#  Scenario D2 (2026-08-31 fix, caught by a same-day /code-review
+#  full-codebase pass): with Clean Console Output OFF (the default), the
+#  -NextJobProvider closure's per-series chapter-count side-scan (a
+#  SECOND, bounded Get-ZippableLeafDirs walk, purely to feed
+#  Start-CcrSeriesProgressIfEnabled's -TotalChapters - which itself no-ops
+#  when CCR is off) used to run unconditionally anyway, duplicating every
+#  Test-ZippableLeafDirCandidate skip-reason Warn the FIRST (real,
+#  incremental) scan already logged. A series with one up-to-date leaf
+#  (triggers a real skip Warn) and one real leaf must log that Warn
+#  exactly ONCE, not twice, with CCR off.
+# ==============================================================================
+Write-Host "=== Scenario D2: the CCR-only side-scan does not double-log skip warnings when Clean Console Output is off ===" -ForegroundColor Cyan
+$rootD2 = New-Dir "scenario-d2"
+$leafD2Real = New-Dir "scenario-d2\Series\Chapter 1"
+New-FileIn -DirPath $leafD2Real -Name "page1.jpg" | Out-Null
+$leafD2Stale = New-Dir "scenario-d2\Series\Chapter 2"
+New-FileIn -DirPath $leafD2Stale -Name "page1.jpg" | Out-Null
+$zipOutD2 = Join-Path (Split-Path -Parent $leafD2Stale) "Chapter 2.zip"
+"fake pre-existing zip" | Out-File -FilePath $zipOutD2 -Encoding UTF8
+(Get-Item -LiteralPath $zipOutD2).LastWriteTimeUtc = (Get-Date).ToUniversalTime()
+
+Test-Assert (-not $script:CleanConsoleOutputEnabled) "sanity check: Clean Console Output is off (the default) for this scenario"
+$totalsD2 = Invoke-ZipOnlyPipeline -Path $rootD2 -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -FullLogging $false -PermanentDelete $true
+$warnLinesD2 = @(Get-Content -LiteralPath $script:logWarnFile | Where-Object { $_ -like "*Chapter 2*" -and $_ -like "*up to date*" })
+Test-Assert ($totalsD2.CandidateCount -eq 1) "only the one real leaf was a candidate, the up-to-date one excluded"
+Test-Assert ($warnLinesD2.Count -eq 1) ("the up-to-date-zip skip Warn was logged exactly once, not duplicated by the CCR-only side-scan (got " + $warnLinesD2.Count + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario E: the former-container ("Only Images") case, exercised
 #  through the FULL pipeline (not calling Get-ZippableLeafDirs directly) -
 #  confirms end-to-end that a post-completion series folder is never

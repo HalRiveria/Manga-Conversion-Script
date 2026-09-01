@@ -31,12 +31,14 @@
     for that case.
 
     Logging.ps1's Initialize-LogPaths already calls Move-ToRecycleBin as a
-    FORWARD REFERENCE (it was built before this module existed for real).
-    That call site uses `-ItemPath <string>`, a single file path - matches
-    this module's real signature exactly, so no changes needed there now
-    that this module exists. Dot-source FileDeletion.ps1 before
-    Logging.ps1 (or in either order, as long as both are dot-sourced
-    before Initialize-LogPaths's full-logging branch actually runs) so
+    FORWARD REFERENCE (it was built before this module existed for real) -
+    BOTH branches (full-logging and split-log) call it, not just one
+    (2026-08-31 fix - split-log's own stale-log cleanup used to permanently
+    Remove-Item instead). That call site uses `-ItemPath <string>`, a
+    single file path - matches this module's real signature exactly, so no
+    changes needed there now that this module exists. Dot-source
+    FileDeletion.ps1 before Logging.ps1 (or in either order, as long as
+    both are dot-sourced before Initialize-LogPaths actually runs) so
     Move-ToRecycleBin resolves when that cleanup code executes.
 
     All three deletion functions return $true if ItemPath existed and was

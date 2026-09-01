@@ -85,6 +85,34 @@ Test-Assert ($resultD -eq $realCandidateD) "the first EXISTING candidate in orde
 Write-Host ""
 
 # ==============================================================================
+#  Scenario D2 (2026-08-31 fix, caught by a same-day /code-review
+#  full-codebase pass): a function or alias sharing $ExeName's name (a
+#  real, not hypothetical, case - a user's own PowerShell profile
+#  defining a "magick"/"cjxl" helper) used to be matched by a bare
+#  Get-Command call, and its .Source is an EMPTY STRING, not $null -
+#  still truthy for the old if-check, so Find-Exe returned "" instead of
+#  falling through to -Candidates, breaking the documented "$null if not
+#  found" contract AND skipping a real exe sitting at a candidate path.
+# ==============================================================================
+Write-Host "=== Scenario D2: a function/alias sharing the exe name is skipped, falls through to -Candidates ===" -ForegroundColor Cyan
+function totally-fake-function-zzz { "shadow function, not a real exe" }
+Set-Alias -Name totally-fake-alias-zzz -Value Get-ChildItem
+try {
+    $realCandidateD2 = Join-Path $scratchDir "candidate-real-exe-behind-shadow.exe"
+    "fake exe content" | Out-File -FilePath $realCandidateD2 -Encoding UTF8
+
+    $resultD2Func  = Find-Exe -ExeName "totally-fake-function-zzz" -Candidates @($realCandidateD2)
+    $resultD2Alias = Find-Exe -ExeName "totally-fake-alias-zzz" -Candidates @()
+
+    Test-Assert ($resultD2Func -eq $realCandidateD2) ("a shadowing FUNCTION was skipped, real -Candidates exe found instead (got '" + $resultD2Func + "')")
+    Test-Assert ($null -eq $resultD2Alias) ("a shadowing ALIAS with no -Candidates correctly returns `$null, not an empty string (got '" + $resultD2Alias + "', type " + $(if ($null -ne $resultD2Alias) { $resultD2Alias.GetType().Name } else { "`$null" }) + ")")
+} finally {
+    Remove-Item -Path Function:\totally-fake-function-zzz -ErrorAction SilentlyContinue
+    Remove-Item -Path Alias:\totally-fake-alias-zzz -ErrorAction SilentlyContinue
+}
+Write-Host ""
+
+# ==============================================================================
 #  Scenario E: not found anywhere (no -UserPath, not in PATH, no matching
 #  -Candidates) - returns `$null`, not an error.
 # ==============================================================================

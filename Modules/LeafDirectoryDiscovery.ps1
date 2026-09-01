@@ -345,12 +345,32 @@ function New-ZippableLeafDirProvider {
             }
 
             $childPath = $state.CurrentEnumerator.Current
-            $dirStack.Push($childPath)
 
             $dirInfo = [System.IO.DirectoryInfo]::new($childPath)
             $candidate = Test-ZippableLeafDirCandidate -Dir $dirInfo -QualifyingExtensions $QualifyingExtensions `
                 -ExcludeStagingDirs $ExcludeStagingDirs -ForceRezip $ForceRezip
             if ($null -ne $candidate) { return $candidate }
+
+            # Only push a NON-candidate onto the stack (2026-08-31 fix,
+            # caught by a same-day /code-review full-codebase pass) - a
+            # directory that qualifies as a candidate is, by
+            # Test-ZippableLeafDirCandidate's own definition, a true LEAF
+            # (it returns $null the moment it finds a subdirectory), so
+            # pushing one was pointless work in the best case. In mode 3 it
+            # was worse than pointless: the caller (Invoke-ZipOnlyPipeline)
+            # dispatches this SAME candidate, its worker zips it and then
+            # deletes the folder - the stack is LIFO, so this provider
+            # later pops that now-deleted path, EnumerateDirectories throws
+            # DirectoryNotFoundException, and the catch above logged a
+            # bogus "Could not enumerate ... skipping it" Warn for every
+            # single chapter zipped, on every normal `-DeleteFolders $true`
+            # run (the default) - burying the real signal that catch
+            # exists for (an actual permission-denied subtree) in
+            # per-chapter noise. Discovery itself stayed correct either
+            # way (a deleted-and-already-returned candidate was never
+            # going to be explored further), so this was diagnostics
+            # damage, not a real miss.
+            $dirStack.Push($childPath)
         }
     }.GetNewClosure()
 }

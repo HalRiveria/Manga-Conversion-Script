@@ -533,36 +533,52 @@ function Invoke-GracefulDrain {
 
     $localHandles  = $Handles
     $abortDeadline = [System.Diagnostics.Stopwatch]::StartNew()
-
-    while ($localHandles.Count -gt 0 -and $abortDeadline.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
-        $localHandles = Receive-CompletedHandles -Handles $localHandles -ResultHandler $ResultHandler -ErrorHandler $ErrorHandler
-        if ($null -ne $ConsoleQueue) { Flush-ConsoleQueue -Queue $ConsoleQueue }
-        if ($localHandles.Count -gt 0) { Start-Sleep -Milliseconds 250 }
-    }
-
-    # One final completion-check pass before declaring anything force-stopped.
-    # Closes the race where a job finishes in the gap between the last poll
-    # and the timeout firing - without this, that job's real result is
-    # silently discarded and it's miscounted as force-stopped (see
-    # CLAUDE.md "Known gaps" for the history of this exact bug).
-    if ($localHandles.Count -gt 0) {
-        $localHandles = Receive-CompletedHandles -Handles $localHandles -ResultHandler $ResultHandler -ErrorHandler $ErrorHandler
-        if ($null -ne $ConsoleQueue) { Flush-ConsoleQueue -Queue $ConsoleQueue }
-    }
-
     $forceStoppedCount = 0
-    if ($localHandles.Count -gt 0) {
-        $forceStoppedCount = $localHandles.Count
-        $forceStopMessage = "[ABORT] Force-stopping " + $forceStoppedCount + " job(s) that did not finish within " + $TimeoutSeconds + "s."
-        Write-GatedConsoleMessage -Text $forceStopMessage -Color Red -CleanConsoleOutputEnabled ([bool]$script:CleanConsoleOutputEnabled)
-        foreach ($h in $localHandles) {
-            try { $h.PS.Stop() } catch { }
-            try { $h.PS.Dispose() } catch { }
-        }
-    }
 
-    if ($null -ne $ConsoleQueue) { Flush-ConsoleQueue -Queue $ConsoleQueue }
-    Complete-AbortDrain
+    # try/finally around the whole drain body (2026-08-31 fix, caught by a
+    # same-day /code-review full-codebase pass) - this function's own
+    # docstring promises it "ALWAYS signals DrainComplete before
+    # returning", but nothing enforced that: anything throwing between
+    # here and the old unconditional Complete-AbortDrain call below (a
+    # -ResultHandler/-ErrorHandler that throws, Flush-ConsoleQueue on a
+    # bad queue, Write-GatedConsoleMessage not resolving - a documented
+    # hard dependency) skipped the signal entirely, leaving the native
+    # Ctrl+C/window-close handler parked in DrainComplete.Wait(65000) for
+    # up to 65s instead of returning promptly. Same species of gap
+    # ZipParallelProcessing.ps1's own mutex-leak fix closed earlier the
+    # same day (move the risky work inside the try so the finally can't
+    # be skipped).
+    try {
+        while ($localHandles.Count -gt 0 -and $abortDeadline.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+            $localHandles = Receive-CompletedHandles -Handles $localHandles -ResultHandler $ResultHandler -ErrorHandler $ErrorHandler
+            if ($null -ne $ConsoleQueue) { Flush-ConsoleQueue -Queue $ConsoleQueue }
+            if ($localHandles.Count -gt 0) { Start-Sleep -Milliseconds 250 }
+        }
+
+        # One final completion-check pass before declaring anything force-stopped.
+        # Closes the race where a job finishes in the gap between the last poll
+        # and the timeout firing - without this, that job's real result is
+        # silently discarded and it's miscounted as force-stopped (see
+        # CLAUDE.md "Known gaps" for the history of this exact bug).
+        if ($localHandles.Count -gt 0) {
+            $localHandles = Receive-CompletedHandles -Handles $localHandles -ResultHandler $ResultHandler -ErrorHandler $ErrorHandler
+            if ($null -ne $ConsoleQueue) { Flush-ConsoleQueue -Queue $ConsoleQueue }
+        }
+
+        if ($localHandles.Count -gt 0) {
+            $forceStoppedCount = $localHandles.Count
+            $forceStopMessage = "[ABORT] Force-stopping " + $forceStoppedCount + " job(s) that did not finish within " + $TimeoutSeconds + "s."
+            Write-GatedConsoleMessage -Text $forceStopMessage -Color Red -CleanConsoleOutputEnabled ([bool]$script:CleanConsoleOutputEnabled)
+            foreach ($h in $localHandles) {
+                try { $h.PS.Stop() } catch { }
+                try { $h.PS.Dispose() } catch { }
+            }
+        }
+
+        if ($null -ne $ConsoleQueue) { Flush-ConsoleQueue -Queue $ConsoleQueue }
+    } finally {
+        Complete-AbortDrain
+    }
 
     return @{ ForceStoppedCount = $forceStoppedCount }
 }

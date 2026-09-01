@@ -172,6 +172,21 @@ function Complete-CcrChapterProgressIfEnabled {
 function Complete-CcrAllSeriesProgressIfEnabled {
     if ($script:CleanConsoleOutputEnabled) { $null = Complete-AllActiveSeriesProgress }
 }
+function Test-CcrEnabledForZipOnly {
+    <#
+    .SYNOPSIS
+        Ordinary function wrapper around $script:CleanConsoleOutputEnabled
+        (2026-08-31 addition, caught by a same-day /code-review
+        full-codebase pass) - same reason the four IfEnabled wrappers
+        above exist: mode 3's own -NextJobProvider closure
+        (.GetNewClosure()'d, see this module's header) needs to gate its
+        per-series chapter-count side-scan on this flag too, and an
+        inline $script: read inside that closure is exactly the pattern
+        this module's header already calls out as unsafe - an ordinary
+        function call is not.
+    #>
+    return [bool]$script:CleanConsoleOutputEnabled
+}
 
 function Get-ZipChapterProgressStatus {
     <#
@@ -395,7 +410,20 @@ function Invoke-ZipOnlyPipeline {
             $topLevelName = ($relativePath -split [regex]::Escape([System.IO.Path]::DirectorySeparatorChar))[0]
             $seriesName = if ([string]::IsNullOrEmpty($topLevelName)) { $next.Dir.Name } else { $topLevelName }
 
-            if (-not $zoSeenSeriesNames.Contains($seriesName)) {
+            # Gated on Test-CcrEnabledForZipOnly (2026-08-31 fix, caught by
+            # a same-day /code-review full-codebase pass) - this whole
+            # block exists ONLY to compute -TotalChapters for
+            # Start-CcrSeriesProgressIfEnabled, which itself no-ops when
+            # Clean Console Output is off (the default). Without this
+            # gate, the bounded Get-ZippableLeafDirs side-scan below ran
+            # unconditionally on every default-settings mode-3 run -
+            # doubled directory I/O (a full second recursive walk of every
+            # series folder, synchronously, right before that series'
+            # first job dispatches) and duplicated every Test-
+            # ZippableLeafDirCandidate skip-reason Warn in the log
+            # (verified live: an up-to-date-zip skip logged twice), for a
+            # value nothing ever consumed.
+            if ((Test-CcrEnabledForZipOnly) -and -not $zoSeenSeriesNames.Contains($seriesName)) {
                 $null = $zoSeenSeriesNames.Add($seriesName)
                 $seriesRoot  = Join-Path $trimmedPath $seriesName
                 $seriesTotal = 1

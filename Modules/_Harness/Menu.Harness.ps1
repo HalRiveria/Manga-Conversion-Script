@@ -23,6 +23,15 @@
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "..\Config.ps1")
+# Logging.ps1/FileDeletion.ps1 dot-sourced too (2026-08-31 addition, for
+# Scenario covering the PermanentDelete/CleanConsoleOutput re-sync fix on
+# Show-ModeMenu's '5' branch) - just for their real, trivial
+# Initialize-CleanConsoleOutput/Initialize-FileDeletion setters, which
+# Menu.ps1 now forward-references. Write-Log below is stubbed AFTER this,
+# overriding Logging.ps1's real one, same as before this addition - this
+# harness still never touches a real log file.
+. (Join-Path $PSScriptRoot "..\Logging.ps1")
+. (Join-Path $PSScriptRoot "..\FileDeletion.ps1")
 . (Join-Path $PSScriptRoot "..\Menu.ps1")
 
 $script:logCalls = New-Object System.Collections.Generic.List[string]
@@ -361,6 +370,51 @@ $pathQ = New-ScratchSettingsPath "scenario-q"
 $promptQ = New-ScriptedPrompt -Responses @('5', '0', '2')
 $resultQ = Show-ModeMenu -Settings $settingsQ -SettingsPath $pathQ -PromptFunc $promptQ
 Test-Assert ($resultQ.Mode -eq 'ImageConversion') "after Back ('0') out of Cover Deletion, the main prompt re-showed and '2' resolved to ImageConversion"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario Q2 (2026-08-31 fix, caught by a same-day /code-review
+#  full-codebase pass): turning PermanentDelete off via Options, THEN
+#  picking Cover Deletion in the SAME menu visit, must have Show-ModeMenu's
+#  '5' branch re-sync $script:PermanentDelete BEFORE Show-CoverDeletionMenu
+#  runs - Controller.ps1's Invoke-MainLoop only re-syncs AFTER Get-SelectedMode
+#  returns, which is too late for option 5's own real, permanent-deletion-
+#  capable work done INSIDE that same call. Live-reproduced before the fix:
+#  a just-turned-off Permanent Delete toggle had no effect on the very Cover
+#  Deletion run that immediately followed it, deleting permanently instead
+#  of to the Recycle Bin. $script:PermanentDelete/CleanConsoleOutputEnabled
+#  are set by the REAL Initialize-FileDeletion/Initialize-CleanConsoleOutput
+#  (dot-sourced above) - checked directly here since Show-CoverDeletionMenu
+#  itself is stubbed out (this scenario only needs to prove the re-sync
+#  happened before it was called, not exercise a real scan).
+# ==============================================================================
+Write-Host "=== Scenario Q2: turning PermanentDelete off then picking Cover Deletion re-syncs BEFORE the submenu runs, not after ===" -ForegroundColor Cyan
+Initialize-FileDeletion -PermanentDelete $true
+Initialize-CleanConsoleOutput -Enabled $true
+$settingsQ2 = Get-DefaultScriptSettings
+$settingsQ2.PermanentDelete = $true
+$settingsQ2.CleanConsoleOutputEnabled = $true
+Export-ScriptSettings -Settings $settingsQ2 -Path (New-ScratchSettingsPath "scenario-q2-init") | Out-Null
+$pathQ2 = New-ScratchSettingsPath "scenario-q2"
+# '0' -> Options, '5' -> toggle Permanent Delete off (Options loops back
+# to show itself again), '0' -> back out of Options to the main prompt,
+# '5' -> Cover Deletion (re-sync should fire here, BEFORE the stubbed
+# submenu below runs - the stub itself consumes no prompt), '2' -> resolve
+# a mode so the loop can return.
+$promptQ2 = New-ScriptedPrompt -Responses @('0', '5', '0', '5', '2')
+$script:permDeleteAtCoverDeletionQ2 = $null
+$stubCoverMenuQ2 = { param($PromptFunc) $script:permDeleteAtCoverDeletionQ2 = $script:PermanentDelete }
+$realShowCoverDeletionMenuQ2 = ${function:Show-CoverDeletionMenu}
+${function:Show-CoverDeletionMenu} = $stubCoverMenuQ2
+try {
+    $resultQ2 = Show-ModeMenu -Settings $settingsQ2 -SettingsPath $pathQ2 -PromptFunc $promptQ2
+} finally {
+    ${function:Show-CoverDeletionMenu} = $realShowCoverDeletionMenuQ2
+}
+
+Test-Assert ($settingsQ2.PermanentDelete -eq $false) "sanity check: the Options toggle actually flipped PermanentDelete to false in `$Settings"
+Test-Assert ($script:permDeleteAtCoverDeletionQ2 -eq $false) ("`$script:PermanentDelete was re-synced to the just-toggled value BEFORE Cover Deletion ran, not left at the stale bootstrap `$true (got " + $script:permDeleteAtCoverDeletionQ2 + ")")
+Test-Assert ($resultQ2.Mode -eq 'ImageConversion') "the loop still resolved a mode normally afterward"
 Write-Host ""
 
 # ==============================================================================

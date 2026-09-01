@@ -576,6 +576,34 @@ Reset-HarnessScenarioState
 Write-Host ""
 
 # ==============================================================================
+#  Scenario S (2026-08-31 fix, caught by a same-day /code-review
+#  full-codebase pass): Invoke-GracefulDrain's docstring promises it
+#  ALWAYS signals DrainComplete before returning - but nothing enforced
+#  that until this fix wrapped the drain body in try/finally. A failing
+#  job (EndInvoke throws) routes into -ErrorHandler; if -ErrorHandler
+#  ITSELF throws (a broken caller-supplied handler), that propagates out
+#  of Receive-CompletedHandles uncaught - DrainComplete must still get
+#  signalled despite that, so the native Ctrl+C/window-close handler
+#  doesn't park in DrainComplete.Wait(65000) for up to 65s.
+# ==============================================================================
+Write-Host "=== Scenario S: a throwing -ErrorHandler still signals DrainComplete before propagating ===" -ForegroundColor Cyan
+Reset-HarnessScenarioState
+$fakeS = New-FakeHandles -DelaysMs @(0) -Worker $fakeWorkerFail
+$throwingErrorHandlerS = { param($msg) throw "simulated broken -ErrorHandler" }
+$threwS = $false
+try {
+    $null = Invoke-GracefulDrain -Handles $fakeS.Handles -ErrorHandler $throwingErrorHandlerS -TimeoutSeconds 5
+} catch {
+    $threwS = $true
+}
+$fakeS.Pool.Close(); $fakeS.Pool.Dispose()
+
+Test-Assert $threwS "the injected -ErrorHandler failure propagated out of Invoke-GracefulDrain, not silently swallowed"
+Test-Assert ([ConsoleCtrl]::DrainComplete.IsSet) "DrainComplete was still signalled despite the throw - the native abort handler is not left parked"
+Reset-HarnessScenarioState
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

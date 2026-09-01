@@ -16,6 +16,13 @@
         Invoke-UnwantedImageScan, Show-AddUnwantedImageProfileFlow
         (Modules\UnwantedImage.ps1) - the Cover Deletion submenu (option
         5) is pure wiring around these, no new pipeline logic of its own.
+      - Initialize-CleanConsoleOutput (Modules\Logging.ps1),
+        Initialize-FileDeletion (Modules\FileDeletion.ps1) - Show-ModeMenu's
+        own "5" branch re-syncs both from the current $Settings right
+        before Show-CoverDeletionMenu runs (2026-08-31 fix - Cover
+        Deletion's real, permanent-deletion-capable scan happens INSIDE
+        that same call, before Controller.ps1's own Invoke-MainLoop
+        re-sync would ever get a chance to run).
 
     TESTABILITY: every interactive loop takes a -PromptFunc scriptblock
     (defaults to a thin `Read-Host` wrapper) instead of calling Read-Host
@@ -144,6 +151,26 @@ function Show-ModeMenu {
         }
 
         if ($choice -eq '5') {
+            # Re-sync PermanentDelete/CleanConsoleOutputEnabled here too
+            # (2026-08-31 fix, caught by a same-day /code-review full-
+            # codebase pass) - Controller.ps1's Invoke-MainLoop already
+            # re-syncs both AFTER Get-SelectedMode returns, but Cover
+            # Deletion does its real, permanent-deletion-capable work
+            # (Invoke-CoverDeletionRun -> Invoke-UnwantedImageScan ->
+            # Remove-Source, reading $script:PermanentDelete) INSIDE this
+            # same call, before that re-sync ever runs. A user who opens
+            # Options, turns Permanent Delete off, backs out, and picks
+            # Cover Deletion in the SAME menu visit was still deleting
+            # permanently on the stale bootstrap value - live-reproduced,
+            # a real data-loss bug (files that should have gone to the
+            # Recycle Bin didn't). Same file bypasses Recycle Bin only
+            # when explicitly asked to; this closes the one path that
+            # wasn't honoring a just-made "off" choice. CleanConsoleOutput
+            # is re-synced alongside it for the same reason - stale-on
+            # would silently suppress every "Deleted..." console line for
+            # the scan the user is about to run.
+            Initialize-CleanConsoleOutput -Enabled ([bool]$Settings.CleanConsoleOutputEnabled)
+            Initialize-FileDeletion -PermanentDelete ([bool]$Settings.PermanentDelete)
             Show-CoverDeletionMenu -PromptFunc $PromptFunc
             Write-Host ""
             continue

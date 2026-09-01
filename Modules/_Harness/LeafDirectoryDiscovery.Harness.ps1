@@ -371,6 +371,52 @@ Test-Assert ($null -eq $postExhaustion1 -and $null -eq $postExhaustion2) "callin
 Write-Host ""
 
 # ==============================================================================
+#  Scenario N2 (2026-08-31 fix, caught by a same-day /code-review
+#  full-codebase pass): a directory the provider just returned as a
+#  candidate must NOT be on $dirStack - it's a true leaf (Test-
+#  ZippableLeafDirCandidate returns $null the moment it finds a
+#  subdirectory), so pushing it was pointless, and worse in mode 3: the
+#  caller (Invoke-ZipOnlyPipeline) zips that SAME candidate and deletes
+#  the folder before this provider's next call. The stack being LIFO
+#  meant the provider then popped the now-deleted path and
+#  EnumerateDirectories threw, logging a bogus "Could not enumerate -
+#  skipping it" Warn for a perfectly normal deletion - on every chapter,
+#  every default (-DeleteFolders $true) mode-3 run. This scenario
+#  reproduces the exact production condition: return a candidate, delete
+#  it (simulating the worker), call again - no Warn should be logged.
+# ==============================================================================
+Write-Host "=== Scenario N2: a candidate directory deleted right after being returned does not log a bogus enumerate-failure Warn ===" -ForegroundColor Cyan
+$rootN2 = New-Dir "scenario-n2"
+$leaf1N2 = New-Dir "scenario-n2\Chapter 1"
+New-FileIn -DirPath $leaf1N2 -Name "page1.jpg" | Out-Null
+$leaf2N2 = New-Dir "scenario-n2\Chapter 2"
+New-FileIn -DirPath $leaf2N2 -Name "page1.jpg" | Out-Null
+
+$script:logMessages.Clear()
+$providerN2 = New-ZippableLeafDirProvider -ScanPath $rootN2 -QualifyingExtensions $imgExts
+$firstN2 = & $providerN2
+Test-Assert ($null -ne $firstN2) "sanity check: the first candidate was returned"
+# Simulate the mode-3 worker's own zip-then-delete of the returned candidate.
+Remove-Item -LiteralPath $firstN2.Dir.FullName -Recurse -Force
+# Drain the provider fully (matching Scenario N's own pattern) - the bug
+# only surfaces once the stack is later POPPED back down to the deleted
+# entry (LIFO), which doesn't happen until the tree is otherwise exhausted,
+# not on the very next call.
+$resultsN2 = [System.Collections.Generic.List[string]]::new()
+$callCountN2 = 0
+while ($true) {
+    $callCountN2++
+    $next = & $providerN2
+    if ($null -eq $next) { break }
+    $resultsN2.Add($next.Dir.FullName)
+    if ($callCountN2 -gt 100) { throw "Scenario N2: provider did not terminate after 100 calls - possible infinite loop." }
+}
+
+Test-Assert ($resultsN2.Count -eq 1 -and $resultsN2[0] -eq $leaf2N2) ("the second (still-real) candidate was still found correctly after the first was deleted, and nothing else (got: " + ($resultsN2 -join ", ") + ")")
+Test-Assert (($script:logMessages | Where-Object { $_ -like "*Could not enumerate*" }).Count -eq 0) "no bogus 'Could not enumerate' Warn was logged for the deleted candidate - it was never pushed onto the stack in the first place"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario O: real end-to-end dispatch - New-ZippableLeafDirProvider
 #  passed directly as -NextJobProvider to the REAL
 #  Invoke-ZipParallelProcessing (dot-sourced for real, not stubbed),
