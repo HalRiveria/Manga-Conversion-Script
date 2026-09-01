@@ -212,6 +212,27 @@ class Program {
             Console.Error.WriteLine("simulated magick conversion failure");
             return 1;
         }
+        Match pm = Regex.Match(srcContent, "PARTIAL_THEN_SLEEP:(\\d+)");
+        if (pm.Success) {
+            // Simulates a real magick that has already flushed a partial
+            // output file mid-encode and is still genuinely running - lets
+            // a test force-kill it while a partial .webp is already on
+            // disk, proving the outer dispatch-loop catch cleans up
+            // $j.MagickOutputPath for a genuinely-still-running job (not
+            // just the ordinary force-kill drain path, which already had
+            // this coverage).
+            File.WriteAllText(dst, "partial-in-flight-bytes");
+            Thread.Sleep(int.Parse(pm.Groups[1].Value));
+            return 0;
+        }
+        if (srcContent.Contains("STDOUT_MARKER")) {
+            // Real magick writes progress info to stdout - normally empty
+            // here, so Complete-AnimatedConversionJob's own "magick stdout
+            // for" Write-Log call (gated on -DoFullLogging) never fires.
+            // This marker lets a test force that specific, UNGUARDED
+            // Write-Log call to actually run (and, for that test, throw).
+            Console.WriteLine("simulated magick progress output");
+        }
         Match sm = Regex.Match(srcContent, "SLEEP_MS:(\\d+)");
         if (sm.Success) { Thread.Sleep(int.Parse(sm.Groups[1].Value)); }
 
@@ -739,6 +760,165 @@ Test-Assert ($null -ne $script:capturedCtsW) "sanity check: the fake actually ca
 $disposedW = $false
 try { $script:capturedCtsW.Cancel() } catch { $disposedW = ($_.Exception.InnerException -is [System.ObjectDisposedException]) }
 Test-Assert $disposedW "the Cts was disposed via the finally block despite the throw happening before the old try's own opening brace"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario X (2026-08-31 fix, mirrors ImageConversionPipeline.ps1's own
+#  Scenario AF, including the data-loss correction found there): the outer
+#  dispatch-loop catch's own bulk cleanup iterates a $running list that
+#  can be STALE if Complete-AnimatedConversionJob throws partway through
+#  the poll loop's per-pass foreach - it may still list a job that ALREADY
+#  completed successfully earlier in the SAME pass (source deleted, real
+#  .webp on disk) alongside the job that throws. A same-budget scenario
+#  can't show the SharedBudget half of this (SemaphoreSlim self-caps at
+#  max once every acquired slot is legitimately released), but a SHARED
+#  budget with real headroom (simulating the image engine holding some
+#  slots, the actual Full Pipeline shape) can.
+# ==============================================================================
+Write-Host "=== Scenario X: a same-pass throw does not double-release an EARLIER job's slot or delete its already-converted output ===" -ForegroundColor Cyan
+$chX = New-Dir "scenario-x\Series\Chapter 1"
+# Both jobs get a small, MATCHING SLEEP_MS (2026-08-31 tuning) - each AVIF
+# job spawns its own `identify` classification call SEQUENTIALLY before
+# its real conversion process starts, so without this, jobA (dispatched
+# first, less overhead ahead of it) reliably finishes and gets swept out
+# of $running via the poll loop's own reassignment in an EARLIER pass than
+# jobB's - by the time jobB throws, $running no longer contains jobA at
+# all, so the intended stale-list condition (BOTH jobs still in $running
+# when the throw hits) never actually happens (confirmed empirically: a
+# 0ms sleep on neither job showed this exact miss; a 150ms sleep on ONLY
+# jobA overshot the other way - jobA was still genuinely mid-sleep, not
+# yet exited, when jobB's near-instant conversion had already finished
+# and thrown). A short, equal sleep on both keeps neither exited at the
+# very first (~0ms-elapsed) poll check, but both are reliably exited by
+# the second (50ms-elapsed) poll check, so the SAME foreach pass processes
+# jobA's completion and jobB's throw together - the real condition being
+# tested.
+$fileX1Path = Join-Path $chX "jobA_x.avif"
+[System.IO.File]::WriteAllText($fileX1Path, "FRAMES:5`nSLEEP_MS:20")
+$fileX1 = Get-Item -LiteralPath $fileX1Path
+$expectedWebpX = Join-Path $chX "jobA_x.webp"
+$fileX2Path = Join-Path $chX "jobB_x.avif"
+[System.IO.File]::WriteAllText($fileX2Path, "FRAMES:5`nSLEEP_MS:20`nSTDOUT_MARKER")
+$fileX2 = Get-Item -LiteralPath $fileX2Path
+$budgetX = [System.Threading.SemaphoreSlim]::new(4, 4)
+# Pre-acquire 2 slots to stand in for the image engine's own real,
+# still-in-use share of the budget - the exact condition under which the
+# bug's damage (refunding slots that were never this batch's to release)
+# is actually observable.
+$budgetX.Wait(0) | Out-Null
+$budgetX.Wait(0) | Out-Null
+
+$realWriteLogFnX = ${function:Write-Log}
+function Write-Log {
+    param([string]$Message, [ValidateSet("Info", "Warn", "Error", "Summary")][string]$Level = "Info")
+    if ($Message -like "*magick stdout for*jobB_x.avif*") { throw "simulated Write-Log failure on jobB's own UNGUARDED stdout-log call" }
+    & $script:realWriteLogFnX -Message $Message -Level $Level
+}
+$script:realWriteLogFnX = $realWriteLogFnX
+
+$threwX = $false
+try {
+    $null = Convert-AnimatedBatch -AnimatedFiles @($fileX1, $fileX2) -MagickExe $fakeMagickExe -AnimatedThreads 5 -DoFullLogging $true `
+        -CancelToken ([System.Threading.CancellationToken]::None) -SharedBudget $budgetX
+} catch {
+    $threwX = $true
+} finally {
+    ${function:Write-Log} = $realWriteLogFnX
+}
+
+Test-Assert $threwX "the injected Write-Log failure propagated out of Convert-AnimatedBatch"
+Test-Assert ($budgetX.CurrentCount -eq 2) ("only this batch's own 2 acquired slots were released, not the 2 pre-acquired ones standing in for the OTHER engine (got CurrentCount=" + $budgetX.CurrentCount + ", would be 4 if both jobs were double-released)")
+Test-Assert (Test-Path -LiteralPath $expectedWebpX) "jobA's already-converted .webp survived - the outer catch's force-cleanup must not touch a job that already completed successfully earlier in the same poll pass"
+$budgetX.Dispose()
+Write-Host ""
+
+# ==============================================================================
+#  Scenario Y (2026-08-31 fix, mirrors ImageConversionPipeline.ps1's own
+#  Scenario AG): the outer catch must still delete a partial output left
+#  by a job that's genuinely still running (force-killed) when the catch
+#  fires - a non-zero-byte, incomplete .webp left behind would otherwise
+#  sit on disk as debris (this engine has no "stale source" reconciliation
+#  concept the way the image engine does, but leaving a partial/corrupt
+#  .webp behind is still real debris a future scan could pick up).
+# ==============================================================================
+Write-Host "=== Scenario Y: the outer catch deletes a partial output left by a force-killed still-running job ===" -ForegroundColor Cyan
+$chY = New-Dir "scenario-y\Series\Chapter 1"
+$fileY1Path = Join-Path $chY "stillrunning_y.avif"
+[System.IO.File]::WriteAllText($fileY1Path, "FRAMES:5`nPARTIAL_THEN_SLEEP:5000")
+$fileY1 = Get-Item -LiteralPath $fileY1Path
+$fileY2Path = Join-Path $chY "throws_y.avif"
+[System.IO.File]::WriteAllText($fileY2Path, "FRAMES:5`nSTDOUT_MARKER")
+$fileY2 = Get-Item -LiteralPath $fileY2Path
+$expectedWebpY = Join-Path $chY "stillrunning_y.webp"
+
+$realWriteLogFnY = ${function:Write-Log}
+function Write-Log {
+    param([string]$Message, [ValidateSet("Info", "Warn", "Error", "Summary")][string]$Level = "Info")
+    if ($Message -like "*magick stdout for*throws_y.avif*") { throw "simulated Write-Log failure on the second job's UNGUARDED stdout-log call" }
+    & $script:realWriteLogFnY -Message $Message -Level $Level
+}
+$script:realWriteLogFnY = $realWriteLogFnY
+
+$threwY = $false
+try {
+    $null = Convert-AnimatedBatch -AnimatedFiles @($fileY1, $fileY2) -MagickExe $fakeMagickExe -AnimatedThreads 5 -DoFullLogging $true `
+        -CancelToken ([System.Threading.CancellationToken]::None)
+} catch {
+    $threwY = $true
+} finally {
+    ${function:Write-Log} = $realWriteLogFnY
+}
+
+Test-Assert $threwY "the injected failure propagated out of Convert-AnimatedBatch"
+Test-Assert (-not (Test-Path -LiteralPath $expectedWebpY)) "the partial output left by the force-killed still-running job was deleted, not left as debris"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario Z (2026-08-31 fix, found by verifying today's own Scenario X/Y
+#  fix): a job in the -DoAnimatedOverwrite case whose OWN unguarded
+#  "magick stdout for" Write-Log call throws AFTER its finally already ran
+#  (SlotReleased=true) used to leave its "_tmp_overwrite.webp" scratch file
+#  on disk forever. Note the throw happens BEFORE the success-verification
+#  block that does the real File.Replace swap (a later verification pass
+#  caught an earlier version of this comment claiming the swap had already
+#  happened by then - it hasn't; magick wrote a complete, unverified temp
+#  file, nothing more) - $j.MagickOutputPath at throw time is still the
+#  TEMP path, never the pre-existing real .webp, so SlotReleased's guard on
+#  MagickOutputPath was never actually protecting anything in this
+#  specific scenario; TempOverwritePath's unconditional cleanup is what's
+#  under test here. A single job (no timing tricks needed - it's the only
+#  entry in $running when it throws) is enough to reproduce this.
+# ==============================================================================
+Write-Host "=== Scenario Z: an orphaned _tmp_overwrite.webp scratch file is cleaned up even when its own job already completed successfully ===" -ForegroundColor Cyan
+$chZ = New-Dir "scenario-z\Series\Chapter 1"
+$webpZPath = Join-Path $chZ "overwrite_z.webp"
+[System.IO.File]::WriteAllText($webpZPath, "pre-existing good webp bytes")
+$fileZPath = Join-Path $chZ "overwrite_z.avif"
+[System.IO.File]::WriteAllText($fileZPath, "FRAMES:5`nSTDOUT_MARKER")
+$fileZ = Get-Item -LiteralPath $fileZPath
+$expectedTempZ = Join-Path $chZ "overwrite_z_tmp_overwrite.webp"
+
+$realWriteLogFnZ = ${function:Write-Log}
+function Write-Log {
+    param([string]$Message, [ValidateSet("Info", "Warn", "Error", "Summary")][string]$Level = "Info")
+    if ($Message -like "*magick stdout for*overwrite_z.avif*") { throw "simulated Write-Log failure on the job's own UNGUARDED stdout-log call, AFTER its own finally already ran" }
+    & $script:realWriteLogFnZ -Message $Message -Level $Level
+}
+$script:realWriteLogFnZ = $realWriteLogFnZ
+
+$threwZ = $false
+try {
+    $null = Convert-AnimatedBatch -AnimatedFiles @($fileZ) -MagickExe $fakeMagickExe -AnimatedThreads 5 -DoFullLogging $true -DoAnimatedOverwrite $true `
+        -CancelToken ([System.Threading.CancellationToken]::None)
+} catch {
+    $threwZ = $true
+} finally {
+    ${function:Write-Log} = $realWriteLogFnZ
+}
+
+Test-Assert $threwZ "the injected failure propagated out of Convert-AnimatedBatch"
+Test-Assert (-not (Test-Path -LiteralPath $expectedTempZ)) "the orphaned _tmp_overwrite.webp scratch file was cleaned up, not left as permanent debris"
+Test-Assert (Test-Path -LiteralPath $webpZPath) "sanity check: the pre-existing real .webp was never touched by this job at all - magick wrote only to the separate temp path, confirming the deleted file above was genuinely the scratch file, not a misattributed real output"
 Write-Host ""
 
 # ==============================================================================

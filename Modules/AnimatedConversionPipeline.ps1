@@ -233,11 +233,34 @@ function Complete-AnimatedConversionJob {
         [bool]$IsAbortDrain = $false
     )
 
-    $stdout = $Job.Proc.StandardOutput.ReadToEnd()
-    $stderr = $Job.Proc.StandardError.ReadToEnd()
-    $code   = $Job.Proc.ExitCode
-    $Job.Proc.Dispose()
-    if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
+    # try/finally (2026-08-31 fix, caught by verifying this same day's
+    # /code-review 4th pass on the sibling ImageConversionPipeline.ps1,
+    # which found and fixed the identical gap in its own
+    # Complete-ImageConversionJob first): this is the one place a RUNNING
+    # job's process handle and SharedBudget slot get released - unlike
+    # every other resource-release path in this file, it wasn't guarded.
+    # A throw from ReadToEnd/ExitCode (unlikely on an already-exited
+    # process, but not impossible) used to skip Dispose() AND Release()
+    # entirely and propagate straight out of Convert-AnimatedBatch - a
+    # permanently leaked SemaphoreSlim slot for the rest of the run under
+    # Controller.ps1's Full Pipeline, where the budget is shared with the
+    # image engine.
+    try {
+        $stdout = $Job.Proc.StandardOutput.ReadToEnd()
+        $stderr = $Job.Proc.StandardError.ReadToEnd()
+        $code   = $Job.Proc.ExitCode
+    } finally {
+        $Job.Proc.Dispose()
+        if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
+        # SlotReleased marker (2026-08-31 fix, mirrors the sibling module's
+        # identical fix, INCLUDING the data-loss correction a later
+        # verification pass found there - see Convert-AnimatedBatch's own
+        # outer catch below for the full reasoning) - lets that catch tell
+        # a job whose own cleanup already ran apart from one genuinely
+        # still running, both for the SharedBudget double-release risk AND
+        # for not deleting an already-converted job's real output.
+        $Job.SlotReleased = $true
+    }
 
     if (-not $IsAbortDrain -and $DoFullLogging -and -not [string]::IsNullOrWhiteSpace($stdout)) {
         Write-Log ("magick stdout for '" + $Job.SrcPath + "': " + $stdout.Trim())
@@ -415,6 +438,15 @@ function Convert-AnimatedBatch {
     }
     $running = [System.Collections.Generic.List[hashtable]]::new()
 
+    # try/catch around the whole dispatch loop (2026-08-31 fix, mirrors
+    # Convert-ImageBatch's identical fix in the sibling module - see that
+    # function's own header comment for the full reasoning: every OTHER
+    # exit from this loop already releases every running job's process
+    # handle and SharedBudget slot, but an unexpected throw from inside
+    # the loop itself (-AbortPollCallback, Write-Log on a locked log file,
+    # a rethrow from Complete-AnimatedConversionJob) had no such
+    # guarantee).
+    try {
     while (($pending.Count -gt 0 -or $running.Count -gt 0) -and (-not $CancelToken.IsCancellationRequested)) {
 
         if ($AbortPollCallback) {
@@ -510,14 +542,32 @@ function Convert-AnimatedBatch {
             # decision - no separate job-hashtable field needed once
             # Complete-AnimatedConversionJob stopped consuming one
             # directly, per this same fix.)
-            $j.MagickOutputPath = if ($webpPathExists) {
+            # $j.TempOverwritePath (2026-08-31 fix, caught by verifying this
+            # same day's /code-review 4th pass): mirrors the sibling
+            # module's $j.TempPng field - a SEPARATE handle on the temp
+            # overwrite file, distinct from $j.MagickOutputPath, so the
+            # outer dispatch-loop catch below can delete it UNCONDITIONALLY
+            # (like the sibling deletes TempPng) instead of only when
+            # SlotReleased is false. Without this, a job whose own
+            # Complete-AnimatedConversionJob call threw AFTER its
+            # SlotReleased-setting finally (the unguarded "magick stdout
+            # for" Write-Log call is the realistic trigger) left its
+            # "_tmp_overwrite.webp" debris on disk forever - SlotReleased
+            # being true correctly protects a job's REAL output
+            # ($j.MagickOutputPath when it equals $j.WebpPath) from the
+            # outer catch, but a temp overwrite file isn't real output, the
+            # same way TempPng isn't in the sibling module. $null when
+            # there's no pre-existing file to protect (magick writes
+            # directly to $j.WebpPath in that case - nothing to clean up).
+            $j.TempOverwritePath = if ($webpPathExists) {
                 [System.IO.Path]::Combine(
                     [System.IO.Path]::GetDirectoryName($j.WebpPath),
                     [System.IO.Path]::GetFileNameWithoutExtension($j.WebpPath) + "_tmp_overwrite.webp"
                 )
             } else {
-                $j.WebpPath
+                $null
             }
+            $j.MagickOutputPath = if ($j.TempOverwritePath) { $j.TempOverwritePath } else { $j.WebpPath }
 
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName = $MagickExe
@@ -566,6 +616,53 @@ function Convert-AnimatedBatch {
         # check busy-spun at ~100% CPU whenever -SharedBudget was smaller
         # than $AnimatedThreads (the normal Full Pipeline case).
         Start-Sleep -Milliseconds 50
+    }
+    } catch {
+        # Force-cleanup mirrors the force-kill block below (own try/catch
+        # per step, same as every other cleanup path in this file) - best
+        # effort, since we're already unwinding from an unexpected failure
+        # and must not let a cleanup error mask or replace the real one.
+        # $j.SlotReleased guards the Release() call AND the output-path
+        # deletion (2026-08-31 fix, mirrors Convert-ImageBatch's identical
+        # fix, INCLUDING the data-loss correction a verification pass
+        # found there - this $running list is STALE, since the poll loop
+        # above only reassigns it after its whole foreach pass completes,
+        # so it can still list a job that ALREADY completed successfully
+        # earlier in the SAME pass, source deleted and all, right
+        # alongside a job that throws later in that pass. SlotReleased is
+        # set in Complete-AnimatedConversionJob's own finally, true for
+        # any job whose own cleanup already ran - success or failure,
+        # doesn't matter which - false only for one genuinely still
+        # running when this catch fires).
+        foreach ($j in $running) {
+            try { if ($j.Proc -and -not $j.Proc.HasExited) { $j.Proc.Kill() } } catch { }
+            try { if ($j.Proc) { $j.Proc.WaitForExit(5000) } } catch { }
+            # $j.TempOverwritePath cleanup is intentionally NOT guarded by
+            # SlotReleased (2026-08-31 fix, mirrors the sibling module's
+            # own TempPng cleanup - see this file's own comment at the
+            # field's assignment above): it's never real output, regardless
+            # of which state this job is in when the catch fires - still
+            # genuinely encoding into it (real debris to clean up),
+            # verified and already File.Replace'd into the real WebpPath
+            # (this path is now stale, Delete is a safe no-op), or failed
+            # (already deleted by Complete-AnimatedConversionJob's own
+            # failure cleanup, same no-op) - so it's always safe to delete
+            # unconditionally. $null when there was no pre-existing file to
+            # protect in the first place (nothing to clean up).
+            if ($j.TempOverwritePath) {
+                try { [System.IO.File]::Delete($j.TempOverwritePath) } catch { }
+            }
+            # $j.MagickOutputPath itself IS guarded by SlotReleased - when
+            # there was no pre-existing file to protect, it equals
+            # $j.WebpPath directly (the job's REAL output), which a job
+            # whose own cleanup already ran must not have touched.
+            if (-not $j.SlotReleased) {
+                try { [System.IO.File]::Delete($j.MagickOutputPath) } catch { }
+            }
+            try { if ($j.Proc) { $j.Proc.Dispose() } } catch { }
+            if ($SharedBudget -and -not $j.SlotReleased) { try { $SharedBudget.Release() | Out-Null } catch { } }
+        }
+        throw
     }
 
     # ------------------------------------------------------------------
