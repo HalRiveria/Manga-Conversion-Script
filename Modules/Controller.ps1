@@ -304,7 +304,8 @@ $script:fullPipelineChapterWorker = {
         [System.Threading.Mutex]$LogMutex,
         [System.Collections.Concurrent.ConcurrentQueue[object]]$ConsoleQueue,
         [System.Threading.CancellationToken]$CancelToken,
-        [System.Collections.Generic.HashSet[string]]$KnownAnimatedPaths
+        [System.Collections.Generic.HashSet[string]]$KnownAnimatedPaths,
+        [System.Collections.Generic.HashSet[string]]$KnownStaticPaths
     )
 
     # A fresh runspace has no assemblies pre-loaded beyond the CLR
@@ -337,7 +338,7 @@ $script:fullPipelineChapterWorker = {
         $r = Convert-ImageBatch -ImageFiles $Files -CjxlExe $CjxlExe -MagickExe $MagickExe `
             -DoJpegLossless $DoJpegLossless -DoJpegQuality $DoJpegQuality -MaxCjxlProcs $Files.Count `
             -DoFullLogging $DoFullLogging -CancelToken $CancelToken -ItemNoun "loose image" `
-            -SourceNoun "loose source image" -SharedBudget $SharedBudget
+            -SourceNoun "loose source image" -SharedBudget $SharedBudget -KnownStaticPaths $KnownStaticPaths
         return @{ EngineType = 'Image'; Result = $r }
     } else {
         $r = Convert-AnimatedBatch -AnimatedFiles $Files -MagickExe $MagickExe `
@@ -426,34 +427,43 @@ function Invoke-FullPipelineChapter {
         [System.Threading.SemaphoreSlim]$SharedBudget,
         [Parameter(Mandatory)]
         [System.Threading.CancellationTokenSource]$Cts,
-        [System.Collections.Generic.HashSet[string]]$KnownAnimatedPaths = $null
+        [System.Collections.Generic.HashSet[string]]$KnownAnimatedPaths = $null,
+        [System.Collections.Generic.HashSet[string]]$KnownStaticPaths = $null
     )
 
     $jobParams = [System.Collections.Generic.List[hashtable]]::new()
     $ccrEnabled = [bool]$script:CleanConsoleOutputEnabled
 
+    # Shared base fields both engines need (2026-08-31 simplification -
+    # was two hashtable literals each repeating every shared field AND
+    # padding the OTHER engine's own fields with unused defaults, e.g. the
+    # Image entry setting DoAnimatedLossless/AnimatedQuality/... it never
+    # uses - already redundant even before this fix, since those padding
+    # values matched what the worker's own unset-parameter defaults would
+    # be anyway). Cloned per engine, then each adds only the fields it
+    # actually uses - no padding needed since the worker's own $false/0
+    # defaults apply to whatever a job's hashtable omits.
+    $baseJobParams = @{
+        CjxlExe = $CjxlExe; MagickExe = $MagickExe
+        DoFullLogging = $FullLogging; LogFile = $LogFile; LogErrorFile = $LogErrorFile; LogWarnFile = $LogWarnFile
+        DoPermanentDelete = $PermanentDelete; CleanConsoleOutputEnabled = $ccrEnabled
+        SharedBudget = $SharedBudget
+    }
+
     if ($ChapterImageFiles.Count -gt 0) {
-        $jobParams.Add(@{
-            EngineType = 'Image'; Files = $ChapterImageFiles
-            CjxlExe = $CjxlExe; MagickExe = $MagickExe
-            DoJpegLossless = $JpegLossless; DoJpegQuality = $JpegQuality
-            DoAnimatedLossless = $false; AnimatedQuality = 90; DoAnimatedOverwrite = $false; DoAnimatedDeleteSource = $true
-            DoFullLogging = $FullLogging; LogFile = $LogFile; LogErrorFile = $LogErrorFile; LogWarnFile = $LogWarnFile
-            DoPermanentDelete = $PermanentDelete; CleanConsoleOutputEnabled = $ccrEnabled
-            SharedBudget = $SharedBudget
-        })
+        $imageJobParams = $baseJobParams.Clone()
+        $imageJobParams.EngineType = 'Image'; $imageJobParams.Files = $ChapterImageFiles
+        $imageJobParams.DoJpegLossless = $JpegLossless; $imageJobParams.DoJpegQuality = $JpegQuality
+        $imageJobParams.KnownStaticPaths = $KnownStaticPaths
+        $jobParams.Add($imageJobParams)
     }
     if ($ChapterAnimatedFiles.Count -gt 0) {
-        $jobParams.Add(@{
-            EngineType = 'Animated'; Files = $ChapterAnimatedFiles
-            CjxlExe = $CjxlExe; MagickExe = $MagickExe
-            DoJpegLossless = $false; DoJpegQuality = 90
-            DoAnimatedLossless = $AnimatedLossless; AnimatedQuality = $AnimatedQuality
-            DoAnimatedOverwrite = $AnimatedOverwrite; DoAnimatedDeleteSource = $AnimatedDeleteSource
-            DoFullLogging = $FullLogging; LogFile = $LogFile; LogErrorFile = $LogErrorFile; LogWarnFile = $LogWarnFile
-            DoPermanentDelete = $PermanentDelete; CleanConsoleOutputEnabled = $ccrEnabled
-            SharedBudget = $SharedBudget; KnownAnimatedPaths = $KnownAnimatedPaths
-        })
+        $animatedJobParams = $baseJobParams.Clone()
+        $animatedJobParams.EngineType = 'Animated'; $animatedJobParams.Files = $ChapterAnimatedFiles
+        $animatedJobParams.DoAnimatedLossless = $AnimatedLossless; $animatedJobParams.AnimatedQuality = $AnimatedQuality
+        $animatedJobParams.DoAnimatedOverwrite = $AnimatedOverwrite; $animatedJobParams.DoAnimatedDeleteSource = $AnimatedDeleteSource
+        $animatedJobParams.KnownAnimatedPaths = $KnownAnimatedPaths
+        $jobParams.Add($animatedJobParams)
     }
 
     $imageResult    = $null
@@ -510,13 +520,51 @@ function Invoke-FullPipelineChapter {
         # doesn't even require a .jxl entry, and the chapter gets zipped
         # with that engine's files completely untouched while the run
         # silently reports success - see Todo.md.
+        # -not $Cts.Token.IsCancellationRequested guard on the "treat as a
+        # failure" branch (2026-08-31 fix): a Ctrl+C landing right at/before
+        # this chapter's dispatch is a THIRD, legitimate reason a result
+        # can be $null - Invoke-ZipParallelProcessing's own dispatch loop
+        # never even starts a job once cancellation is already signaled,
+        # and Invoke-GracefulDrain only drains what's already running, not
+        # what was never dispatched. That's a normal, expected outcome of
+        # a user-requested abort, not a crash - without this guard, a
+        # clean cancellation was logged as a false "-Level Error" crash
+        # and inflated ConvertedImageFail/ConvertedAnimatedFail for a run
+        # that was never actually broken. The zip gate below already has
+        # its own independent Cts check, so leaving $imageResult/
+        # $animatedResult at $null here (mapped to a clean Status by
+        # Get-MergedChapterStatus) doesn't risk a cancelled chapter
+        # getting zipped anyway.
+        # -not $Cts.Token.IsCancellationRequested guard on the "treat as a
+        # failure" branch (2026-08-31 fix): a Ctrl+C landing right at/before
+        # this chapter's dispatch is a THIRD, legitimate reason a result
+        # can be $null - Invoke-ZipParallelProcessing's own dispatch loop
+        # never even starts a job once cancellation is already signaled,
+        # and Invoke-GracefulDrain only drains what's already running, not
+        # what was never dispatched. That's a normal, expected outcome of
+        # a user-requested abort, not a crash - without this guard, a
+        # clean cancellation was logged as a false "-Level Error" crash
+        # and inflated ConvertedImageFail/ConvertedAnimatedFail for a run
+        # that was never actually broken. The zip gate below already has
+        # its own independent Cts check, so leaving $imageResult/
+        # $animatedResult at $null here (mapped to a clean Status by
+        # Get-MergedChapterStatus) doesn't risk a cancelled chapter
+        # getting zipped anyway.
         if ($ChapterImageFiles.Count -gt 0 -and $null -eq $imageResult) {
-            Write-Log ("Image engine for chapter '" + $ChapterDir + "' never returned a result (crashed or force-stopped) - treating as a failure.") -Level Error
-            $imageResult = @{ FailedCount = 1 }
+            if ($Cts.Token.IsCancellationRequested) {
+                Write-Log ("Image engine for chapter '" + $ChapterDir + "' never returned a result because the run was aborted before/during dispatch - not counted as a failure.") -Level Warn
+            } else {
+                Write-Log ("Image engine for chapter '" + $ChapterDir + "' never returned a result (crashed or force-stopped) - treating as a failure.") -Level Error
+                $imageResult = @{ FailedCount = 1 }
+            }
         }
         if ($ChapterAnimatedFiles.Count -gt 0 -and $null -eq $animatedResult) {
-            Write-Log ("Animated engine for chapter '" + $ChapterDir + "' never returned a result (crashed or force-stopped) - treating as a failure.") -Level Error
-            $animatedResult = @{ FailedCount = 1 }
+            if ($Cts.Token.IsCancellationRequested) {
+                Write-Log ("Animated engine for chapter '" + $ChapterDir + "' never returned a result because the run was aborted before/during dispatch - not counted as a failure.") -Level Warn
+            } else {
+                Write-Log ("Animated engine for chapter '" + $ChapterDir + "' never returned a result (crashed or force-stopped) - treating as a failure.") -Level Error
+                $animatedResult = @{ FailedCount = 1 }
+            }
         }
     }
 
@@ -623,8 +671,11 @@ function Invoke-FullPipeline {
            DeletedAnimatedSuccess; DeletedAnimatedFail;
            ZipCreatedSuccess; ZipCreatedFail; ZipSkippedDueToError (despite
            the name, also counts a zippable chapter skipped because the run
-           was aborted, not just a genuine Error-tier outcome - see this
-           function's own 2026-08-31 fix note below);
+           was aborted, AND a chapter forced un-zippable by an AVIF
+           classification failure - neither is a genuine Error-tier
+           chapter outcome, but both mean a chapter that should have
+           zipped didn't - see this function's own 2026-08-31 fix notes
+           below);
            FolderDeletedSuccess; FolderDeletedFail;
            ForceKilledCount; InspectFailedCount; SeriesCount; ChapterCount;
            Aborted } - InspectFailedCount (added 2026-08-28) sums BOTH
@@ -641,6 +692,19 @@ function Invoke-FullPipeline {
         [string]$Path,
         [Parameter(Mandatory)]
         [string]$CjxlExe,
+        # Deliberately NOT [Parameter(Mandatory)] (reviewed 2026-08-31): the
+        # AVIF-ownership classification step below silently no-ops when
+        # this is null/empty, which only matters if `.avif` is actually in
+        # -LooseImageExtensions AND an ambiguous file is present. The real
+        # guard against that combination is Invoke-Mode's own check
+        # (`$Resolved.Mode -in @('AnimatedConversion','FullPipeline') -and
+        # [string]::IsNullOrWhiteSpace($MagickExe)` -> throws before
+        # dispatch) - CLAUDE.md's "validate at real trust boundaries, not
+        # everywhere" argues against duplicating that check here too. A
+        # caller that bypasses Invoke-Mode entirely (a direct call, a
+        # future refactor) is responsible for its own MagickExe validation,
+        # same as any other precondition Invoke-Mode enforces on this
+        # function's behalf.
         [string]$MagickExe,
         [bool]$JpegLossless = $false,
         [int]$JpegQuality = 90,
@@ -706,10 +770,12 @@ function Invoke-FullPipeline {
             $failedClassificationDirs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             # Populated below, once classification runs - threaded into
             # every Invoke-FullPipelineChapter call this series so
-            # Convert-AnimatedBatch can skip re-running Test-AvifAnimated
-            # on a file this step already confirmed animated (2026-08-31
-            # efficiency fix - see the classification block's own comment).
+            # Convert-AnimatedBatch/Convert-ImageBatch can each skip
+            # re-running Test-AvifAnimated on a file this step already
+            # classified (2026-08-31 efficiency fix - see the
+            # classification block's own comment).
             $knownAnimatedPaths = $null
+            $knownStaticPaths   = $null
 
             $chapters = Get-SeriesChapters -SeriesPath $series.FullName -QualifyingExtensions $FolderQualifyingExtensions `
                 -ExcludeStagingDirs $FolderExcludeStagingDirs -ForceRezip $false
@@ -744,36 +810,32 @@ function Invoke-FullPipeline {
                 # below - a Dictionary, not two separate filter passes,
                 # so a file's classification can never disagree between
                 # the image-side filter and the animated-side filter.
+                #
+                # A single combined pass over BOTH candidate lists
+                # (2026-08-31 simplification - was two copy-paste-identical
+                # loops, one per list, each with its own try/catch/log
+                # body). StaleSources is walked second, same order as
+                # before, so a path already resolved via NeedsConversion is
+                # skipped via the ContainsKey guard rather than
+                # reclassified - preserves the original behavior exactly.
+                # StaleSources classification exists because
+                # Get-LooseImageCandidates matches staleness purely by
+                # basename (ANY source with a same-basename non-zero .jxl
+                # counts, regardless of which source actually produced it -
+                # see ImageConversionPipeline.ps1's own known gap), so an
+                # animated .avif kept around on purpose
+                # (AnimatedDeleteSource=$false) can look "stale" the moment
+                # an unrelated same-basename file (e.g. its own already-
+                # converted .webp) gets its .jxl. Without also classifying
+                # StaleSources, that .avif would be deleted by
+                # Remove-StaleLooseSources below while still sitting
+                # unfiltered in $animatedCandidates - deleted out from
+                # under the engine that still owned it, despite the
+                # setting whose entire point is to keep it.
                 $avifClassification = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-                foreach ($img in $imageCandidates.NeedsConversion) {
-                    if ($img.Extension -ine ".avif" -or -not $animatedPathSet.Contains($img.FullName)) {
-                        continue   # not .avif, or not claimed by both scans - no ambiguity to resolve
-                    }
-                    try {
-                        $isAnimated = Test-AvifAnimated -AvifPath $img.FullName -MagickExe $MagickExe
-                        $avifClassification[$img.FullName] = if ($isAnimated) { "Animated" } else { "Static" }
-                    } catch {
-                        Write-Log ("Could not determine if AVIF '" + $img.FullName + "' is animated - excluding it from BOTH engines this run: " + $_) -Level Error
-                        $totals.InspectFailedCount++
-                        $avifClassification[$img.FullName] = "Failed"
-                    }
-                }
-                # Also classify .avif entries the image side considers
-                # STALE (2026-08-31 fix) - Get-LooseImageCandidates matches
-                # staleness purely by basename (ANY source with a same-
-                # basename non-zero .jxl counts, regardless of which source
-                # actually produced it - see ImageConversionPipeline.ps1's
-                # own known gap), so an animated .avif kept around on
-                # purpose (AnimatedDeleteSource=$false) can look "stale" the
-                # moment an unrelated same-basename file (e.g. its own
-                # already-converted .webp) gets its .jxl. Without this pass,
-                # that .avif was deleted by Remove-StaleLooseSources below
-                # while still sitting unfiltered in $animatedCandidates -
-                # deleted out from under the engine that still owned it,
-                # despite the setting whose entire point is to keep it.
-                foreach ($img in $imageCandidates.StaleSources) {
+                foreach ($img in (@($imageCandidates.NeedsConversion) + @($imageCandidates.StaleSources))) {
                     if ($img.Extension -ine ".avif" -or -not $animatedPathSet.Contains($img.FullName) -or $avifClassification.ContainsKey($img.FullName)) {
-                        continue   # not .avif, not claimed by both scans, or already classified above
+                        continue   # not .avif, not claimed by both scans, or already classified
                     }
                     try {
                         $isAnimated = Test-AvifAnimated -AvifPath $img.FullName -MagickExe $MagickExe
@@ -786,18 +848,19 @@ function Invoke-FullPipeline {
                 }
 
                 if ($avifClassification.Count -gt 0) {
-                    $imageCandidates.NeedsConversion = @($imageCandidates.NeedsConversion | Where-Object {
-                        -not $avifClassification.ContainsKey($_.FullName) -or $avifClassification[$_.FullName] -eq "Static"
-                    })
-                    # A "Static" AVIF genuinely IS safe to delete as stale
-                    # (its own .jxl already exists) - only "Animated"/"Failed"
-                    # need to be pulled OUT of StaleSources so
-                    # Remove-StaleLooseSources below doesn't delete a file
-                    # the animated engine (Animated) or neither engine
-                    # (Failed, ownership unresolved) should be touching.
-                    $imageCandidates.StaleSources = @($imageCandidates.StaleSources | Where-Object {
-                        -not $avifClassification.ContainsKey($_.FullName) -or $avifClassification[$_.FullName] -eq "Static"
-                    })
+                    # One shared predicate (2026-08-31 simplification - was
+                    # two separately-written but identical Where-Object
+                    # filters) - a "Static" AVIF genuinely IS safe to keep
+                    # in either list (safe to convert if in NeedsConversion,
+                    # safe to delete as stale if in StaleSources, since its
+                    # own .jxl already exists); only "Animated"/"Failed"
+                    # need to be pulled OUT so Remove-StaleLooseSources
+                    # below doesn't delete a file the animated engine
+                    # (Animated) or neither engine (Failed, ownership
+                    # unresolved) should be touching.
+                    $keepIfStatic = { -not $avifClassification.ContainsKey($_.FullName) -or $avifClassification[$_.FullName] -eq "Static" }
+                    $imageCandidates.NeedsConversion = @($imageCandidates.NeedsConversion | Where-Object $keepIfStatic)
+                    $imageCandidates.StaleSources     = @($imageCandidates.StaleSources    | Where-Object $keepIfStatic)
                     $animatedCandidates = @($animatedCandidates | Where-Object {
                         -not $avifClassification.ContainsKey($_.FullName) -or $avifClassification[$_.FullName] -eq "Animated"
                     })
@@ -811,13 +874,29 @@ function Invoke-FullPipeline {
                     # ran. Tracked by directory (not by file), same
                     # granularity Get-MergedChapterStatus already zip-
                     # blocks at.
+                    # $knownAnimatedPaths/$knownStaticPaths ARE derivable
+                    # from $avifClassification (a Dictionary keyed the same
+                    # way) - kept as separate HashSets rather than passing
+                    # the dictionary itself into Convert-AnimatedBatch/
+                    # Convert-ImageBatch (reviewed 2026-08-31): both were
+                    # built here, in the SAME loop that builds
+                    # $avifClassification, so there's no separate pass and
+                    # no drift risk in practice. A plain HashSet is also a
+                    # cleaner, self-explanatory parameter contract for
+                    # those two functions ("paths already known to be X")
+                    # than handing them a dictionary keyed by a third
+                    # module's own "Animated"/"Static"/"Failed" string
+                    # values they'd have no other reason to know about.
                     $knownAnimatedPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                    $knownStaticPaths   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
                     foreach ($entry in $avifClassification.GetEnumerator()) {
                         if ($entry.Value -eq "Failed") {
                             $failedAvifDir = [System.IO.Path]::GetDirectoryName($entry.Key)
                             $null = $failedClassificationDirs.Add($failedAvifDir)
                         } elseif ($entry.Value -eq "Animated") {
                             $null = $knownAnimatedPaths.Add($entry.Key)
+                        } elseif ($entry.Value -eq "Static") {
+                            $null = $knownStaticPaths.Add($entry.Key)
                         }
                     }
                 }
@@ -922,7 +1001,7 @@ function Invoke-FullPipeline {
                     -JpegLossless $JpegLossless -JpegQuality $JpegQuality -AnimatedLossless $AnimatedLossless -AnimatedQuality $AnimatedQuality `
                     -AnimatedOverwrite $AnimatedOverwrite -AnimatedDeleteSource $AnimatedDeleteSource -FullLogging $FullLogging `
                     -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete $PermanentDelete `
-                    -SharedBudget $sharedBudget -Cts $fullCts -KnownAnimatedPaths $knownAnimatedPaths
+                    -SharedBudget $sharedBudget -Cts $fullCts -KnownAnimatedPaths $knownAnimatedPaths -KnownStaticPaths $knownStaticPaths
 
                 if ($null -ne $chapterOutcome.ImageResult) {
                     $ir = $chapterOutcome.ImageResult
@@ -968,6 +1047,18 @@ function Invoke-FullPipeline {
                     # still correctly distinguishes "N zippable chapters
                     # didn't get zipped, and the run was aborted" from a
                     # genuine Error found on some chapter in a normal run.
+                    $totals.ZipSkippedDueToError++
+                } elseif (-not $chapter.IsZippable -and $failedClassificationDirs.Contains($chapterDir.FullName)) {
+                    # 2026-08-31 fix: a chapter forced un-zippable specifically
+                    # because an AVIF in it couldn't be classified (IsZippable
+                    # was already $false at line ~872, so the elseif above
+                    # never fires for it - it requires IsZippable) was
+                    # invisible in every one of this run's own zip-outcome
+                    # counters, even though the classification failure itself
+                    # IS independently counted in InspectFailedCount. Counted
+                    # into the same ZipSkippedDueToError field, same
+                    # reasoning as the abort case above - it correctly
+                    # reflects "this chapter should have zipped and didn't."
                     $totals.ZipSkippedDueToError++
                 }
 
@@ -1097,14 +1188,21 @@ function Invoke-Mode {
                 $stats.InspectFailed.Count            = $r.InspectFailedCount
             }
             'ZipFolders' {
+                # [bool](...) casts (2026-08-31 fix, from a same-day
+                # /code-review): FullLogging/PermanentDelete are both
+                # [Parameter(Mandatory)][bool] on the receiving function -
+                # a $Settings missing either key would otherwise fail
+                # PowerShell's own boolean coercion with a hard crash, the
+                # same species already fixed at other call sites today.
                 $r = & $ZipFoldersHandler -Path $TargetPath -MaxParallel $Settings.ZipParallelThreads -DeleteFolders $true `
-                    -FullLogging $Settings.FullLogging -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete $Settings.PermanentDelete
+                    -FullLogging ([bool]$Settings.FullLogging) -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete ([bool]$Settings.PermanentDelete)
                 $stats.ZipOnlyZipped.Success        = $r.ZippedSuccess;        $stats.ZipOnlyZipped.Fail        = $r.ZippedFail
                 $stats.ZipOnlyFolderDeleted.Success = $r.FolderDeletedSuccess; $stats.ZipOnlyFolderDeleted.Fail = $r.FolderDeletedFail
             }
             'ConvertZipped' {
+                # [bool](...) casts - same reasoning as the ZipFolders case above.
                 $r = & $ConvertZippedHandler -Path $TargetPath -MaxParallel $Settings.ZipParallelThreads -DeleteFolders $Settings.DeleteExtractedFoldersAfterRezip `
-                    -FullLogging $Settings.FullLogging -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete $Settings.PermanentDelete `
+                    -FullLogging ([bool]$Settings.FullLogging) -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete ([bool]$Settings.PermanentDelete) `
                     -CjxlExe $CjxlExe -MagickExe $MagickExe -MaxCjxlProcs $Settings.MaxCjxlProcs -JpegLossless $Settings.JpegLossless -JpegQuality $Settings.JpegQuality
                 $stats.ZipExtracted.Success  = $r.ZipExtractedSuccess;  $stats.ZipExtracted.Fail  = $r.ZipExtractedFail
                 $stats.ImgConverted.Success  = $r.ImgConvertedSuccess; $stats.ImgConverted.Fail  = $r.ImgConvertedFail; $stats.ImgConverted.Skipped = $r.ImgConvertedSkipped
@@ -1113,10 +1211,11 @@ function Invoke-Mode {
                 $stats.FolderDeleted.Success = $r.FolderDeletedSuccess; $stats.FolderDeleted.Fail = $r.FolderDeletedFail
             }
             'FullPipeline' {
+                # [bool](...) casts - same reasoning as the ZipFolders case above.
                 $r = & $FullPipelineHandler -Path $TargetPath -CjxlExe $CjxlExe -MagickExe $MagickExe `
                     -JpegLossless $Settings.JpegLossless -JpegQuality $Settings.JpegQuality -AnimatedLossless $Settings.AnimatedLossless -AnimatedQuality $Settings.AnimatedQuality `
                     -AnimatedOverwrite $Settings.AnimatedOverwrite -AnimatedDeleteSource $Settings.AnimatedDeleteSource -FullPipelineMaxConcurrentProcs $Settings.MaxCjxlProcs `
-                    -FullLogging $Settings.FullLogging -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete $Settings.PermanentDelete
+                    -FullLogging ([bool]$Settings.FullLogging) -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete ([bool]$Settings.PermanentDelete)
                 $stats.LooseImgConverted.Success      = $r.ConvertedImageSuccess;    $stats.LooseImgConverted.Fail      = $r.ConvertedImageFail;    $stats.LooseImgConverted.Skipped = $r.ConvertedImageSkipped
                 $stats.LooseImgDeleted.Success        = $r.DeletedImageSuccess;      $stats.LooseImgDeleted.Fail        = $r.DeletedImageFail
                 $stats.LooseStaleCleaned.Success      = $r.StaleImageCleanedSuccess; $stats.LooseStaleCleaned.Fail      = $r.StaleImageCleanedFail

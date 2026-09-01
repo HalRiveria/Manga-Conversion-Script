@@ -430,7 +430,8 @@ function Convert-ImageBatch {
         [string]$AbortWaitMessage       = $null,
         [scriptblock]$AbortPollCallback = $null,
         [int]$AbortTimeoutSeconds       = 60,
-        [System.Threading.SemaphoreSlim]$SharedBudget = $null
+        [System.Threading.SemaphoreSlim]$SharedBudget = $null,
+        [System.Collections.Generic.HashSet[string]]$KnownStaticPaths = $null
     )
 
     $batchResult = @{
@@ -583,14 +584,30 @@ function Convert-ImageBatch {
                     # --- End animated WebP check ---
                 } else {
                     # --- Animated AVIF check (real magick identify spawn) ---
+                    # -KnownStaticPaths (2026-08-31 efficiency fix, mirrors
+                    # Convert-AnimatedBatch's own -KnownAnimatedPaths):
+                    # Controller.ps1's Full Pipeline already ran
+                    # Test-AvifAnimated on every ambiguous .avif during its
+                    # own per-series ownership classification, before ever
+                    # dispatching to this function - re-running it here for
+                    # a file already confirmed Static was a pure redundant
+                    # magick identify spawn, the mirror-image half of the
+                    # double-classification bug fixed on the animated side
+                    # earlier the same day. A file already confirmed static
+                    # by the caller skips the re-check entirely; anything
+                    # NOT in the set (standalone mode 1/2, or any caller
+                    # that never classified) falls through to the real
+                    # check unchanged.
                     $isAnimatedAvif = $false
-                    try {
-                        $isAnimatedAvif = Test-AvifAnimated -AvifPath $j.SrcPath -MagickExe $MagickExe
-                    } catch {
-                        Write-Log ("Could not determine if AVIF '" + $j.SrcPath + "' is animated - skipping: " + $_) -Level Warn
-                        $batchResult.InspectFailedCount++
-                        if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
-                        continue
+                    if (-not ($KnownStaticPaths -and $KnownStaticPaths.Contains($j.SrcPath))) {
+                        try {
+                            $isAnimatedAvif = Test-AvifAnimated -AvifPath $j.SrcPath -MagickExe $MagickExe
+                        } catch {
+                            Write-Log ("Could not determine if AVIF '" + $j.SrcPath + "' is animated - skipping: " + $_) -Level Warn
+                            $batchResult.InspectFailedCount++
+                            if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
+                            continue
+                        }
                     }
                     if ($isAnimatedAvif) {
                         Write-Log ("SKIPPING animated AVIF '" + $j.SrcPath + "': has its own conversion pipeline (AnimatedConversionPipeline.ps1) - not converted here.") -Level Warn

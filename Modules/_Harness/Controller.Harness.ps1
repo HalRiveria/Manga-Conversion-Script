@@ -378,6 +378,33 @@ Test-Assert (-not (Test-Path -LiteralPath (Join-Path $scratchDir "scenario-c4.zi
 Write-Host ""
 
 # ==============================================================================
+#  Scenario C4b (2026-08-31 fix): a Cts already cancelled BEFORE dispatch
+#  even begins is a third, legitimate reason a result stays $null - not
+#  the two causes ("crashed" or "force-stopped past the drain timeout")
+#  the original code's own comment named. Invoke-ZipParallelProcessing's
+#  dispatch loop never starts a job once cancellation is already
+#  signaled, so -ResultHandler is never invoked at all for this chapter's
+#  job - a real, graceful outcome, not a crash. No timing/race needed
+#  here (unlike C4) - the Cts is cancelled synchronously before the call.
+# ==============================================================================
+Write-Host "=== Scenario C4b: a Cts already cancelled before dispatch is not logged/counted as a crash ===" -ForegroundColor Cyan
+$chC4b = New-Dir "scenario-c4b\Series\Chapter 1"
+$imgC4b = New-FakeImageIn -DirPath $chC4b -Name "page1.jpg"
+$budgetC4b = [System.Threading.SemaphoreSlim]::new(2, 2)
+$ctsC4b = [System.Threading.CancellationTokenSource]::new()
+$ctsC4b.Cancel()   # already cancelled BEFORE Invoke-FullPipelineChapter is ever called
+
+$resultC4b = Invoke-FullPipelineChapter -ChapterDir $chC4b -ChapterImageFiles @((Get-Item -LiteralPath $imgC4b)) -IsZippable $true -ZipOut (Join-Path $scratchDir "scenario-c4b.zip") `
+    -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullLogging $false -PermanentDelete $true -SharedBudget $budgetC4b -Cts $ctsC4b
+
+$budgetC4b.Dispose()
+$ctsC4b.Dispose()
+
+Test-Assert ($null -eq $resultC4b.ImageResult -or $resultC4b.ImageResult.FailedCount -ne 1) "a pre-cancelled dispatch does NOT synthesize a false FailedCount=1 - the null result is recognized as a graceful abort, not a crash"
+Test-Assert (Test-Path -LiteralPath (Join-Path $chC4b "page1.jpg")) "the source file is left untouched - never actually dispatched, so nothing to have converted or deleted"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario C5 (2026-08-31 fix): $resultHandler's else branch used to
 #  treat ANY non-Image object as the animated result - Invoke-ZipParallelProcessing
 #  passes every object a worker's runspace emits to -ResultHandler, not
@@ -729,6 +756,56 @@ $fakeFullHandlerN = { param($Path, $CjxlExe, $MagickExe, $JpegLossless, $JpegQua
 $statsN = Invoke-Mode -Resolved @{ Mode = 'FullPipeline' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -FullPipelineHandler $fakeFullHandlerN
 Test-Assert ($statsN.LooseImgConverted.Success -eq 5 -and $statsN.LooseAnimatedConverted.Success -eq 2 -and $statsN.LooseFolderZipped.Success -eq 3) "FullPipeline: image + animated + zip stat groups all mapped in one call"
 Test-Assert ($statsN.InspectFailed.Count -eq 4) "FullPipeline: InspectFailedCount (both engines summed by Controller.ps1) mapped onto InspectFailed.Count"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario N2 (2026-08-31 fix): Invoke-Mode's ZipFolders/ConvertZipped/
+#  FullPipeline branches used to pass $Settings.FullLogging/PermanentDelete
+#  UNCAST into the real handlers' own [Parameter(Mandatory)][bool] params -
+#  the same crash-on-$null-key species already fixed today at other call
+#  sites (Invoke-MainLoop's re-sync, the bootstrap script). The earlier
+#  fake handlers above (L/M/N) use untyped params, so they'd silently
+#  accept a $null and never catch this - these fakes instead declare
+#  Mandatory [bool] params matching the REAL ZipPipeline.ps1/
+#  RezipPipeline.ps1/Controller.ps1 function signatures exactly, so a
+#  missing $Settings key would genuinely throw if passed uncast.
+#
+#  NOTE: Invoke-Mode's own outer try/catch (see the end of this function)
+#  already swallows ANY exception from a handler call via
+#  Invoke-AbortOrFatalHandler and returns $null - so "did Invoke-Mode
+#  itself throw" is ALWAYS false regardless of this fix, and is NOT a
+#  valid signal (an earlier draft of this test used exactly that check
+#  and failed to catch the bug even with the fix reverted). The real
+#  signal is whether the mode actually COMPLETES (returns the handler's
+#  real stats) instead of silently falling into the fatal-handler path
+#  and returning $null.
+# ==============================================================================
+Write-Host "=== Scenario N2: Invoke-Mode completes normally despite a `$Settings missing FullLogging/PermanentDelete (ZipFolders/ConvertZipped/FullPipeline) ===" -ForegroundColor Cyan
+$fakeSettingsN2 = @{ ZipParallelThreads = 2; DeleteExtractedFoldersAfterRezip = $false; MaxCjxlProcs = 2; JpegLossless = $false; JpegQuality = 90; AnimatedLossless = $false; AnimatedQuality = 90; AnimatedOverwrite = $false; AnimatedDeleteSource = $true }
+
+$fakeZipHandlerN2 = { param([string]$Path, [int]$MaxParallel, [bool]$DeleteFolders, [Parameter(Mandatory)][bool]$FullLogging, [string]$LogFile, [string]$LogErrorFile, [string]$LogWarnFile, [Parameter(Mandatory)][bool]$PermanentDelete)
+    return @{ CandidateCount = 3; ZippedSuccess = 3; ZippedFail = 0; FolderDeletedSuccess = 3; FolderDeletedFail = 0; ForceStoppedCount = 0 }
+}
+$statsN2Zip = Invoke-Mode -Resolved @{ Mode = 'ZipFolders' } -TargetPath "C:\fake\lib" -Settings $fakeSettingsN2 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ZipFoldersHandler $fakeZipHandlerN2
+Test-Assert ($null -ne $statsN2Zip -and $statsN2Zip.ZipOnlyZipped.Success -eq 3) "ZipFolders completes normally (not swallowed into the fatal-handler `$null path) despite `$Settings missing FullLogging/PermanentDelete"
+
+$fakeRezipHandlerN2 = { param([string]$Path, [int]$MaxParallel, [bool]$DeleteFolders, [Parameter(Mandatory)][bool]$FullLogging, [string]$LogFile, [string]$LogErrorFile, [string]$LogWarnFile, [Parameter(Mandatory)][bool]$PermanentDelete, [string]$CjxlExe, [string]$MagickExe, [int]$MaxCjxlProcs, [bool]$JpegLossless, [int]$JpegQuality)
+    return @{ CandidateCount = 1; ZipExtractedSuccess = 1; ZipExtractedFail = 0; ImgConvertedSuccess = 3; ImgConvertedFail = 0; ImgConvertedSkipped = 0; ImgDeletedSuccess = 3; ImgDeletedFail = 0; ZipCreatedSuccess = 1; ZipCreatedFail = 0; FolderDeletedSuccess = 1; FolderDeletedFail = 0; Skipped = 0; ForceStoppedCount = 0 }
+}
+$statsN2Rezip = Invoke-Mode -Resolved @{ Mode = 'ConvertZipped' } -TargetPath "C:\fake\lib" -Settings $fakeSettingsN2 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ConvertZippedHandler $fakeRezipHandlerN2
+Test-Assert ($null -ne $statsN2Rezip -and $statsN2Rezip.ImgConverted.Success -eq 3) "ConvertZipped completes normally (not swallowed into the fatal-handler `$null path) despite `$Settings missing FullLogging/PermanentDelete"
+
+$fakeFullHandlerN2 = { param([string]$Path, [string]$CjxlExe, [string]$MagickExe, [bool]$JpegLossless, [int]$JpegQuality, [bool]$AnimatedLossless, [int]$AnimatedQuality, [bool]$AnimatedOverwrite, [bool]$AnimatedDeleteSource, [int]$FullPipelineMaxConcurrentProcs, [Parameter(Mandatory)][bool]$FullLogging, [string]$LogFile, [string]$LogErrorFile, [string]$LogWarnFile, [Parameter(Mandatory)][bool]$PermanentDelete)
+    return @{
+        ConvertedImageSuccess = 7; ConvertedImageFail = 0; ConvertedImageSkipped = 0; DeletedImageSuccess = 7; DeletedImageFail = 0
+        StaleImageCleanedSuccess = 0; StaleImageCleanedFail = 0
+        ConvertedAnimatedSuccess = 0; ConvertedAnimatedFail = 0; ConvertedAnimatedSkipped = 0; DeletedAnimatedSuccess = 0; DeletedAnimatedFail = 0
+        ZipCreatedSuccess = 0; ZipCreatedFail = 0; ZipSkippedDueToError = 0; FolderDeletedSuccess = 0; FolderDeletedFail = 0
+        ForceKilledCount = 0; InspectFailedCount = 0; SeriesCount = 0; ChapterCount = 0; Aborted = $false
+    }
+}
+$statsN2Full = Invoke-Mode -Resolved @{ Mode = 'FullPipeline' } -TargetPath "C:\fake\lib" -Settings $fakeSettingsN2 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -FullPipelineHandler $fakeFullHandlerN2
+Test-Assert ($null -ne $statsN2Full -and $statsN2Full.LooseImgConverted.Success -eq 7) "FullPipeline completes normally (not swallowed into the fatal-handler `$null path) despite `$Settings missing FullLogging/PermanentDelete"
 Write-Host ""
 
 Write-Host "=== Scenario O: Invoke-Mode / ImageConversionZip (mode 8) - real zip-step wiring, 2026-08-28 ===" -ForegroundColor Cyan
@@ -1087,6 +1164,33 @@ Test-Assert ($identifyCallsV2.Count -eq 1) ("the file was identified exactly onc
 Write-Host ""
 
 # ==============================================================================
+#  Scenario V3 (2026-08-31 efficiency fix, mirror of V2): a STATIC ambiguous
+#  AVIF is identified ONCE too - before this fix, only the animated side
+#  got a -KnownAnimatedPaths equivalent; a Static-classified file still
+#  fell through to Convert-ImageBatch's own unconditional Test-AvifAnimated
+#  re-check. Convert-ImageBatch now takes -KnownStaticPaths, mirroring
+#  Convert-AnimatedBatch's own parameter exactly.
+# ==============================================================================
+Write-Host "=== Scenario V3: a static ambiguous AVIF is identified ONCE, not twice (mirror of V2 for the image engine) ===" -ForegroundColor Cyan
+$identifyLogV3 = Join-Path $scratchDir "scenario-v3-identify.log"
+[System.IO.File]::WriteAllText($identifyLogV3, "")
+$env:HARNESS_IDENTIFY_LOG = $identifyLogV3
+
+$chV3 = New-Dir "scenario-v3\Series\Chapter 1"
+New-FakeAvifIn -DirPath $chV3 -Name "static.avif" -Frames 1 | Out-Null
+
+try {
+    $totalsV3 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-v3") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+} finally {
+    $env:HARNESS_IDENTIFY_LOG = $null
+}
+
+$identifyCallsV3 = @(Get-Content -LiteralPath $identifyLogV3 | Where-Object { $_ -like "*static.avif" })
+Test-Assert ($totalsV3.ConvertedImageSuccess -eq 1) "sanity check: the file still converted correctly through the image engine"
+Test-Assert ($identifyCallsV3.Count -eq 1) ("the file was identified exactly once, not twice (got " + $identifyCallsV3.Count + " identify call(s))")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario W: a file the reconciliation can't classify is excluded from
 #  BOTH engines for that run, not guessed at or left to race - the
 #  "fail safe" half of the same fix.
@@ -1103,6 +1207,12 @@ Test-Assert ($totalsW.ConvertedAnimatedSuccess -eq 1) "the OTHER, real animated 
 Test-Assert ($totalsW.InspectFailedCount -eq 1) ("the classification failure was counted exactly once, directly in Invoke-FullPipeline's own InspectFailedCount, not through either engine (got " + $totalsW.InspectFailedCount + ")")
 Test-Assert (Test-Path -LiteralPath (Join-Path $chW "corrupt.avif")) "the unclassifiable source file was left untouched, not deleted by either engine"
 Test-Assert ($totalsW.ZipCreatedSuccess -eq 0) "the chapter was NOT zipped at all - a real bug this scenario caught live: without blocking zip here too, the unclassified source got swept into the zip in raw form and its loose folder deleted anyway"
+# 2026-08-31 fix: a chapter forced un-zippable by a classification
+# failure used to be invisible in EVERY zip-outcome counter (IsZippable
+# was already false, so the existing ZipSkippedDueToError elseif never
+# fired for it) - the run summary's zip section looked complete while
+# silently omitting a chapter that should have zipped and didn't.
+Test-Assert ($totalsW.ZipSkippedDueToError -eq 1) ("the classification-blocked chapter is now counted in ZipSkippedDueToError, not invisible (got " + $totalsW.ZipSkippedDueToError + ")")
 Write-Host ""
 
 # ==============================================================================
