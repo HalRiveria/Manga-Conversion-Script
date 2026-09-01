@@ -1289,8 +1289,12 @@ function Invoke-Mode {
                     return @{ Status = $zipResult.Status; Detail = $detail }
                 }.GetNewClosure()
 
+                # [bool](...) cast (2026-08-31 fix, from a THIRD same-day
+                # /code-review pass) - same reasoning as every other
+                # switch case in this function; this one (mode 8) was
+                # missed by both earlier passes.
                 $r = & $ImageConversionHandler -Path $TargetPath -CjxlExe $CjxlExe -MagickExe $MagickExe `
-                    -JpegLossless $Settings.JpegLossless -JpegQuality $Settings.JpegQuality -MaxCjxlProcs $Settings.MaxCjxlProcs -FullLogging $Settings.FullLogging `
+                    -JpegLossless $Settings.JpegLossless -JpegQuality $Settings.JpegQuality -MaxCjxlProcs $Settings.MaxCjxlProcs -FullLogging ([bool]$Settings.FullLogging) `
                     -ZipStepCallback $zipStep
                 $stats.LooseImgConverted.Success = $r.ConvertedSuccess; $stats.LooseImgConverted.Fail = $r.ConvertedFail; $stats.LooseImgConverted.Skipped = $r.ConvertedSkipped
                 $stats.LooseImgDeleted.Success   = $r.DeletedSuccess;   $stats.LooseImgDeleted.Fail   = $r.DeletedFail
@@ -1424,7 +1428,13 @@ function Invoke-MainLoop {
         } else {
             $elapsedString = Format-ElapsedTime -Elapsed $runStopwatch.Elapsed
             $summaryLines = Get-SummaryLines -Stats $stats -ElapsedString $elapsedString -ModeFlags $resolved
-            Write-SummaryReport -Lines $summaryLines -FullLogging $Settings.FullLogging
+            # [bool](...) cast (2026-08-31 fix, from a THIRD same-day
+            # /code-review pass) - Write-SummaryReport's -FullLogging is
+            # also [Parameter(Mandatory)][bool] (Summary.ps1); missed by
+            # both earlier passes even though the two calls right above
+            # this one (Initialize-CleanConsoleOutput/Initialize-FileDeletion)
+            # already got this exact cast.
+            Write-SummaryReport -Lines $summaryLines -FullLogging ([bool]$Settings.FullLogging)
         }
 
         $postRun = & $PostRunPromptHandler

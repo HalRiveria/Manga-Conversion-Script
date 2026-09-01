@@ -821,6 +821,15 @@ $fakeAnimHandlerN2 = { param([string]$Path, [string]$MagickExe, [bool]$AnimatedL
 }
 $statsN2Anim = Invoke-Mode -Resolved @{ Mode = 'AnimatedConversion' } -TargetPath "C:\fake\lib" -Settings $fakeSettingsN2 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -AnimatedConversionHandler $fakeAnimHandlerN2
 Test-Assert ($null -ne $statsN2Anim -and $statsN2Anim.LooseAnimatedConverted.Success -eq 2) "AnimatedConversion completes normally (not swallowed into the fatal-handler `$null path) despite `$Settings missing FullLogging"
+
+# 2026-08-31 fix (found by a THIRD-pass re-review): the ImageConversionZip
+# (mode 8) case was missed by both earlier bool-cast fix passes.
+$fakeImageHandlerN2Zip = { param([string]$Path, [string]$CjxlExe, [string]$MagickExe, [bool]$JpegLossless, [int]$JpegQuality, [int]$MaxCjxlProcs, [Parameter(Mandatory)][bool]$FullLogging, [scriptblock]$ZipStepCallback)
+    return @{ ConvertedSuccess = 1; ConvertedFail = 0; ConvertedSkipped = 0; DeletedSuccess = 1; DeletedFail = 0; StaleCleanedSuccess = 0; StaleCleanedFail = 0; InspectFailedCount = 0 }
+}
+$fakeZipFolderHandlerN2 = { param($FolderPath, $ZipOut, $LooseImageExtensions) return @{ Status = "Success"; ZipSize = 1; EntryCount = 1; FolderDeleted = $true; FolderDeleteFailed = $false } }
+$statsN2Zip = Invoke-Mode -Resolved @{ Mode = 'ImageConversionZip' } -TargetPath $scratchDir -Settings $fakeSettingsN2 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ImageConversionHandler $fakeImageHandlerN2Zip -ZipFolderHandler $fakeZipFolderHandlerN2
+Test-Assert ($null -ne $statsN2Zip -and $statsN2Zip.LooseImgConverted.Success -eq 1) "ImageConversionZip (mode 8) completes normally (not swallowed into the fatal-handler `$null path) despite `$Settings missing FullLogging"
 Write-Host ""
 
 Write-Host "=== Scenario O: Invoke-Mode / ImageConversionZip (mode 8) - real zip-step wiring, 2026-08-28 ===" -ForegroundColor Cyan
@@ -1077,6 +1086,35 @@ Test-Assert ($null -ne $script:capturedCtsT4) "sanity check: the fake actually c
 $disposedT4 = $false
 try { $script:capturedCtsT4.Cancel() } catch { $disposedT4 = ($_.Exception.InnerException -is [System.ObjectDisposedException]) }
 Test-Assert $disposedT4 "the Cts was disposed via the finally block despite the throw happening before the old try's own opening brace"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario T5 (2026-08-31 fix, found by a THIRD-pass re-review):
+#  Invoke-MainLoop's own call to Write-SummaryReport (after a real,
+#  non-null $stats comes back) was missed by both earlier bool-cast fix
+#  passes - unlike T3 (which deliberately included FullLogging specifically
+#  to NOT exercise this exact call), this scenario omits FullLogging
+#  entirely and drives the loop all the way to Write-SummaryReport.
+#  Invoke-MainLoop has NO try/catch of its own around its while loop body
+#  (see this function's own comment above Initialize-CleanConsoleOutput),
+#  so unlike Invoke-Mode's switch (which swallows exceptions via its own
+#  outer catch), "did it throw" IS a valid signal here.
+# ==============================================================================
+Write-Host "=== Scenario T5: Invoke-MainLoop's own Write-SummaryReport call does not crash on a `$Settings missing FullLogging ===" -ForegroundColor Cyan
+$fakeSettingsT5 = @{}
+$fakeGetModeT5 = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
+$fakeInvokeModeT5 = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) return New-StatsTracker }
+$script:callsT5 = 0
+$fakePostRunT5 = { $script:callsT5++; return 'Exit' }
+$threwT5 = $false
+try {
+    Invoke-MainLoop -TargetPath "C:\fake\lib" -Settings $fakeSettingsT5 -SettingsPath "C:\fake\settings.json" -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" `
+        -GetModeHandler $fakeGetModeT5 -InvokeModeHandler $fakeInvokeModeT5 -PostRunPromptHandler $fakePostRunT5
+} catch {
+    $threwT5 = $true
+}
+Test-Assert (-not $threwT5) "the loop did not crash at Write-SummaryReport despite `$Settings missing FullLogging entirely"
+Test-Assert ($script:callsT5 -eq 1) "the loop still ran a full iteration and reached Show-PostRunPrompt"
 Write-Host ""
 
 # ==============================================================================
