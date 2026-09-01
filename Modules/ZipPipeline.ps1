@@ -188,6 +188,13 @@ function Get-ZipChapterProgressStatus {
     param(
         [hashtable]$ZipResult
     )
+    # Checked before Failed/FolderDeleteFailed since a cancelled-before-start
+    # job's result is otherwise indistinguishable from a real clean success
+    # (Success=0/Failed=0/FolderDeleteFailed=0 all fall through to Success) -
+    # 2026-08-31 fix: a Ctrl+C mid-run left an already-queued worker's
+    # "nothing attempted" result reported as a clean Success in Clean
+    # Console Output instead of flagging that the folder was never zipped.
+    if ($ZipResult.Cancelled -eq 1) { return "Warning", "cancelled before starting - not zipped" }
     if ($ZipResult.Failed -eq 1) { return "Error", "zip failed" }
     if ($ZipResult.FolderDeleteFailed -eq 1) { return "Warning", "zipped OK, but source folder delete failed" }
     return "Success", $null
@@ -242,10 +249,12 @@ $script:zipOnlyWorker = {
         Failed             = 0
         FolderDeleted      = 0
         FolderDeleteFailed = 0
+        Cancelled          = 0
     }
 
     if ($CancelToken.IsCancellationRequested) {
         Write-Log ("Cancelled before starting '" + $folderName + "'") -Level Warn
+        $result.Cancelled = 1
         return $result
     }
 

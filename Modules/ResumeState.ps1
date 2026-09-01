@@ -290,7 +290,17 @@ function Save-ResumeStateBag {
         try {
             $obj = $kvp.Value | ConvertFrom-Json
             if ($obj.Path -and $obj.LastWriteTimeUtc) { $newEntries[$obj.Path] = $obj.LastWriteTimeUtc }
-        } catch { }
+        } catch {
+            # 2026-08-31 fix: this used to swallow a malformed bag entry
+            # with no comment and no log line (CLAUDE.md: "no silent
+            # catches without a reason"). $CompletedBag entries are built
+            # in-process by this run's own workers, not read from an
+            # external file, so a malformed one here means something
+            # actually went wrong upstream - worth a log line even though
+            # dropping just this one entry (rather than aborting the whole
+            # bulk save) is still the right recovery.
+            Write-Log ("Skipping malformed resume-state bag entry for '" + $kvp.Key + "': " + $_) -Level Warn
+        }
     }
 
     return Invoke-ResumeStateWrite -StateFile $StateFile -NewEntries $newEntries -StateMutex $StateMutex

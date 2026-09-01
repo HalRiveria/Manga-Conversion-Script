@@ -247,6 +247,18 @@ function Initialize-LogMutex {
         a worker to receive the values it needs as its own parameters,
         since $script:pathHash inside a fresh runspace is independent
         state, not inherited from the caller.
+    .NOTES
+        Deliberately does NOT dispose whatever mutex was already at
+        $script:logMutex before overwriting it (2026-08-31, confirmed by a
+        same-day /code-review) - ZipParallelProcessing.ps1's own caller
+        contract depends on that OLD reference staying valid: it saves it
+        before calling this function specifically so it can restore it
+        afterward once its own local mutex is no longer needed. Adding an
+        unconditional dispose here would destroy that still-live reference
+        out from under the caller. A future caller that re-initializes
+        this mutex WITHOUT needing the old reference back is responsible
+        for disposing it itself first - this function only ever creates
+        the new one.
     #>
     param([string]$PathHash)
 

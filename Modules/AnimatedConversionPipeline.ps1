@@ -288,7 +288,8 @@ function Convert-AnimatedBatch {
         [scriptblock]$AbortPollCallback = $null,
         [int]$AbortTimeoutSeconds       = 60,
         [int]$HeartbeatIntervalSeconds  = 30,
-        [System.Threading.SemaphoreSlim]$SharedBudget = $null
+        [System.Threading.SemaphoreSlim]$SharedBudget = $null,
+        [System.Collections.Generic.HashSet[string]]$KnownAnimatedPaths = $null
     )
 
     $batchResult = @{
@@ -357,14 +358,36 @@ function Convert-AnimatedBatch {
                 continue
             }
 
+            # -KnownAnimatedPaths (2026-08-31 efficiency fix): Controller.ps1's
+            # Full Pipeline already ran Test-AvifAnimated on every ambiguous
+            # .avif during its own per-series ownership classification,
+            # before ever dispatching to this function - re-running it here
+            # for every one of those files was a pure redundant magick
+            # identify spawn per file. A file already confirmed animated by
+            # the caller skips the re-check entirely; anything NOT in the
+            # set (standalone mode 3, or any caller that never classified)
+            # falls through to the real check unchanged.
+            # -KnownAnimatedPaths (2026-08-31 efficiency fix): Controller.ps1's
+            # Full Pipeline already ran Test-AvifAnimated on every ambiguous
+            # .avif during its own per-series ownership classification,
+            # before ever dispatching to this function - re-running it here
+            # for every one of those files was a pure redundant magick
+            # identify spawn per file. A file already confirmed animated by
+            # the caller skips the re-check entirely; anything NOT in the
+            # set (standalone mode 3, or any caller that never classified)
+            # falls through to the real check unchanged.
             $isAnimated = $false
-            try {
-                $isAnimated = Test-AvifAnimated -AvifPath $j.SrcPath -MagickExe $MagickExe
-            } catch {
-                Write-Log ("Could not determine if '" + $j.SrcPath + "' is animated - skipping: " + $_) -Level Warn
-                $batchResult.InspectFailedCount++
-                if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
-                continue
+            if ($KnownAnimatedPaths -and $KnownAnimatedPaths.Contains($j.SrcPath)) {
+                $isAnimated = $true
+            } else {
+                try {
+                    $isAnimated = Test-AvifAnimated -AvifPath $j.SrcPath -MagickExe $MagickExe
+                } catch {
+                    Write-Log ("Could not determine if '" + $j.SrcPath + "' is animated - skipping: " + $_) -Level Warn
+                    $batchResult.InspectFailedCount++
+                    if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
+                    continue
+                }
             }
 
             if (-not $isAnimated) {
@@ -553,8 +576,11 @@ function Get-ChapterAnimatedStatus {
     .SYNOPSIS
         Maps a Convert-AnimatedBatch result to the Status/Detail pair
         Complete-ChapterProgress expects - mirrors
-        Get-ChapterProgressStatus's severity ordering exactly (Error >
-        Warning > Success). A $null $ChapterResult (nothing left to
+        Get-ChapterProgressStatus's severity ordering (Error > Warning >
+        Success), both treating InspectFailedCount as Error-tier (2026-08-31
+        fix - an inspect failure leaves a raw, completely unconverted file
+        on disk, which must block the zip gate the same way a real
+        conversion failure does). A $null $ChapterResult (nothing left to
         convert) always maps to a clean Success. StaticSkippedCount does
         NOT count toward Warning - a static AVIF being left untouched is
         expected, deliberate behavior (see this module's header), not a
@@ -568,18 +594,32 @@ function Get-ChapterAnimatedStatus {
     )
     if ($null -eq $ChapterResult) { return "Success", $null }
 
-    if ($ChapterResult.FailedCount -gt 0 -or $ChapterResult.ForceKilledCount -gt 0 -or $ChapterResult.DeleteFailedCount -gt 0) {
+    # InspectFailedCount is Error-tier, not Warning: unlike SkippedCount (a
+    # file deliberately left alone because its output already exists - a
+    # non-problem), an inspect failure means Test-AvifAnimated couldn't even
+    # determine whether the file needs converting, so it was left as a raw,
+    # completely unconverted .avif on disk. A Warning-tier chapter still
+    # passes the zip gate (Controller.ps1's Invoke-FullPipelineChapter only
+    # blocks on 'Error') - left as Warning, that raw file would get zipped
+    # into the archive and its source folder deleted anyway. 2026-08-31 fix.
+    # InspectFailedCount is Error-tier, not Warning: unlike SkippedCount (a
+    # file deliberately left alone because its output already exists - a
+    # non-problem), an inspect failure means Test-AvifAnimated couldn't even
+    # determine whether the file needs converting, so it was left as a raw,
+    # completely unconverted .avif on disk. A Warning-tier chapter still
+    # passes the zip gate (Controller.ps1's Invoke-FullPipelineChapter only
+    # blocks on 'Error') - left as Warning, that raw file would get zipped
+    # into the archive and its source folder deleted anyway. 2026-08-31 fix.
+    if ($ChapterResult.FailedCount -gt 0 -or $ChapterResult.ForceKilledCount -gt 0 -or $ChapterResult.DeleteFailedCount -gt 0 -or $ChapterResult.InspectFailedCount -gt 0) {
         $parts = [System.Collections.Generic.List[string]]::new()
-        if ($ChapterResult.FailedCount -gt 0)       { $parts.Add($ChapterResult.FailedCount.ToString() + " failed") }
-        if ($ChapterResult.ForceKilledCount -gt 0)  { $parts.Add($ChapterResult.ForceKilledCount.ToString() + " force-stopped") }
-        if ($ChapterResult.DeleteFailedCount -gt 0) { $parts.Add($ChapterResult.DeleteFailedCount.ToString() + " source delete(s) failed") }
+        if ($ChapterResult.FailedCount -gt 0)        { $parts.Add($ChapterResult.FailedCount.ToString() + " failed") }
+        if ($ChapterResult.ForceKilledCount -gt 0)   { $parts.Add($ChapterResult.ForceKilledCount.ToString() + " force-stopped") }
+        if ($ChapterResult.DeleteFailedCount -gt 0)  { $parts.Add($ChapterResult.DeleteFailedCount.ToString() + " source delete(s) failed") }
+        if ($ChapterResult.InspectFailedCount -gt 0) { $parts.Add($ChapterResult.InspectFailedCount.ToString() + " inspect failure(s)") }
         return "Error", ($parts -join ", ")
     }
-    if ($ChapterResult.SkippedCount -gt 0 -or $ChapterResult.InspectFailedCount -gt 0) {
-        $parts = [System.Collections.Generic.List[string]]::new()
-        if ($ChapterResult.SkippedCount -gt 0)       { $parts.Add($ChapterResult.SkippedCount.ToString() + " skipped (output already exists)") }
-        if ($ChapterResult.InspectFailedCount -gt 0) { $parts.Add($ChapterResult.InspectFailedCount.ToString() + " inspect failure(s)") }
-        return "Warning", ($parts -join ", ")
+    if ($ChapterResult.SkippedCount -gt 0) {
+        return "Warning", ($ChapterResult.SkippedCount.ToString() + " skipped (output already exists)")
     }
     return "Success", $null
 }
@@ -633,6 +673,14 @@ function Invoke-LooseAnimatedConversionPipeline {
         [bool]$FullLogging,
         [string[]]$AnimatedFileExtensions = @(".avif"),
         [string[]]$KnownZipPaths = @(),
+        # Kept as its own literal, not ImageConversionPipeline.ps1's shared
+        # Get-LooseImageExtensions (2026-08-31), even though this is the
+        # exact same 7-element list - this module's own harness dot-sources
+        # it standalone, without ImageConversionPipeline.ps1, by design
+        # (this project's "own standalone test harness, verified in
+        # isolation" convention). A cross-module default-value dependency
+        # would break that. Must be kept in sync by hand with the
+        # canonical list if it ever changes.
         [string[]]$FolderQualifyingExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif"),
         [System.Collections.Generic.HashSet[string]]$FolderExcludeStagingDirs = $null,
         [scriptblock]$PostChapterCallback = $null,
@@ -663,9 +711,14 @@ function Invoke-LooseAnimatedConversionPipeline {
     # same bug that registration omission caused there (Test-AbortSignal
     # would never actually cancel this token) - registered from day one
     # here rather than needing a later fix.
-    $animatedCts = [System.Threading.CancellationTokenSource]::new()
-    Register-AbortCancellationSource -Cts $animatedCts
+    #
+    # Construction/registration moved INSIDE the try (2026-08-31 fix, same
+    # species as ZipParallelProcessing.ps1's mutex-leak fix earlier today) -
+    # if either throws, the finally block below still runs and disposes
+    # $animatedCts if it was actually created.
     try {
+        $animatedCts = [System.Threading.CancellationTokenSource]::new()
+        Register-AbortCancellationSource -Cts $animatedCts
         $seriesProvider = New-SeriesProvider -LibraryPath $Path
 
         while ($true) {
@@ -779,8 +832,12 @@ function Invoke-LooseAnimatedConversionPipeline {
             }
         }
     } finally {
-        Unregister-AbortCancellationSource -Cts $animatedCts
-        $animatedCts.Dispose()
+        # $animatedCts can be unset if construction/registration itself
+        # threw (now inside the try above).
+        if ($animatedCts) {
+            Unregister-AbortCancellationSource -Cts $animatedCts
+            $animatedCts.Dispose()
+        }
         # Safety net for the abort/shutdown path - same reasoning as
         # Invoke-LooseImageConversionPipeline's own finally block.
         if ($script:CleanConsoleOutputEnabled) {

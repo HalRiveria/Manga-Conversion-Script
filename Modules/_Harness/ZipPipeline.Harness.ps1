@@ -352,6 +352,22 @@ try {
 Write-Host ""
 
 # ==============================================================================
+#  Scenario M (2026-08-31 fix): Get-ZipChapterProgressStatus mapping, tested
+#  directly (unit-level). A cancelled-before-start job's result
+#  (Success=0/Failed=0/FolderDeleteFailed=0, all zero - nothing attempted)
+#  used to be indistinguishable from a genuine clean success and fell
+#  through to "Success". The worker now sets Cancelled=1 on that path, and
+#  this function checks it first.
+# ==============================================================================
+Write-Host "=== Scenario M: Get-ZipChapterProgressStatus mapping - cancelled-before-start is not Success ===" -ForegroundColor Cyan
+$statusCancelledM, $detailCancelledM = Get-ZipChapterProgressStatus -ZipResult @{ Success = 0; Failed = 0; FolderDeleted = 0; FolderDeleteFailed = 0; Cancelled = 1 }
+Test-Assert ($statusCancelledM -eq "Warning" -and $detailCancelledM -match "cancelled") "a cancelled-before-start result is Warning, not Success - it was never actually zipped"
+
+$statusCleanM, $detailCleanM = Get-ZipChapterProgressStatus -ZipResult @{ Success = 1; Failed = 0; FolderDeleted = 1; FolderDeleteFailed = 0; Cancelled = 0 }
+Test-Assert ($statusCleanM -eq "Success" -and $null -eq $detailCleanM) "a genuine clean success is still Success"
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

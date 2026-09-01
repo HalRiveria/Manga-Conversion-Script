@@ -165,6 +165,19 @@ class Program {
     static int Main(string[] args) {
         if (args.Length > 0 && args[0] == "identify") {
             string path = args[args.Length - 1];
+            // Logs each identify call's target path (gated on an env var
+            // so unrelated scenarios pay nothing) - lets a test count how
+            // many times Test-AvifAnimated actually spawned magick for a
+            // given file, proving the 2026-08-31 double-classification fix
+            // (Controller.ps1's own classification result threaded through
+            // to Convert-AnimatedBatch instead of it re-checking).
+            string identifyLog = Environment.GetEnvironmentVariable("HARNESS_IDENTIFY_LOG");
+            if (identifyLog != null) {
+                using (var mtx = new System.Threading.Mutex(false, "ControllerHarnessIdentifyLogMutex")) {
+                    mtx.WaitOne();
+                    try { File.AppendAllText(identifyLog, path + Environment.NewLine); } finally { mtx.ReleaseMutex(); }
+                }
+            }
             string content = File.Exists(path) ? File.ReadAllText(path) : "";
             if (content.Contains("FAIL_IDENTIFY")) {
                 Console.Error.WriteLine("simulated identify failure");
@@ -932,6 +945,49 @@ Test-Assert ($script:callsT3 -eq 1) "the loop still ran a full iteration and rea
 Write-Host ""
 
 # ==============================================================================
+#  Scenario T4 (2026-08-31 fix): Invoke-FullPipeline's own $fullCts/
+#  $sharedBudget construction and Register-AbortCancellationSource call were
+#  moved INSIDE the function's try block (same species as
+#  ZipParallelProcessing.ps1's mutex-leak fix from earlier today) - if
+#  Register-AbortCancellationSource throws, the finally block must still
+#  run and dispose $fullCts (already constructed by that point).
+#  Register-AbortCancellationSource is temporarily replaced with a fake
+#  that captures the real $Cts object (so the test can inspect it
+#  afterward) and then throws, simulating a real registration failure.
+#  Verified via $capturedCts.Token throwing ObjectDisposedException -
+#  proof Dispose() actually ran via the finally path, not just that the
+#  exception propagated.
+# ==============================================================================
+Write-Host "=== Scenario T4: a throw during Register-AbortCancellationSource still disposes the already-constructed Cts ===" -ForegroundColor Cyan
+$realRegisterFnT4 = ${function:Register-AbortCancellationSource}
+$script:capturedCtsT4 = $null
+function Register-AbortCancellationSource {
+    param([System.Threading.CancellationTokenSource]$Cts)
+    $script:capturedCtsT4 = $Cts
+    throw "simulated Register-AbortCancellationSource failure"
+}
+$rootT4 = New-Dir "scenario-t4"
+New-Dir "scenario-t4\Series\Chapter 1" | Out-Null
+$threwT4 = $false
+try {
+    $null = Invoke-FullPipeline -Path $rootT4 -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+} catch {
+    $threwT4 = $true
+}
+${function:Register-AbortCancellationSource} = $realRegisterFnT4
+
+Test-Assert $threwT4 "the registration failure propagated out of Invoke-FullPipeline, not silently swallowed"
+Test-Assert ($null -ne $script:capturedCtsT4) "sanity check: the fake actually captured the real Cts object before throwing"
+# A disposed CancellationTokenSource's own .Token getter does NOT throw
+# (verified directly) - .Cancel() is the operation that does, wrapped by
+# PowerShell as a MethodInvocationException whose InnerException is the
+# real System.ObjectDisposedException.
+$disposedT4 = $false
+try { $script:capturedCtsT4.Cancel() } catch { $disposedT4 = ($_.Exception.InnerException -is [System.ObjectDisposedException]) }
+Test-Assert $disposedT4 "the Cts was disposed via the finally block despite the throw happening before the old try's own opening brace"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario U: Invoke-MainLoop - a $null Invoke-Mode result (a run that
 #  didn't complete) is logged, not treated as a clean summary, and does
 #  NOT stop the loop by itself - only Show-PostRunPrompt's own Exit does.
@@ -999,6 +1055,35 @@ $totalsV = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-v") -CjxlE
 Test-Assert ($totalsV.ConvertedImageSuccess -eq 1) ("exactly one file converted by the IMAGE engine - the static one (got " + $totalsV.ConvertedImageSuccess + ")")
 Test-Assert ($totalsV.ConvertedAnimatedSuccess -eq 1) ("exactly one file converted by the ANIMATED engine - the animated one (got " + $totalsV.ConvertedAnimatedSuccess + ")")
 Test-Assert ($totalsV.InspectFailedCount -eq 0) "no classification failures for two cleanly-identifiable files"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario V2 (2026-08-31 efficiency fix): the animated AVIF from Scenario
+#  V's own setup is classified by Controller.ps1's own reconciliation step
+#  AND handed to Convert-AnimatedBatch - before the fix, that meant TWO
+#  separate `magick identify` spawns for the same file (one during
+#  classification, one from Convert-AnimatedBatch's own re-check). The
+#  fake magick.exe now logs every identify call's target path (gated on
+#  HARNESS_IDENTIFY_LOG so other scenarios pay nothing); this counts how
+#  many times "animated.avif" was actually identified.
+# ==============================================================================
+Write-Host "=== Scenario V2: an ambiguous AVIF is identified ONCE, not twice (classification result is reused, not re-checked) ===" -ForegroundColor Cyan
+$identifyLogV2 = Join-Path $scratchDir "scenario-v2-identify.log"
+[System.IO.File]::WriteAllText($identifyLogV2, "")
+$env:HARNESS_IDENTIFY_LOG = $identifyLogV2
+
+$chV2 = New-Dir "scenario-v2\Series\Chapter 1"
+New-FakeAvifIn -DirPath $chV2 -Name "animated.avif" -Frames 5 | Out-Null
+
+try {
+    $totalsV2 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-v2") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+} finally {
+    $env:HARNESS_IDENTIFY_LOG = $null
+}
+
+$identifyCallsV2 = @(Get-Content -LiteralPath $identifyLogV2 | Where-Object { $_ -like "*animated.avif" })
+Test-Assert ($totalsV2.ConvertedAnimatedSuccess -eq 1) "sanity check: the file still converted correctly through the animated engine"
+Test-Assert ($identifyCallsV2.Count -eq 1) ("the file was identified exactly once, not twice (got " + $identifyCallsV2.Count + " identify call(s))")
 Write-Host ""
 
 # ==============================================================================

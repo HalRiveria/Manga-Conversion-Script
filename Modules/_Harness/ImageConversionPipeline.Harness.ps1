@@ -156,9 +156,9 @@ function New-Dir {
     return $path
 }
 function New-FakeImage {
-    param([string]$DirPath, [string]$Name, [bool]$Fail = $false, [int]$SleepMs = 0)
+    param([string]$DirPath, [string]$Name, [bool]$Fail = $false, [bool]$FailPartial = $false, [int]$SleepMs = 0)
     $path = Join-Path $DirPath $Name
-    $content = if ($Fail) { "FAIL_CJXL" } elseif ($SleepMs -gt 0) { "SLEEP_MS:" + $SleepMs } else { "fake source pixels" }
+    $content = if ($FailPartial) { "FAIL_CJXL_PARTIAL" } elseif ($Fail) { "FAIL_CJXL" } elseif ($SleepMs -gt 0) { "SLEEP_MS:" + $SleepMs } else { "fake source pixels" }
     [System.IO.File]::WriteAllText($path, $content)
     return $path
 }
@@ -190,6 +190,15 @@ class Program {
             return 1;
         }
         string content = File.ReadAllText(src);
+        if (content.Contains("FAIL_CJXL_PARTIAL")) {
+            // Simulates a real crash/disk-full mid-write: cjxl DOES write
+            // some non-zero-byte output to dst before exiting non-zero -
+            // proves the caller cleans up a partial .jxl on ordinary
+            // failure, not just on a force-killed process.
+            File.WriteAllText(dst, "partial-corrupt-jxl-bytes");
+            Console.Error.WriteLine("simulated cjxl crash after partial write");
+            return 1;
+        }
         if (content.Contains("FAIL_CJXL")) {
             Console.Error.WriteLine("simulated cjxl failure");
             return 1;
@@ -273,6 +282,26 @@ function New-FakeAvif {
 Write-Host ""
 
 # ==============================================================================
+#  Scenario A0 (2026-08-31 reuse fix): Get-LooseImageExtensions is the
+#  single source of truth this module and Controller.ps1 both use as a
+#  default parameter value, instead of 5 independently hardcoded copies of
+#  the same 7-element array. AnimatedConversionPipeline.ps1 keeps its own
+#  literal on purpose (module-independence reasons, see that file's own
+#  comment) - checked here too, so a future edit to one and not the other
+#  is caught immediately instead of silently drifting.
+# ==============================================================================
+Write-Host "=== Scenario A0: Get-LooseImageExtensions is the shared source of truth ===" -ForegroundColor Cyan
+$expectedExtA0 = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif")
+$actualExtA0 = @(Get-LooseImageExtensions)
+Test-Assert (($actualExtA0 -join ",") -eq ($expectedExtA0 -join ",")) ("Get-LooseImageExtensions returns the expected 7-element list in order (got: " + ($actualExtA0 -join ",") + ")")
+
+$animatedPipelinePath = Join-Path $PSScriptRoot "..\AnimatedConversionPipeline.ps1"
+$animatedPipelineSource = Get-Content -LiteralPath $animatedPipelinePath -Raw
+$expectedLiteral = '@(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif")'
+Test-Assert ($animatedPipelineSource.Contains($expectedLiteral)) "AnimatedConversionPipeline.ps1's own deliberately-kept-literal still matches the canonical list exactly (not drifted)"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario A: multi-series, multi-chapter conversion end to end - correct
 #  per-chapter batching, source deletion on success, SeriesCount/ChapterCount.
 # ==============================================================================
@@ -314,6 +343,26 @@ Test-Assert ($totalsB.ConvertedSuccess -eq 1) ("1 converted (got " + $totalsB.Co
 Test-Assert ($totalsB.ConvertedFail -eq 1) ("1 failed (got " + $totalsB.ConvertedFail + ")")
 Test-Assert (Test-Path -LiteralPath (Join-Path $chB "bad.jpg")) "failed source left in place, not deleted"
 Test-Assert (-not (Test-Path -LiteralPath (Join-Path $chB "good.jpg"))) "successful source deleted"
+
+# ==============================================================================
+#  Scenario B2 (2026-08-31 fix): a cjxl process that writes a PARTIAL/corrupt
+#  .jxl before exiting non-zero (simulating a crash or disk-full mid-write) -
+#  Complete-ImageConversionJob's normal failure path used to leave that
+#  partial .jxl on disk (only the force-kill path cleaned one up). Left
+#  behind, it's a non-zero-byte file newer than its source, so the NEXT run's
+#  Get-LooseImageCandidates would misclassify the source as a stale leftover
+#  and permanently delete it - losing the real source over a garbage output.
+# ==============================================================================
+Write-Host "=== Scenario B2: a partial .jxl from a mid-write crash is cleaned up, not left as a stale-source trap ===" -ForegroundColor Cyan
+$rootB2 = New-Dir "scenario-b2"
+$chB2 = New-Dir "scenario-b2\Series\Chapter 1"
+New-FakeImage -DirPath $chB2 -Name "crashed.jpg" -FailPartial $true | Out-Null
+
+$totalsB2 = Invoke-LooseImageConversionPipeline -Path $rootB2 -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
+
+Test-Assert ($totalsB2.ConvertedFail -eq 1) ("1 failed (got " + $totalsB2.ConvertedFail + ")")
+Test-Assert (Test-Path -LiteralPath (Join-Path $chB2 "crashed.jpg")) "failed source left in place, not deleted"
+Test-Assert (-not (Test-Path -LiteralPath (Join-Path $chB2 "crashed.jxl"))) "the partial/corrupt .jxl left by the crashed process was cleaned up, not left behind as a future stale-source trap"
 
 # ==============================================================================
 #  Scenario C: stale-source cleanup - a source with an existing non-zero .jxl
@@ -424,6 +473,12 @@ Test-Assert ($statusWarn -eq "Warning" -and $detailWarn -match "2 image") "skipp
 
 $statusErr, $detailErr = Get-ChapterProgressStatus -ChapterResult @{ FailedCount = 1; ForceKilledCount = 1; DeleteFailedCount = 0; SkippedCount = 0 }
 Test-Assert ($statusErr -eq "Error" -and $detailErr -match "1 failed" -and $detailErr -match "1 force-stopped") "failed+force-killed result -> Error with both reasons in detail"
+
+# 2026-08-31 fix: InspectFailedCount is now Error-tier - previously not
+# checked here AT ALL, so it fell through to a silent Success, letting the
+# zip gate proceed with a raw, completely unconverted AVIF in the chapter.
+$statusInspErr, $detailInspErr = Get-ChapterProgressStatus -ChapterResult @{ FailedCount = 0; ForceKilledCount = 0; DeleteFailedCount = 0; SkippedCount = 0; InspectFailedCount = 1 }
+Test-Assert ($statusInspErr -eq "Error" -and $detailInspErr -match "1 inspect failure") "InspectFailedCount alone is Error tier, not silently Success - it means a file was left completely unconverted"
 
 # ==============================================================================
 #  Scenario G: CCR wiring - real CleanConsoleRendering.ps1 functions actually
@@ -905,6 +960,43 @@ $swY.Stop()
 
 Test-Assert ($swY.Elapsed.TotalSeconds -lt 15) ("returned promptly instead of hanging (took " + [int]$swY.Elapsed.TotalSeconds + "s)")
 Test-Assert ($totalsY.ConvertedFail -eq 1 -and $totalsY.ConvertedSuccess -eq 0) ("the failed process start is counted as a real failure, not silently dropped (got ConvertedFail=" + $totalsY.ConvertedFail + ", ConvertedSuccess=" + $totalsY.ConvertedSuccess + ")")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario Z (2026-08-31 fix): $looseCts's construction and
+#  Register-AbortCancellationSource call were moved INSIDE the function's
+#  try block (same species as ZipParallelProcessing.ps1's mutex-leak fix
+#  from earlier today). Register-AbortCancellationSource is temporarily
+#  replaced with a fake that captures the real $Cts (so the test can
+#  inspect it afterward) and throws, simulating a real registration
+#  failure. Verified via a disposed Cts's own .Cancel() throwing
+#  ObjectDisposedException (wrapped by PowerShell as
+#  MethodInvocationException) - proof Dispose() actually ran via the
+#  finally path.
+# ==============================================================================
+Write-Host "=== Scenario Z: a throw during Register-AbortCancellationSource still disposes the already-constructed Cts ===" -ForegroundColor Cyan
+$realRegisterFnZ = ${function:Register-AbortCancellationSource}
+$script:capturedCtsZ = $null
+function Register-AbortCancellationSource {
+    param([System.Threading.CancellationTokenSource]$Cts)
+    $script:capturedCtsZ = $Cts
+    throw "simulated Register-AbortCancellationSource failure"
+}
+$rootZ = New-Dir "scenario-z\Series\Chapter 1"
+New-FakeImage -DirPath $rootZ -Name "page1.jpg" | Out-Null
+$threwZ = $false
+try {
+    $null = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-z") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -MaxCjxlProcs 2 -FullLogging $false
+} catch {
+    $threwZ = $true
+}
+${function:Register-AbortCancellationSource} = $realRegisterFnZ
+
+Test-Assert $threwZ "the registration failure propagated out of the pipeline, not silently swallowed"
+Test-Assert ($null -ne $script:capturedCtsZ) "sanity check: the fake actually captured the real Cts object before throwing"
+$disposedZ = $false
+try { $script:capturedCtsZ.Cancel() } catch { $disposedZ = ($_.Exception.InnerException -is [System.ObjectDisposedException]) }
+Test-Assert $disposedZ "the Cts was disposed via the finally block despite the throw happening before the old try's own opening brace"
 Write-Host ""
 
 if ($script:failCount -eq 0) {

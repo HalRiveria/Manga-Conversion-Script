@@ -139,7 +139,17 @@ function Invoke-ZipParallelProcessing {
 
         $localIss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
         foreach ($sharedFn in $SharedFunctionNames) {
-            $fnDef = (Get-Item ("Function:\" + $sharedFn)).Definition
+            # 2026-08-31 fix: a misspelled name, or one whose owning module
+            # wasn't dot-sourced before this call, used to throw a bare
+            # ItemNotFoundException with no mention of -SharedFunctionNames
+            # or a dot-sourcing-order problem - re-thrown here with that
+            # context so the actual cause is obvious instead of a generic
+            # "cannot find path" message.
+            try {
+                $fnDef = (Get-Item ("Function:\" + $sharedFn)).Definition
+            } catch {
+                throw ("Invoke-ZipParallelProcessing: -SharedFunctionNames entry '" + $sharedFn + "' does not resolve to a defined function - check for a typo, or that the module defining it was dot-sourced before this call. Original error: " + $_)
+            }
             $localIss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList $sharedFn, $fnDef))
         }
 

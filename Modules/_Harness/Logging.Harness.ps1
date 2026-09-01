@@ -507,6 +507,32 @@ $script:logMutex.Dispose()
 Write-Host ""
 
 # ==============================================================================
+#  Scenario N2b (2026-08-31, from a same-day /code-review): calling
+#  Initialize-LogMutex a SECOND time does NOT dispose whatever mutex was
+#  already at $script:logMutex - locks in a deliberate contract, not an
+#  oversight. ZipParallelProcessing.ps1's own caller saves the old
+#  reference before calling this function specifically so it can restore
+#  it afterward; if this function disposed the old mutex itself, that
+#  saved reference would be dead by the time the caller tries to restore
+#  and reuse it. Verified directly: the reference from the FIRST call
+#  still works (WaitOne succeeds) after a second Initialize-LogMutex call
+#  overwrites $script:logMutex.
+# ==============================================================================
+Write-Host "=== Scenario N2b: a second Initialize-LogMutex call does not dispose the previous mutex reference ===" -ForegroundColor Cyan
+Reset-LoggingState
+Initialize-LogMutex -PathHash "N2bFIRSTHASH0123456"
+$firstMutexN2b = $script:logMutex
+Initialize-LogMutex -PathHash "N2bSECONDHASH0123456"
+Test-Assert (-not [object]::ReferenceEquals($firstMutexN2b, $script:logMutex)) "sanity check: the second call really did produce a different Mutex object"
+$firstStillUsableN2b = $false
+try { $firstStillUsableN2b = $firstMutexN2b.WaitOne(0) } catch { }
+Test-Assert $firstStillUsableN2b "the FIRST call's mutex reference is still usable (not disposed) after a second Initialize-LogMutex call"
+if ($firstStillUsableN2b) { $firstMutexN2b.ReleaseMutex() }
+$firstMutexN2b.Dispose()
+$script:logMutex.Dispose()
+Write-Host ""
+
+# ==============================================================================
 #  Scenario N3: Initialize-LogMutex throws a clear, actionable error when
 #  no -PathHash is supplied and $script:pathHash was never set.
 # ==============================================================================

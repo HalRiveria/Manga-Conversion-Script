@@ -519,8 +519,15 @@ Test-Assert ($statusNullR -eq "Success" -and $null -eq $detailNullR) "`$null Cha
 $statusErrR, $detailErrR = Get-ChapterAnimatedStatus -ChapterResult @{ FailedCount = 2; ForceKilledCount = 1; DeleteFailedCount = 0; SkippedCount = 0; InspectFailedCount = 0 }
 Test-Assert ($statusErrR -eq "Error" -and $detailErrR -match "2 failed" -and $detailErrR -match "1 force-stopped") "Error tier wins and lists both failure kinds"
 
-$statusWarnR, $detailWarnR = Get-ChapterAnimatedStatus -ChapterResult @{ FailedCount = 0; ForceKilledCount = 0; DeleteFailedCount = 0; SkippedCount = 3; InspectFailedCount = 1 }
-Test-Assert ($statusWarnR -eq "Warning" -and $detailWarnR -match "3 skipped" -and $detailWarnR -match "1 inspect failure") "Warning tier covers both Skipped and InspectFailed"
+# 2026-08-31 fix: InspectFailedCount is now Error-tier, not Warning - an
+# inspect failure leaves a raw, completely unconverted .avif on disk, which
+# must block Controller.ps1's zip gate the same way a real FailedCount does
+# (a Warning-tier chapter still zips). Confirmed via a same-day /code-review.
+$statusInspErrR, $detailInspErrR = Get-ChapterAnimatedStatus -ChapterResult @{ FailedCount = 0; ForceKilledCount = 0; DeleteFailedCount = 0; SkippedCount = 0; InspectFailedCount = 1 }
+Test-Assert ($statusInspErrR -eq "Error" -and $detailInspErrR -match "1 inspect failure") "InspectFailedCount alone is Error tier, not Warning - it means a file was left completely unconverted"
+
+$statusWarnR, $detailWarnR = Get-ChapterAnimatedStatus -ChapterResult @{ FailedCount = 0; ForceKilledCount = 0; DeleteFailedCount = 0; SkippedCount = 3; InspectFailedCount = 0 }
+Test-Assert ($statusWarnR -eq "Warning" -and $detailWarnR -match "3 skipped") "Warning tier covers Skipped (output already exists - not a problem)"
 
 $statusStaticR, $detailStaticR = Get-ChapterAnimatedStatus -ChapterResult @{ FailedCount = 0; ForceKilledCount = 0; DeleteFailedCount = 0; SkippedCount = 0; InspectFailedCount = 0; StaticSkippedCount = 5 }
 Test-Assert ($statusStaticR -eq "Success" -and $null -eq $detailStaticR) "StaticSkippedCount alone does NOT trigger Warning - a static AVIF being left alone is expected, not a problem"
@@ -626,6 +633,43 @@ Test-Assert ($budgetV.CurrentCount -eq 2) "the budget is back to its full initia
 # AnimatedThreads, since the budget was the real ceiling).
 Test-Assert ($script:budgetSnapshotsV.Count -lt 100) ("the dispatch loop slept between passes instead of busy-spinning (got " + $script:budgetSnapshotsV.Count + " passes for ~450ms of simulated work)")
 $budgetV.Dispose()
+Write-Host ""
+
+# ==============================================================================
+#  Scenario W (2026-08-31 fix): $animatedCts's construction and
+#  Register-AbortCancellationSource call were moved INSIDE the function's
+#  try block (same species as ZipParallelProcessing.ps1's mutex-leak fix
+#  from earlier today, and ImageConversionPipeline.ps1's own analogous
+#  fix). Register-AbortCancellationSource is temporarily replaced with a
+#  fake that captures the real $Cts (so the test can inspect it
+#  afterward) and throws, simulating a real registration failure.
+#  Verified via a disposed Cts's own .Cancel() throwing
+#  ObjectDisposedException (wrapped by PowerShell as
+#  MethodInvocationException) - proof Dispose() actually ran via the
+#  finally path.
+# ==============================================================================
+Write-Host "=== Scenario W: a throw during Register-AbortCancellationSource still disposes the already-constructed Cts ===" -ForegroundColor Cyan
+$realRegisterFnW = ${function:Register-AbortCancellationSource}
+$script:capturedCtsW = $null
+function Register-AbortCancellationSource {
+    param([System.Threading.CancellationTokenSource]$Cts)
+    $script:capturedCtsW = $Cts
+    throw "simulated Register-AbortCancellationSource failure"
+}
+New-FakeAvif -Name "scenario-w\Series\Chapter 1\page1.avif" | Out-Null
+$threwW = $false
+try {
+    $null = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-w") -MagickExe $fakeMagickExe -AnimatedThreads 2 -FullLogging $false
+} catch {
+    $threwW = $true
+}
+${function:Register-AbortCancellationSource} = $realRegisterFnW
+
+Test-Assert $threwW "the registration failure propagated out of the pipeline, not silently swallowed"
+Test-Assert ($null -ne $script:capturedCtsW) "sanity check: the fake actually captured the real Cts object before throwing"
+$disposedW = $false
+try { $script:capturedCtsW.Cancel() } catch { $disposedW = ($_.Exception.InnerException -is [System.ObjectDisposedException]) }
+Test-Assert $disposedW "the Cts was disposed via the finally block despite the throw happening before the old try's own opening brace"
 Write-Host ""
 
 # ==============================================================================

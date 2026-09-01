@@ -261,8 +261,16 @@ try {
 
     Initialize-LogPaths -TargetPath $Path -FullLogging $settings.FullLogging -DisableSummaryFile $settings.DisableSummaryFile -ScriptDir $scriptDir
     Initialize-LogMutex
-    Initialize-CleanConsoleOutput -Enabled $settings.CleanConsoleOutputEnabled
-    Initialize-FileDeletion -PermanentDelete $settings.PermanentDelete
+    # [bool](...) casts (2026-08-31 fix, from a same-day /code-review): both
+    # parameters are [Parameter(Mandatory)][bool] - Import-ScriptSettings
+    # always defaults both keys today so $settings can't actually be
+    # missing either one here, but Controller.ps1's Invoke-MainLoop got
+    # this identical cast for its own re-sync of the same two calls (a
+    # hand-built $Settings there COULD be missing a key) - applied here too
+    # so this call site isn't left fragile against any future change to
+    # how $settings is built above this line.
+    Initialize-CleanConsoleOutput -Enabled ([bool]$settings.CleanConsoleOutputEnabled)
+    Initialize-FileDeletion -PermanentDelete ([bool]$settings.PermanentDelete)
 
     # Version-agnostic ImageMagick fallback: glob-matched so a version bump
     # (Q8/Q16/HDRI, or a future major version) doesn't silently make a

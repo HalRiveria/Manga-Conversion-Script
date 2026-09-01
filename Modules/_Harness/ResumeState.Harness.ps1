@@ -201,6 +201,13 @@ Test-Assert (-not $threwJ) "malformed bag entries do not throw"
 Test-Assert ($countJ -eq 1) "only the one well-formed entry was saved"
 $mapJ = Import-ResumeStateMap -StateFile $pathJ
 Test-Assert ($mapJ.ContainsKey("C:\Library\Good.zip")) "the well-formed entry made it into the state file"
+# 2026-08-31 fix: the catch that drops a bag entry with genuinely
+# malformed JSON (NotJson.zip - ConvertFrom-Json itself throws) used to
+# swallow it with no log line at all (CLAUDE.md: "no silent catches
+# without a reason"). MissingField.zip doesn't hit this catch (valid JSON,
+# just missing a field, filtered by the if-check below it) so it's not
+# expected to log here.
+Test-Assert (($script:logCalls | Where-Object { $_ -like "Warn:*NotJson.zip*" }).Count -eq 1) "the genuinely-malformed-JSON entry was logged, not silently dropped"
 Write-Host ""
 
 # ==============================================================================

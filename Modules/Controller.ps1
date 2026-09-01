@@ -303,7 +303,8 @@ $script:fullPipelineChapterWorker = {
         [System.Threading.SemaphoreSlim]$SharedBudget,
         [System.Threading.Mutex]$LogMutex,
         [System.Collections.Concurrent.ConcurrentQueue[object]]$ConsoleQueue,
-        [System.Threading.CancellationToken]$CancelToken
+        [System.Threading.CancellationToken]$CancelToken,
+        [System.Collections.Generic.HashSet[string]]$KnownAnimatedPaths
     )
 
     # A fresh runspace has no assemblies pre-loaded beyond the CLR
@@ -342,7 +343,7 @@ $script:fullPipelineChapterWorker = {
         $r = Convert-AnimatedBatch -AnimatedFiles $Files -MagickExe $MagickExe `
             -DoAnimatedLossless $DoAnimatedLossless -AnimatedQuality $AnimatedQuality -AnimatedThreads $Files.Count `
             -DoAnimatedOverwrite $DoAnimatedOverwrite -DoAnimatedDeleteSource $DoAnimatedDeleteSource `
-            -DoFullLogging $DoFullLogging -CancelToken $CancelToken -SharedBudget $SharedBudget
+            -DoFullLogging $DoFullLogging -CancelToken $CancelToken -SharedBudget $SharedBudget -KnownAnimatedPaths $KnownAnimatedPaths
         return @{ EngineType = 'Animated'; Result = $r }
     }
 }
@@ -424,7 +425,8 @@ function Invoke-FullPipelineChapter {
         [Parameter(Mandatory)]
         [System.Threading.SemaphoreSlim]$SharedBudget,
         [Parameter(Mandatory)]
-        [System.Threading.CancellationTokenSource]$Cts
+        [System.Threading.CancellationTokenSource]$Cts,
+        [System.Collections.Generic.HashSet[string]]$KnownAnimatedPaths = $null
     )
 
     $jobParams = [System.Collections.Generic.List[hashtable]]::new()
@@ -450,7 +452,7 @@ function Invoke-FullPipelineChapter {
             DoAnimatedOverwrite = $AnimatedOverwrite; DoAnimatedDeleteSource = $AnimatedDeleteSource
             DoFullLogging = $FullLogging; LogFile = $LogFile; LogErrorFile = $LogErrorFile; LogWarnFile = $LogWarnFile
             DoPermanentDelete = $PermanentDelete; CleanConsoleOutputEnabled = $ccrEnabled
-            SharedBudget = $SharedBudget
+            SharedBudget = $SharedBudget; KnownAnimatedPaths = $KnownAnimatedPaths
         })
     }
 
@@ -655,10 +657,10 @@ function Invoke-FullPipeline {
         [string]$LogWarnFile,
         [Parameter(Mandatory)]
         [bool]$PermanentDelete,
-        [string[]]$LooseImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif"),
+        [string[]]$LooseImageExtensions = (Get-LooseImageExtensions),
         [string[]]$AnimatedFileExtensions = @(".avif"),
         [string[]]$KnownZipPaths = @(),
-        [string[]]$FolderQualifyingExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif"),
+        [string[]]$FolderQualifyingExtensions = (Get-LooseImageExtensions),
         [System.Collections.Generic.HashSet[string]]$FolderExcludeStagingDirs = $null
     )
 
@@ -677,10 +679,16 @@ function Invoke-FullPipeline {
         Aborted                  = $false
     }
 
-    $sharedBudget = [System.Threading.SemaphoreSlim]::new($FullPipelineMaxConcurrentProcs, $FullPipelineMaxConcurrentProcs)
-    $fullCts = [System.Threading.CancellationTokenSource]::new()
-    Register-AbortCancellationSource -Cts $fullCts
+    # Construction/registration moved INSIDE the try (2026-08-31 fix, same
+    # species as ZipParallelProcessing.ps1's mutex-leak fix earlier today) -
+    # if either constructor or Register-AbortCancellationSource throws, the
+    # finally block below still runs and disposes whichever of these two
+    # was actually created (guarded, since a throw here can leave one or
+    # both variables unset).
     try {
+        $sharedBudget = [System.Threading.SemaphoreSlim]::new($FullPipelineMaxConcurrentProcs, $FullPipelineMaxConcurrentProcs)
+        $fullCts = [System.Threading.CancellationTokenSource]::new()
+        Register-AbortCancellationSource -Cts $fullCts
         $seriesProvider = New-SeriesProvider -LibraryPath $Path
 
         while ($true) {
@@ -696,6 +704,12 @@ function Invoke-FullPipeline {
             # force IsZippable=$false for any chapter affected. Reset
             # per series, same lifetime as $avifClassification.
             $failedClassificationDirs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            # Populated below, once classification runs - threaded into
+            # every Invoke-FullPipelineChapter call this series so
+            # Convert-AnimatedBatch can skip re-running Test-AvifAnimated
+            # on a file this step already confirmed animated (2026-08-31
+            # efficiency fix - see the classification block's own comment).
+            $knownAnimatedPaths = $null
 
             $chapters = Get-SeriesChapters -SeriesPath $series.FullName -QualifyingExtensions $FolderQualifyingExtensions `
                 -ExcludeStagingDirs $FolderExcludeStagingDirs -ForceRezip $false
@@ -797,10 +811,13 @@ function Invoke-FullPipeline {
                     # ran. Tracked by directory (not by file), same
                     # granularity Get-MergedChapterStatus already zip-
                     # blocks at.
+                    $knownAnimatedPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
                     foreach ($entry in $avifClassification.GetEnumerator()) {
                         if ($entry.Value -eq "Failed") {
                             $failedAvifDir = [System.IO.Path]::GetDirectoryName($entry.Key)
                             $null = $failedClassificationDirs.Add($failedAvifDir)
+                        } elseif ($entry.Value -eq "Animated") {
+                            $null = $knownAnimatedPaths.Add($entry.Key)
                         }
                     }
                 }
@@ -905,7 +922,7 @@ function Invoke-FullPipeline {
                     -JpegLossless $JpegLossless -JpegQuality $JpegQuality -AnimatedLossless $AnimatedLossless -AnimatedQuality $AnimatedQuality `
                     -AnimatedOverwrite $AnimatedOverwrite -AnimatedDeleteSource $AnimatedDeleteSource -FullLogging $FullLogging `
                     -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete $PermanentDelete `
-                    -SharedBudget $sharedBudget -Cts $fullCts
+                    -SharedBudget $sharedBudget -Cts $fullCts -KnownAnimatedPaths $knownAnimatedPaths
 
                 if ($null -ne $chapterOutcome.ImageResult) {
                     $ir = $chapterOutcome.ImageResult
@@ -962,9 +979,14 @@ function Invoke-FullPipeline {
             }
         }
     } finally {
-        Unregister-AbortCancellationSource -Cts $fullCts
-        $fullCts.Dispose()
-        $sharedBudget.Dispose()
+        # $fullCts/$sharedBudget can be unset if construction/registration
+        # itself threw (now inside the try above) - guard each disposal
+        # independently rather than assuming both exist.
+        if ($fullCts) {
+            Unregister-AbortCancellationSource -Cts $fullCts
+            $fullCts.Dispose()
+        }
+        if ($sharedBudget) { $sharedBudget.Dispose() }
         if ($script:CleanConsoleOutputEnabled) {
             $null = Complete-AllActiveSeriesProgress
         }
@@ -1121,7 +1143,7 @@ function Invoke-Mode {
                 $zipLooseExtensions = if ($Settings.ZipWithUnconvertedAnimated) {
                     @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif")
                 } else {
-                    @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif")
+                    Get-LooseImageExtensions
                 }
                 # Boxed, not a bare/$script: var - .GetNewClosure() puts
                 # $zipStep in its own dynamic module, so a plain

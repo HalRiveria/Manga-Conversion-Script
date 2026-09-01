@@ -235,16 +235,23 @@ $script:cts3 = [System.Threading.CancellationTokenSource]::new()
 $jobParamsA3 = [System.Collections.Generic.List[hashtable]]::new()
 $jobParamsA3.Add(@{ JobId = 1; DelayMs = 10; DoFullLogging = $FullLogging; LogFile = $logFile; LogErrorFile = $logErrorFile; LogWarnFile = $logWarnFile })
 $threwA3 = $false
+$errMsgA3 = $null
 try {
     $null = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -JobParams $jobParamsA3 `
         -SharedFunctionNames @('This-Function-Does-Not-Exist') -MaxParallel 3 -Cts $script:cts3 -ResultHandler { param($r) }
 } catch {
     $threwA3 = $true
+    $errMsgA3 = $_.Exception.Message
 }
 $script:cts3.Dispose()
 
 Test-Assert $threwA3 "sanity check: the bad -SharedFunctionNames entry genuinely made the call throw"
 Test-Assert ([object]::ReferenceEquals($script:logMutex, $callerMutexA3)) "the caller's mutex is still restored even though the call threw before the runspace pool was ever built"
+# 2026-08-31 fix: the raw Get-Item failure used to propagate as a bare
+# "cannot find path" error with no mention of -SharedFunctionNames, the
+# offending name, or a dot-sourcing-order hint - now re-thrown with that
+# context (CLAUDE.md: "messages say what's wrong and what to do about it").
+Test-Assert ($errMsgA3 -match "SharedFunctionNames" -and $errMsgA3 -match "This-Function-Does-Not-Exist") ("the error message names both -SharedFunctionNames and the offending function name, not a bare 'cannot find path' (got: " + $errMsgA3 + ")")
 Write-Host ""
 
 # ==============================================================================

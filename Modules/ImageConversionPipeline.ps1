@@ -163,6 +163,34 @@
 #  PART 1 - Convert-ImageBatch, the per-batch conversion engine
 # ==============================================================================
 
+function Get-LooseImageExtensions {
+    <#
+    .SYNOPSIS
+        The canonical "loose image" extension list - single source of
+        truth for what this project treats as a convertible/zip-blocking
+        image file. 2026-08-31 fix: this exact 7-element array was
+        hardcoded independently as a default parameter value in 7 places
+        across ImageConversionPipeline.ps1, Controller.ps1, and
+        AnimatedConversionPipeline.ps1, with no shared getter - unlike the
+        established Get-XSharedFunctionNames pattern this project already
+        uses for exactly this kind of problem. All 7 agreed with each
+        other at the time this was found (no live drift), but a future
+        edit to only some of them would silently desync which files get
+        converted vs. left as unconverted loose files.
+    .DESCRIPTION
+        Used as a default parameter value elsewhere in this module and in
+        Controller.ps1 (which already dot-sources this module, in both
+        the real script and its own harness). Deliberately NOT used as
+        AnimatedConversionPipeline.ps1's own -FolderQualifyingExtensions
+        default - that module's harness dot-sources it standalone,
+        without this one, by design (see this project's "own standalone
+        test harness, verified in isolation" convention); a cross-module
+        default-value dependency would break that. That module keeps its
+        own literal, commented as matching this canonical list.
+    #>
+    return @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif")
+}
+
 function Invoke-IccStripRetryOrFail {
     <#
     .SYNOPSIS
@@ -328,6 +356,19 @@ function Complete-ImageConversionJob {
     } catch {
         Write-Log ("FAILED conversion of " + $ItemNoun + " '" + $Job.SrcPath + "': " + $_) -Level Error
         $BatchResult.FailedCount++
+        # Clean up any partial/corrupt .jxl left behind by a cjxl process
+        # that exited non-zero after already writing output (a crash or a
+        # disk-full mid-write) - same cleanup the force-kill drain path
+        # below already does. Safe unconditionally: a job only reaches this
+        # function if it needed converting, which means nothing valid could
+        # have existed at JxlPath before this attempt (Get-LooseImageCandidates
+        # only dispatches a source with no .jxl or a 0-byte placeholder one).
+        # Without this, a corrupt non-zero-byte .jxl left behind gets picked
+        # up as a StaleSources match on the NEXT run and the real source
+        # gets permanently deleted, leaving only the garbage output.
+        if (Test-Path -LiteralPath $Job.JxlPath) {
+            try { [System.IO.File]::Delete($Job.JxlPath) } catch { }
+        }
     }
 
     # Clean up the temporary PNG used for WebP/ICC-strip pre-conversion
@@ -778,7 +819,7 @@ function Get-LooseImageCandidates {
     param(
         [Parameter(Mandatory)]
         [string]$ScanPath,
-        [string[]]$LooseImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif"),
+        [string[]]$LooseImageExtensions = (Get-LooseImageExtensions),
         [string[]]$KnownZipPaths = @(),
         [System.Collections.Generic.HashSet[string]]$ExcludeStagingDirs = $null
     )
@@ -906,11 +947,26 @@ function Get-ChapterProgressStatus {
     )
     if ($null -eq $ChapterResult) { return "Success", $null }
 
-    if ($ChapterResult.FailedCount -gt 0 -or $ChapterResult.ForceKilledCount -gt 0 -or $ChapterResult.DeleteFailedCount -gt 0) {
+    # InspectFailedCount is Error-tier: it means Test-AvifAnimated couldn't
+    # even determine whether an AVIF needs converting, so it was left as a
+    # raw, completely unconverted file on disk - previously not checked
+    # here AT ALL, so it was silently treated as a clean Success, letting
+    # the zip gate proceed with an unconverted file in the chapter. Same
+    # underlying issue as AnimatedConversionPipeline.ps1's own
+    # Get-ChapterAnimatedStatus, fixed there the same day (2026-08-31).
+    # InspectFailedCount is Error-tier: it means Test-AvifAnimated couldn't
+    # even determine whether an AVIF needs converting, so it was left as a
+    # raw, completely unconverted file on disk - previously not checked
+    # here AT ALL, so it was silently treated as a clean Success, letting
+    # the zip gate proceed with an unconverted file in the chapter. Same
+    # underlying issue as AnimatedConversionPipeline.ps1's own
+    # Get-ChapterAnimatedStatus, fixed there the same day (2026-08-31).
+    if ($ChapterResult.FailedCount -gt 0 -or $ChapterResult.ForceKilledCount -gt 0 -or $ChapterResult.DeleteFailedCount -gt 0 -or $ChapterResult.InspectFailedCount -gt 0) {
         $parts = [System.Collections.Generic.List[string]]::new()
-        if ($ChapterResult.FailedCount -gt 0)       { $parts.Add($ChapterResult.FailedCount.ToString() + " failed") }
-        if ($ChapterResult.ForceKilledCount -gt 0)  { $parts.Add($ChapterResult.ForceKilledCount.ToString() + " force-stopped") }
-        if ($ChapterResult.DeleteFailedCount -gt 0) { $parts.Add($ChapterResult.DeleteFailedCount.ToString() + " source delete(s) failed") }
+        if ($ChapterResult.FailedCount -gt 0)        { $parts.Add($ChapterResult.FailedCount.ToString() + " failed") }
+        if ($ChapterResult.ForceKilledCount -gt 0)   { $parts.Add($ChapterResult.ForceKilledCount.ToString() + " force-stopped") }
+        if ($ChapterResult.DeleteFailedCount -gt 0)  { $parts.Add($ChapterResult.DeleteFailedCount.ToString() + " source delete(s) failed") }
+        if ($ChapterResult.InspectFailedCount -gt 0) { $parts.Add($ChapterResult.InspectFailedCount.ToString() + " inspect failure(s)") }
         return "Error", ($parts -join ", ")
     }
     if ($ChapterResult.SkippedCount -gt 0) {
@@ -995,9 +1051,9 @@ function Invoke-LooseImageConversionPipeline {
         [int]$MaxCjxlProcs,
         [Parameter(Mandatory)]
         [bool]$FullLogging,
-        [string[]]$LooseImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif"),
+        [string[]]$LooseImageExtensions = (Get-LooseImageExtensions),
         [string[]]$KnownZipPaths = @(),
-        [string[]]$FolderQualifyingExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif"),
+        [string[]]$FolderQualifyingExtensions = (Get-LooseImageExtensions),
         [System.Collections.Generic.HashSet[string]]$FolderExcludeStagingDirs = $null,
         [scriptblock]$PostChapterCallback = $null,
         [scriptblock]$ZipStepCallback = $null,
@@ -1028,9 +1084,14 @@ function Invoke-LooseImageConversionPipeline {
     # would never actually cancel $looseCts, and Convert-ImageBatch's own
     # CancelToken check would never fire on a real Ctrl+C - see this
     # module's header for how that was caught.
-    $looseCts = [System.Threading.CancellationTokenSource]::new()
-    Register-AbortCancellationSource -Cts $looseCts
+    #
+    # Construction/registration moved INSIDE the try (2026-08-31 fix, same
+    # species as ZipParallelProcessing.ps1's mutex-leak fix earlier today) -
+    # if either throws, the finally block below still runs and disposes
+    # $looseCts if it was actually created.
     try {
+        $looseCts = [System.Threading.CancellationTokenSource]::new()
+        Register-AbortCancellationSource -Cts $looseCts
         $seriesProvider = New-SeriesProvider -LibraryPath $Path
 
         while ($true) {
@@ -1239,8 +1300,12 @@ function Invoke-LooseImageConversionPipeline {
             }
         }
     } finally {
-        Unregister-AbortCancellationSource -Cts $looseCts
-        $looseCts.Dispose()
+        # $looseCts can be unset if construction/registration itself threw
+        # (now inside the try above).
+        if ($looseCts) {
+            Unregister-AbortCancellationSource -Cts $looseCts
+            $looseCts.Dispose()
+        }
         # Safety net for the abort/shutdown path - a series left mid-flight
         # (some chapters never reaching Complete-ChapterProgress) needs
         # force-resolving so it doesn't sit open in CCR's registry forever.
