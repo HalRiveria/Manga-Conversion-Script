@@ -321,6 +321,17 @@ function Complete-AnimatedConversionJob {
         # guard needed (2026-08-31 efficiency fix) - File.Delete on a
         # missing path is already a safe no-op, confirmed directly.
         try { [System.IO.File]::Delete($Job.MagickOutputPath) } catch { }
+        # $webpReplaceBackup cleanup (2026-08-31 fix, found by a THIRD
+        # same-day /code-review pass): it was only ever deleted on the
+        # success path (right after File.Replace itself succeeds) - if
+        # File.Replace THROWS (e.g. a momentary lock on $Job.WebpPath),
+        # execution lands here instead, and the backup - a full copy of
+        # the pre-replace .webp, already-verified content with nothing
+        # worth keeping - was never cleaned up. $webpReplaceBackup is
+        # $null here if this failure happened before that code ever ran
+        # (or $Job.MagickOutputPath -eq $Job.WebpPath, meaning no backup
+        # was ever created), so this is safe unconditionally.
+        if ($webpReplaceBackup) { try { [System.IO.File]::Delete($webpReplaceBackup) } catch { } }
     }
 
     if ($convOk -and $DoAnimatedDeleteSource) {
