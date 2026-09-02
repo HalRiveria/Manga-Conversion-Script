@@ -604,6 +604,76 @@ Reset-HarnessScenarioState
 Write-Host ""
 
 # ==============================================================================
+#  Scenario T (2026-08-31 addition, project owner's own explicit
+#  decision): Ctrl+C/Ctrl+Break while [ConsoleCtrl]::RunActive is $false
+#  (idle at the menu) must fall through to the OS's own default action
+#  (return $false, no AbortRequested set, no blocking) instead of being
+#  caught - previously the handler caught EVERY Ctrl+C unconditionally,
+#  which leaked into the very next run dispatched in the same loop
+#  iteration and blocked the handler thread on a drain that would never
+#  happen. Invokes the private static Handler method directly via
+#  reflection - the real logic under test, not a simulation of its
+#  output state (the pattern every other scenario in this file uses,
+#  since Handler can't otherwise be called from outside the type).
+# ==============================================================================
+Write-Host "=== Scenario T: Ctrl+C/Ctrl+Break at the menu (RunActive `$false) falls through to the OS default, not caught ===" -ForegroundColor Cyan
+Reset-HarnessScenarioState
+$handlerMethodT = [ConsoleCtrl].GetMethod("Handler", [System.Reflection.BindingFlags]"NonPublic,Static")
+
+[ConsoleCtrl]::RunActive = $false
+$resultCtrlCT = $handlerMethodT.Invoke($null, @([uint32]0))   # CTRL_C_EVENT
+Test-Assert ($resultCtrlCT -eq $false) "Ctrl+C with no active run returns `$false (let the OS terminate the process), not `$true"
+Test-Assert ([ConsoleCtrl]::AbortRequested -eq $false) "AbortRequested was NOT set by a menu-time Ctrl+C"
+
+$resultCtrlBreakT = $handlerMethodT.Invoke($null, @([uint32]1))   # CTRL_BREAK_EVENT
+Test-Assert ($resultCtrlBreakT -eq $false) "Ctrl+Break with no active run also returns `$false"
+Test-Assert ([ConsoleCtrl]::AbortRequested -eq $false) "AbortRequested still NOT set after Ctrl+Break"
+
+# Window-close/logoff/shutdown are UNAFFECTED by RunActive - still real
+# termination requests regardless. Pre-signal DrainComplete so the
+# handler's own Wait(65000) returns immediately instead of actually
+# blocking this test for 65 seconds.
+[ConsoleCtrl]::DrainComplete.Set()
+$resultCloseT = $handlerMethodT.Invoke($null, @([uint32]2))   # CTRL_CLOSE_EVENT
+Test-Assert ($resultCloseT -eq $true) "window-close with no active run is still caught (returns `$true), unaffected by RunActive"
+Test-Assert ([ConsoleCtrl]::AbortRequested -eq $true -and [ConsoleCtrl]::IsCloseEvent -eq $true) "AbortRequested/IsCloseEvent were both set for the window-close case"
+Reset-HarnessScenarioState
+
+# Now with a run genuinely active: Ctrl+C IS caught normally.
+[ConsoleCtrl]::RunActive = $true
+[ConsoleCtrl]::DrainComplete.Set()   # pre-signalled so Wait(65000) returns immediately
+$resultActiveT = $handlerMethodT.Invoke($null, @([uint32]0))
+Test-Assert ($resultActiveT -eq $true) "Ctrl+C WITH an active run is caught normally (returns `$true)"
+Test-Assert ([ConsoleCtrl]::AbortRequested -eq $true -and [ConsoleCtrl]::IsCloseEvent -eq $false) "AbortRequested was set, IsCloseEvent correctly `$false for a real Ctrl+C"
+Reset-HarnessScenarioState
+Write-Host ""
+
+# ==============================================================================
+#  Scenario U: Reset-AbortState also resets [ConsoleCtrl]::RunActive to
+#  $false (defensive belt-and-suspenders alongside
+#  Set-AbortHandlerRunActive's own try/finally at its real call site) -
+#  otherwise a caller that forgot its own try/finally would leave the
+#  very next Ctrl+C at the menu wrongly caught.
+# ==============================================================================
+Write-Host "=== Scenario U: Reset-AbortState clears RunActive too ===" -ForegroundColor Cyan
+[ConsoleCtrl]::RunActive = $true
+Reset-AbortState
+Test-Assert ([ConsoleCtrl]::RunActive -eq $false) "Reset-AbortState reset RunActive back to `$false"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario V: Set-AbortHandlerRunActive is a thin, direct wrapper around
+#  [ConsoleCtrl]::RunActive.
+# ==============================================================================
+Write-Host "=== Scenario V: Set-AbortHandlerRunActive sets [ConsoleCtrl]::RunActive ===" -ForegroundColor Cyan
+Set-AbortHandlerRunActive -Active $true
+Test-Assert ([ConsoleCtrl]::RunActive -eq $true) "Set-AbortHandlerRunActive `$true set RunActive `$true"
+Set-AbortHandlerRunActive -Active $false
+Test-Assert ([ConsoleCtrl]::RunActive -eq $false) "Set-AbortHandlerRunActive `$false set RunActive `$false"
+Reset-HarnessScenarioState
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

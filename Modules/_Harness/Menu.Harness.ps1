@@ -50,6 +50,13 @@ function Get-UnwantedImageProfilesPath {
     param([string]$BaseDir)
     return (Join-Path ([System.IO.Path]::GetTempPath()) "menu-harness-unused-profiles.json")
 }
+# Same reason/shape as the stub above - only Invoke-TrailingZeroAuditRun's
+# own default -ReportPath parameter value needs this to resolve; the real
+# scan/report behavior is verified via an injected -TrailingZeroHandler.
+function Get-TrailingZeroReportPath {
+    param([string]$BaseDir)
+    return (Join-Path ([System.IO.Path]::GetTempPath()) "menu-harness-unused-trailing-zero-report.txt")
+}
 
 $script:passCount = 0
 $script:failCount = 0
@@ -356,6 +363,7 @@ $linesP = Get-CoverDeletionMenuLines
 Test-Assert (($linesP -join "`n") -match "1 - Run") "lists Run (1)"
 Test-Assert (($linesP -join "`n") -match "2 - Add Image") "lists Add Image (2)"
 Test-Assert (($linesP -join "`n") -match "4 - Open Profile Location") "lists Open Profile Location (4)"
+Test-Assert (($linesP -join "`n") -match "5 - Trailing-Zero Report") "lists Trailing-Zero Report (5) - 2026-08-31 addition, project owner's own decision"
 Test-Assert ($linesP[-1] -eq "  0 - Back") "last line is always 0 - Back"
 Write-Host ""
 
@@ -418,17 +426,18 @@ Test-Assert ($resultQ2.Mode -eq 'ImageConversion') "the loop still resolved a mo
 Write-Host ""
 
 # ==============================================================================
-#  Scenario R: Show-CoverDeletionMenu - Run and Add both dispatch through
-#  their injected handlers and return to the SAME submenu (not the
-#  caller) until Back is chosen
+#  Scenario R: Show-CoverDeletionMenu - Run, Add, and Trailing-Zero (5,
+#  2026-08-31 addition) all dispatch through their injected handlers and
+#  return to the SAME submenu (not the caller) until Back is chosen
 # ==============================================================================
-Write-Host "=== Scenario R: Show-CoverDeletionMenu Run/Add dispatch, stay in submenu until Back ===" -ForegroundColor Cyan
+Write-Host "=== Scenario R: Show-CoverDeletionMenu Run/Add/TrailingZero dispatch, stay in submenu until Back ===" -ForegroundColor Cyan
 $callsR = New-Object System.Collections.Generic.List[string]
 $runHandlerR = { param($ProfilesPath, $PromptFunc) $callsR.Add('Run') }.GetNewClosure()
 $addHandlerR = { param($ProfilesPath, $PromptFunc) $callsR.Add('Add') }.GetNewClosure()
-$promptR = New-ScriptedPrompt -Responses @('1', '2', '1', '0')
-Show-CoverDeletionMenu -ProfilesPath "unused" -PromptFunc $promptR -RunHandler $runHandlerR -AddHandler $addHandlerR
-Test-Assert (($callsR -join ",") -eq "Run,Add,Run") "Run/Add/Run all dispatched in order, staying in the submenu each time, before Back exited it"
+$trailingZeroHandlerR = { param($PromptFunc) $callsR.Add('TrailingZero') }.GetNewClosure()
+$promptR = New-ScriptedPrompt -Responses @('1', '2', '5', '1', '0')
+Show-CoverDeletionMenu -ProfilesPath "unused" -PromptFunc $promptR -RunHandler $runHandlerR -AddHandler $addHandlerR -TrailingZeroHandler $trailingZeroHandlerR
+Test-Assert (($callsR -join ",") -eq "Run,Add,TrailingZero,Run") "Run/Add/TrailingZero/Run all dispatched in order, staying in the submenu each time, before Back exited it"
 Write-Host ""
 
 # ==============================================================================
@@ -446,6 +455,64 @@ try {
 } catch { $threwS = $true }
 Test-Assert (-not $threwS) "an invalid choice ('9') did not throw - just re-prompted"
 Test-Assert ($actionCallsS.Count -eq 1 -and $actionCallsS[0] -eq 'OpenProfileLocation') "picking 4 dispatched 'OpenProfileLocation' exactly once through the injected handler"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario S2 (2026-08-31 fix, caught by a same-day /code-review
+#  full-codebase pass): Invoke-CoverDeletionRun and Invoke-TrailingZeroAuditRun
+#  had zero direct test coverage of their own (every scenario above
+#  injects the handler instead) - both real-deletion/real-scan functions,
+#  called here directly with their real UnwantedImage.ps1 dependencies
+#  stubbed locally (that module isn't dot-sourced in this harness - see
+#  this file's own header). Covers the -PathType Container fix (a
+#  dropped FILE, not a folder, is now rejected instead of silently
+#  becoming a one-file scan target) for both functions, and
+#  Invoke-TrailingZeroAuditRun's own "only open the report if something
+#  was actually found" branch.
+# ==============================================================================
+Write-Host "=== Scenario S2: Invoke-CoverDeletionRun / Invoke-TrailingZeroAuditRun direct coverage, including the -PathType Container fix ===" -ForegroundColor Cyan
+$fileS2 = Join-Path $scratchDir "not-a-folder-s2.txt"
+"not a folder" | Set-Content -LiteralPath $fileS2 -Encoding UTF8
+$realFolderS2 = Join-Path $scratchDir "real-folder-s2"
+New-Item -ItemType Directory -Path $realFolderS2 -Force | Out-Null
+
+function Invoke-UnwantedImageScan { param($Path, $Profiles) $script:unwantedScanCallsS2.Add($Path); return @{ ScannedPath = $Path } }
+function Get-AllUnwantedImageProfiles { param($ProfilesPath) return @() }
+$script:unwantedScanCallsS2 = New-Object System.Collections.Generic.List[string]
+
+$promptFileS2 = { param($m) $fileS2 }
+$resultRunFileS2 = Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc $promptFileS2
+Test-Assert (-not $resultRunFileS2.Ran) "Invoke-CoverDeletionRun rejects a FILE dropped on the folder prompt, not a silent one-file scan"
+Test-Assert ($script:unwantedScanCallsS2.Count -eq 0) "the real scan function was never called for a rejected file path"
+
+$promptFolderS2 = { param($m) $realFolderS2 }
+$resultRunFolderS2 = Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc $promptFolderS2
+Test-Assert ($resultRunFolderS2.Ran -and $script:unwantedScanCallsS2.Count -eq 1 -and $script:unwantedScanCallsS2[0] -eq $realFolderS2) "a real folder is accepted and passed through to the real scan function"
+
+function Invoke-TrailingZeroAudit {
+    param($Path, $ReportPath)
+    $script:trailingZeroAuditCallsS2.Add($Path)
+    if ($script:trailingZeroFoundS2) { return @{ UniqueFileCount = 1; HashFailureCount = 0; ReportPath = $ReportPath } }
+    return @{ UniqueFileCount = 0; HashFailureCount = 0; ReportPath = $null }
+}
+$script:trailingZeroAuditCallsS2 = New-Object System.Collections.Generic.List[string]
+$script:trailingZeroOpenCallsS2 = New-Object System.Collections.Generic.List[string]
+$openHandlerS2 = { param($Path) $script:trailingZeroOpenCallsS2.Add($Path) }.GetNewClosure()
+
+$resultTZFileS2 = Invoke-TrailingZeroAuditRun -ReportPath (Join-Path $scratchDir "report-s2.txt") -PromptFunc $promptFileS2 -OpenHandler $openHandlerS2
+Test-Assert (-not $resultTZFileS2.Ran) "Invoke-TrailingZeroAuditRun rejects a FILE dropped on the folder prompt too"
+Test-Assert ($script:trailingZeroAuditCallsS2.Count -eq 0) "the real audit function was never called for a rejected file path"
+
+$script:trailingZeroFoundS2 = $false
+$reportPathS2 = Join-Path $scratchDir "report-s2.txt"
+$resultTZNoneS2 = Invoke-TrailingZeroAuditRun -ReportPath $reportPathS2 -PromptFunc $promptFolderS2 -OpenHandler $openHandlerS2
+Test-Assert ($resultTZNoneS2.Ran -and $script:trailingZeroAuditCallsS2.Count -eq 1) "a real folder with nothing found still ran the audit"
+Test-Assert ($script:trailingZeroOpenCallsS2.Count -eq 0) "nothing was opened when the audit found nothing (Invoke-TrailingZeroAudit's own 'no empty report' contract)"
+
+$script:trailingZeroFoundS2 = $true
+$resultTZFoundS2 = Invoke-TrailingZeroAuditRun -ReportPath $reportPathS2 -PromptFunc $promptFolderS2 -OpenHandler $openHandlerS2
+Test-Assert ($resultTZFoundS2.Ran -and $script:trailingZeroAuditCallsS2.Count -eq 2) "a real folder with something found ran the audit again"
+Test-Assert ($script:trailingZeroOpenCallsS2.Count -eq 1 -and $script:trailingZeroOpenCallsS2[0] -eq $reportPathS2) "the report was opened exactly once, at its real path, when something was found"
 Write-Host ""
 
 # ==============================================================================

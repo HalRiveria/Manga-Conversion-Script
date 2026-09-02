@@ -111,6 +111,23 @@ Test-Assert ($settingsE.ContainsKey('ModulesPath')) "the merged result still con
 Write-Host ""
 
 # ==============================================================================
+#  Scenario E2 (2026-08-31 fix, caught by a same-day /code-review
+#  full-codebase pass): a hand-edited whole-number-with-decimal-point
+#  value ("JpegQuality": 75.0) must be ACCEPTED, not silently reverted to
+#  the default. ConvertFrom-Json on this real PS 5.1/.NET Framework
+#  install yields [decimal] for such a value, not [double] - confirmed
+#  live, not assumed - so Test-ScriptSettingValue's own [double]-only
+#  integral check was dead code against real output from this project's
+#  own real Import-ScriptSettings path.
+# ==============================================================================
+Write-Host "=== Scenario E2: a whole-number JSON value written with a decimal point (75.0) is accepted, not reverted ===" -ForegroundColor Cyan
+$pathE2 = Join-Path $scratchDir "decimal-settings.json"
+'{ "JpegQuality": 75.0 }' | Set-Content -LiteralPath $pathE2 -Encoding UTF8
+$settingsE2 = Import-ScriptSettings -Path $pathE2
+Test-Assert ($settingsE2.JpegQuality -eq 75) ("the decimal-point whole number was accepted as-is, not reverted to the default (got " + $settingsE2.JpegQuality + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario F: corrupt (unparsable) JSON falls back to defaults, backs up
 #  the bad file, and warns via Write-Log - does not throw
 # ==============================================================================

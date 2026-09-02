@@ -388,6 +388,52 @@ if ($RunSlowTest) {
 }
 
 # ==============================================================================
+#  Scenario E (2026-08-31 addition, project owner approved as an easy
+#  fix): -Cts/-WorkerScript/-ResultHandler/-MaxParallel are now all
+#  [Parameter(Mandatory)] - omitting -Cts specifically used to fail
+#  SILENTLY (no error at all): $Cts.Token.IsCancellationRequested on a
+#  $null $Cts just evaluates falsy, so a run with no -Cts was completely
+#  abort-deaf (no cancellation ever noticed, DrainComplete never
+#  signalled). Every real caller already passes all four, so this closes
+#  a latent gap rather than fixing something live.
+# ==============================================================================
+Write-Host "=== Scenario E: -Cts/-WorkerScript/-ResultHandler/-MaxParallel are Mandatory ===" -ForegroundColor Cyan
+$jobParamsE = [System.Collections.Generic.List[hashtable]]::new()
+$jobParamsE.Add(@{ JobId = 1; DelayMs = 0; DoFullLogging = $FullLogging; LogFile = $logFile; LogErrorFile = $logErrorFile; LogWarnFile = $logWarnFile })
+$handlerE = { param($r) }
+
+$threwNoCtsE = $false
+try {
+    $null = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -JobParams $jobParamsE -MaxParallel 1 -ResultHandler $handlerE
+} catch { $threwNoCtsE = $true }
+Test-Assert $threwNoCtsE "omitting -Cts now throws (Mandatory), instead of silently running abort-deaf"
+
+$threwNoWorkerE = $false
+try {
+    $ctsE1 = [System.Threading.CancellationTokenSource]::new()
+    $null = Invoke-ZipParallelProcessing -JobParams $jobParamsE -MaxParallel 1 -Cts $ctsE1 -ResultHandler $handlerE
+    $ctsE1.Dispose()
+} catch { $threwNoWorkerE = $true }
+Test-Assert $threwNoWorkerE "omitting -WorkerScript now throws (Mandatory)"
+
+$threwNoResultHandlerE = $false
+try {
+    $ctsE2 = [System.Threading.CancellationTokenSource]::new()
+    $null = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -JobParams $jobParamsE -MaxParallel 1 -Cts $ctsE2
+    $ctsE2.Dispose()
+} catch { $threwNoResultHandlerE = $true }
+Test-Assert $threwNoResultHandlerE "omitting -ResultHandler now throws (Mandatory)"
+
+$threwNoMaxParallelE = $false
+try {
+    $ctsE3 = [System.Threading.CancellationTokenSource]::new()
+    $null = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -JobParams $jobParamsE -Cts $ctsE3 -ResultHandler $handlerE
+    $ctsE3.Dispose()
+} catch { $threwNoMaxParallelE = $true }
+Test-Assert $threwNoMaxParallelE "omitting -MaxParallel now throws (Mandatory)"
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

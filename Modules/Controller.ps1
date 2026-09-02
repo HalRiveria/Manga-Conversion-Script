@@ -1418,6 +1418,14 @@ function Invoke-MainLoop {
         Test-AbortSignal poll, with no new Ctrl+C from the user. Resetting
         here, at the top of every iteration, means every real dispatched
         run starts from a genuinely clean slate.
+    .PARAMETER SetRunActiveHandler
+        Injectable, defaults to the real AbortPipeline.ps1's
+        Set-AbortHandlerRunActive. Called $true right before, $false
+        right after (try/finally) InvokeModeHandler - tells the native
+        Ctrl+C handler a real run is in progress, so Ctrl+C at the menu
+        (between calls) falls through to the OS's own default action
+        instead of being caught and leaking into the next iteration's
+        run (project owner's own explicit decision, 2026-08-31).
     .OUTPUTS
         None - runs until exit, same as the main script's old inline loop.
     #>
@@ -1437,7 +1445,8 @@ function Invoke-MainLoop {
         [scriptblock]$GetModeHandler = ${function:Get-SelectedMode},
         [scriptblock]$InvokeModeHandler = ${function:Invoke-Mode},
         [scriptblock]$PostRunPromptHandler = ${function:Show-PostRunPrompt},
-        [scriptblock]$ResetAbortHandler = ${function:Reset-AbortState}
+        [scriptblock]$ResetAbortHandler = ${function:Reset-AbortState},
+        [scriptblock]$SetRunActiveHandler = ${function:Set-AbortHandlerRunActive}
     )
 
     while ($true) {
@@ -1481,9 +1490,29 @@ function Invoke-MainLoop {
         Initialize-CleanConsoleOutput -Enabled ([bool]$Settings.CleanConsoleOutputEnabled)
         Initialize-FileDeletion -PermanentDelete ([bool]$Settings.PermanentDelete)
 
+        # Set-AbortHandlerRunActive $true/$false around the actual run
+        # (2026-08-31 addition, project owner's own explicit decision -
+        # see AbortPipeline.ps1's ConsoleCtrl.RunActive comment for the
+        # full reasoning): Ctrl+C is the dedicated abort key for an
+        # active run, but at the menu there's nothing to abort - the
+        # native handler now falls through to the OS's own default
+        # Ctrl+C action there instead of catching it, closing a real leak
+        # (a menu-time Ctrl+C used to set AbortRequested, which then
+        # aborted THIS SAME iteration's freshly-dispatched run on its
+        # very first poll, with no new Ctrl+C from the user) and a real
+        # waste (the handler thread blocking up to 65s on a drain that
+        # was never going to happen). try/finally so a crash inside the
+        # run still clears it - Reset-AbortState's own defensive reset at
+        # the top of the NEXT iteration is the second layer, not the
+        # only one.
+        & $SetRunActiveHandler -Active $true
         $runStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-        $stats = & $InvokeModeHandler -Resolved $resolved -TargetPath $TargetPath -Settings $Settings -CjxlExe $CjxlExe -MagickExe $MagickExe `
-            -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile
+        try {
+            $stats = & $InvokeModeHandler -Resolved $resolved -TargetPath $TargetPath -Settings $Settings -CjxlExe $CjxlExe -MagickExe $MagickExe `
+                -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile
+        } finally {
+            & $SetRunActiveHandler -Active $false
+        }
         $runStopwatch.Stop()
 
         if ($null -eq $stats) {

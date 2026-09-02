@@ -79,12 +79,16 @@
 
 function Invoke-ZipParallelProcessing {
     param(
+        [Parameter(Mandatory)]
         [scriptblock]$WorkerScript,
         [System.Collections.Generic.List[hashtable]]$JobParams = $null,
         [scriptblock]$NextJobProvider = $null,
         [string[]]$SharedFunctionNames,
+        [Parameter(Mandatory)]
         [int]$MaxParallel,
+        [Parameter(Mandatory)]
         [System.Threading.CancellationTokenSource]$Cts,
+        [Parameter(Mandatory)]
         [scriptblock]$ResultHandler,
         [string]$AbortWaitMessage = "[ABORT] Waiting for current jobs to finish (up to 60s)..."
     )
@@ -248,6 +252,21 @@ function Invoke-ZipParallelProcessing {
 
         Flush-ConsoleQueue -Queue $localConsoleQueue
     } finally {
+        # Dispose any $localHandles left over (2026-08-31 addition, project
+        # owner approved as an easy fix) - on every OTHER exit path this
+        # list is already empty (the collection loop above drains it, or
+        # Invoke-GracefulDrain owns and disposes whatever's left after an
+        # abort). If something throws BEFORE the drain gets a chance to
+        # run (-NextJobProvider itself throwing, or Test-AbortSignal/
+        # Flush-ConsoleQueue failing), these in-flight [PowerShell]
+        # instances were never Stop()'d or Dispose()'d - contained (the
+        # pool close/process exit below still clean them up eventually)
+        # but matches this project's own "resource lifecycle matches
+        # acquisition, including the error path" review checklist item.
+        foreach ($h in $localHandles) {
+            try { $h.PS.Stop() } catch { }
+            try { $h.PS.Dispose() } catch { }
+        }
         # Always torn down, even if the provider, worker collection, or
         # -ResultHandler throws - the previous version of this function had
         # no such guarantee and could leak the pool/mutex on an exception.

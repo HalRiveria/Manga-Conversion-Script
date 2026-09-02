@@ -922,6 +922,52 @@ Test-Assert (Test-Path -LiteralPath $webpZPath) "sanity check: the pre-existing 
 Write-Host ""
 
 # ==============================================================================
+#  Scenario AA (2026-08-31 addition, project owner approved as an easy
+#  fix mirroring the sibling module's own identical fix): the straggler-
+#  drain block (only reached after a real cancel, when $running.Count -gt 0)
+#  had no equivalent guard. The force-kill sub-block's own "Force-stopping
+#  N job(s)..." Write-Log call is the realistic trigger, unguarded - a job
+#  that never finishes within -AbortTimeoutSeconds (still genuinely
+#  running, SlotReleased never set) must still be force-killed/disposed/
+#  released by the new catch.
+# ==============================================================================
+Write-Host "=== Scenario AA: an unexpected throw during the straggler-drain's force-kill step still cleans up correctly ===" -ForegroundColor Cyan
+$chAA = New-Dir "scenario-aa\Series\Chapter 1"
+$fileAAPath = Join-Path $chAA "neverfinishes_aa.avif"
+[System.IO.File]::WriteAllText($fileAAPath, "FRAMES:5`nSLEEP_MS:30000")
+$fileAA = Get-Item -LiteralPath $fileAAPath
+$expectedWebpAA = Join-Path $chAA "neverfinishes_aa.webp"
+$budgetAA = [System.Threading.SemaphoreSlim]::new(3, 3)
+$budgetAA.Wait(0) | Out-Null   # one slot pre-acquired to stand in for another engine
+$ctsAA = [System.Threading.CancellationTokenSource]::new()
+$pollAA = { param($inFlight) if ($inFlight.Count -gt 0) { $ctsAA.Cancel() } }
+
+$realWriteLogFnAA = ${function:Write-Log}
+function Write-Log {
+    param([string]$Message, [ValidateSet("Info", "Warn", "Error", "Summary")][string]$Level = "Info")
+    if ($Message -like "*Force-stopping*") { throw "simulated Write-Log failure during the straggler-drain's own force-kill logging" }
+    & $script:realWriteLogFnAA -Message $Message -Level $Level
+}
+$script:realWriteLogFnAA = $realWriteLogFnAA
+
+$threwAA = $false
+try {
+    $null = Convert-AnimatedBatch -AnimatedFiles @($fileAA) -MagickExe $fakeMagickExe -AnimatedThreads 5 -DoFullLogging $false `
+        -CancelToken $ctsAA.Token -SharedBudget $budgetAA -AbortPollCallback $pollAA -AbortTimeoutSeconds 1
+} catch {
+    $threwAA = $true
+} finally {
+    ${function:Write-Log} = $realWriteLogFnAA
+    $ctsAA.Dispose()
+}
+
+Test-Assert $threwAA "the injected failure propagated out of Convert-AnimatedBatch during the straggler-drain, not silently swallowed"
+Test-Assert ($budgetAA.CurrentCount -eq 2) ("the never-finished job's slot was still released exactly once by the new catch (got CurrentCount=" + $budgetAA.CurrentCount + ", would stay 1 if the catch never ran and leaked it)")
+Test-Assert (-not (Test-Path -LiteralPath $expectedWebpAA)) "no .webp was ever created for a job that was force-killed mid-sleep (sanity check - fake magick only writes output AFTER its SLEEP_MS completes)"
+$budgetAA.Dispose()
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

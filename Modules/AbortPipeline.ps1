@@ -141,6 +141,27 @@ public static class ConsoleCtrl
     public static volatile bool AbortRequested = false;
     public static volatile bool IsCloseEvent   = false;   // true = X button, false = Ctrl+C
 
+    // Whether a real pipeline run is currently dispatched (2026-08-31
+    // addition - set by Set-AbortHandlerRunActive, called by
+    // Controller.ps1's Invoke-MainLoop around its own InvokeModeHandler
+    // call). Ctrl+C/Ctrl+Break IS the dedicated abort key for an active
+    // run - but at the menu, between runs, there is nothing to abort:
+    // setting AbortRequested there used to leak into the very next run
+    // dispatched in the SAME loop iteration (Reset-AbortState only runs
+    // at the TOP of each iteration, before the menu, not after it), and
+    // the handler thread would block on DrainComplete.Wait(65000) for a
+    // drain that was never going to happen, since no pipeline was
+    // running to call Invoke-GracefulDrain/Complete-AbortDrain at all.
+    // Decided explicitly (not a guess): Ctrl+C at the menu now falls
+    // through to the OS's own default CTRL_C action (immediate process
+    // termination, the same as if this handler were never registered at
+    // all) rather than being caught and somehow "resumed" - there is
+    // nothing in-flight to drain or clean up at the menu, so an abrupt
+    // exit there is safe, and it avoids inventing a third state ("caught
+    // but ignored, keep running") this module would then have to keep
+    // correct forever.
+    public static volatile bool RunActive = false;
+
     // The handler signals this when abort is requested; the main thread calls
     // Set() when the graceful drain is complete so the handler can return.
     public static readonly ManualResetEventSlim DrainComplete = new ManualResetEventSlim(false);
@@ -156,6 +177,15 @@ public static class ConsoleCtrl
     private static bool Handler(uint ctrlType)
     {
         // ctrlType: 0=CTRL_C, 1=CTRL_BREAK, 2=CTRL_CLOSE, 5=CTRL_LOGOFF, 6=CTRL_SHUTDOWN
+        if ((ctrlType == 0 || ctrlType == 1) && !RunActive)
+        {
+            // Idle at the menu - let the OS apply its own default CTRL_C/
+            // CTRL_BREAK action (immediate termination) instead of
+            // catching it here. Window-close/logoff/shutdown (below) are
+            // unaffected either way - those remain real termination
+            // requests regardless of RunActive.
+            return false;
+        }
         if (ctrlType == 0 || ctrlType == 1 || ctrlType == 2 || ctrlType == 5 || ctrlType == 6)
         {
             AbortRequested = true;
@@ -190,6 +220,26 @@ function Register-AbortHandler {
         script startup, before any pipeline runs.
     #>
     [ConsoleCtrl]::Register()
+}
+
+function Set-AbortHandlerRunActive {
+    <#
+    .SYNOPSIS
+        Tells the native handler whether a real pipeline run is currently
+        dispatched (2026-08-31 addition, project owner's own explicit
+        decision - see [ConsoleCtrl]'s own RunActive comment for the full
+        reasoning). Call with $true right before dispatching a run, $false
+        right after it returns (in a try/finally, so a crash doesn't leave
+        it stuck $true) - Controller.ps1's Invoke-MainLoop is the one real
+        caller. While $false (idle at the menu, between runs), Ctrl+C/
+        Ctrl+Break falls through to the OS's own default action (immediate
+        termination) instead of being caught - there is nothing running to
+        abort or drain at the menu, and catching it there used to leak
+        AbortRequested into the very next run dispatched in the same loop
+        iteration.
+    #>
+    param([Parameter(Mandatory)][bool]$Active)
+    [ConsoleCtrl]::RunActive = $Active
 }
 
 function Register-AbortCancellationSource {
@@ -252,11 +302,21 @@ function Reset-AbortState {
         lifecycle is already handled per pipeline phase by
         Register-/Unregister-AbortCancellationSource and has nothing to
         do with whether a PAST abort happened.
+
+        Also resets [ConsoleCtrl]::RunActive to $false (2026-08-31
+        addition) - defensive belt-and-suspenders alongside
+        Set-AbortHandlerRunActive's own try/finally at its real call site
+        (Controller.ps1's Invoke-MainLoop): this runs once per loop
+        iteration, BEFORE the menu, so it's never correct for RunActive
+        to still be $true here - if it somehow were (a caller that forgot
+        its own try/finally), the very NEXT Ctrl+C at the menu would be
+        wrongly caught and blocked on a drain that will never happen.
     #>
     $script:abortRequested = $false
     $script:ctrlCloseAbort = $false
     [ConsoleCtrl]::AbortRequested = $false
     [ConsoleCtrl]::IsCloseEvent   = $false
+    [ConsoleCtrl]::RunActive      = $false
     [ConsoleCtrl]::DrainComplete.Reset()
 }
 

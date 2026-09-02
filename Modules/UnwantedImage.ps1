@@ -124,6 +124,22 @@ function Get-UnwantedImageProfilesPath {
     return (Join-Path $BaseDir "ConversionScript\unwanted-image-profiles.json")
 }
 
+function Get-TrailingZeroReportPath {
+    <#
+    .SYNOPSIS
+        "<BaseDir>\ConversionScript\trailing-zero-report.txt" (2026-08-31
+        addition, for Menu.ps1's Cover Deletion submenu item 5) - same
+        base directory as Get-UnwantedImageProfilesPath/settings.json,
+        same "one place this filename is decided" precedent. Overwritten
+        on every run - Invoke-TrailingZeroAudit's own report is a
+        point-in-time scan result, not something to accumulate.
+    #>
+    param([string]$BaseDir)
+
+    if ([string]::IsNullOrWhiteSpace($BaseDir)) { $BaseDir = $env:LOCALAPPDATA }
+    return (Join-Path $BaseDir "ConversionScript\trailing-zero-report.txt")
+}
+
 function Import-UnwantedImageProfiles {
     <#
     .SYNOPSIS

@@ -186,10 +186,20 @@ function Test-ScriptSettingValue {
         return ($Value -is [bool])
     }
     if ($Default -is [int]) {
-        # ConvertFrom-Json yields [double] for whole numbers - accept an
-        # integral double as well as a real int.
+        # ConvertFrom-Json yields [decimal] for a whole-number JSON value
+        # on this PS 5.1/.NET Framework combination - confirmed live
+        # ('{"a":75.0}' | ConvertFrom-Json).a.GetType() -> System.Decimal,
+        # NOT [double] (2026-08-31 fix, caught by a same-day /code-review:
+        # the [double] branch below was dead code against real
+        # ConvertFrom-Json output, so a hand-edited "JpegQuality": 75.0 in
+        # settings.json was silently rejected and reverted to the
+        # default, contrary to what this comment claimed). [double] kept
+        # alongside [decimal] rather than replaced - some other JSON
+        # parser or a value built directly in PowerShell (not from this
+        # project's own ConvertFrom-Json path) could still hand this
+        # function a real [double], and accepting it costs nothing.
         $isIntegral = ($Value -is [int]) -or ($Value -is [long]) -or
-                      (($Value -is [double]) -and ($Value -eq [math]::Truncate($Value)))
+                      (($Value -is [double] -or $Value -is [decimal]) -and ($Value -eq [math]::Truncate($Value)))
         if (-not $isIntegral) { return $false }
 
         $intValue = [int]$Value

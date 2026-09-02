@@ -680,51 +680,77 @@ function Convert-AnimatedBatch {
         }
         $abortDeadline = [System.Diagnostics.Stopwatch]::StartNew()
 
-        while ($running.Count -gt 0 -and $abortDeadline.Elapsed.TotalSeconds -lt $AbortTimeoutSeconds) {
-            $stillWaiting = [System.Collections.Generic.List[hashtable]]::new()
-            foreach ($j in $running) {
-                if ($j.Proc.HasExited) {
-                    Complete-AnimatedConversionJob -Job $j -BatchResult $batchResult -DoFullLogging $DoFullLogging -DoAnimatedDeleteSource $DoAnimatedDeleteSource -SharedBudget $SharedBudget -IsAbortDrain $true
-                } else {
-                    $stillWaiting.Add($j)
+        # try/catch around the whole straggler-drain body (2026-08-31
+        # addition, project owner approved as an easy fix - mirrors both
+        # this function's own outer dispatch-loop catch above AND the
+        # identical fix applied to the sibling module's own straggler
+        # drain: that outer catch only covers the MAIN loop, and an
+        # unexpected throw here (Complete-AnimatedConversionJob's Write-Log
+        # calls are all guarded by its own try/catch, so the realistic
+        # trigger is the force-kill block's own unguarded "Force-stopping"
+        # Write-Log call below) had no equivalent guard, leaking every
+        # remaining drain-list job's process handle and SharedBudget slot.
+        try {
+            while ($running.Count -gt 0 -and $abortDeadline.Elapsed.TotalSeconds -lt $AbortTimeoutSeconds) {
+                $stillWaiting = [System.Collections.Generic.List[hashtable]]::new()
+                foreach ($j in $running) {
+                    if ($j.Proc.HasExited) {
+                        Complete-AnimatedConversionJob -Job $j -BatchResult $batchResult -DoFullLogging $DoFullLogging -DoAnimatedDeleteSource $DoAnimatedDeleteSource -SharedBudget $SharedBudget -IsAbortDrain $true
+                    } else {
+                        $stillWaiting.Add($j)
+                    }
+                }
+                $running = $stillWaiting
+                if ($running.Count -gt 0) { Start-Sleep -Milliseconds 250 }
+            }
+
+            # Force-kill anything still running past the timeout
+            if ($running.Count -gt 0) {
+                $batchResult.ForceKilledCount = $running.Count
+                $labelSuffix = if ($BatchLabel) { " in '" + $BatchLabel + "'" } else { "" }
+                Write-Log ("Force-stopping " + $running.Count + " job(s) that did not finish within " + $AbortTimeoutSeconds + "s" + $labelSuffix + ".") -Level Warn
+                foreach ($j in $running) {
+                    # Swallowed deliberately: a TOCTOU race between the
+                    # HasExited check and Kill() (or an access-denied Kill()/
+                    # WaitForExit()) would otherwise propagate out of an
+                    # already-aborting run's own cleanup - best-effort only,
+                    # matching this file's established best-effort cleanup
+                    # idiom used throughout.
+                    try { if (-not $j.Proc.HasExited) { $j.Proc.Kill() } } catch { }
+                    try { $j.Proc.WaitForExit(5000) } catch { }
+                    # Always safe to delete $j.MagickOutputPath (2026-08-31
+                    # fix, mirrors Complete-AnimatedConversionJob's own failure
+                    # cleanup - see that function's comment): it's either a
+                    # dedicated temp path magick was writing to (an overwrite
+                    # case, never the original file) or, when there was no
+                    # pre-existing file, $j.WebpPath itself. A Ctrl+C during a
+                    # -DoAnimatedOverwrite re-conversion pass force-killing a
+                    # job mid-flight can no longer damage the pre-existing
+                    # good .webp, since magick was never pointed at it
+                    # directly in that case. The inner catch is swallowed
+                    # deliberately, same reasoning as the identical cleanup in
+                    # Complete-AnimatedConversionJob - best-effort only. No
+                    # Test-Path guard needed - File.Delete on a missing path
+                    # is already a safe no-op.
+                    try { [System.IO.File]::Delete($j.MagickOutputPath) } catch { }
+                    $j.Proc.Dispose()
+                    if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
                 }
             }
-            $running = $stillWaiting
-            if ($running.Count -gt 0) { Start-Sleep -Milliseconds 250 }
-        }
-
-        # Force-kill anything still running past the timeout
-        if ($running.Count -gt 0) {
-            $batchResult.ForceKilledCount = $running.Count
-            $labelSuffix = if ($BatchLabel) { " in '" + $BatchLabel + "'" } else { "" }
-            Write-Log ("Force-stopping " + $running.Count + " job(s) that did not finish within " + $AbortTimeoutSeconds + "s" + $labelSuffix + ".") -Level Warn
+        } catch {
             foreach ($j in $running) {
-                # Swallowed deliberately: a TOCTOU race between the
-                # HasExited check and Kill() (or an access-denied Kill()/
-                # WaitForExit()) would otherwise propagate out of an
-                # already-aborting run's own cleanup - best-effort only,
-                # matching this file's established best-effort cleanup
-                # idiom used throughout.
-                try { if (-not $j.Proc.HasExited) { $j.Proc.Kill() } } catch { }
-                try { $j.Proc.WaitForExit(5000) } catch { }
-                # Always safe to delete $j.MagickOutputPath (2026-08-31
-                # fix, mirrors Complete-AnimatedConversionJob's own failure
-                # cleanup - see that function's comment): it's either a
-                # dedicated temp path magick was writing to (an overwrite
-                # case, never the original file) or, when there was no
-                # pre-existing file, $j.WebpPath itself. A Ctrl+C during a
-                # -DoAnimatedOverwrite re-conversion pass force-killing a
-                # job mid-flight can no longer damage the pre-existing
-                # good .webp, since magick was never pointed at it
-                # directly in that case. The inner catch is swallowed
-                # deliberately, same reasoning as the identical cleanup in
-                # Complete-AnimatedConversionJob - best-effort only. No
-                # Test-Path guard needed - File.Delete on a missing path
-                # is already a safe no-op.
-                try { [System.IO.File]::Delete($j.MagickOutputPath) } catch { }
-                $j.Proc.Dispose()
-                if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
+                try { if ($j.Proc -and -not $j.Proc.HasExited) { $j.Proc.Kill() } } catch { }
+                try { if ($j.Proc) { $j.Proc.WaitForExit(5000) } } catch { }
+                if ($j.TempOverwritePath) {
+                    try { [System.IO.File]::Delete($j.TempOverwritePath) } catch { }
+                }
+                if ((-not $j.SlotReleased) -and $j.MagickOutputPath) {
+                    try { [System.IO.File]::Delete($j.MagickOutputPath) } catch { }
+                }
+                try { if ($j.Proc) { $j.Proc.Dispose() } } catch { }
+                if ($SharedBudget -and -not $j.SlotReleased) { try { $SharedBudget.Release() | Out-Null } catch { } }
             }
+            throw
         }
     }
 

@@ -222,7 +222,21 @@ function Invoke-IccStripRetryOrFail {
     Write-Log ("ICC profile mismatch on '" + $Job.SrcPath + "' - stripping profile and retrying.") -Level Warn
     $stripPsi = New-Object System.Diagnostics.ProcessStartInfo
     $stripPsi.FileName               = $MagickExe
-    $stripPsi.Arguments              = "`"" + $Job.SrcPath + "`" -colorspace Gray -strip `"" + $strippedPng + "`""
+    # -strip ONLY - no -colorspace Gray (2026-08-31, project owner's own
+    # explicit decision: color data must never be force-converted, full
+    # stop). The retry trigger is cjxl's generic "Getting pixel data
+    # failed" stderr match - broader than the one specific case
+    # (a PNG mislabeled RGB that's actually grayscale) this was written
+    # for. -strip alone already fixes THAT case (the profile/pixel-format
+    # mismatch is what -strip resolves); -colorspace Gray was a no-op for
+    # it (the source was already grayscale) but would silently destroy
+    # color data - then get its now-unrecoverable original deleted as a
+    # successful conversion - for any OTHER cause of the same generic
+    # stderr message on a genuinely color image cjxl can't read. Verbatim
+    # -colorspace Gray usage was inherited from the original monolithic
+    # reference script; removing it here is a deliberate, explicit
+    # deviation from that reference, not an oversight.
+    $stripPsi.Arguments              = "`"" + $Job.SrcPath + "`" -strip `"" + $strippedPng + "`""
     $stripPsi.UseShellExecute        = $false
     $stripPsi.RedirectStandardOutput = $true
     $stripPsi.RedirectStandardError  = $true
@@ -904,39 +918,66 @@ function Convert-ImageBatch {
         }
         $abortDeadline = [System.Diagnostics.Stopwatch]::StartNew()
 
-        while ($running.Count -gt 0 -and $abortDeadline.Elapsed.TotalSeconds -lt $AbortTimeoutSeconds) {
-            $stillWaiting = [System.Collections.Generic.List[hashtable]]::new()
-            foreach ($j in $running) {
-                if ($j.Proc.HasExited) {
-                    if (Complete-ImageConversionJob -Job $j -BatchResult $batchResult -Pending $pending -MagickExe $MagickExe -DoFullLogging $DoFullLogging -ItemNoun $ItemNoun -SourceNoun $SourceNoun -SharedBudget $SharedBudget -IsAbortDrain $true) {
-                        continue
+        # try/catch around the whole straggler-drain body (2026-08-31
+        # addition - project owner approved as an easy fix, same shape as
+        # the main dispatch loop's own outer catch above): that catch only
+        # covers the MAIN loop - an unexpected throw here (the same
+        # unguarded Write-Log calls inside Complete-ImageConversionJob are
+        # the realistic trigger) had no equivalent guard, leaking every
+        # remaining drain-list job's process handle and SharedBudget slot.
+        # Mirrors that catch's own cleanup exactly, including the
+        # SlotReleased-guarded .jxl deletion (the identical stale-list/
+        # data-loss shape applies here too - the drain's own polling loop
+        # only reassigns $running after its whole foreach pass completes).
+        try {
+            while ($running.Count -gt 0 -and $abortDeadline.Elapsed.TotalSeconds -lt $AbortTimeoutSeconds) {
+                $stillWaiting = [System.Collections.Generic.List[hashtable]]::new()
+                foreach ($j in $running) {
+                    if ($j.Proc.HasExited) {
+                        if (Complete-ImageConversionJob -Job $j -BatchResult $batchResult -Pending $pending -MagickExe $MagickExe -DoFullLogging $DoFullLogging -ItemNoun $ItemNoun -SourceNoun $SourceNoun -SharedBudget $SharedBudget -IsAbortDrain $true) {
+                            continue
+                        }
+                    } else {
+                        $stillWaiting.Add($j)
                     }
-                } else {
-                    $stillWaiting.Add($j)
+                }
+                $running = $stillWaiting
+                if ($running.Count -gt 0) { Start-Sleep -Milliseconds 250 }
+            }
+
+            # Force-kill anything still running past the timeout
+            if ($running.Count -gt 0) {
+                $batchResult.ForceKilledCount = $running.Count
+                $labelSuffix = if ($BatchLabel) { " in '" + $BatchLabel + "'" } else { "" }
+                Write-Log ("Force-stopping " + $running.Count + " job(s) that did not finish within " + $AbortTimeoutSeconds + "s" + $labelSuffix + ".") -Level Warn
+                foreach ($j in $running) {
+                    try { if (-not $j.Proc.HasExited) { $j.Proc.Kill() } } catch { }
+                    try { $j.Proc.WaitForExit(5000) } catch { }
+                    if ($j.TempPng -and (Test-Path -LiteralPath $j.TempPng)) {
+                        try { [System.IO.File]::Delete($j.TempPng) } catch { }
+                    }
+                    # Clean up any partial/corrupt .jxl left behind by the killed process
+                    if (Test-Path -LiteralPath $j.JxlPath) {
+                        try { [System.IO.File]::Delete($j.JxlPath) } catch { }
+                    }
+                    $j.Proc.Dispose()
+                    if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
                 }
             }
-            $running = $stillWaiting
-            if ($running.Count -gt 0) { Start-Sleep -Milliseconds 250 }
-        }
-
-        # Force-kill anything still running past the timeout
-        if ($running.Count -gt 0) {
-            $batchResult.ForceKilledCount = $running.Count
-            $labelSuffix = if ($BatchLabel) { " in '" + $BatchLabel + "'" } else { "" }
-            Write-Log ("Force-stopping " + $running.Count + " job(s) that did not finish within " + $AbortTimeoutSeconds + "s" + $labelSuffix + ".") -Level Warn
+        } catch {
             foreach ($j in $running) {
-                try { if (-not $j.Proc.HasExited) { $j.Proc.Kill() } } catch { }
-                try { $j.Proc.WaitForExit(5000) } catch { }
+                try { if ($j.Proc -and -not $j.Proc.HasExited) { $j.Proc.Kill() } } catch { }
+                try { if ($j.Proc) { $j.Proc.WaitForExit(5000) } } catch { }
                 if ($j.TempPng -and (Test-Path -LiteralPath $j.TempPng)) {
                     try { [System.IO.File]::Delete($j.TempPng) } catch { }
                 }
-                # Clean up any partial/corrupt .jxl left behind by the killed process
-                if (Test-Path -LiteralPath $j.JxlPath) {
+                if ((-not $j.SlotReleased) -and (Test-Path -LiteralPath $j.JxlPath)) {
                     try { [System.IO.File]::Delete($j.JxlPath) } catch { }
                 }
-                $j.Proc.Dispose()
-                if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
+                try { if ($j.Proc) { $j.Proc.Dispose() } } catch { }
+                if ($SharedBudget -and -not $j.SlotReleased) { try { $SharedBudget.Release() | Out-Null } catch { } }
             }
+            throw
         }
     }
 

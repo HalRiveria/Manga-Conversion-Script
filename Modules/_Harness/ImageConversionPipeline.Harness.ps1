@@ -303,12 +303,14 @@ class Program {
             Console.Error.WriteLine("simulated magick pre-conversion failure");
             return 1;
         }
-        // Invoke-IccStripRetryOrFail's own call shape: "<src>" -colorspace
-        // Gray -strip "<dst>" - actually remove the ICC_MISMATCH marker
-        // here, simulating a real profile strip, so a retry against the
-        // resulting PNG behaves differently from the original (fake
-        // cjxl.exe's own ICC_MISMATCH sniff no longer fires on it).
-        bool isIccStrip = args.Length == 5 && args[1] == "-colorspace" && args[2] == "Gray" && args[3] == "-strip";
+        // Invoke-IccStripRetryOrFail's own call shape: "<src>" -strip
+        // "<dst>" - -colorspace Gray deliberately removed (2026-08-31,
+        // project owner's own decision: never force-convert color data) -
+        // actually remove the ICC_MISMATCH marker here, simulating a real
+        // profile strip, so a retry against the resulting PNG behaves
+        // differently from the original (fake cjxl.exe's own ICC_MISMATCH
+        // sniff no longer fires on it).
+        bool isIccStrip = args.Length == 3 && args[1] == "-strip";
         string outContent = isIccStrip ? srcContent.Replace("ICC_MISMATCH", "") : srcContent;
         File.WriteAllText(dst, outContent);
         return 0;
@@ -1353,6 +1355,54 @@ try {
 
 Test-Assert $threwAG "the injected failure propagated out of Convert-ImageBatch"
 Test-Assert (-not (Test-Path -LiteralPath $expectedJxlAG)) "the partial .jxl left by the force-killed still-running job was deleted, not left as a future stale-source trap"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario AH (2026-08-31 addition, project owner approved as an easy
+#  fix mirroring the main dispatch loop's own try/catch): the straggler-
+#  drain block (only reached after a real cancel, when $running.Count -gt 0)
+#  had no equivalent guard. The force-kill sub-block's own "Force-stopping
+#  N job(s)..." Write-Log call is the realistic trigger - unlike every
+#  Write-Log call inside Complete-ImageConversionJob (all guarded by that
+#  function's own try/catch, confirmed by trying the success-path "Conversion
+#  OK (abort drain)" line first: it's swallowed and miscounted as a normal
+#  failure, not a genuine propagating throw), this one sits directly in the
+#  drain block's own body, unguarded. A job that never finishes within
+#  -AbortTimeoutSeconds (so it's still genuinely running, SlotReleased
+#  never set) must still be force-killed/disposed/released by the new catch.
+# ==============================================================================
+Write-Host "=== Scenario AH: an unexpected throw during the straggler-drain's force-kill step still cleans up correctly ===" -ForegroundColor Cyan
+$chAH = New-Dir "scenario-ah\Series\Chapter 1"
+$fileAH = Get-Item -LiteralPath (New-FakeImage -DirPath $chAH -Name "neverfinishes_ah.jpg" -SleepMs 30000)
+$expectedJxlAH = Join-Path $chAH "neverfinishes_ah.jxl"
+$budgetAH = [System.Threading.SemaphoreSlim]::new(3, 3)
+$budgetAH.Wait(0) | Out-Null   # one slot pre-acquired to stand in for another engine
+$ctsAH = [System.Threading.CancellationTokenSource]::new()
+$pollAH = { param($inFlight) if ($inFlight.Count -gt 0) { $ctsAH.Cancel() } }
+
+$realWriteLogFnAH = ${function:Write-Log}
+function Write-Log {
+    param([string]$Message, [ValidateSet("Info", "Warn", "Error", "Summary")][string]$Level = "Info")
+    if ($Message -like "*Force-stopping*") { throw "simulated Write-Log failure during the straggler-drain's own force-kill logging" }
+    & $script:realWriteLogFnAH -Message $Message -Level $Level
+}
+$script:realWriteLogFnAH = $realWriteLogFnAH
+
+$threwAH = $false
+try {
+    $null = Convert-ImageBatch -ImageFiles @($fileAH) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 5 -DoFullLogging $false `
+        -CancelToken $ctsAH.Token -SharedBudget $budgetAH -AbortPollCallback $pollAH -AbortTimeoutSeconds 1
+} catch {
+    $threwAH = $true
+} finally {
+    ${function:Write-Log} = $realWriteLogFnAH
+    $ctsAH.Dispose()
+}
+
+Test-Assert $threwAH "the injected failure propagated out of Convert-ImageBatch during the straggler-drain, not silently swallowed"
+Test-Assert ($budgetAH.CurrentCount -eq 2) ("the never-finished job's slot was still released exactly once by the new catch (got CurrentCount=" + $budgetAH.CurrentCount + ", would stay 1 if the catch never ran and leaked it)")
+Test-Assert (-not (Test-Path -LiteralPath $expectedJxlAH)) "no .jxl was ever created for a job that was force-killed mid-sleep (sanity check - fake cjxl only writes output AFTER its SLEEP_MS completes)"
+$budgetAH.Dispose()
 Write-Host ""
 
 if ($script:failCount -eq 0) {

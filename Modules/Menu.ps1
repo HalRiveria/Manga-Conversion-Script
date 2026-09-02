@@ -13,7 +13,8 @@
         edit saves immediately, not batched, so nothing is lost on a
         mid-menu Ctrl+C (decided explicitly, not a guess).
       - Get-AllUnwantedImageProfiles, Get-UnwantedImageProfilesPath,
-        Invoke-UnwantedImageScan, Show-AddUnwantedImageProfileFlow
+        Invoke-UnwantedImageScan, Show-AddUnwantedImageProfileFlow,
+        Invoke-TrailingZeroAudit, Get-TrailingZeroReportPath
         (Modules\UnwantedImage.ps1) - the Cover Deletion submenu (option
         5) is pure wiring around these, no new pipeline logic of its own.
       - Initialize-CleanConsoleOutput (Modules\Logging.ps1),
@@ -418,6 +419,7 @@ function Get-CoverDeletionMenuLines {
         "  1 - Run                      (scan a folder for known unwanted covers)"
         "  2 - Add Image                (point at a real image to add as a new profile)"
         "  4 - Open Profile Location    (opens the unwanted-image-profiles.json folder)"
+        "  5 - Trailing-Zero Report     (scan a folder, write and open a report of trailing-zero filenames)"
         "  0 - Back"
     )
 }
@@ -464,12 +466,62 @@ function Invoke-CoverDeletionRun {
         Write-Host "No path entered - cancelled." -ForegroundColor Yellow
         return @{ Ran = $false; Reason = "No path entered." }
     }
-    if (-not (Test-Path -LiteralPath $path)) {
-        Write-Host ("Path not found: '" + $path + "'") -ForegroundColor Red
-        return @{ Ran = $false; Reason = "Path not found." }
+    # -PathType Container (2026-08-31 fix, caught by a same-day
+    # /code-review full-codebase pass): a bare Test-Path matches a FILE
+    # too, so dropping a file on this prompt (instead of the folder it
+    # asks for) silently became a one-file scan target instead of being
+    # rejected with a clear message.
+    if (-not (Test-Path -LiteralPath $path -PathType Container)) {
+        Write-Host ("Folder not found: '" + $path + "'") -ForegroundColor Red
+        return @{ Ran = $false; Reason = "Folder not found." }
     }
 
     $result = Invoke-UnwantedImageScan -Path $path -Profiles (Get-AllUnwantedImageProfiles -ProfilesPath $ProfilesPath)
+    return @{ Ran = $true; Reason = $null; Result = $result }
+}
+
+function Invoke-TrailingZeroAuditRun {
+    <#
+    .SYNOPSIS
+        Cover Deletion submenu item 5's real behavior (2026-08-31
+        addition - project owner's own decision: since item 4 opens the
+        profile location, item 5 opens the trailing-zero report). Prompts
+        for a folder to scan (same convention as Invoke-CoverDeletionRun's
+        own prompt), runs Invoke-TrailingZeroAudit against it, then opens
+        the resulting report in the default text-file handler - but only
+        when something was actually found (Invoke-TrailingZeroAudit
+        itself returns a $null ReportPath and writes no file at all in
+        that case - "don't create an empty report" is that function's own
+        documented behavior, not something to work around here).
+    #>
+    param(
+        [string]$ReportPath = (Get-TrailingZeroReportPath),
+        [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
+        [scriptblock]$OpenHandler = { param($Path) Open-FolderInExplorer -Path $Path }
+    )
+
+    $path = (& $PromptFunc "Enter the folder to scan (drag & drop the folder in, or paste the path)")
+    if ($null -ne $path) { $path = $path.Trim().Trim('"') }
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        Write-Host "No path entered - cancelled." -ForegroundColor Yellow
+        return @{ Ran = $false; Reason = "No path entered." }
+    }
+    if (-not (Test-Path -LiteralPath $path -PathType Container)) {
+        Write-Host ("Folder not found: '" + $path + "'") -ForegroundColor Red
+        return @{ Ran = $false; Reason = "Folder not found." }
+    }
+
+    $reportDir = Split-Path -Path $ReportPath -Parent
+    if (-not (Test-Path -LiteralPath $reportDir)) { New-Item -ItemType Directory -Path $reportDir -Force | Out-Null }
+
+    $result = Invoke-TrailingZeroAudit -Path $path -ReportPath $ReportPath
+    if ($null -eq $result.ReportPath) {
+        Write-Host "No trailing-zero filenames found - nothing to report." -ForegroundColor Yellow
+        return @{ Ran = $true; Reason = $null; Result = $result }
+    }
+
+    Write-Host ("Report written: '" + $result.ReportPath + "' (" + $result.UniqueFileCount + " unique file(s))") -ForegroundColor Green
+    & $OpenHandler $result.ReportPath
     return @{ Ran = $true; Reason = $null; Result = $result }
 }
 
@@ -479,10 +531,14 @@ function Show-CoverDeletionMenu {
         The Cover Deletion submenu loop - "1 - Run" and "2 - Add Image"
         both return to THIS submenu when they finish (not the main
         prompt), matching Options' own "stay until you back out" shape;
-        "4 - Open Profile Location" and "0 - Back" are one-shot. Design
-        settled with the project owner (see Todo.md's Menu section) -
-        this function is pure wiring around already-built
-        UnwantedImage.ps1 functions, no new pipeline logic.
+        "4 - Open Profile Location" and "0 - Back" are one-shot. "5 -
+        Trailing-Zero Report" (2026-08-31 addition, project owner's own
+        decision) also returns to this submenu when it finishes, same
+        shape as "1"/"2" - it's a real, potentially lengthy scan, not a
+        one-shot action like "4". Design settled with the project owner
+        (see Todo.md's Menu section) - this function is pure wiring
+        around already-built UnwantedImage.ps1 functions, no new
+        pipeline logic.
     .PARAMETER RunHandler
         Defaults to Invoke-CoverDeletionRun. Injectable so a harness can
         verify dispatch without a real folder scan.
@@ -494,13 +550,17 @@ function Show-CoverDeletionMenu {
         avoid a real Explorer launch while still verifying the right
         action name was dispatched - same pattern as
         Show-OptionsMenuLevel's -ActionHandler.
+    .PARAMETER TrailingZeroHandler
+        Defaults to Invoke-TrailingZeroAuditRun. Injectable for the same
+        reason as -RunHandler/-AddHandler.
     #>
     param(
         [string]$ProfilesPath = (Get-UnwantedImageProfilesPath),
         [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
         [scriptblock]$RunHandler = { param($ProfilesPath, $PromptFunc) Invoke-CoverDeletionRun -ProfilesPath $ProfilesPath -PromptFunc $PromptFunc },
         [scriptblock]$AddHandler = { param($ProfilesPath, $PromptFunc) Show-AddUnwantedImageProfileFlow -ProfilesPath $ProfilesPath -PromptFunc $PromptFunc },
-        [scriptblock]$ActionHandler = { param($ActionName, $ProfilesPath) Invoke-CoverDeletionAction -ActionName $ActionName -ProfilesPath $ProfilesPath }
+        [scriptblock]$ActionHandler = { param($ActionName, $ProfilesPath) Invoke-CoverDeletionAction -ActionName $ActionName -ProfilesPath $ProfilesPath },
+        [scriptblock]$TrailingZeroHandler = { param($PromptFunc) Invoke-TrailingZeroAuditRun -PromptFunc $PromptFunc }
     )
 
     while ($true) {
@@ -512,6 +572,7 @@ function Show-CoverDeletionMenu {
             '1' { & $RunHandler $ProfilesPath $PromptFunc; Write-Host "" }
             '2' { & $AddHandler $ProfilesPath $PromptFunc; Write-Host "" }
             '4' { & $ActionHandler 'OpenProfileLocation' $ProfilesPath }
+            '5' { & $TrailingZeroHandler $PromptFunc; Write-Host "" }
             default { Write-Host "Invalid selection." -ForegroundColor Yellow }
         }
     }

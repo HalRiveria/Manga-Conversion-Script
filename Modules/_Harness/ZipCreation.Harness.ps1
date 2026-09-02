@@ -129,38 +129,30 @@ Write-Host ""
 #  trying to include the very ZIP it's writing as part of its own
 #  contents (a self-referential write). Tested live, not assumed, since
 #  the failure mode here (hang vs. throw vs. silently-corrupt output) was
-#  not known in advance.
+#  not known in advance when this scenario was first written - it's known
+#  NOW (confirmed live, repeatedly, on this real machine:
+#  ZipFile.CreateFromDirectory throws "The process cannot access the
+#  file" - it tries to read the in-progress output file, which is still
+#  open for writing, as one of its own source entries): pinned to the
+#  real, observed behavior (2026-08-31, caught by a same-day /code-review -
+#  the original version branched on whether it threw and asserted
+#  `Test-Assert $true` in the throw case, a tautology that would keep
+#  passing even if this behavior later regressed to something worse,
+#  like silent corruption).
 # ==============================================================================
 Write-Host "=== Scenario D: ZipOut located INSIDE SourceDir (self-referential) ===" -ForegroundColor Cyan
 $sourceD = New-ScratchSourceDir -Name "scenario-d-source" -FileCount 2
 $zipOutD = Join-Path $sourceD "output-inside-itself.zip"   # nested INSIDE the source dir being zipped
 
 $threwD = $false
-$errorMessageD = $null
 try {
     Compress-FolderToZip -SourceDir $sourceD -ZipOut $zipOutD
 } catch {
     $threwD = $true
-    $errorMessageD = $_.Exception.Message
 }
 
-if ($threwD) {
-    Write-Host ("  (threw as expected: " + $errorMessageD + ")") -ForegroundColor DarkGray
-    Test-Assert $true "a self-referential ZipOut (inside SourceDir) throws rather than succeeding silently"
-} else {
-    # Did not throw - inspect what actually happened so this is a real,
-    # informative finding rather than a silent pass either way.
-    $entryCountD = -1
-    if (Test-Path -LiteralPath $zipOutD) {
-        try {
-            $archiveD = [System.IO.Compression.ZipFile]::OpenRead($zipOutD)
-            $entryCountD = $archiveD.Entries.Count
-            $archiveD.Dispose()
-        } catch { $entryCountD = -2 }
-    }
-    Write-Host ("  (did NOT throw - zip exists: " + (Test-Path -LiteralPath $zipOutD) + ", entry count: " + $entryCountD + ")") -ForegroundColor Yellow
-    Test-Assert ($entryCountD -eq 2) "a self-referential ZipOut still produced a valid ZIP with exactly the 2 real source files (not corrupted, not self-included)"
-}
+Test-Assert $threwD "a self-referential ZipOut throws (reading its own in-progress output file as a source entry fails), rather than silently corrupting or hanging"
+Test-Assert (-not (Test-Path -LiteralPath $zipOutD)) "the broken/partial zip left behind by the failed attempt was cleaned up, not left as debris"
 Write-Host ""
 
 # ==============================================================================
