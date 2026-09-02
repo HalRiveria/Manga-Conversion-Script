@@ -1355,7 +1355,15 @@ function Invoke-LooseImageConversionPipeline {
         [bool]$FullLogging,
         [string[]]$LooseImageExtensions = (Get-LooseImageExtensions),
         [string[]]$KnownZipPaths = @(),
-        [string[]]$FolderQualifyingExtensions = (Get-LooseImageExtensions),
+        # Get-LooseImageExtensions() PLUS ".jxl" (2026-09-01 live-shakedown
+        # fix, same root cause as Controller.ps1's Full Pipeline default -
+        # see that parameter's own comment there for the full explanation).
+        # This engine's own output extension is ".jxl", which the bare
+        # loose list doesn't include - a chapter this pipeline already
+        # finished converting (source images deleted, only .jxl left) was
+        # otherwise invisible to Get-SeriesChapters on any later solo-mode
+        # run, permanently, with no warning logged.
+        [string[]]$FolderQualifyingExtensions = ((Get-LooseImageExtensions) + @(".jxl")),
         [System.Collections.Generic.HashSet[string]]$FolderExcludeStagingDirs = $null,
         [scriptblock]$PostChapterCallback = $null,
         [scriptblock]$ZipStepCallback = $null,

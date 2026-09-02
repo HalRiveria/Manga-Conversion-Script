@@ -554,6 +554,35 @@ Test-Assert (-not (Test-Path -LiteralPath $chD2)) "the chapter folder was delete
 Write-Host ""
 
 # ==============================================================================
+#  Scenario D3 (2026-09-01 live-shakedown fix): the discovery-level twin of
+#  D2's gap, actually reproduced this time. D2 keeps one real loose-
+#  extension file around (stale though it is), so Get-SeriesChapters still
+#  DISCOVERS the chapter - only the per-chapter "0 candidates" short-
+#  circuit needed fixing there. Here there is no loose file at all - a
+#  chapter that finished converting cleanly on an earlier run (source
+#  already deleted) and has ONLY a .jxl left. Confirmed live against this
+#  project's real cjxl.exe/magick.exe: with -FolderQualifyingExtensions
+#  still defaulting to the bare Get-LooseImageExtensions() list (no
+#  ".jxl"), Test-ZippableLeafDirCandidate's own qualifying-file check
+#  never matches anything in this folder, so Get-SeriesChapters never
+#  finds it - the chapter is silently invisible to every later Full
+#  Pipeline run, permanently, with no warning logged. Fixed by adding
+#  ".jxl" to Invoke-FullPipeline's own -FolderQualifyingExtensions
+#  default - see that parameter's own comment in Controller.ps1.
+# ==============================================================================
+Write-Host "=== Scenario D3: a chapter with ONLY already-converted .jxl (zero loose files) is still discovered and zipped ===" -ForegroundColor Cyan
+$chD3 = New-Dir "scenario-d3\Series\Chapter 1"
+[System.IO.File]::WriteAllText((Join-Path $chD3 "page1.jxl"), "already converted on a prior run - source already deleted, nothing loose left")
+
+$totalsD3 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-d3") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+
+Test-Assert ($totalsD3.ChapterCount -eq 1) ("the all-.jxl chapter was discovered at all (got ChapterCount=" + $totalsD3.ChapterCount + ")")
+Test-Assert ($totalsD3.ConvertedImageSuccess -eq 0 -and $totalsD3.ConvertedImageFail -eq 0) "sanity check: nothing needed converting"
+Test-Assert ($totalsD3.ZipCreatedSuccess -eq 1) ("the all-.jxl chapter was still zipped - the exact discovery-level gap this fix closes (got ZipCreatedSuccess=" + $totalsD3.ZipCreatedSuccess + ")")
+Test-Assert (-not (Test-Path -LiteralPath $chD3)) "the chapter folder was deleted after the successful zip"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario E: a chapter with ONLY animated files - symmetric to D, the
 #  image engine is never dispatched.
 # ==============================================================================

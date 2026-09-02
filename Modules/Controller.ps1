@@ -752,7 +752,26 @@ function Invoke-FullPipeline {
         [string[]]$LooseImageExtensions = (Get-LooseImageExtensions),
         [string[]]$AnimatedFileExtensions = @(".avif"),
         [string[]]$KnownZipPaths = @(),
-        [string[]]$FolderQualifyingExtensions = (Get-LooseImageExtensions),
+        # Get-LooseImageExtensions() PLUS ".jxl" (2026-09-01 live-shakedown
+        # fix), not the bare loose list: that list is the "still needs
+        # converting" set, correct for deciding what to CONVERT, but wrong
+        # here - here it decides whether a chapter directory is even
+        # DISCOVERED as real, zippable content (Get-SeriesChapters ->
+        # Get-ZippableLeafDirs -> Test-ZippableLeafDirCandidate). A chapter
+        # that Full Pipeline already finished converting has ONLY .jxl
+        # files left (no loose source images remain) - with the bare loose
+        # list, Test-ZippableLeafDirCandidate's qualifying-file check saw
+        # zero matches and silently treated the whole chapter as "empty,
+        # or nothing recognized", forever - confirmed live: a chapter
+        # left with only .jxl content (e.g. a prior run's conversion step
+        # finished but its zip step didn't) was never zipped by Full
+        # Pipeline on a later run, no warning logged, while mode 3
+        # (ZipPipeline.ps1's Invoke-ZipOnlyPipeline, whose own
+        # -QualifyingExtensions default already includes ".jxl") zipped
+        # the identical folder correctly. ".webp" needs no separate
+        # addition - it's already in Get-LooseImageExtensions() and
+        # doubles as the animated engine's own output extension.
+        [string[]]$FolderQualifyingExtensions = ((Get-LooseImageExtensions) + @(".jxl")),
         [System.Collections.Generic.HashSet[string]]$FolderExcludeStagingDirs = $null
     )
 

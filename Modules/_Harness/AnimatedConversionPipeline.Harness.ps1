@@ -187,7 +187,13 @@ class Program {
             }
             Match fm = Regex.Match(content, "FRAMES:(\\d+)");
             int frames = fm.Success ? int.Parse(fm.Groups[1].Value) : 1;
-            Console.Write(frames.ToString());
+            // Real magick's "identify -format ... <path>" runs the format
+            // string once PER FRAME with no separator unless the format
+            // string supplies one (2026-09-01 live-shakedown finding) -
+            // reproduce that here (one "<frames>\n" repetition per frame)
+            // so a regression back to a bare, separator-less "%n" would
+            // fail this scenario instead of only ever surfacing live.
+            for (int i = 0; i < frames; i++) { Console.Write(frames.ToString() + "\n"); }
             return 0;
         }
 

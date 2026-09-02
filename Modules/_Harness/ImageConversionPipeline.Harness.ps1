@@ -524,6 +524,34 @@ Test-Assert ($totalsD.SeriesCount -eq 1) "the empty series was still walked"
 Test-Assert ($totalsD.ChapterCount -eq 0) "zero chapters counted"
 
 # ==============================================================================
+#  Scenario D2 (2026-09-01 live-shakedown fix): a chapter that finished
+#  converting on an EARLIER run - source images already deleted, only a
+#  .jxl left, zero loose files of any kind. Confirmed live against this
+#  project's real cjxl.exe: with -FolderQualifyingExtensions still
+#  defaulting to the bare Get-LooseImageExtensions() list (no ".jxl", this
+#  engine's own output extension), Get-SeriesChapters never finds this
+#  chapter at all - it's silently invisible to every later mode-1 run,
+#  permanently, with no warning logged (same root cause as
+#  Controller.ps1's Full Pipeline - see that file's own matching fix).
+#  Fixed by adding ".jxl" to this function's own -FolderQualifyingExtensions
+#  default.
+# ==============================================================================
+Write-Host "=== Scenario D2: a chapter with ONLY already-converted .jxl (zero loose files) is still discovered ===" -ForegroundColor Cyan
+$rootD2 = New-Dir "scenario-d2"
+$chD2 = New-Dir "scenario-d2\Series\Chapter 1"
+[System.IO.File]::WriteAllText((Join-Path $chD2 "page1.jxl"), "already converted on a prior run - source already deleted, nothing loose left")
+
+$zipCallsD2 = [System.Collections.Generic.List[hashtable]]::new()
+$zipStepD2 = { param($Info) $zipCallsD2.Add($Info); return @{ Status = "Success"; Detail = "1 entry" } }.GetNewClosure()
+
+$totalsD2 = Invoke-LooseImageConversionPipeline -Path $rootD2 -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false -ZipStepCallback $zipStepD2
+
+Test-Assert ($totalsD2.ChapterCount -eq 1) ("the all-.jxl chapter was discovered at all (got ChapterCount=" + $totalsD2.ChapterCount + ")")
+Test-Assert ($totalsD2.ConvertedSuccess -eq 0 -and $totalsD2.ConvertedFail -eq 0) "sanity check: nothing needed converting"
+Test-Assert ($zipCallsD2.Count -eq 1) ("the zip callback fired for the all-.jxl chapter - the exact discovery-level gap this fix closes (got " + $zipCallsD2.Count + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario E: -PostChapterCallback fires once per chapter with the documented
 #  shape (SeriesName/ChapterName/Dir/ChapterResult) - this is mode 2's hook.
 # ==============================================================================

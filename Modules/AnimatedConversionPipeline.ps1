@@ -153,9 +153,22 @@ function Test-AvifAnimated {
         [string]$MagickExe
     )
 
+    # Format string includes a trailing \n (2026-09-01 live-shakedown fix):
+    # `identify` runs its -format string once PER FRAME in the sequence,
+    # with no separator between repetitions unless the format string
+    # supplies one. On a real multi-frame AVIF (confirmed live against
+    # this machine's actual libjxl/ImageMagick install, not just the
+    # harness's fake magick.exe), a bare "%n" therefore produced e.g. a
+    # 96-frame file's stdout as "96" repeated 96 times concatenated with
+    # no boundary ("96969696...", 192 chars) - un-parseable as an int, so
+    # this function threw on EVERY genuinely animated AVIF on this
+    # system, misclassifying every one as unclassifiable. Since %n (total
+    # frame count) is identical on every repetition, adding "\n" lets us
+    # split on newlines and just read the first line - correct for any
+    # frame count, including the single-frame/static case (one "1\n").
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName               = $MagickExe
-    $psi.Arguments              = "identify -format `"%n`" `"" + $AvifPath + "`""
+    $psi.Arguments              = "identify -format `"%n\n`" `"" + $AvifPath + "`""
     $psi.UseShellExecute        = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
@@ -199,8 +212,9 @@ function Test-AvifAnimated {
         throw ("magick identify exited " + $code + ". Stderr: " + $stderr.Trim())
     }
 
+    $firstLine = ($stdout -split "`r?`n" | Where-Object { $_ -ne "" } | Select-Object -First 1)
     $frameCount = 0
-    if (-not [int]::TryParse($stdout.Trim(), [ref]$frameCount)) {
+    if ($null -eq $firstLine -or -not [int]::TryParse($firstLine.Trim(), [ref]$frameCount)) {
         throw ("magick identify returned a non-numeric frame count: '" + $stdout.Trim() + "'")
     }
 
