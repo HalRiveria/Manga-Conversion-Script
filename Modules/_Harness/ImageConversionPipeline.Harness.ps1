@@ -915,22 +915,26 @@ Write-Host ""
 # ==============================================================================
 #  Scenario Q2 (2026-09-02, project owner's own decision): .gif/.bmp/.heic/
 #  .heif now count as unconverted content, same as any other extension on
-#  Get-LooseImageExtensions()'s own list. .gif needs no detour - confirmed
-#  live against the real cjxl.exe, it reads GIF directly (same as JPEG/PNG).
-#  .bmp/.heic/.heif DO need the same magick temp-PNG detour WebP/AVIF
-#  already use - confirmed live, cjxl.exe cannot read any of the three
-#  directly, but `magick -list format` confirms BMP is read/write and
-#  HEIC/HEIF are read-only, both sufficient for a one-way transcode.
+#  Get-LooseImageExtensions()'s own list. .bmp/.heic/.heif actually
+#  convert, through the same magick temp-PNG detour WebP/AVIF already use
+#  (confirmed live - cjxl.exe cannot read any of the three directly, but
+#  `magick -list format` confirms BMP is read/write and HEIC/HEIF are
+#  read-only, both sufficient for a one-way transcode). .gif is always
+#  SKIPPED, never actually converted (project owner's own real-world
+#  experience - GIF conversion caused real problems in older script
+#  versions; live-reproduced the same day, an animated GIF reaching the
+#  ICC-strip retry path left orphaned numbered temp PNGs behind that no
+#  cleanup regex in this project catches).
 # ==============================================================================
-Write-Host "=== Scenario Q2: .gif converts directly (no magick detour needed) ===" -ForegroundColor Cyan
+Write-Host "=== Scenario Q2: .gif is always skipped, never actually converted ===" -ForegroundColor Cyan
 $chQ2 = New-Dir "scenario-q2\Series\Chapter 1"
 $gifQ2 = New-FakeImage -DirPath $chQ2 -Name "cover.gif"
 
 $totalsQ2 = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-q2") -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
 
-Test-Assert ($totalsQ2.ConvertedSuccess -eq 1 -and $totalsQ2.ConvertedFail -eq 0) ("GIF converted successfully, with no -MagickExe configured at all (got ConvertedSuccess=" + $totalsQ2.ConvertedSuccess + ", ConvertedFail=" + $totalsQ2.ConvertedFail + ")")
-Test-Assert (-not (Test-Path -LiteralPath $gifQ2)) "the GIF source was deleted after a successful conversion"
-Test-Assert (Test-Path -LiteralPath (Join-Path $chQ2 "cover.jxl")) "cover.jxl was created"
+Test-Assert ($totalsQ2.ConvertedSkipped -eq 1 -and $totalsQ2.ConvertedSuccess -eq 0 -and $totalsQ2.ConvertedFail -eq 0) ("GIF counted as skipped, not converted or failed, with no -MagickExe configured at all (got ConvertedSkipped=" + $totalsQ2.ConvertedSkipped + ", ConvertedSuccess=" + $totalsQ2.ConvertedSuccess + ", ConvertedFail=" + $totalsQ2.ConvertedFail + ")")
+Test-Assert (Test-Path -LiteralPath $gifQ2) "the GIF source was left untouched, not deleted"
+Test-Assert (-not (Test-Path -LiteralPath (Join-Path $chQ2 "cover.jxl"))) "no .jxl was created for a skipped GIF"
 Write-Host ""
 
 Write-Host "=== Scenario Q3: .bmp/.heic/.heif each convert through the WebP-style temp-PNG detour ===" -ForegroundColor Cyan

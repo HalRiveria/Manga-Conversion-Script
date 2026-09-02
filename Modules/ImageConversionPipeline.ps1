@@ -192,18 +192,20 @@ function Get-LooseImageExtensions {
         own decision - these formats were previously silently invisible
         to chapter discovery entirely; the owner's call was they should
         count as unconverted content instead, the same as any other
-        format on this list). ".gif" needs no special handling below -
-        confirmed live, cjxl.exe reads GIF (animated or not) directly,
-        the same as JPEG/PNG, producing an animated JXL from an animated
-        GIF automatically (a real cjxl/JXL feature, not something this
-        project has to special-case the way animated WebP/AVIF are - see
-        Convert-ImageBatch's own header for why those two ARE special-
-        cased). ".bmp"/".heic"/".heif" DO need cjxl's existing WebP/AVIF
-        magick-detour (transcode to a temp PNG first) - confirmed live,
-        cjxl.exe cannot read any of the three directly, but `magick
-        -list format` confirms BMP is read/write and HEIC/HEIF are
-        read-only, both sufficient for the detour's one-way
-        source-to-PNG conversion.
+        format on this list). ".gif" is included here for that reason
+        ONLY - it still counts as unconverted/zip-blocking content, but
+        Convert-ImageBatch always SKIPS it rather than actually
+        converting it (project owner's own real-world experience: GIF
+        conversion caused real problems in older script versions - a
+        live-reproduced instance the same day, an animated GIF reaching
+        the ICC-strip retry path left orphaned numbered temp PNGs behind
+        that no cleanup regex in this project catches, confirmed the
+        concern). ".bmp"/".heic"/".heif" DO actually convert, through
+        cjxl's existing WebP/AVIF magick-detour (transcode to a temp PNG
+        first) - confirmed live, cjxl.exe cannot read any of the three
+        directly, but `magick -list format` confirms BMP is read/write
+        and HEIC/HEIF are read-only, both sufficient for the detour's
+        one-way source-to-PNG conversion.
     #>
     return @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif", ".gif", ".bmp", ".heic", ".heif")
 }
@@ -576,6 +578,28 @@ function Convert-ImageBatch {
         # already-pending reporting the drain path below uses.
         if ($CancelToken.IsCancellationRequested) {
             $batchResult.PendingPaths.Add($srcPath)
+            continue
+        }
+        if ($srcPath -imatch '\.gif$') {
+            # GIF is always skipped, never actually converted (2026-09-02,
+            # project owner's own decision from real-world experience with
+            # older script versions - GIF conversion caused real problems
+            # before). Still counts as unconverted content for chapter-
+            # discovery/zip-blocking purposes (Get-LooseImageExtensions
+            # includes ".gif"), same treatment as animated WebP/AVIF -
+            # just unconditional here rather than gated on an animation
+            # check, since the trouble wasn't specific to animated GIFs.
+            # Confirmed live: a real animated GIF reaching cjxl via the
+            # ICC-strip retry path (Invoke-IccStripRetryOrFail, below)
+            # left orphaned numbered temp PNGs behind (magick auto-numbers
+            # its output when a multi-frame source has no frame selector
+            # and the destination is a single filename) that don't match
+            # the orphaned-scratch-file cleanup regex anywhere in this
+            # project - skipping GIF outright avoids that whole class of
+            # problem rather than trying to patch around it.
+            Write-Log ("SKIPPING GIF '" + $srcPath + "': not converted by this project (see Get-LooseImageExtensions's own comment for why). File left untouched.") -Level Warn
+            $batchResult.SkippedCount++
+            $batchResult.SkippedPaths.Add($srcPath)
             continue
         }
         if ($MagickExe -and $srcPath -imatch '\.webp$') {
