@@ -110,10 +110,11 @@ function Get-ModeMenuLines {
 function Resolve-ModeSelection {
     <#
     .SYNOPSIS
-        Maps a validated mode-menu choice ("1"/"2"/"3"/"4"/"8"/"9") to the
+        Maps a validated mode-menu choice ("1"/"2"/"3"/"4"/"8") to the
         flags a caller acts on. Returns $null for anything else (including
         "0", which Show-ModeMenu handles itself as "enter Options", not a
-        mode).
+        mode, and "9" - Convert Zipped/rezip is hidden from the live menu,
+        see this function's own commented-out '9' case below).
     .OUTPUTS
         @{ Mode = <string>; RunImageConversion = <bool>;
            RunAnimatedConversion = <bool>; RunZip = <bool>;

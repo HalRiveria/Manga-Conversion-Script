@@ -70,6 +70,30 @@ Test-Assert ($resultC -like "*cmd.exe") "the PATH-resolved path points at cmd.ex
 Write-Host ""
 
 # ==============================================================================
+#  Scenario C2 (2026-09-02 review fix, live-confirmed): a DIRECTORY passed
+#  as -UserPath (or sitting in the cache) must fall through, not be
+#  accepted as-is - Test-PathSafely's own bare Test-Path used to return
+#  $true for a directory too. Real trigger: a mistyped -CjxlPath pointing
+#  at an install FOLDER instead of the .exe inside it (or a hand-edited
+#  settings.json with the same mistake) - accepted silently, with no
+#  error until every file in the library failed at cjxl-exec time with
+#  an unrelated-looking error, instead of this project's own clear
+#  "cjxl.exe could not be found..." message.
+# ==============================================================================
+Write-Host "=== Scenario C2: a directory as -UserPath (or a cached path) falls through, not accepted as-is ===" -ForegroundColor Cyan
+$dirPathC2 = Join-Path $scratchDir "a-real-directory-not-an-exe"
+New-Item -ItemType Directory -Path $dirPathC2 -Force | Out-Null
+$resultC2 = Find-Exe -UserPath $dirPathC2 -ExeName "cmd"
+Test-Assert ($resultC2 -ne $dirPathC2) "a directory -UserPath is not returned as-is"
+Test-Assert ($null -ne $resultC2 -and (Test-Path -LiteralPath $resultC2 -PathType Leaf)) "it fell through to a real file instead (PATH lookup), not a directory"
+
+$fakeSettingsC2 = @{ CachedExePath = $dirPathC2 }
+$resultC2b = Find-ExeCached -Settings $fakeSettingsC2 -SettingsKey "CachedExePath" -ExeName "cmd"
+Test-Assert ($resultC2b -ne $dirPathC2) "a directory sitting in the cache is not returned as-is either"
+Test-Assert ($null -ne $resultC2b -and (Test-Path -LiteralPath $resultC2b -PathType Leaf)) "the cached-directory case also falls through to a real file"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario D: not in PATH, found via -Candidates - picks the first
 #  candidate that actually exists, in order (not just any).
 # ==============================================================================

@@ -67,10 +67,23 @@ function Test-PathSafely {
         A System.IO.PathTooLongException (an excessively long path) is
         the same class of "can't evaluate this path" problem and is
         caught here too.
+
+        -PathType Leaf (2026-09-02 review fix, live-confirmed): every
+        real caller (Find-Exe's -UserPath check and its -Candidates
+        loop, Find-ExeCached's cache check) is asking "is there an
+        executable file here," never "is there a directory here" - a
+        bare Test-Path returns $true for a directory too, so a mistyped
+        -CjxlPath pointing at an install FOLDER instead of the .exe
+        inside it (or a hand-edited settings.json with the same mistake)
+        used to be accepted as a valid path, silently, with no error
+        until every single file in the library failed at cjxl-exec time
+        with an unrelated-looking error, instead of this project's own
+        "cjxl.exe could not be found..." message written for exactly
+        this case.
     #>
     param([Parameter(Mandatory)][string]$Path)
     try {
-        return (Test-Path -LiteralPath $Path)
+        return (Test-Path -LiteralPath $Path -PathType Leaf)
     } catch [System.ArgumentException] {
         return $false
     } catch [System.IO.PathTooLongException] {
