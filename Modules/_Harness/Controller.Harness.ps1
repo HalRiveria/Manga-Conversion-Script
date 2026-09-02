@@ -145,7 +145,16 @@ class Program {
             File.WriteAllText(dst + ".started", "");
             Match m = Regex.Match(content, "SLEEP_MS:(\\d+)");
             if (m.Success) { Thread.Sleep(int.Parse(m.Groups[1].Value)); }
-            File.WriteAllText(dst, "fake-jxl-bytes");
+            if (content.Contains("ARGS_MARKER")) {
+                // Lets a test read back the real arguments this fake was
+                // invoked with (2026-09-02, recurring-bug-pattern coverage -
+                // see Scenario Z3) - e.g. proving a real --quality=<N> value
+                // was actually received from the worker scriptblock's own
+                // default, not just that SOME .jxl got written.
+                File.WriteAllText(dst, "ARGS:" + string.Join(" ", args));
+            } else {
+                File.WriteAllText(dst, "fake-jxl-bytes");
+            }
         } finally { PeakBump(-1); }
         return 0;
     }
@@ -1400,6 +1409,31 @@ Test-Assert ($entryNamesY -notcontains "photo_tmp_iccstrip.png" -and $entryNames
 Write-Host ""
 
 # ==============================================================================
+#  Scenario Y2 (2026-09-02 review fix): a chapter whose ONLY content is an
+#  orphaned scratch file - Get-LooseImageCandidates excludes it from both
+#  engines, so nothing gets dispatched or blocks zipping, but the scratch
+#  sweep right before zipping then empties the folder entirely. The
+#  resulting zip has 0 entries - Test-ZipArchive throws even before
+#  checking -RequireJxlEntry - a REAL failure that leaves a REAL,
+#  complete-looking (if empty) zip file on disk, exactly the gap
+#  ZipPipeline.ps1's own Invoke-LooseFolderZip had (same day's matching
+#  fix, ZipPipeline.Harness.ps1 Scenario H). Confirms the broken zip is
+#  now deleted here too, not left behind to permanently hide this
+#  chapter from Get-SeriesChapters on every later run via the staleness
+#  guard.
+# ==============================================================================
+Write-Host "=== Scenario Y2: a chapter emptied by the scratch sweep produces a 0-entry zip, which gets deleted, not left behind ===" -ForegroundColor Cyan
+$chY2 = New-Dir "scenario-y2\Series\Chapter 1"
+[System.IO.File]::WriteAllText((Join-Path $chY2 "photo_tmp_iccstrip.png"), "orphaned strip scratch, nothing else in this chapter")
+
+$totalsY2 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-y2") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+
+$zipOutY2 = Join-Path $scratchDir "scenario-y2\Series\Chapter 1.zip"
+Test-Assert ($totalsY2.ZipCreatedFail -eq 1) ("the 0-entry zip was correctly counted as a failure, not a success (got ZipCreatedFail=" + $totalsY2.ZipCreatedFail + ")")
+Test-Assert (-not (Test-Path -LiteralPath $zipOutY2)) "the broken 0-entry zip itself was deleted on validation failure, not left behind to permanently hide this chapter from later runs"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario Z2 (2026-08-31 fix, caught by a same-day /code-review
 #  full-codebase pass): every -FullLogging/-DoFullLogging argument Invoke-Mode
 #  passes now reads $script:FullLogging (the value Initialize-LogPaths froze
@@ -1429,6 +1463,51 @@ $null = Invoke-Mode -Resolved @{ Mode = 'ImageConversion' } -TargetPath "C:\fake
 $script:FullLogging = $false
 
 Test-Assert ($capturedZ2.FullLogging -eq $true) ("the handler received the frozen `$script:FullLogging (`$true), not the live `$Settings.FullLogging (`$false) (got " + $capturedZ2.FullLogging + ")")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario Z3 (2026-09-02, recurring-bug-pattern coverage): the REAL
+#  $script:fullPipelineChapterWorker scriptblock's own defaults, invoked
+#  directly - distinct from Convert-ImageBatch/Convert-AnimatedBatch's OWN
+#  defaults (already proven safe by ImageConversionPipeline.Harness.ps1's
+#  own Scenario AI). This worker forwards -DoJpegQuality/-AnimatedQuality/
+#  -DoAnimatedDeleteSource to those functions EXPLICITLY, so an omitted
+#  key here overrides whatever safe default they have, regardless of it.
+#  Two real divergences of this exact shape were found in this seam on
+#  2026-09-02 (a same-day full-codebase review found -DoJpegQuality/
+#  -AnimatedQuality; a same-day cross-module-seam review then found
+#  -DoAnimatedDeleteSource) and neither had a test proving the WORKER's
+#  own fallback - as opposed to the downstream function's - was safe.
+#  This closes that for all three at once, directly, rather than only
+#  ever proving it indirectly through Invoke-FullPipelineChapter (which
+#  always sets every key explicitly and so could never have caught this).
+# ==============================================================================
+Write-Host "=== Scenario Z3: the worker scriptblock's own DoJpegQuality/AnimatedQuality/DoAnimatedDeleteSource defaults are safe when omitted ===" -ForegroundColor Cyan
+
+$chZ3 = New-Dir "scenario-z3\Series\Chapter 1"
+$imgZ3 = Join-Path $chZ3 "page1.jpg"
+[System.IO.File]::WriteAllText($imgZ3, "ARGS_MARKER")
+$avifZ3 = Join-Path $chZ3 "anim1.avif"
+[System.IO.File]::WriteAllText($avifZ3, "FRAMES:2")
+
+$budgetZ3 = [System.Threading.SemaphoreSlim]::new(4, 4)
+$imageResultZ3 = & $script:fullPipelineChapterWorker -EngineType 'Image' -Files @(Get-Item -LiteralPath $imgZ3) `
+    -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -DoFullLogging $false -CancelToken ([System.Threading.CancellationToken]::None) `
+    -SharedBudget $budgetZ3 -DoPermanentDelete $true
+$expectedJxlZ3 = Join-Path $chZ3 "page1.jxl"
+$argsTextZ3 = Get-Content -LiteralPath $expectedJxlZ3 -Raw
+Test-Assert ($imageResultZ3.Result.ConvertedCount -eq 1) "sanity check: the worker's own Image-engine call succeeded"
+Test-Assert ($argsTextZ3 -match "--quality=90(\s|$)") ("the worker's own -DoJpegQuality default is 90 when omitted, not 0 (got: '" + $argsTextZ3.Trim() + "')")
+
+$animatedResultZ3 = & $script:fullPipelineChapterWorker -EngineType 'Animated' -Files @(Get-Item -LiteralPath $avifZ3) `
+    -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -DoFullLogging $false -CancelToken ([System.Threading.CancellationToken]::None) `
+    -SharedBudget $budgetZ3 -DoPermanentDelete $true
+$expectedWebpZ3 = Join-Path $chZ3 "anim1.webp"
+$animArgsTextZ3 = Get-Content -LiteralPath $expectedWebpZ3 -Raw
+Test-Assert ($animatedResultZ3.Result.ConvertedCount -eq 1) "sanity check: the worker's own Animated-engine call succeeded"
+Test-Assert ($animArgsTextZ3 -match "-quality 90(\s|$)") ("the worker's own -AnimatedQuality default is 90 when omitted, not 0 (got: '" + $animArgsTextZ3.Trim() + "')")
+Test-Assert (-not (Test-Path -LiteralPath $avifZ3)) "the worker's own -DoAnimatedDeleteSource default is `$true when omitted - the source .avif was deleted, not left behind to double up with its own .webp in the eventual zip"
+$budgetZ3.Dispose()
 Write-Host ""
 
 # ==============================================================================

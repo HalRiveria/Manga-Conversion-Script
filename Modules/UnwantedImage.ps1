@@ -156,25 +156,40 @@ function Import-UnwantedImageProfiles {
 
     if (-not (Test-Path -LiteralPath $ProfilesPath)) { return @() }
 
+    # The per-field cast block below is inside THIS SAME try (2026-09-02
+    # review fix) - it used to run after the try/catch had already
+    # exited, unguarded, contradicting this function's own docstring
+    # above ("rather than throwing"). A hand-edited profiles file (the
+    # whole point of it being plain JSON) with one non-numeric
+    # Width/Height/SizeBytes/SizeTolerance value parsed as valid JSON
+    # (so the try/catch above never caught it) but then threw a real
+    # "Cannot convert value..." error on the [int]/[int64] cast, live-
+    # reproduced. Confirmed this escaped all the way out to
+    # Invoke-CoverDeletionRun/Add-UnwantedImageProfile's own callers -
+    # contained today by Invoke-MainLoop's own $GetModeHandler catch (a
+    # same-day fix), but with no ".corrupt-*.bak" recovery and no reset,
+    # so every LATER Cover Deletion action failed identically until the
+    # file was found and fixed by hand. Same single try, same recovery
+    # path as a parse failure now - a bad field value is exactly as
+    # "corrupt" as bad JSON syntax from this function's own point of view.
     try {
         $raw = [System.IO.File]::ReadAllText($ProfilesPath) | ConvertFrom-Json
+        $profiles = @(foreach ($p in $raw) {
+            @{
+                Label         = $p.Label
+                Width         = [int]$p.Width
+                Height        = [int]$p.Height
+                SizeBytes     = [int64]$p.SizeBytes
+                SizeTolerance = [int]$p.SizeTolerance
+                Hash          = $p.Hash
+            }
+        })
     } catch {
         Write-Log ("Could not read unwanted-image profiles file '" + $ProfilesPath + "' - starting with none. (" + $_ + ")") -Level Warn
         $backupPath = $ProfilesPath + ".corrupt-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".bak"
         try { Copy-Item -LiteralPath $ProfilesPath -Destination $backupPath -Force -ErrorAction Stop } catch { }
         return @()
     }
-
-    $profiles = @(foreach ($p in $raw) {
-        @{
-            Label         = $p.Label
-            Width         = [int]$p.Width
-            Height        = [int]$p.Height
-            SizeBytes     = [int64]$p.SizeBytes
-            SizeTolerance = [int]$p.SizeTolerance
-            Hash          = $p.Hash
-        }
-    })
     return ,$profiles
 }
 

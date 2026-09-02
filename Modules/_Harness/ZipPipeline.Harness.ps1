@@ -280,6 +280,15 @@ $resultH = Invoke-LooseFolderZip -FolderPath $dirH -ZipOut $zipOutH -LooseImageE
 
 Test-Assert ($resultH.Status -eq "Fail") ("Status is Fail when the zip has no .jxl entries and RequireJxlEntry defaults true (got " + $resultH.Status + ")")
 Test-Assert (Test-Path -LiteralPath $dirH) "the source folder is left alone after a failed zip (not deleted)"
+# 2026-09-02 review fix: Compress-FolderToZip succeeded here (a real,
+# complete zip WAS written) - it's Test-ZipArchive's own verification
+# that failed, AFTER the file already existed on disk. Before this fix,
+# that broken-but-real zip was left behind, and Test-ZippableLeafDirCandidate's
+# own staleness guard (LeafDirectoryDiscovery.ps1) would then see it as
+# newer than every file in the folder and skip this chapter FOREVER on
+# every later run - live-reproduced. Invoke-ZipOnlyPipeline's own worker
+# already cleaned this up; this call path didn't.
+Test-Assert (-not (Test-Path -LiteralPath $zipOutH)) "the broken zip itself was deleted on validation failure, not left behind to permanently hide this chapter from later runs"
 Write-Host ""
 
 # ==============================================================================

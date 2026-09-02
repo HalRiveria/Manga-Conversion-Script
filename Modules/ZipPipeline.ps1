@@ -647,6 +647,21 @@ function Invoke-LooseFolderZip {
         } catch {
             Write-Log ("FAILED to zip folder '" + $FolderPath + "': " + $_) -Level Error
             $result.Status = "Fail"
+            # Remove a broken/partial zip left on disk (2026-09-02 review
+            # fix, same species as the 2026-09-01 .jxl-discovery bug):
+            # Compress-FolderToZip cleans up after ITSELF on its own
+            # throw, but Test-ZipArchive runs AFTER it, on an already-
+            # written file - a verification failure (e.g. "contains no
+            # .jxl files", "0 entries") left a real, complete-looking
+            # zip on disk with nothing to delete it. Test-ZippableLeafDirCandidate's
+            # own staleness guard then saw that fresh zip, newer than
+            # every file in the folder, and skipped the chapter forever
+            # on every later run - live-reproduced. Invoke-ZipOnlyPipeline's
+            # own worker (above in this file) already had this cleanup;
+            # this call path was missing it.
+            try {
+                if (Test-Path -LiteralPath $ZipOut) { [System.IO.File]::Delete($ZipOut) }
+            } catch { }
         }
 
         return $result

@@ -305,7 +305,16 @@ $script:fullPipelineChapterWorker = {
         [bool]$DoAnimatedLossless,
         [int]$AnimatedQuality = 90,
         [bool]$DoAnimatedOverwrite,
-        [bool]$DoAnimatedDeleteSource,
+        # = $true (2026-09-02 review fix, same species as the two quality
+        # defaults above): Convert-AnimatedBatch's own -DoAnimatedDeleteSource
+        # already defaults to $true - an omitted key here used to bind
+        # $false instead, silently flipping the module's real default
+        # from delete-on-success to keep-the-source. Latent, not live
+        # (Invoke-FullPipelineChapter always sets this key explicitly),
+        # but a source .avif left behind gets swept into the chapter's
+        # zip alongside its own .webp output, permanently, once the
+        # folder is deleted after a successful zip.
+        [bool]$DoAnimatedDeleteSource = $true,
         [bool]$DoFullLogging,
         [string]$LogFile,
         [string]$LogErrorFile,
@@ -675,6 +684,20 @@ function Invoke-FullPipelineChapter {
         } catch {
             Write-Log ("FAILED to zip '" + $ChapterDir + "': " + $_) -Level Error
             $zipResult.Status = 'Fail'
+            # Remove a broken/partial zip left on disk (2026-09-02 review
+            # fix, same species as the 2026-09-01 .jxl-discovery bug, and
+            # the identical fix applied to ZipPipeline.ps1's own
+            # Invoke-LooseFolderZip the same day): Compress-FolderToZip
+            # cleans up after ITSELF on its own throw, but Test-ZipArchive
+            # runs AFTER it, on an already-written file - a verification
+            # failure left a real, complete-looking zip on disk with
+            # nothing to delete it. Test-ZippableLeafDirCandidate's own
+            # staleness guard then saw that fresh zip, newer than every
+            # file in the folder, and skipped the chapter forever on
+            # every later run - live-reproduced.
+            try {
+                if (Test-Path -LiteralPath $ZipOut) { [System.IO.File]::Delete($ZipOut) }
+            } catch { }
         }
         $zipped = $true
     }

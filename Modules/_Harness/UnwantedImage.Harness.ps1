@@ -397,6 +397,23 @@ try { $loadedM2 = Import-UnwantedImageProfiles -ProfilesPath $corruptPathM } cat
 Test-Assert (-not $threwM -and @($loadedM2).Count -eq 0) "a corrupt profiles file returns an empty array, does not throw"
 Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*" }).Count -ge 1) "a Warn was logged for the corrupt file"
 Test-Assert (@(Get-ChildItem -LiteralPath (Split-Path $corruptPathM -Parent) -Filter "*.corrupt-*.bak").Count -eq 1) "the corrupt file was backed up, not silently discarded"
+
+# 2026-09-02 review fix: valid JSON (so the parse step above never
+# catches it), but a non-numeric value in one of the [int]/[int64]-cast
+# fields - the per-field cast used to run outside the try/catch entirely.
+# Real trigger: a user hand-editing the plain-JSON profiles file and
+# fat-fingering a dimension. Same recovery contract as a parse failure -
+# Warn + .bak + empty array, not a throw.
+$badFieldPathM = Join-Path $scratchDir "profiles-m-badfield\unwanted-image-profiles.json"
+New-Item -ItemType Directory -Path (Split-Path $badFieldPathM -Parent) -Force | Out-Null
+'[{"Label":"Test A","Width":"3OOO","Height":20,"SizeBytes":100,"SizeTolerance":5,"Hash":"AAA"}]' | Set-Content -LiteralPath $badFieldPathM -Encoding UTF8
+$script:logCalls.Clear()
+$threwM2 = $false
+$loadedM3 = $null
+try { $loadedM3 = Import-UnwantedImageProfiles -ProfilesPath $badFieldPathM } catch { $threwM2 = $true }
+Test-Assert (-not $threwM2 -and @($loadedM3).Count -eq 0) "a valid-JSON profiles file with a bad field value returns an empty array, does not throw"
+Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*" }).Count -ge 1) "a Warn was logged for the bad field value"
+Test-Assert (@(Get-ChildItem -LiteralPath (Split-Path $badFieldPathM -Parent) -Filter "*.corrupt-*.bak").Count -eq 1) "the bad-field file was backed up too, same as a parse failure"
 Write-Host ""
 
 # ==============================================================================
