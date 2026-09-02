@@ -1211,6 +1211,34 @@ Test-Assert (@($script:ccrSeenU2)[0] -eq $false -and @($script:ccrSeenU2)[1] -eq
 Write-Host ""
 
 # ==============================================================================
+#  Scenario U3 (2026-09-02 review fix): mode 5 (Cover Deletion)'s real work
+#  runs INSIDE $GetModeHandler (Get-SelectedMode -> Show-ModeMenu ->
+#  Show-CoverDeletionMenu), not inside $InvokeModeHandler like every other
+#  mode - so it was never covered by Invoke-Mode's own try/catch. Before
+#  this fix, a throw from $GetModeHandler had nothing to catch it in this
+#  loop at all - it escaped straight to the bootstrap's top-level catch,
+#  taking down the whole script instead of being logged and returning to
+#  the menu like every other mode's own crash already does (Scenario U,
+#  above, proves the $InvokeModeHandler side of this same contract).
+# ==============================================================================
+Write-Host "=== Scenario U3: Invoke-MainLoop handles a throwing GetModeHandler without crashing the loop ===" -ForegroundColor Cyan
+$fakeGetModeU3 = { param($Settings, $SettingsPath) throw "simulated crash inside mode 5's own Cover Deletion work" }
+$script:invokeModeCallsU3 = 0
+$fakeInvokeModeU3 = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) $script:invokeModeCallsU3++; return New-StatsTracker }
+$script:postRunCallsU3 = 0
+$fakePostRunU3 = { $script:postRunCallsU3++; return 'Exit' }
+$loggedErrorsU3 = [System.Collections.Generic.List[string]]::new()
+$fakeLogHandlerU3 = { param($m) $loggedErrorsU3.Add($m) }.GetNewClosure()
+
+Invoke-MainLoop -TargetPath "C:\fake\lib" -Settings $fakeSettings -SettingsPath "C:\fake\settings.json" -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" `
+    -GetModeHandler $fakeGetModeU3 -InvokeModeHandler $fakeInvokeModeU3 -PostRunPromptHandler $fakePostRunU3 -LogHandler $fakeLogHandlerU3
+
+Test-Assert ($loggedErrorsU3.Count -ge 1) "the throw from GetModeHandler was actually logged, not silently lost"
+Test-Assert ($script:invokeModeCallsU3 -eq 0) "InvokeModeHandler was never called - the loop didn't try to run a mode from a failed resolution"
+Test-Assert ($script:postRunCallsU3 -eq 1) "the loop still reached Show-PostRunPrompt after the crash - same recovery path as a `$null Invoke-Mode result"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario V: the Full-Pipeline AVIF race fix (2026-08-28) - a static and
 #  an animated AVIF in the SAME chapter are each routed to exactly one
 #  engine, proving the reconciliation actually prevents double-discovery/

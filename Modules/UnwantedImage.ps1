@@ -465,9 +465,9 @@ function Test-UnwantedImageMatch {
         one in the list - true of the original script too, not a
         regression introduced here).
     .OUTPUTS
-        @{ Status = 'Match'|'HashMismatch'|'NoMatch'; Profile; Width;
-           Height; Hash } - Profile/Width/Height/Hash are all $null for
-        'NoMatch'.
+        @{ Status = 'Match'|'HashMismatch'|'HashFailure'|'NoMatch'; Profile;
+           Width; Height; Hash } - Profile/Width/Height/Hash are all $null
+        for 'NoMatch'.
     #>
     param(
         [Parameter(Mandatory)]
@@ -486,7 +486,27 @@ function Test-UnwantedImageMatch {
         if (-not $dimOk) { continue }
         if ($width -ne $profile.Width -or $height -ne $profile.Height) { continue }
 
-        $fileHash = (Get-FileHash -LiteralPath $File.FullName -Algorithm SHA256).Hash
+        # try/catch (2026-09-02 review fix): Get-FileHash used to run bare,
+        # unlike Get-TrailingZeroGroups's own identical call further down
+        # this file - with the bootstrap's $ErrorActionPreference = 'Stop'
+        # inherited into this function, a file that disappears or gets
+        # locked (a sync client, an indexer, another app) in the window
+        # between the Get-ImageDimensions call above and this line throws
+        # a terminating error here. A size+dimension match is exactly the
+        # moment this function is most likely to be looking at a real,
+        # externally-touched file, not a made-up edge case. Same
+        # treatment as Get-TrailingZeroGroups: log a Warn and give up on
+        # this file (retrying against another profile would just hit the
+        # same failure again), rather than letting it escape uncaught -
+        # see Invoke-MainLoop's own matching fix for why an uncaught throw
+        # here used to take down the whole script instead of just this
+        # one scan.
+        try {
+            $fileHash = (Get-FileHash -LiteralPath $File.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+        } catch {
+            Write-Log ("Could not hash '" + $File.FullName + "' during unwanted-image scan: " + $_) -Level Warn
+            return @{ Status = 'HashFailure'; Profile = $profile; Width = $width; Height = $height; Hash = $null }
+        }
         if ($fileHash -ne $profile.Hash) {
             return @{ Status = 'HashMismatch'; Profile = $profile; Width = $width; Height = $height; Hash = $fileHash }
         }
@@ -539,7 +559,12 @@ function Invoke-UnwantedImageScan {
         Full paths to skip entirely (e.g. a caller's own log files, if
         they happen to sit inside $Path) - optional, defaults to none.
     .OUTPUTS
-        @{ ScannedCount; DeletedCount; DeleteFailedCount; HashMismatchCount }
+        @{ ScannedCount; DeletedCount; DeleteFailedCount; HashMismatchCount;
+           HashFailureCount } - HashFailureCount (2026-09-02 review fix)
+        counts a file Test-UnwantedImageMatch couldn't hash at all (already
+        logged as its own Warn there) - distinct from HashMismatchCount
+        (hashed fine, just didn't match), same distinction
+        Get-TrailingZeroGroups's own HashFailureCount already makes.
     #>
     param(
         [Parameter(Mandatory)]
@@ -555,6 +580,7 @@ function Invoke-UnwantedImageScan {
         DeletedCount      = 0
         DeleteFailedCount = 0
         HashMismatchCount = 0
+        HashFailureCount  = 0
     }
 
     $files = Get-ScannableFiles -Path $Path -ExcludePaths $ExcludePaths -ImageExtensions $ImageExtensions
@@ -562,6 +588,11 @@ function Invoke-UnwantedImageScan {
     foreach ($file in $files) {
         $totals.ScannedCount++
         $matchResult = Test-UnwantedImageMatch -File $file -Profiles $Profiles
+
+        if ($matchResult.Status -eq 'HashFailure') {
+            $totals.HashFailureCount++
+            continue
+        }
 
         if ($matchResult.Status -eq 'HashMismatch') {
             Write-Log ("Hash mismatch (not deleted): [" + $matchResult.Profile.Label + "] '" + $file.FullName + "' | " + $file.Length + " bytes | " + $matchResult.Width + "x" + $matchResult.Height + " | " + $matchResult.Hash) -Level Warn

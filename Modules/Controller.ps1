@@ -289,9 +289,21 @@ $script:fullPipelineChapterWorker = {
         [string]$CjxlExe,
         [string]$MagickExe,
         [bool]$DoJpegLossless,
-        [int]$DoJpegQuality,
+        # = 90 on both quality params (2026-09-02 review fix): this
+        # worker forwards each explicitly to Convert-ImageBatch/
+        # Convert-AnimatedBatch's own -DoJpegQuality/-AnimatedQuality
+        # (below), each of which already defaults to 90 - an omitted key
+        # in the caller's job-params hashtable used to bind $0 here
+        # instead, silently OVERRIDING that safe default with
+        # maximum-loss encoding. Latent, not live (both real job-params
+        # builders below always set both explicitly), but this worker's
+        # own header comment documents "the worker's own $false/0
+        # defaults apply to whatever a job's hashtable omits" as the
+        # deliberate fallback contract - for these two fields specifically,
+        # 0 was never a safe value for that contract to fall back to.
+        [int]$DoJpegQuality = 90,
         [bool]$DoAnimatedLossless,
-        [int]$AnimatedQuality,
+        [int]$AnimatedQuality = 90,
         [bool]$DoAnimatedOverwrite,
         [bool]$DoAnimatedDeleteSource,
         [bool]$DoFullLogging,
@@ -1480,12 +1492,39 @@ function Invoke-MainLoop {
         [scriptblock]$InvokeModeHandler = ${function:Invoke-Mode},
         [scriptblock]$PostRunPromptHandler = ${function:Show-PostRunPrompt},
         [scriptblock]$ResetAbortHandler = ${function:Reset-AbortState},
-        [scriptblock]$SetRunActiveHandler = ${function:Set-AbortHandlerRunActive}
+        [scriptblock]$SetRunActiveHandler = ${function:Set-AbortHandlerRunActive},
+        [scriptblock]$LogHandler = { param($m) Write-Log $m -Level Error }
     )
 
     while ($true) {
         & $ResetAbortHandler
-        $resolved = & $GetModeHandler -Settings $Settings -SettingsPath $SettingsPath
+
+        # try/catch around $GetModeHandler (2026-09-02 review fix): mode 5
+        # (Cover Deletion)'s own real, destructive work runs INSIDE this
+        # call (Get-SelectedMode -> Show-ModeMenu -> Show-CoverDeletionMenu),
+        # unlike every other mode, which runs inside $InvokeModeHandler
+        # below - already wrapped, and Invoke-Mode has its own further
+        # internal catch besides. Before this fix, an uncaught throw
+        # anywhere under mode 5 (e.g. Test-UnwantedImageMatch's own
+        # Get-FileHash call, fixed the same day) had nothing between it
+        # and the bootstrap's top-level catch - it took down the entire
+        # script (a FATAL ERROR message, keypress, exit) instead of being
+        # reported and returning to the menu like every other mode's own
+        # crash already does. Same containment/-LogHandler shape as
+        # Invoke-Mode's own catch, for the same reason.
+        $resolved = $null
+        try {
+            $resolved = & $GetModeHandler -Settings $Settings -SettingsPath $SettingsPath
+        } catch {
+            $null = Invoke-AbortOrFatalHandler -ErrorRecord $_ -LogHandler $LogHandler
+        }
+        if ($null -eq $resolved) {
+            Write-Log "Run did not complete - see the error above." -Level Warn
+            $postRun = & $PostRunPromptHandler
+            if ($postRun -eq 'Exit') { break }
+            Write-Host ""
+            continue
+        }
 
         # Re-sync the two options-menu toggles that are cheap, idempotent
         # $script: assignments with no other side effect, so a change made

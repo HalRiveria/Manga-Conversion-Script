@@ -184,6 +184,34 @@ $nonImgC = New-NonImageFile -Name "notimage-c.jpg" -Content "x" * 100
 $profileNonImgC = @{ Label = "N/A"; Width = 1; Height = 1; SizeBytes = $nonImgC.Length; SizeTolerance = 0; Hash = "irrelevant" }
 $resultC5 = Test-UnwantedImageMatch -File $nonImgC -Profiles @($profileNonImgC)
 Test-Assert ($resultC5.Status -eq 'NoMatch') "a non-image file (dimension read fails) -> NoMatch, no throw"
+
+# 2026-09-02 review fix: a file that matches on size+dimensions but can't
+# be hashed (locked by another process, or vanishes between the dimension
+# read and this call - a real TOCTOU gap, since Get-ImageDimensions and
+# Get-FileHash are two separate file opens) used to throw straight out of
+# Test-UnwantedImageMatch - with the bootstrap's $ErrorActionPreference =
+# 'Stop' inherited into this function, Get-FileHash's own terminating
+# error was never caught, unlike Get-TrailingZeroGroups's identical call
+# further down this same file. A real FileShare.None lock can't isolate
+# this to just the hash step (Get-ImageDimensions's own
+# [System.Drawing.Image]::FromFile call needs Read access too, so it
+# fails FIRST and this never reaches the hash line at all) - so this
+# shadows the Get-FileHash cmdlet with a throwing function for the
+# duration of one call instead, the standard PowerShell mocking technique
+# (a function of the same name resolves before the cmdlet in the same
+# scope chain). Confirmed live (outside this harness) that a real
+# FileShare.None lock DOES throw from Get-FileHash when it's the only
+# thing holding the file open - this just isolates that one failure
+# deterministically rather than racing a real lock against GDI+.
+$imgC6 = New-RealImage -Name "locked-c.png" -Width 50 -Height 30
+$profileC6 = New-ProfileFromRealFile -File $imgC6 -Width 50 -Height 30
+function Get-FileHash { throw "simulated: file vanished/got locked between the dimension read and the hash read" }
+try {
+    $resultC6 = Test-UnwantedImageMatch -File $imgC6 -Profiles @($profileC6)
+    Test-Assert ($resultC6.Status -eq 'HashFailure') ("size+dimensions match but the hash read throws -> HashFailure, not a throw (got '" + $resultC6.Status + "')")
+} finally {
+    Remove-Item Function:\Get-FileHash -ErrorAction SilentlyContinue
+}
 Write-Host ""
 
 # ==============================================================================

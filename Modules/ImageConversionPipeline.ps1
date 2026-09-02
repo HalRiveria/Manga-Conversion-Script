@@ -487,7 +487,18 @@ function Convert-ImageBatch {
         [string]$CjxlExe,
         [string]$MagickExe,
         [bool]$DoJpegLossless,
-        [int]$DoJpegQuality,
+        # = 90 (2026-09-02 review fix), matching Convert-AnimatedBatch's
+        # own -AnimatedQuality default: unlike DoJpegLossless ($false) or
+        # every other bool/int this batch engine takes, 0 is NOT a safe
+        # fallback for a cjxl quality value - it means maximum-loss
+        # encoding, silently. Both real call sites (Controller.ps1's
+        # worker, Invoke-LooseImageConversionPipeline) already pass this
+        # explicitly, so this was latent, not live - but Controller.ps1's
+        # own worker-param hashtable is deliberately built so an omitted
+        # key falls back to the worker's own default (see that file's
+        # header comment on $baseJobParams), and an omitted DoJpegQuality
+        # was the one field where that fallback was actively wrong.
+        [int]$DoJpegQuality = 90,
         [Parameter(Mandatory)]
         [int]$MaxCjxlProcs,
         [bool]$DoFullLogging,
