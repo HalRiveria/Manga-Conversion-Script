@@ -589,10 +589,16 @@ function Invoke-LooseFolderZip {
         # boundary-level backstop for when that cleanup couldn't run (a
         # force-killed process, a locked file swallowed by a bare
         # `catch {}`).
+        # Patterns widened 2026-09-02 (BMP/HEIC/HEIF detour added to
+        # ImageConversionPipeline.ps1, plus a defensive numbered-output
+        # backstop for Invoke-IccStripRetryOrFail's own magick call) - see
+        # that module's own Get-LooseImageCandidates comment for the full
+        # story, including a real orphaned "_tmp_bmp2png.png" confirmed
+        # live to be missed by the pre-widening pattern here.
         $orphanedScratchFiles = @(Get-ChildItem -LiteralPath $FolderPath -Recurse -File -ErrorAction SilentlyContinue |
             Where-Object {
-                $_.Name -imatch '_tmp_iccstrip\.png$' -or
-                $_.Name -imatch '_tmp_(webp|avif)2png\.png$' -or
+                $_.Name -imatch '_tmp_iccstrip(-\d+)?\.png$' -or
+                $_.Name -imatch '_tmp_(webp|avif|bmp|heic|heif)2png\.png$' -or
                 $_.Name -imatch '_tmp_overwrite\.webp$'
             })
         foreach ($orphan in $orphanedScratchFiles) {

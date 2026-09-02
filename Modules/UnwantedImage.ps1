@@ -284,7 +284,18 @@ function New-UnwantedImageProfileFromFile {
         Height        = $height
         SizeBytes     = $file.Length
         SizeTolerance = $SizeTolerance
-        Hash          = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+        # -ErrorAction Stop (2026-09-02 fix, consistency with this file's
+        # other two Get-FileHash call sites, both fixed the same day):
+        # this function's own docstring already documents "throws if
+        # $Path can't be read" as its contract (unlike Test-UnwantedImageMatch,
+        # which promises never to throw) - this doesn't change that
+        # contract, it just makes the throw reliable regardless of the
+        # ambient $ErrorActionPreference a future caller might have,
+        # rather than depending on inheriting the bootstrap's own 'Stop'
+        # setting. Without it, a non-'Stop' caller would get a silent
+        # non-terminating error and a profile with Hash = $null - one
+        # that looks successfully added but can never match anything.
+        Hash          = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
     }
 }
 

@@ -929,6 +929,16 @@ $fakeSettingsO2 = $fakeSettings.Clone()
 $fakeSettingsO2.ZipWithUnconvertedAnimated = $true
 $null = Invoke-Mode -Resolved @{ Mode = 'ImageConversionZip' } -TargetPath $scratchDir -Settings $fakeSettingsO2 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ImageConversionHandler $fakeImageHandlerO -ZipFolderHandler $fakeZipFolderHandlerO
 Test-Assert ($zipHandlerCallsO[0].LooseImageExtensions -notcontains ".avif") "ZipWithUnconvertedAnimated=true: .avif is EXCLUDED from the blocking extension list"
+# 2026-09-02 review fix: this list used to be a hand-retyped literal
+# snapshot of the canonical list minus ".avif", taken BEFORE ".gif"/
+# ".bmp"/".heic"/".heif" were added to Get-LooseImageExtensions() - it
+# silently never picked those up, so with the toggle ON, an unconverted
+# BMP/HEIC/HEIF sailed past this gate and got zipped raw. ".gif" stays a
+# blocker here too (unrelated to this toggle's own narrow, AVIF-specific
+# purpose - it "counts as unconverted content" by its own separate
+# decision the same day).
+Test-Assert ($zipHandlerCallsO[0].LooseImageExtensions -contains ".bmp" -and $zipHandlerCallsO[0].LooseImageExtensions -contains ".heic" -and $zipHandlerCallsO[0].LooseImageExtensions -contains ".heif") "ZipWithUnconvertedAnimated=true: .bmp/.heic/.heif still block - the toggle is AVIF-specific, not a blanket relax"
+Test-Assert ($zipHandlerCallsO[0].LooseImageExtensions -contains ".gif") "ZipWithUnconvertedAnimated=true: .gif still blocks too - it counts as unconverted content regardless of this toggle"
 Write-Host ""
 
 Write-Host "=== Scenario P: Invoke-Mode / blank MagickExe fails fast for magick-dependent modes ===" -ForegroundColor Cyan
@@ -1392,10 +1402,17 @@ Write-Host "=== Scenario Y: an orphaned _tmp_* scratch file is deleted before zi
 $chY = New-Dir "scenario-y\Series\Chapter 1"
 New-FakeImageIn -DirPath $chY -Name "page1.jpg" | Out-Null
 [System.IO.File]::WriteAllText((Join-Path $chY "photo_tmp_iccstrip.png"), "orphaned strip scratch")
+[System.IO.File]::WriteAllText((Join-Path $chY "photo_tmp_iccstrip-0.png"), "orphaned NUMBERED strip scratch")
+[System.IO.File]::WriteAllText((Join-Path $chY "photo_tmp_bmp2png.png"), "orphaned bmp scratch")
+[System.IO.File]::WriteAllText((Join-Path $chY "photo_tmp_heic2png.png"), "orphaned heic scratch")
+[System.IO.File]::WriteAllText((Join-Path $chY "photo_tmp_heif2png.png"), "orphaned heif scratch")
 [System.IO.File]::WriteAllText((Join-Path $chY "photo_tmp_overwrite.webp"), "orphaned overwrite scratch")
 
 $totalsY = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-y") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
 
+# 2026-09-02 review fix: the BMP/HEIC/HEIF scratch patterns (and the
+# numbered iccstrip variant) were confirmed live to be missed by the
+# pre-widening regex here.
 Test-Assert ($totalsY.ZipCreatedSuccess -eq 1) ("the chapter still zipped cleanly, not blocked by the scratch files (got ZipCreatedSuccess=" + $totalsY.ZipCreatedSuccess + ")")
 $zipOutY = Join-Path $scratchDir "scenario-y\Series\Chapter 1.zip"
 Test-Assert (Test-Path -LiteralPath $zipOutY) "the zip file was created"
@@ -1405,7 +1422,7 @@ try {
 } finally {
     $zipEntriesY.Dispose()
 }
-Test-Assert ($entryNamesY -notcontains "photo_tmp_iccstrip.png" -and $entryNamesY -notcontains "photo_tmp_overwrite.webp") ("neither scratch file was archived into the zip (got entries: " + ($entryNamesY -join ", ") + ")")
+Test-Assert (@($entryNamesY | Where-Object { $_ -match '_tmp_' }).Count -eq 0) ("none of the 6 scratch files were archived into the zip (got entries: " + ($entryNamesY -join ", ") + ")")
 Write-Host ""
 
 # ==============================================================================

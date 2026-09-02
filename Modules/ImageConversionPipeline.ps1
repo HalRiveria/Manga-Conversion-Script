@@ -210,6 +210,29 @@ function Get-LooseImageExtensions {
     return @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif", ".gif", ".bmp", ".heic", ".heif")
 }
 
+function Get-NeverConvertedExtensions {
+    <#
+    .SYNOPSIS
+        Extensions on Get-LooseImageExtensions()'s own list that this
+        project deliberately never actually converts - currently just
+        ".gif" (2026-09-02, project owner's own decision from real-world
+        experience with older script versions). Single source of truth
+        for that fact, used by BOTH Convert-ImageBatch's own skip check
+        AND Get-LooseImageCandidates's staleness classification - a real,
+        live-confirmed bug (2026-09-02 review) came from those two
+        agreeing only by accident: Convert-ImageBatch skipped GIF and
+        left it untouched with a "File left untouched" promise, but
+        Get-LooseImageCandidates had no matching exclusion, so a GIF
+        older than an unrelated same-basename .jxl got classified as a
+        stale leftover and deleted on the very next run - breaking that
+        promise one run later. Same species as this project's other
+        divergent-list bugs (Get-LooseImageExtensions itself, the
+        orphaned-scratch-file regex trio) - a fact that has to stay true
+        in two places, now consolidated into one.
+    #>
+    return @(".gif")
+}
+
 function Invoke-IccStripRetryOrFail {
     <#
     .SYNOPSIS
@@ -255,6 +278,25 @@ function Invoke-IccStripRetryOrFail {
     # -colorspace Gray usage was inherited from the original monolithic
     # reference script; removing it here is a deliberate, explicit
     # deviation from that reference, not an oversight.
+    # Deliberately NO "[0]" frame selector here (2026-09-02, considered and
+    # rejected during the same review that found the orphaned-numbered-PNG
+    # leak this retry can cause against a multi-frame/multi-image source -
+    # see the calling function's own header and Get-LooseImageCandidates's
+    # matching exclusion fix). Adding "[0]" WOULD stop magick from auto-
+    # numbering its output - but it would also silently strip every frame
+    # past the first from whatever this retry produces, for any genuinely
+    # multi-frame/multi-image source that reaches this point (a multi-page
+    # TIFF, a multi-image HEIC burst) - trading a noisy-but-safe failure
+    # (Test-Path below correctly finds no file at the expected exact name,
+    # so this function correctly returns $false, no data touched) for a
+    # quiet, lossy "success" that silently truncates real content. That is
+    # exactly the class of bug this project's own standing rule already
+    # exists to prevent (see the -colorspace Gray removal above, same
+    # function, same day - "never silently strip data, full stop"). The
+    # numbered-orphan-file problem is real but cosmetic (disk space, not
+    # data loss) and is fixed instead at the cleanup side - see
+    # Get-LooseImageCandidates's own widened orphan-sweep regex, which now
+    # matches the numbered form this command can produce.
     $stripPsi.Arguments              = "`"" + $Job.SrcPath + "`" -strip `"" + $strippedPng + "`""
     $stripPsi.UseShellExecute        = $false
     $stripPsi.RedirectStandardOutput = $true
@@ -580,24 +622,34 @@ function Convert-ImageBatch {
             $batchResult.PendingPaths.Add($srcPath)
             continue
         }
-        if ($srcPath -imatch '\.gif$') {
-            # GIF is always skipped, never actually converted (2026-09-02,
-            # project owner's own decision from real-world experience with
-            # older script versions - GIF conversion caused real problems
-            # before). Still counts as unconverted content for chapter-
-            # discovery/zip-blocking purposes (Get-LooseImageExtensions
-            # includes ".gif"), same treatment as animated WebP/AVIF -
-            # just unconditional here rather than gated on an animation
-            # check, since the trouble wasn't specific to animated GIFs.
-            # Confirmed live: a real animated GIF reaching cjxl via the
-            # ICC-strip retry path (Invoke-IccStripRetryOrFail, below)
-            # left orphaned numbered temp PNGs behind (magick auto-numbers
-            # its output when a multi-frame source has no frame selector
-            # and the destination is a single filename) that don't match
-            # the orphaned-scratch-file cleanup regex anywhere in this
+        if ((Get-NeverConvertedExtensions) -icontains [System.IO.Path]::GetExtension($srcPath)) {
+            # Reads Get-NeverConvertedExtensions (2026-09-02 fix, from a
+            # same-day review) rather than a literal '\.gif$' match - that
+            # literal was the ONLY place this fact was recorded, and
+            # Get-LooseImageCandidates's own staleness classification
+            # (below) had no matching exclusion, so a GIF older than an
+            # unrelated same-basename .jxl got deleted as a "stale
+            # leftover" on the very next run - live-confirmed, breaking
+            # this exact skip message's own "File left untouched" promise
+            # one run later. See Get-NeverConvertedExtensions's own header
+            # for the full story. GIF is always skipped, never actually
+            # converted (project owner's own decision from real-world
+            # experience with older script versions - GIF conversion
+            # caused real problems before). Still counts as unconverted
+            # content for chapter-discovery/zip-blocking purposes
+            # (Get-LooseImageExtensions includes ".gif"), same treatment
+            # as animated WebP/AVIF - just unconditional here rather than
+            # gated on an animation check, since the trouble wasn't
+            # specific to animated GIFs. Confirmed live: a real animated
+            # GIF reaching cjxl via the ICC-strip retry path
+            # (Invoke-IccStripRetryOrFail, below) left orphaned numbered
+            # temp PNGs behind (magick auto-numbers its output when a
+            # multi-frame source has no frame selector and the
+            # destination is a single filename) that don't match the
+            # orphaned-scratch-file cleanup regex anywhere in this
             # project - skipping GIF outright avoids that whole class of
             # problem rather than trying to patch around it.
-            Write-Log ("SKIPPING GIF '" + $srcPath + "': not converted by this project (see Get-LooseImageExtensions's own comment for why). File left untouched.") -Level Warn
+            Write-Log ("SKIPPING '" + $srcPath + "': not converted by this project (see Get-NeverConvertedExtensions's own comment for why). File left untouched.") -Level Warn
             $batchResult.SkippedCount++
             $batchResult.SkippedPaths.Add($srcPath)
             continue
@@ -1169,9 +1221,14 @@ function Get-LooseImageCandidates {
         Where-Object {
             if ($LooseImageExtensions -inotcontains $_.Extension) { return $false }
             # Orphaned scratch files (2026-08-31 fix, caught by a same-day
-            # /code-review 4th pass) - "_tmp_iccstrip.png" (this file's own
-            # Invoke-IccStripRetryOrFail), "_tmp_<fmt>2png.png" (this file's
-            # own WebP/AVIF pre-conversion detour), and "_tmp_overwrite.webp"
+            # /code-review 4th pass; widened 2026-09-02 for the BMP/HEIC/
+            # HEIF detour and a defensive numbered-output backstop) -
+            # "_tmp_iccstrip.png"/"_tmp_iccstrip-N.png" (this file's own
+            # Invoke-IccStripRetryOrFail - the "-N" form shouldn't occur
+            # any more now that its own magick call selects frame 0
+            # explicitly, but stays matched here as a backstop),
+            # "_tmp_<fmt>2png.png" (this file's own WebP/AVIF/BMP/HEIC/
+            # HEIF pre-conversion detour), and "_tmp_overwrite.webp"
             # (AnimatedConversionPipeline.ps1's own -DoAnimatedOverwrite
             # staging file) all carry extensions in $LooseImageExtensions.
             # Every real leak path for these already has its own cleanup
@@ -1181,10 +1238,43 @@ function Get-LooseImageCandidates {
             # loss, a locked file swallowed by a bare `catch {}`): without
             # it, a leaked scratch file gets treated as a real loose image
             # by the very next run, converted, and left behind permanently
-            # instead of being recognized as debris.
-            if ($_.Name -imatch '_tmp_iccstrip\.png$' -or
-                $_.Name -imatch '_tmp_(webp|avif)2png\.png$' -or
+            # instead of being recognized as debris. Confirmed live
+            # (2026-09-02 review) that the BMP/HEIC/HEIF variants of this
+            # pattern were missing entirely before this fix - a real
+            # orphaned "_tmp_bmp2png.png" was misclassified as a genuine
+            # NeedsConversion candidate.
+            if ($_.Name -imatch '_tmp_iccstrip(-\d+)?\.png$' -or
+                $_.Name -imatch '_tmp_(webp|avif|bmp|heic|heif)2png\.png$' -or
                 $_.Name -imatch '_tmp_overwrite\.webp$') {
+                return $false
+            }
+            # Never-converted extensions (2026-09-02 fix, from a same-day
+            # review, live-confirmed) - excluded here for the same reason
+            # orphaned scratch files are excluded above: without this, a
+            # GIF (Convert-ImageBatch's own pre-pass always skips it,
+            # leaving it untouched with a "File left untouched" promise -
+            # see Get-NeverConvertedExtensions's own header) that happens
+            # to be OLDER than an unrelated same-basename .jxl gets
+            # classified as a stale leftover below and DELETED on the
+            # very next run, breaking that promise. Excluding it here
+            # means it's never even a NeedsConversion/StaleSources/
+            # NamingCollisions candidate - it just sits there, still
+            # visible to a folder-qualifying-extension check (still
+            # blocks zip until resolved), permanently untouched by this
+            # function specifically.
+            if ((Get-NeverConvertedExtensions) -icontains $_.Extension) {
+                # Logged here, not just left silent like the scratch-file
+                # exclusion above (2026-09-02 fix) - a never-converted file
+                # is real user content, not internal debris, and this
+                # exclusion means Convert-ImageBatch's own matching
+                # "SKIPPING..." message (its pre-pass) can no longer fire
+                # for it through either real caller (both route through
+                # this function first) - without a message here, a
+                # chapter holding only a never-converted file would show
+                # nothing more specific than "no unconverted images",
+                # indistinguishable from a chapter that's genuinely fully
+                # done.
+                Write-Log ("SKIPPING '" + $_.FullName + "': not converted by this project (see Get-NeverConvertedExtensions's own comment for why). File left untouched.") -Level Warn
                 return $false
             }
             $fileDir = $_.DirectoryName
@@ -1728,7 +1818,10 @@ function Get-ImageConversionSharedFunctionNames {
         can call it, but propagating it is unsafe (CleanConsoleRendering.ps1's
         module-scope state is never initialized inside a fresh runspace) -
         see CLAUDE.md's Known gaps / CHANGELOG.md 2026-08-29 for the real
-        gap this leaves (deliberately, not an oversight either).
+        gap this leaves (deliberately, not an oversight either). Includes
+        Get-NeverConvertedExtensions (2026-09-02) - Convert-ImageBatch's
+        own pre-pass calls it directly to decide whether to skip a file
+        (currently just ".gif") rather than dispatch it to cjxl.
     #>
-    return @('Convert-ImageBatch', 'Complete-ImageConversionJob', 'Invoke-IccStripRetryOrFail', 'Test-AvifAnimated')
+    return @('Convert-ImageBatch', 'Complete-ImageConversionJob', 'Invoke-IccStripRetryOrFail', 'Test-AvifAnimated', 'Get-NeverConvertedExtensions')
 }

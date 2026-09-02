@@ -467,6 +467,35 @@ $nonImgP = New-NonImageFile -Name "notimage-p.jpg"
 $threwP2 = $false
 try { New-UnwantedImageProfileFromFile -Path $nonImgP.FullName -Label "X" } catch { $threwP2 = $true }
 Test-Assert $threwP2 "throws for a file that can't be read as an image"
+
+# 2026-09-02 review fix: this function's own Get-FileHash call now passes
+# -ErrorAction Stop, matching this file's other two Get-FileHash sites
+# (both fixed the same day) - makes the throw reliable regardless of the
+# ambient $ErrorActionPreference a caller might have, rather than
+# depending on inheriting the bootstrap's own 'Stop' setting. Proven here
+# by explicitly setting a non-Stop preference for this one call and
+# shadowing Get-FileHash with a non-terminating-error version (a real
+# file lock can't isolate the failure to just this call, since
+# Get-ImageDimensions needs read access too and would fail first - same
+# reasoning as the earlier Test-UnwantedImageMatch fix's own test).
+$imgP3 = New-RealImage -Name "profile-source-p3.png" -Width 15 -Height 15
+function Get-FileHash {
+    [CmdletBinding()]
+    param($LiteralPath, $Algorithm)
+    Write-Error "simulated non-terminating hash failure"
+}
+$threwP3 = $false
+$oldEapP3 = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    New-UnwantedImageProfileFromFile -Path $imgP3.FullName -Label "X"
+} catch {
+    $threwP3 = $true
+} finally {
+    $ErrorActionPreference = $oldEapP3
+    Remove-Item Function:\Get-FileHash -ErrorAction SilentlyContinue
+}
+Test-Assert $threwP3 "still throws on a hash failure even under a non-Stop `$ErrorActionPreference, thanks to its own -ErrorAction Stop"
 Write-Host ""
 
 # ==============================================================================

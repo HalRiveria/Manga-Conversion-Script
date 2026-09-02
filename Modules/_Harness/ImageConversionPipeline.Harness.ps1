@@ -925,16 +925,32 @@ Write-Host ""
 #  versions; live-reproduced the same day, an animated GIF reaching the
 #  ICC-strip retry path left orphaned numbered temp PNGs behind that no
 #  cleanup regex in this project catches).
+#
+#  Convert-ImageBatch's own skip-check is exercised DIRECTLY here, not
+#  through Invoke-LooseImageConversionPipeline (2026-09-02 follow-up fix):
+#  Get-LooseImageCandidates now excludes .gif entirely (Scenario AC2,
+#  above) so it never reaches Convert-ImageBatch through either real
+#  caller (this one, or Controller.ps1's Full Pipeline) any more - the
+#  check below is a defensive backstop for anything that calls
+#  Convert-ImageBatch directly, not a live production code path.
 # ==============================================================================
 Write-Host "=== Scenario Q2: .gif is always skipped, never actually converted ===" -ForegroundColor Cyan
 $chQ2 = New-Dir "scenario-q2\Series\Chapter 1"
 $gifQ2 = New-FakeImage -DirPath $chQ2 -Name "cover.gif"
 
-$totalsQ2 = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-q2") -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
+$resultQ2 = Convert-ImageBatch -ImageFiles @(Get-Item -LiteralPath $gifQ2) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -DoFullLogging $false -CancelToken ([System.Threading.CancellationToken]::None)
 
-Test-Assert ($totalsQ2.ConvertedSkipped -eq 1 -and $totalsQ2.ConvertedSuccess -eq 0 -and $totalsQ2.ConvertedFail -eq 0) ("GIF counted as skipped, not converted or failed, with no -MagickExe configured at all (got ConvertedSkipped=" + $totalsQ2.ConvertedSkipped + ", ConvertedSuccess=" + $totalsQ2.ConvertedSuccess + ", ConvertedFail=" + $totalsQ2.ConvertedFail + ")")
+Test-Assert ($resultQ2.SkippedCount -eq 1 -and $resultQ2.ConvertedCount -eq 0 -and $resultQ2.FailedCount -eq 0) ("GIF counted as skipped, not converted or failed, with no -MagickExe configured at all (got SkippedCount=" + $resultQ2.SkippedCount + ", ConvertedCount=" + $resultQ2.ConvertedCount + ", FailedCount=" + $resultQ2.FailedCount + ")")
 Test-Assert (Test-Path -LiteralPath $gifQ2) "the GIF source was left untouched, not deleted"
 Test-Assert (-not (Test-Path -LiteralPath (Join-Path $chQ2 "cover.jxl"))) "no .jxl was created for a skipped GIF"
+
+# Confirms Get-LooseImageCandidates's own exclusion (not this function's
+# check) is what actually governs the real, end-to-end pipeline now -
+# a chapter with only a .gif reports zero candidates of any kind and
+# never even reaches Convert-ImageBatch.
+$totalsQ2 = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-q2") -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
+Test-Assert ($totalsQ2.ConvertedSuccess -eq 0 -and $totalsQ2.ConvertedFail -eq 0 -and $totalsQ2.ConvertedSkipped -eq 0) ("through the real end-to-end pipeline, the .gif is invisible before ever reaching Convert-ImageBatch - not skipped there, just never a candidate at all (got Success=" + $totalsQ2.ConvertedSuccess + ", Fail=" + $totalsQ2.ConvertedFail + ", Skipped=" + $totalsQ2.ConvertedSkipped + ")")
+Test-Assert (Test-Path -LiteralPath $gifQ2) "the GIF source is still untouched after the real end-to-end pipeline run too"
 Write-Host ""
 
 Write-Host "=== Scenario Q3: .bmp/.heic/.heif each convert through the WebP-style temp-PNG detour ===" -ForegroundColor Cyan
@@ -1279,15 +1295,50 @@ Write-Host ""
 Write-Host "=== Scenario AC: orphaned _tmp_* scratch files are excluded from loose-image discovery ===" -ForegroundColor Cyan
 $chAC = New-Dir "scenario-ac\Series\Chapter 1"
 [System.IO.File]::WriteAllText((Join-Path $chAC "photo_tmp_iccstrip.png"), "orphaned strip scratch")
+[System.IO.File]::WriteAllText((Join-Path $chAC "photo_tmp_iccstrip-0.png"), "orphaned NUMBERED strip scratch")
 [System.IO.File]::WriteAllText((Join-Path $chAC "photo_tmp_webp2png.png"), "orphaned webp scratch")
 [System.IO.File]::WriteAllText((Join-Path $chAC "photo_tmp_avif2png.png"), "orphaned avif scratch")
+[System.IO.File]::WriteAllText((Join-Path $chAC "photo_tmp_bmp2png.png"), "orphaned bmp scratch")
+[System.IO.File]::WriteAllText((Join-Path $chAC "photo_tmp_heic2png.png"), "orphaned heic scratch")
+[System.IO.File]::WriteAllText((Join-Path $chAC "photo_tmp_heif2png.png"), "orphaned heif scratch")
 [System.IO.File]::WriteAllText((Join-Path $chAC "photo_tmp_overwrite.webp"), "orphaned overwrite scratch")
 $realAC = New-FakeImage -DirPath $chAC -Name "real.jpg"
 
 $candidatesAC = Get-LooseImageCandidates -ScanPath (Join-Path $scratchDir "scenario-ac")
 
-Test-Assert ($candidatesAC.NeedsConversion.Count -eq 1 -and $candidatesAC.NeedsConversion[0].Name -eq "real.jpg") ("only the real loose image was returned, all 4 scratch-file patterns excluded (got " + $candidatesAC.NeedsConversion.Count + " candidate(s): " + (($candidatesAC.NeedsConversion | ForEach-Object { $_.Name }) -join ", ") + ")")
+# 2026-09-02 review fix: the BMP/HEIC/HEIF scratch patterns (and the
+# numbered iccstrip variant) were confirmed live to be missed by the
+# pre-widening regexes here - a real "cover_tmp_bmp2png.png" was
+# misclassified as a genuine NeedsConversion candidate.
+Test-Assert ($candidatesAC.NeedsConversion.Count -eq 1 -and $candidatesAC.NeedsConversion[0].Name -eq "real.jpg") ("only the real loose image was returned, all 7 scratch-file patterns excluded (got " + $candidatesAC.NeedsConversion.Count + " candidate(s): " + (($candidatesAC.NeedsConversion | ForEach-Object { $_.Name }) -join ", ") + ")")
 Test-Assert ($candidatesAC.StaleSources.Count -eq 0) "no scratch file was misclassified as a stale source either"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario AC2 (2026-09-02 review fix, live-confirmed): a never-converted
+#  extension (currently just .gif - Get-NeverConvertedExtensions) must
+#  NEVER be classified as a stale source, no matter its timestamp relative
+#  to a same-basename .jxl. Before this fix, a chapter with "01.jpg" and
+#  "01.gif" would convert "01.jpg" to "01.jxl" (deleting "01.jpg"
+#  normally) and leave "01.gif" untouched with a "File left untouched"
+#  promise (Convert-ImageBatch's own skip message) - but on the VERY NEXT
+#  run, "01.gif" (older than the freshly-written "01.jxl") was classified
+#  as StaleSources and DELETED, breaking that promise one run later.
+#  Reproduced directly against Get-LooseImageCandidates with a real,
+#  already-older .gif sitting next to a real .jxl.
+# ==============================================================================
+Write-Host "=== Scenario AC2: a never-converted extension (.gif) is never classified as stale, regardless of timestamp ===" -ForegroundColor Cyan
+$chAC2 = New-Dir "scenario-ac2\Series\Chapter 1"
+$gifAC2 = New-FakeImage -DirPath $chAC2 -Name "01.gif"
+Start-Sleep -Milliseconds 50
+[System.IO.File]::WriteAllText((Join-Path $chAC2 "01.jxl"), "a real .jxl, newer than the .gif above")
+
+$candidatesAC2 = Get-LooseImageCandidates -ScanPath (Join-Path $scratchDir "scenario-ac2")
+
+Test-Assert ($candidatesAC2.StaleSources.Count -eq 0) ("the older .gif was NOT classified as a stale source, despite being older than the same-basename .jxl (got " + $candidatesAC2.StaleSources.Count + " stale candidate(s))")
+Test-Assert ($candidatesAC2.NeedsConversion.Count -eq 0) "the .gif was also not classified as needing conversion - it's simply invisible to this function, same as an orphaned scratch file"
+Test-Assert ($candidatesAC2.NamingCollisions.Count -eq 0) "the .gif was not flagged as a naming collision either"
+Test-Assert (Test-Path -LiteralPath $gifAC2) "the .gif itself is untouched on disk (Get-LooseImageCandidates never deletes anything - this just confirms the file wasn't affected by the scan)"
 Write-Host ""
 
 # ==============================================================================

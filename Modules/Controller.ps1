@@ -623,10 +623,16 @@ function Invoke-FullPipelineChapter {
             # folder) permanently embeds the debris as a junk page, and the
             # only mode that produces "_tmp_overwrite.webp" in the first
             # place (-DoAnimatedOverwrite) only ever runs here.
+            # Patterns widened 2026-09-02 (BMP/HEIC/HEIF detour added to
+            # ImageConversionPipeline.ps1, plus a defensive numbered-output
+            # backstop for Invoke-IccStripRetryOrFail's own magick call) -
+            # see that module's own Get-LooseImageCandidates comment for
+            # the full story, including a real orphaned "_tmp_bmp2png.png"
+            # confirmed live to be missed by the pre-widening pattern here.
             $orphanedScratchFiles = @(Get-ChildItem -LiteralPath $ChapterDir -Recurse -File -ErrorAction SilentlyContinue |
                 Where-Object {
-                    $_.Name -imatch '_tmp_iccstrip\.png$' -or
-                    $_.Name -imatch '_tmp_(webp|avif)2png\.png$' -or
+                    $_.Name -imatch '_tmp_iccstrip(-\d+)?\.png$' -or
+                    $_.Name -imatch '_tmp_(webp|avif|bmp|heic|heif)2png\.png$' -or
                     $_.Name -imatch '_tmp_overwrite\.webp$'
                 })
             foreach ($orphan in $orphanedScratchFiles) {
@@ -1392,8 +1398,23 @@ function Invoke-Mode {
                 # -ZipFolderHandler - that would make Invoke-LooseFolderZip
                 # start its OWN CCR transition, which is exactly the
                 # second-transition shape this design rejected.
+                # Derived from Get-LooseImageExtensions() (2026-09-02 fix,
+                # from a same-day review), not a hand-retyped literal - the
+                # literal was a snapshot of the canonical list minus
+                # ".avif" (this toggle's own, literal, documented scope -
+                # "ZipWithUnconvertedAnimated" - never widened to cover
+                # ".webp", a pre-existing asymmetry this fix doesn't touch)
+                # taken BEFORE ".gif"/".bmp"/".heic"/".heif" were added to
+                # the canonical list - it silently never picked those up,
+                # so with the toggle ON, an unconverted BMP/HEIC/HEIF
+                # (magick missing, a future conversion failure) sailed
+                # past this gate and got zipped raw. ".gif" deliberately
+                # stays a blocker here even with the toggle on - it
+                # "counts as unconverted content" by its own, separate,
+                # explicit design decision the same day, unrelated to this
+                # toggle's own narrow, AVIF-specific purpose.
                 $zipLooseExtensions = if ($Settings.ZipWithUnconvertedAnimated) {
-                    @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif")
+                    @((Get-LooseImageExtensions) | Where-Object { $_ -ne ".avif" })
                 } else {
                     Get-LooseImageExtensions
                 }

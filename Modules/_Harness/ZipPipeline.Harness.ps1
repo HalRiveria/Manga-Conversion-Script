@@ -248,12 +248,20 @@ Write-Host "=== Scenario G2: an orphaned _tmp_* scratch file is deleted, not arc
 $dirG2 = New-Dir "scenario-g2"
 New-FileIn -DirPath $dirG2 -Name "page1.jxl" | Out-Null
 New-FileIn -DirPath $dirG2 -Name "photo_tmp_iccstrip.png" | Out-Null
+New-FileIn -DirPath $dirG2 -Name "photo_tmp_iccstrip-0.png" | Out-Null
 New-FileIn -DirPath $dirG2 -Name "photo_tmp_webp2png.png" | Out-Null
+New-FileIn -DirPath $dirG2 -Name "photo_tmp_bmp2png.png" | Out-Null
+New-FileIn -DirPath $dirG2 -Name "photo_tmp_heic2png.png" | Out-Null
+New-FileIn -DirPath $dirG2 -Name "photo_tmp_heif2png.png" | Out-Null
 New-FileIn -DirPath $dirG2 -Name "photo_tmp_overwrite.webp" | Out-Null
 $zipOutG2 = Join-Path $scratchDir "scenario-g2.zip"
 
 $resultG2 = Invoke-LooseFolderZip -FolderPath $dirG2 -ZipOut $zipOutG2 -LooseImageExtensions @(".jpg", ".png", ".webp")
 
+# 2026-09-02 review fix: the BMP/HEIC/HEIF scratch patterns (and the
+# numbered iccstrip variant) were confirmed live to be missed by the
+# pre-widening regex here - real orphaned files of this shape would have
+# been permanently embedded in the .cbz as junk pages.
 Test-Assert ($resultG2.Status -eq "Success") ("Status is Success, not blocked by scratch files (got " + $resultG2.Status + ")")
 Test-Assert (Test-Path -LiteralPath $zipOutG2) "the zip file was created"
 $zipEntriesG2 = [System.IO.Compression.ZipFile]::OpenRead($zipOutG2)
@@ -262,7 +270,7 @@ try {
 } finally {
     $zipEntriesG2.Dispose()
 }
-Test-Assert ($entryNamesG2 -notcontains "photo_tmp_iccstrip.png" -and $entryNamesG2 -notcontains "photo_tmp_webp2png.png" -and $entryNamesG2 -notcontains "photo_tmp_overwrite.webp") ("none of the 3 scratch files were archived into the zip (got entries: " + ($entryNamesG2 -join ", ") + ")")
+Test-Assert (@($entryNamesG2 | Where-Object { $_ -match '_tmp_' }).Count -eq 0) ("none of the 7 scratch files were archived into the zip (got entries: " + ($entryNamesG2 -join ", ") + ")")
 Test-Assert ($entryNamesG2 -contains "page1.jxl") "the real .jxl entry is still there"
 Write-Host ""
 
