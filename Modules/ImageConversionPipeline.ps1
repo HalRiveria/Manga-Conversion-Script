@@ -187,8 +187,25 @@ function Get-LooseImageExtensions {
         test harness, verified in isolation" convention); a cross-module
         default-value dependency would break that. That module keeps its
         own literal, commented as matching this canonical list.
+
+        ".gif"/".bmp"/".heic"/".heif" added 2026-09-02 (project owner's
+        own decision - these formats were previously silently invisible
+        to chapter discovery entirely; the owner's call was they should
+        count as unconverted content instead, the same as any other
+        format on this list). ".gif" needs no special handling below -
+        confirmed live, cjxl.exe reads GIF (animated or not) directly,
+        the same as JPEG/PNG, producing an animated JXL from an animated
+        GIF automatically (a real cjxl/JXL feature, not something this
+        project has to special-case the way animated WebP/AVIF are - see
+        Convert-ImageBatch's own header for why those two ARE special-
+        cased). ".bmp"/".heic"/".heif" DO need cjxl's existing WebP/AVIF
+        magick-detour (transcode to a temp PNG first) - confirmed live,
+        cjxl.exe cannot read any of the three directly, but `magick
+        -list format` confirms BMP is read/write and HEIC/HEIF are
+        read-only, both sufficient for the detour's one-way
+        source-to-PNG conversion.
     #>
-    return @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif")
+    return @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif", ".gif", ".bmp", ".heic", ".heif")
 }
 
 function Invoke-IccStripRetryOrFail {
@@ -704,16 +721,25 @@ function Convert-ImageBatch {
             $psi.RedirectStandardError  = $true
             $psi.CreateNoWindow         = $true
 
-            # cjxl 0.11.x cannot read WebP or AVIF directly - transcode to a
-            # temp PNG first. Animated WebP/AVIF are skipped entirely (cjxl
-            # has no multi-frame support) - animated AVIF has its own
-            # conversion pipeline, AnimatedConversionPipeline.ps1. The two
+            # cjxl 0.11.x cannot read WebP, AVIF, BMP, HEIC, or HEIF
+            # directly - transcode to a temp PNG first. Animated WebP/AVIF
+            # are skipped entirely (cjxl has no multi-frame support) -
+            # animated AVIF has its own conversion pipeline,
+            # AnimatedConversionPipeline.ps1. BMP/HEIC/HEIF (2026-09-02
+            # addition) need no animation pre-check - neither format
+            # carries the kind of animation this project routes specially
+            # (a real HEIC/HEIF "image sequence," e.g. a burst photo, just
+            # transcodes its first image via magick's own "[0]" selector
+            # below, same as it already does for WebP/AVIF). All five
             # formats share this one transcode step; only the animation
-            # pre-check differs (a cheap WebP byte read vs. a real magick
-            # identify process spawn for AVIF - see this module's header,
-            # "STATIC AVIF -> JXL").
+            # pre-check differs where one applies (a cheap WebP byte read
+            # vs. a real magick identify process spawn for AVIF - see this
+            # module's header, "STATIC AVIF -> JXL").
             $isWebp = ($j.SrcPath -imatch '\.webp$')
             $isAvif = ($j.SrcPath -imatch '\.avif$')
+            $isBmp  = ($j.SrcPath -imatch '\.bmp$')
+            $isHeic = ($j.SrcPath -imatch '\.heic$')
+            $isHeif = ($j.SrcPath -imatch '\.heif$')
             if ($j.TempPng) {
                 # Retry job (ICC-strip): TempPng already points to a
                 # complete, ready-to-use PNG that Invoke-IccStripRetryOrFail
@@ -732,15 +758,18 @@ function Convert-ImageBatch {
                 # since the fresh pre-conversion was never actually
                 # ICC-stripped.
                 $cjxlSrc = $j.TempPng
-            } elseif ($isWebp -or $isAvif) {
+            } elseif ($isWebp -or $isAvif -or $isBmp -or $isHeic -or $isHeif) {
                 # Animation classification for WebP/AVIF now happens in the
                 # pre-pass that builds $allJobs, before the collision count -
                 # see that pre-pass's own comment (2026-08-31 fix). A job
                 # reaching here is therefore already known non-animated
                 # (unless $MagickExe was missing at pre-pass time too, in
                 # which case it falls through to the same error below,
-                # matching prior behavior).
-                $formatLabel = if ($isAvif) { "AVIF" } else { "WebP" }
+                # matching prior behavior). BMP/HEIC/HEIF never went
+                # through that pre-pass at all (2026-09-02 addition) -
+                # neither format needs an animation check, see this
+                # branch's own header comment above.
+                $formatLabel = if ($isAvif) { "AVIF" } elseif ($isWebp) { "WebP" } elseif ($isBmp) { "BMP" } elseif ($isHeic) { "HEIC" } else { "HEIF" }
                 if (-not $MagickExe) {
                     Write-Log ("SKIPPING " + $formatLabel + " '" + $j.SrcPath + "': ImageMagick not found. Install ImageMagick or pass -MagickPath.") -Level Error
                     $batchResult.FailedCount++

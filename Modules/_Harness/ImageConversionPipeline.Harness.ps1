@@ -348,13 +348,16 @@ Write-Host ""
 #  is caught immediately instead of silently drifting.
 # ==============================================================================
 Write-Host "=== Scenario A0: Get-LooseImageExtensions is the shared source of truth ===" -ForegroundColor Cyan
-$expectedExtA0 = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif")
+# 2026-09-02: ".gif"/".bmp"/".heic"/".heif" added (project owner's own
+# decision - these formats should count as unconverted content, not be
+# silently invisible to chapter discovery).
+$expectedExtA0 = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif", ".gif", ".bmp", ".heic", ".heif")
 $actualExtA0 = @(Get-LooseImageExtensions)
-Test-Assert (($actualExtA0 -join ",") -eq ($expectedExtA0 -join ",")) ("Get-LooseImageExtensions returns the expected 7-element list in order (got: " + ($actualExtA0 -join ",") + ")")
+Test-Assert (($actualExtA0 -join ",") -eq ($expectedExtA0 -join ",")) ("Get-LooseImageExtensions returns the expected 11-element list in order (got: " + ($actualExtA0 -join ",") + ")")
 
 $animatedPipelinePath = Join-Path $PSScriptRoot "..\AnimatedConversionPipeline.ps1"
 $animatedPipelineSource = Get-Content -LiteralPath $animatedPipelinePath -Raw
-$expectedLiteral = '@(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif")'
+$expectedLiteral = '@(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif", ".gif", ".bmp", ".heic", ".heif")'
 Test-Assert ($animatedPipelineSource.Contains($expectedLiteral)) "AnimatedConversionPipeline.ps1's own deliberately-kept-literal still matches the canonical list exactly (not drifted)"
 Write-Host ""
 
@@ -907,6 +910,50 @@ $totalsR = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "sce
 
 Test-Assert ($totalsR.ConvertedSkipped -eq 1 -and $totalsR.ConvertedSuccess -eq 0) ("animated AVIF counted as skipped, not converted (got ConvertedSkipped=" + $totalsR.ConvertedSkipped + ", ConvertedSuccess=" + $totalsR.ConvertedSuccess + ")")
 Test-Assert (Test-Path -LiteralPath $avifR) "the animated AVIF source was left untouched, not deleted"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario Q2 (2026-09-02, project owner's own decision): .gif/.bmp/.heic/
+#  .heif now count as unconverted content, same as any other extension on
+#  Get-LooseImageExtensions()'s own list. .gif needs no detour - confirmed
+#  live against the real cjxl.exe, it reads GIF directly (same as JPEG/PNG).
+#  .bmp/.heic/.heif DO need the same magick temp-PNG detour WebP/AVIF
+#  already use - confirmed live, cjxl.exe cannot read any of the three
+#  directly, but `magick -list format` confirms BMP is read/write and
+#  HEIC/HEIF are read-only, both sufficient for a one-way transcode.
+# ==============================================================================
+Write-Host "=== Scenario Q2: .gif converts directly (no magick detour needed) ===" -ForegroundColor Cyan
+$chQ2 = New-Dir "scenario-q2\Series\Chapter 1"
+$gifQ2 = New-FakeImage -DirPath $chQ2 -Name "cover.gif"
+
+$totalsQ2 = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-q2") -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
+
+Test-Assert ($totalsQ2.ConvertedSuccess -eq 1 -and $totalsQ2.ConvertedFail -eq 0) ("GIF converted successfully, with no -MagickExe configured at all (got ConvertedSuccess=" + $totalsQ2.ConvertedSuccess + ", ConvertedFail=" + $totalsQ2.ConvertedFail + ")")
+Test-Assert (-not (Test-Path -LiteralPath $gifQ2)) "the GIF source was deleted after a successful conversion"
+Test-Assert (Test-Path -LiteralPath (Join-Path $chQ2 "cover.jxl")) "cover.jxl was created"
+Write-Host ""
+
+Write-Host "=== Scenario Q3: .bmp/.heic/.heif each convert through the WebP-style temp-PNG detour ===" -ForegroundColor Cyan
+foreach ($extQ3 in @("bmp", "heic", "heif")) {
+    $chQ3 = New-Dir ("scenario-q3-" + $extQ3 + "\Series\Chapter 1")
+    $srcQ3 = New-FakeImage -DirPath $chQ3 -Name ("cover." + $extQ3)
+
+    $totalsQ3 = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir ("scenario-q3-" + $extQ3)) -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -MaxCjxlProcs 2 -FullLogging $false
+
+    Test-Assert ($totalsQ3.ConvertedSuccess -eq 1 -and $totalsQ3.ConvertedFail -eq 0) ("." + $extQ3 + " converted successfully through the magick detour (got ConvertedSuccess=" + $totalsQ3.ConvertedSuccess + ", ConvertedFail=" + $totalsQ3.ConvertedFail + ")")
+    Test-Assert (-not (Test-Path -LiteralPath $srcQ3)) ("the ." + $extQ3 + " source was deleted after a successful conversion")
+    Test-Assert (Test-Path -LiteralPath (Join-Path $chQ3 "cover.jxl")) ("cover.jxl was created for ." + $extQ3)
+}
+Write-Host ""
+
+Write-Host "=== Scenario Q4: .bmp/.heic/.heif fail cleanly (not silently) when -MagickExe isn't configured ===" -ForegroundColor Cyan
+$chQ4 = New-Dir "scenario-q4\Series\Chapter 1"
+$srcQ4 = New-FakeImage -DirPath $chQ4 -Name "cover.heic"
+
+$totalsQ4 = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-q4") -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
+
+Test-Assert ($totalsQ4.ConvertedFail -eq 1 -and $totalsQ4.ConvertedSuccess -eq 0) ("HEIC fails cleanly with no -MagickExe, same as WebP/AVIF already did (got ConvertedFail=" + $totalsQ4.ConvertedFail + ", ConvertedSuccess=" + $totalsQ4.ConvertedSuccess + ")")
+Test-Assert (Test-Path -LiteralPath $srcQ4) "the HEIC source survives untouched when it couldn't be converted"
 Write-Host ""
 
 # ==============================================================================

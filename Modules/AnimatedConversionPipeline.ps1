@@ -935,13 +935,15 @@ function Invoke-LooseAnimatedConversionPipeline {
         [string[]]$KnownZipPaths = @(),
         # Kept as its own literal, not ImageConversionPipeline.ps1's shared
         # Get-LooseImageExtensions (2026-08-31), even though this is the
-        # exact same 7-element list - this module's own harness dot-sources
-        # it standalone, without ImageConversionPipeline.ps1, by design
+        # exact same list - this module's own harness dot-sources it
+        # standalone, without ImageConversionPipeline.ps1, by design
         # (this project's "own standalone test harness, verified in
         # isolation" convention). A cross-module default-value dependency
         # would break that. Must be kept in sync by hand with the
-        # canonical list if it ever changes.
-        [string[]]$FolderQualifyingExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif"),
+        # canonical list if it ever changes - updated 2026-09-02 to add
+        # ".gif"/".bmp"/".heic"/".heif" alongside that list's own same-day
+        # addition.
+        [string[]]$FolderQualifyingExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif", ".gif", ".bmp", ".heic", ".heif"),
         [System.Collections.Generic.HashSet[string]]$FolderExcludeStagingDirs = $null,
         [scriptblock]$PostChapterCallback = $null,
         [int]$AbortTimeoutSeconds = 60,
