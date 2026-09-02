@@ -232,6 +232,15 @@ class Program {
             // call to actually run (and, for that test, throw).
             Console.WriteLine("simulated cjxl progress output");
         }
+        if (content.Contains("ARGS_MARKER")) {
+            // Lets a test read back the exact arguments this fake was
+            // actually invoked with (2026-09-02, recurring-bug-pattern
+            // coverage - see Scenario AI below) - e.g. proving a real
+            // --quality=<N> value was received, not just that SOME .jxl
+            // got written.
+            File.WriteAllText(dst, "ARGS:" + string.Join(" ", args));
+            return 0;
+        }
         File.WriteAllText(dst, "fake-jxl-bytes");
         return 0;
     }
@@ -1431,6 +1440,33 @@ Test-Assert $threwAH "the injected failure propagated out of Convert-ImageBatch 
 Test-Assert ($budgetAH.CurrentCount -eq 2) ("the never-finished job's slot was still released exactly once by the new catch (got CurrentCount=" + $budgetAH.CurrentCount + ", would stay 1 if the catch never ran and leaked it)")
 Test-Assert (-not (Test-Path -LiteralPath $expectedJxlAH)) "no .jxl was ever created for a job that was force-killed mid-sleep (sanity check - fake cjxl only writes output AFTER its SLEEP_MS completes)"
 $budgetAH.Dispose()
+Write-Host ""
+
+# ==============================================================================
+#  Scenario AI (2026-09-02, recurring-bug-pattern coverage): omitting
+#  -DoJpegQuality falls back to a safe default (90), not 0. Same species
+#  of bug as the 2026-09-01 .jxl-discovery gap (Todo.md/CHANGELOG.md) -
+#  a parameter default silently diverging from its sibling function's
+#  own default (Convert-AnimatedBatch's -AnimatedQuality already
+#  defaulted to 90) - fixed the same day this scenario was added, but
+#  was latent (both real call sites already pass it explicitly) and had
+#  NO test anywhere proving the omitted-key fallback itself was safe.
+#  Reads back the fake cjxl.exe's own real argument string (via the new
+#  ARGS_MARKER trigger) to prove --quality=90 was actually received, not
+#  just that some default value exists somewhere unverified.
+# ==============================================================================
+Write-Host "=== Scenario AI: Convert-ImageBatch's -DoJpegQuality defaults to 90 when omitted ===" -ForegroundColor Cyan
+$chAI = New-Dir "scenario-ai\Series\Chapter 1"
+$fileAI = Join-Path $chAI "page1.jpg"
+[System.IO.File]::WriteAllText($fileAI, "ARGS_MARKER")
+
+$resultAI = Convert-ImageBatch -ImageFiles @(Get-Item -LiteralPath $fileAI) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -DoFullLogging $false `
+    -CancelToken ([System.Threading.CancellationToken]::None)
+
+$expectedJxlAI = Join-Path $chAI "page1.jxl"
+Test-Assert ($resultAI.ConvertedCount -eq 1 -and $resultAI.FailedCount -eq 0) "sanity check: the conversion itself succeeded"
+$argsTextAI = Get-Content -LiteralPath $expectedJxlAI -Raw
+Test-Assert ($argsTextAI -match "--quality=90(\s|$)") ("omitting -DoJpegQuality produced --quality=90, not --quality=0 (got: '" + $argsTextAI.Trim() + "')")
 Write-Host ""
 
 if ($script:failCount -eq 0) {
