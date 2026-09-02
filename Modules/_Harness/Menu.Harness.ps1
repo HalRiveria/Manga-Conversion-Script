@@ -105,23 +105,27 @@ function New-ScratchSettingsPath {
 
 # ==============================================================================
 #  Scenario A: Get-ModeMenuLines - expected entries present, reserved
-#  numbers (5/6/7) are NOT listed as menu items
+#  numbers (5/6/7) are NOT listed as menu items. Convert Zipped (9) is
+#  ALSO not listed (2026-09-02, project owner's own decision - hidden
+#  from the live menu while its underlying code stays intact for a
+#  possible future reimplementation - see Get-ModeMenuLines/
+#  Resolve-ModeSelection's own matching comments in Menu.ps1).
 # ==============================================================================
 Write-Host "=== Scenario A: Get-ModeMenuLines ===" -ForegroundColor Cyan
 $linesA = Get-ModeMenuLines
 Test-Assert (($linesA -join "`n") -match "1 - Full Pipeline") "lists Full Pipeline (1)"
 Test-Assert (($linesA -join "`n") -match "5 - Cover Deletion") "lists Cover Deletion (5)"
 Test-Assert (($linesA -join "`n") -match "8 - Image Conversion \+ Zip") "lists Image Conversion + Zip (8)"
-Test-Assert (($linesA -join "`n") -match "9 - Convert Zipped") "lists Convert Zipped (9)"
-Test-Assert (($linesA -join "`n") -match "DEPRECATED") "Convert Zipped is marked DEPRECATED on the menu text itself"
+Test-Assert (($linesA -join "`n") -notmatch "9 - Convert Zipped") "does NOT list Convert Zipped (9) - hidden from the live menu"
 Test-Assert (($linesA -join "`n") -match "0 - Options") "lists Options (0)"
 Test-Assert (($linesA -join "`n") -match "Ctrl\+C") "mentions Ctrl+C abort behavior"
-$reservedShownA = @($linesA | Where-Object { $_ -match "^\s*[67] - " })
-Test-Assert ($reservedShownA.Count -eq 0) "reserved numbers 6/7 are not shown as menu items"
+$reservedShownA = @($linesA | Where-Object { $_ -match "^\s*[679] - " })
+Test-Assert ($reservedShownA.Count -eq 0) "reserved numbers 6/7/9 are not shown as menu items"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario B: Resolve-ModeSelection - all six valid codes
+#  Scenario B: Resolve-ModeSelection - all five live valid codes ('9' is
+#  no longer one - see Scenario A/C's own matching comments)
 # ==============================================================================
 Write-Host "=== Scenario B: Resolve-ModeSelection valid codes ===" -ForegroundColor Cyan
 $b1 = Resolve-ModeSelection -Choice '1'
@@ -139,15 +143,17 @@ Test-Assert ($b4.Mode -eq 'ZipFolders' -and $b4.RunZipOnly -and -not $b4.RunImag
 $b8 = Resolve-ModeSelection -Choice '8'
 Test-Assert ($b8.Mode -eq 'ImageConversionZip' -and $b8.RunImageConversion -and $b8.RunZip -and -not $b8.RunAnimatedConversion -and -not $b8.RunZipOnly) "'8' -> ImageConversionZip: image+zip, no animated"
 
-$b9 = Resolve-ModeSelection -Choice '9'
-Test-Assert ($b9.Mode -eq 'ConvertZipped' -and $b9.RunConvertZipped -and -not $b9.RunImageConversion -and -not $b9.RunAnimatedConversion -and -not $b9.RunZip) "'9' -> ConvertZipped: only RunConvertZipped set"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario C: Resolve-ModeSelection - invalid/reserved codes return $null
+#  Scenario C: Resolve-ModeSelection - invalid/reserved codes return $null.
+#  '9' is included here now (2026-09-02) - Convert Zipped/rezip is hidden
+#  from the live menu, so it resolves the same as any other unrecognized
+#  code; Menu.ps1's own commented-out '9' case is where to look to
+#  re-enable it, not here.
 # ==============================================================================
 Write-Host "=== Scenario C: Resolve-ModeSelection invalid codes ===" -ForegroundColor Cyan
-foreach ($badChoice in @('0', '5', '6', '7', '', 'abc', '10')) {
+foreach ($badChoice in @('0', '5', '6', '7', '9', '', 'abc', '10')) {
     $resultC = Resolve-ModeSelection -Choice $badChoice
     Test-Assert ($null -eq $resultC) ("'" + $badChoice + "' resolves to `$null (not a valid mode code)")
 }

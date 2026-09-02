@@ -91,7 +91,16 @@ function Get-ModeMenuLines {
         "  4 - Zip Folders              (no conversion; zips folders that are already ready)"
         "  5 - Cover Deletion           (submenu - unwanted-image profile scan/add)"
         "  8 - Image Conversion + Zip   (convert loose images, then zip)"
-        "  9 - Convert Zipped           [DEPRECATED - image files only, does not convert animated content]"
+        # "9 - Convert Zipped" hidden from the live menu (2026-09-02,
+        # project owner's own decision) - the underlying code
+        # (Resolve-ModeSelection's '9' case below, RezipPipeline.ps1,
+        # Invoke-Mode's ConvertZipped case) is all still intact in case
+        # it's reimplemented later; deprecated/minimal-effort code being
+        # reachable from the live menu was judged more likely to cause a
+        # real issue than to be worth keeping available. Don't just
+        # delete this line if re-enabling later - uncomment it and its
+        # matching Resolve-ModeSelection case together.
+        # "  9 - Convert Zipped           [DEPRECATED - image files only, does not convert animated content]"
         "  0 - Options                  (view/change settings - saved for future runs)"
         ""
         "  Ctrl+C aborts the current run at any point (finishes in-flight work, then stops cleanly)."
@@ -118,7 +127,12 @@ function Resolve-ModeSelection {
         '3' { return @{ Mode = 'AnimatedConversion';   RunImageConversion = $false; RunAnimatedConversion = $true;  RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
         '4' { return @{ Mode = 'ZipFolders';           RunImageConversion = $false; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $true;  RunConvertZipped = $false } }
         '8' { return @{ Mode = 'ImageConversionZip';   RunImageConversion = $true;  RunAnimatedConversion = $false; RunZip = $true;  RunZipOnly = $false; RunConvertZipped = $false } }
-        '9' { return @{ Mode = 'ConvertZipped';        RunImageConversion = $false; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $true  } }
+        # '9' (Convert Zipped / rezip) hidden from the live menu, same
+        # 2026-09-02 decision as its now-commented Get-ModeMenuLines entry
+        # above - falls through to default ($null -> "Invalid selection.")
+        # if somehow still typed. Uncomment together with that line to
+        # re-enable.
+        # '9' { return @{ Mode = 'ConvertZipped';        RunImageConversion = $false; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $true  } }
         default { return $null }
     }
 }
