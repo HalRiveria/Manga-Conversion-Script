@@ -389,48 +389,39 @@ if ($RunSlowTest) {
 
 # ==============================================================================
 #  Scenario E (2026-08-31 addition, project owner approved as an easy
-#  fix): -Cts/-WorkerScript/-ResultHandler/-MaxParallel are now all
-#  [Parameter(Mandatory)] - omitting -Cts specifically used to fail
-#  SILENTLY (no error at all): $Cts.Token.IsCancellationRequested on a
-#  $null $Cts just evaluates falsy, so a run with no -Cts was completely
-#  abort-deaf (no cancellation ever noticed, DrainComplete never
-#  signalled). Every real caller already passes all four, so this closes
-#  a latent gap rather than fixing something live.
+#  fix; corrected the same day after a verification pass found the
+#  original version could HANG the whole suite): -Cts/-WorkerScript/
+#  -ResultHandler/-MaxParallel are now all [Parameter(Mandatory)] -
+#  omitting -Cts specifically used to fail SILENTLY (no error at all):
+#  $Cts.Token.IsCancellationRequested on a $null $Cts just evaluates
+#  falsy, so a run with no -Cts was completely abort-deaf (no
+#  cancellation ever noticed, DrainComplete never signalled). Every real
+#  caller already passes all four, so this closes a latent gap rather
+#  than fixing something live.
+#
+#  ORIGINAL VERSION of this scenario actually CALLED the function with
+#  one parameter omitted and asserted the call threw. That only throws
+#  when PowerShell's own missing-Mandatory-parameter prompt has nowhere
+#  to read from (a fully non-interactive host, like Run-Harness.ps1's
+#  own `powershell -NoProfile -File` invocation) - in a REAL interactive
+#  console (a plain manual test run, or one of a review agent's own ad-
+#  hoc verification commands), PowerShell instead shows "Supply values
+#  for the following parameters:" and blocks forever waiting for input
+#  that will never come, verified live. Checking the parameter METADATA
+#  instead of actually invoking the function is host-independent - it
+#  can never hang, in any invocation context.
 # ==============================================================================
 Write-Host "=== Scenario E: -Cts/-WorkerScript/-ResultHandler/-MaxParallel are Mandatory ===" -ForegroundColor Cyan
-$jobParamsE = [System.Collections.Generic.List[hashtable]]::new()
-$jobParamsE.Add(@{ JobId = 1; DelayMs = 0; DoFullLogging = $FullLogging; LogFile = $logFile; LogErrorFile = $logErrorFile; LogWarnFile = $logWarnFile })
-$handlerE = { param($r) }
-
-$threwNoCtsE = $false
-try {
-    $null = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -JobParams $jobParamsE -MaxParallel 1 -ResultHandler $handlerE
-} catch { $threwNoCtsE = $true }
-Test-Assert $threwNoCtsE "omitting -Cts now throws (Mandatory), instead of silently running abort-deaf"
-
-$threwNoWorkerE = $false
-try {
-    $ctsE1 = [System.Threading.CancellationTokenSource]::new()
-    $null = Invoke-ZipParallelProcessing -JobParams $jobParamsE -MaxParallel 1 -Cts $ctsE1 -ResultHandler $handlerE
-    $ctsE1.Dispose()
-} catch { $threwNoWorkerE = $true }
-Test-Assert $threwNoWorkerE "omitting -WorkerScript now throws (Mandatory)"
-
-$threwNoResultHandlerE = $false
-try {
-    $ctsE2 = [System.Threading.CancellationTokenSource]::new()
-    $null = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -JobParams $jobParamsE -MaxParallel 1 -Cts $ctsE2
-    $ctsE2.Dispose()
-} catch { $threwNoResultHandlerE = $true }
-Test-Assert $threwNoResultHandlerE "omitting -ResultHandler now throws (Mandatory)"
-
-$threwNoMaxParallelE = $false
-try {
-    $ctsE3 = [System.Threading.CancellationTokenSource]::new()
-    $null = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -JobParams $jobParamsE -Cts $ctsE3 -ResultHandler $handlerE
-    $ctsE3.Dispose()
-} catch { $threwNoMaxParallelE = $true }
-Test-Assert $threwNoMaxParallelE "omitting -MaxParallel now throws (Mandatory)"
+$paramsE = (Get-Command Invoke-ZipParallelProcessing).Parameters
+function Test-ParamIsMandatory {
+    param([string]$Name)
+    $attr = $paramsE[$Name].Attributes | Where-Object { $_ -is [System.Management.Automation.ParameterAttribute] } | Select-Object -First 1
+    return [bool]$attr.Mandatory
+}
+Test-Assert (Test-ParamIsMandatory 'Cts') "-Cts is Mandatory, instead of silently running abort-deaf when omitted"
+Test-Assert (Test-ParamIsMandatory 'WorkerScript') "-WorkerScript is Mandatory"
+Test-Assert (Test-ParamIsMandatory 'ResultHandler') "-ResultHandler is Mandatory"
+Test-Assert (Test-ParamIsMandatory 'MaxParallel') "-MaxParallel is Mandatory"
 Write-Host ""
 
 # ==============================================================================

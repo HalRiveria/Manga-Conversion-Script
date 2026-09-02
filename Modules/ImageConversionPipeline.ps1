@@ -962,6 +962,20 @@ function Convert-ImageBatch {
                     }
                     $j.Proc.Dispose()
                     if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
+                    # $j.SlotReleased = $true (2026-08-31 fix, caught by
+                    # verifying a same-day /code-review pass): without
+                    # this, a throw partway through THIS SAME loop (e.g.
+                    # Process.Dispose() itself throwing, or Release()
+                    # hitting SemaphoreFullException) would drop straight
+                    # into the outer catch below, which re-iterates this
+                    # same $running list - any job THIS loop already
+                    # released, with no marker to say so, would get its
+                    # slot released a second time. Remote trigger (this
+                    # loop's own calls rarely throw) and small blast
+                    # radius (we're already unwinding an aborting run),
+                    # but it's exactly the invariant SlotReleased exists
+                    # to hold, so worth closing even without a live repro.
+                    $j.SlotReleased = $true
                 }
             }
         } catch {

@@ -202,7 +202,22 @@ function Test-ScriptSettingValue {
                       (($Value -is [double] -or $Value -is [decimal]) -and ($Value -eq [math]::Truncate($Value)))
         if (-not $isIntegral) { return $false }
 
-        $intValue = [int]$Value
+        # try/catch around the [int] cast (2026-08-31 fix, caught by
+        # verifying a same-day /code-review pass): a value outside
+        # Int32's range (e.g. a hand-edited "MaxCjxlProcs": 99999999999)
+        # is integral by the check above but throws OverflowException on
+        # cast, contradicting this function's own "never throws" contract
+        # (Import-ScriptSettings' docstring) - unguarded, that exception
+        # escaped Import-ScriptSettings entirely (no try/catch there
+        # either) and killed the WHOLE settings load, not just this one
+        # key falling back to its default. An out-of-Int32-range value is
+        # exactly as invalid as any other out-of-range value this
+        # function already rejects below - now treated the same way.
+        try {
+            $intValue = [int]$Value
+        } catch {
+            return $false
+        }
         switch ($Key) {
             'JpegQuality'        { return ($intValue -ge 1 -and $intValue -le 100) }
             'AnimatedQuality'    { return ($intValue -ge 1 -and $intValue -le 100) }
@@ -281,7 +296,22 @@ function Import-ScriptSettings {
         }
         $value = $loaded[$key]
         if (Test-ScriptSettingValue -Key $key -Value $value -Default $settings[$key]) {
-            $settings[$key] = $value
+            # [int] normalization (2026-08-31 fix, caught by verifying a
+            # same-day /code-review pass): Test-ScriptSettingValue accepts
+            # an integral [double]/[decimal] for an int-typed key (a
+            # hand-edited "JpegQuality": 75.0), but storing $value as-is
+            # kept it a [decimal] - functionally harmless (every real
+            # consumer binds it to an [int] parameter anyway) but visibly
+            # wrong: the options menu displayed "Quality [75.0]" and
+            # Export-ScriptSettings wrote "75.0" back out, both looking
+            # like a bug even though nothing downstream actually broke.
+            # The cast itself can't throw here - Test-ScriptSettingValue
+            # just proved it's in Int32's range.
+            if ($settings[$key] -is [int]) {
+                $settings[$key] = [int]$value
+            } else {
+                $settings[$key] = $value
+            }
         } else {
             Write-Log ("Setting '" + $key + "' in '" + $Path + "' has an invalid value - keeping default (" + $settings[$key] + ").") -Level Warn
         }

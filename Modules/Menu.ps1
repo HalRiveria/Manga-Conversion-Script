@@ -497,7 +497,18 @@ function Invoke-TrailingZeroAuditRun {
     param(
         [string]$ReportPath = (Get-TrailingZeroReportPath),
         [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
-        [scriptblock]$OpenHandler = { param($Path) Open-FolderInExplorer -Path $Path }
+        # Start-Process -FilePath (2026-08-31 fix, caught by verifying a
+        # same-day /code-review pass) - NOT Open-FolderInExplorer, which
+        # opens $Path's PARENT FOLDER, not $Path itself. Every piece of
+        # this feature's own documentation (this function's docstring,
+        # Get-CoverDeletionMenuLines' menu text, Docs/menu-design.md)
+        # says item 5 opens the REPORT, contrasting it with item 4's own
+        # "open the location" behavior - the original wiring accidentally
+        # reused item 4's helper instead. Start-Process with just a file
+        # path launches it via the OS's own default handler for that
+        # extension (Notepad or whatever .txt is associated with), same
+        # as double-clicking the file in Explorer.
+        [scriptblock]$OpenHandler = { param($Path) Start-Process -FilePath $Path }
     )
 
     $path = (& $PromptFunc "Enter the folder to scan (drag & drop the folder in, or paste the path)")

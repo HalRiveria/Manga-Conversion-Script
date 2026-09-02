@@ -596,8 +596,21 @@ function Invoke-LooseFolderZip {
                 $_.Name -imatch '_tmp_overwrite\.webp$'
             })
         foreach ($orphan in $orphanedScratchFiles) {
-            Write-Log ("Deleting orphaned scratch file (its owning cleanup could not run earlier): '" + $orphan.FullName + "'") -Level Warn
-            try { [System.IO.File]::Delete($orphan.FullName) } catch { }
+            # A failed delete (locked file, AV hold) is logged explicitly
+            # rather than swallowed silently (2026-08-31 fix, caught by
+            # verifying a same-day /code-review pass - CLAUDE.md's own
+            # review checklist: "no silent catches without a reason") -
+            # the original "Deleting..." line asserted success regardless
+            # of outcome, and a failure here means the orphan survives
+            # into the `$remainingSrcImages` check right below, which
+            # blocks the zip with its own separate Warn - visible, but
+            # this makes the ROOT cause visible too, not just the symptom.
+            try {
+                [System.IO.File]::Delete($orphan.FullName)
+                Write-Log ("Deleted orphaned scratch file (its owning cleanup could not run earlier): '" + $orphan.FullName + "'") -Level Warn
+            } catch {
+                Write-Log ("Could not delete orphaned scratch file '" + $orphan.FullName + "' - it may still block this chapter's zip: " + $_) -Level Warn
+            }
         }
 
         $remainingSrcImages = @(Get-ChildItem -LiteralPath $FolderPath -Recurse -File -ErrorAction SilentlyContinue |

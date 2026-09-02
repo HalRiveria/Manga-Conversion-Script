@@ -735,6 +735,15 @@ function Convert-AnimatedBatch {
                     try { [System.IO.File]::Delete($j.MagickOutputPath) } catch { }
                     $j.Proc.Dispose()
                     if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
+                    # $j.SlotReleased = $true (2026-08-31 fix, mirrors the
+                    # identical fix in the sibling module's own force-kill
+                    # loop - see that file's comment for the full
+                    # reasoning): without this, a throw partway through
+                    # THIS loop would drop into the outer catch below,
+                    # which re-iterates this same $running list and could
+                    # release an already-released job's slot a second
+                    # time.
+                    $j.SlotReleased = $true
                 }
             }
         } catch {

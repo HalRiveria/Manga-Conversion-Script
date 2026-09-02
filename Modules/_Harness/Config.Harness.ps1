@@ -125,6 +125,14 @@ $pathE2 = Join-Path $scratchDir "decimal-settings.json"
 '{ "JpegQuality": 75.0 }' | Set-Content -LiteralPath $pathE2 -Encoding UTF8
 $settingsE2 = Import-ScriptSettings -Path $pathE2
 Test-Assert ($settingsE2.JpegQuality -eq 75) ("the decimal-point whole number was accepted as-is, not reverted to the default (got " + $settingsE2.JpegQuality + ")")
+# [int] normalization (2026-08-31 fix, caught by verifying a same-day
+# /code-review pass): storing the accepted value as-is left it a
+# [decimal] - functionally harmless (every real consumer binds it to an
+# [int] parameter) but cosmetically wrong (the options menu would show
+# "Quality [75.0]", and Export-ScriptSettings would write "75.0" back
+# out, both looking like a live bug even though nothing downstream
+# actually broke).
+Test-Assert ($settingsE2.JpegQuality -is [int]) ("the accepted value was normalized to [int], not left as the raw [decimal] ConvertFrom-Json produced (got type " + $settingsE2.JpegQuality.GetType().Name + ")")
 Write-Host ""
 
 # ==============================================================================
@@ -207,6 +215,34 @@ Test-Assert ($settingsH.ZipParallelThreads -eq 1) "wrong-type ZipParallelThreads
 Test-Assert ($settingsH.PermanentDelete -eq $false) "wrong-type PermanentDelete fell back to default (`$false)"
 Test-Assert ($settingsH.CjxlPath -eq "C:\ok.exe") "a valid sibling key (CjxlPath) still loaded despite the other bad values"
 Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*" }).Count -eq 3) "exactly one warning per invalid key (3 bad keys -> 3 warnings)"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario H2 (2026-08-31 fix, caught by verifying a same-day
+#  /code-review pass): a value outside Int32's range is integral (passes
+#  the earlier double/decimal-truncation check) but throws OverflowException
+#  on the `[int]$Value` cast - unguarded, that exception escaped
+#  Import-ScriptSettings entirely (no try/catch there either), violating
+#  its own documented "never throws" contract by killing the WHOLE
+#  settings load instead of just this one key falling back to its
+#  default. Two shapes tested: a real [long] (99999999999, an integral
+#  JSON number too large for [int] but exactly representable, so
+#  ConvertFrom-Json itself returns [long]) and a [decimal] with the same
+#  numeric value (matches the exact repro used to find this).
+# ==============================================================================
+Write-Host "=== Scenario H2: an Int32-range-overflowing value falls back to default instead of throwing ===" -ForegroundColor Cyan
+$pathH2 = Join-Path $scratchDir "overflow-settings.json"
+'{ "MaxCjxlProcs": 99999999999, "AnimatedThreads": 99999999999.0 }' | Set-Content -LiteralPath $pathH2 -Encoding UTF8
+$threwH2 = $false
+$settingsH2 = $null
+try {
+    $settingsH2 = Import-ScriptSettings -Path $pathH2
+} catch {
+    $threwH2 = $true
+}
+Test-Assert (-not $threwH2) "Import-ScriptSettings did not throw on an Int32-range-overflowing value"
+Test-Assert ($null -ne $settingsH2 -and $settingsH2.MaxCjxlProcs -eq 8) "the overflowing [long] value (MaxCjxlProcs) fell back to its own default (8)"
+Test-Assert ($null -ne $settingsH2 -and $settingsH2.AnimatedThreads -eq 8) "the overflowing [decimal] value (AnimatedThreads) fell back to its own default (8)"
 Write-Host ""
 
 # ==============================================================================

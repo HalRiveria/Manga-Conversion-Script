@@ -253,16 +253,24 @@ function Invoke-ZipParallelProcessing {
         Flush-ConsoleQueue -Queue $localConsoleQueue
     } finally {
         # Dispose any $localHandles left over (2026-08-31 addition, project
-        # owner approved as an easy fix) - on every OTHER exit path this
-        # list is already empty (the collection loop above drains it, or
-        # Invoke-GracefulDrain owns and disposes whatever's left after an
-        # abort). If something throws BEFORE the drain gets a chance to
-        # run (-NextJobProvider itself throwing, or Test-AbortSignal/
-        # Flush-ConsoleQueue failing), these in-flight [PowerShell]
-        # instances were never Stop()'d or Dispose()'d - contained (the
-        # pool close/process exit below still clean them up eventually)
-        # but matches this project's own "resource lifecycle matches
-        # acquisition, including the error path" review checklist item.
+        # owner approved as an easy fix). On the normal completion path
+        # this list is already empty (the collection loop above drains
+        # it). On the abort path it's usually NOT empty here (correction,
+        # caught by verifying a same-day /code-review pass) -
+        # Invoke-GracefulDrain takes a snapshot of $localHandles (its own
+        # `$localHandles = $Handles` parameter binding) and disposes
+        # THAT list as jobs complete, but never writes back into ZPP's
+        # own `$localHandles` variable, so this loop still runs over
+        # every handle that was in flight when the drain started -
+        # harmlessly, since `Stop()`/`Dispose()` are both wrapped in
+        # try/catch here and `Dispose()` is idempotent. The case this
+        # loop actually exists for is something throwing BEFORE the
+        # drain ever gets a chance to run at all (-NextJobProvider itself
+        # throwing, or Test-AbortSignal/Flush-ConsoleQueue failing) -
+        # contained even without this fix (the pool close/process exit
+        # below still clean up eventually) but matches this project's own
+        # "resource lifecycle matches acquisition, including the error
+        # path" review checklist item.
         foreach ($h in $localHandles) {
             try { $h.PS.Stop() } catch { }
             try { $h.PS.Dispose() } catch { }

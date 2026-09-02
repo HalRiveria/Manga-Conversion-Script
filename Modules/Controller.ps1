@@ -609,8 +609,23 @@ function Invoke-FullPipelineChapter {
                     $_.Name -imatch '_tmp_overwrite\.webp$'
                 })
             foreach ($orphan in $orphanedScratchFiles) {
-                Write-Log ("Deleting orphaned scratch file (its owning cleanup could not run earlier): '" + $orphan.FullName + "'") -Level Warn
-                try { [System.IO.File]::Delete($orphan.FullName) } catch { }
+                # A failed delete (locked file, AV hold) is logged
+                # explicitly rather than swallowed silently (2026-08-31
+                # fix, caught by verifying a same-day /code-review pass -
+                # CLAUDE.md's own review checklist: "no silent catches
+                # without a reason"). Unlike ZipPipeline.ps1's own sibling
+                # sweep, Full Pipeline has NO remaining-source guard after
+                # this point - a failed delete here means the orphan gets
+                # silently archived into the zip below and the folder
+                # deleted right after, exactly the outcome this whole
+                # sweep exists to prevent. The original "Deleting..." line
+                # asserted success regardless of outcome.
+                try {
+                    [System.IO.File]::Delete($orphan.FullName)
+                    Write-Log ("Deleted orphaned scratch file (its owning cleanup could not run earlier): '" + $orphan.FullName + "'") -Level Warn
+                } catch {
+                    Write-Log ("Could not delete orphaned scratch file '" + $orphan.FullName + "' - it will be archived into this chapter's zip: " + $_) -Level Error
+                }
             }
 
             Write-Log ("Zipping '" + $ChapterDir + "' -> '" + $ZipOut + "'")
