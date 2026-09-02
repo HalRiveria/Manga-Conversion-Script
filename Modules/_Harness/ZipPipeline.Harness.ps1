@@ -232,6 +232,50 @@ Test-Assert (Test-Path -LiteralPath $dirG) "the source folder was left alone (no
 Write-Host ""
 
 # ==============================================================================
+#  Scenario G3 (2026-09-02 review fix, live-confirmed): the mirror image of
+#  Scenario G - a chapter containing a never-converted file (.gif) MUST
+#  still zip successfully when the caller's own -LooseImageExtensions
+#  doesn't include it, exactly as Controller.ps1's own mode-8 zip-blocking
+#  list is now built (Get-LooseImageExtensions() minus
+#  Get-NeverConvertedExtensions()). Before that same-day fix, mode 8's own
+#  list DID include ".gif" (it derives from the full canonical list), so
+#  passing it here reproduces the real deadlock this fix closes: a
+#  never-converted file can never stop being "unconverted", so a chapter
+#  containing one could never be zipped by mode 8, on any run, forever.
+#  This function (Invoke-LooseFolderZip) itself is correct either way -
+#  it just does what its own -LooseImageExtensions is told; the bug and
+#  the fix both live entirely in what CALLERS pass it.
+# ==============================================================================
+Write-Host "=== Scenario G3: a chapter with a never-converted .gif zips successfully when the caller excludes it (mode 8's own real fix) ===" -ForegroundColor Cyan
+$dirG3 = New-Dir "scenario-g3"
+New-FileIn -DirPath $dirG3 -Name "page1.jxl" | Out-Null
+New-FileIn -DirPath $dirG3 -Name "cover.gif" | Out-Null
+$zipOutG3 = Join-Path $scratchDir "scenario-g3.zip"
+
+# Literal, not a call to ImageConversionPipeline.ps1's own
+# Get-LooseImageExtensions()/Get-NeverConvertedExtensions() - this
+# harness deliberately doesn't dot-source that module (see this file's
+# own header). Mirrors Controller.ps1's own real derivation by hand:
+# the canonical list minus ".gif" (the only current
+# Get-NeverConvertedExtensions member).
+$mode8ExtensionsG3 = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif", ".bmp", ".heic", ".heif")
+
+$resultG3 = Invoke-LooseFolderZip -FolderPath $dirG3 -ZipOut $zipOutG3 -LooseImageExtensions $mode8ExtensionsG3
+
+Test-Assert ($resultG3.Status -eq "Success") ("the chapter actually zipped, not perpetually skipped as unresolvable (got Status=" + $resultG3.Status + ")")
+Test-Assert (Test-Path -LiteralPath $zipOutG3) "the zip file actually exists on disk"
+if (Test-Path -LiteralPath $zipOutG3) {
+    $zipEntriesG3 = [System.IO.Compression.ZipFile]::OpenRead($zipOutG3)
+    try {
+        $entryNamesG3 = @($zipEntriesG3.Entries | ForEach-Object { $_.Name })
+    } finally {
+        $zipEntriesG3.Dispose()
+    }
+    Test-Assert ($entryNamesG3 -contains "page1.jxl" -and $entryNamesG3 -contains "cover.gif") ("the zip contains both the converted page and the never-converted gif, swept in together (got entries: " + ($entryNamesG3 -join ", ") + ")")
+}
+Write-Host ""
+
+# ==============================================================================
 #  Scenario G2 (2026-08-31 fix, corrected after a same-day /code-review 4th
 #  pass verification): an orphaned "_tmp_*" scratch file (its owning
 #  cleanup couldn't run) carries an extension in $LooseImageExtensions, so

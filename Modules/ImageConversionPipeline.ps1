@@ -1224,9 +1224,12 @@ function Get-LooseImageCandidates {
             # /code-review 4th pass; widened 2026-09-02 for the BMP/HEIC/
             # HEIF detour and a defensive numbered-output backstop) -
             # "_tmp_iccstrip.png"/"_tmp_iccstrip-N.png" (this file's own
-            # Invoke-IccStripRetryOrFail - the "-N" form shouldn't occur
-            # any more now that its own magick call selects frame 0
-            # explicitly, but stays matched here as a backstop),
+            # Invoke-IccStripRetryOrFail - the "-N" form is fully
+            # reachable, not legacy: that function's own magick call
+            # deliberately does NOT select frame 0, see its own header
+            # comment for why adding "[0]" was considered and rejected
+            # the same day this pattern was widened - this is a real,
+            # live cleanup path, not a dead backstop),
             # "_tmp_<fmt>2png.png" (this file's own WebP/AVIF/BMP/HEIC/
             # HEIF pre-conversion detour), and "_tmp_overwrite.webp"
             # (AnimatedConversionPipeline.ps1's own -DoAnimatedOverwrite
@@ -1259,9 +1262,20 @@ function Get-LooseImageCandidates {
             # very next run, breaking that promise. Excluding it here
             # means it's never even a NeedsConversion/StaleSources/
             # NamingCollisions candidate - it just sits there, still
-            # visible to a folder-qualifying-extension check (still
-            # blocks zip until resolved), permanently untouched by this
-            # function specifically.
+            # visible to a folder-qualifying-extension check (so a
+            # chapter holding one is still discovered/walked, not
+            # invisible), permanently untouched by this function
+            # specifically. It does NOT keep blocking zip forever
+            # (2026-09-02 correction, caught by a second same-day
+            # review) - Controller.ps1's own mode-8 zip-blocking list
+            # also subtracts Get-NeverConvertedExtensions now, for
+            # exactly this reason: a never-converted file can never
+            # produce the "conversion failure resolved" state a
+            # blocking check like that expects, so leaving it as a
+            # permanent blocker there meant mode 8 could never zip that
+            # chapter, ever, on any run - live-confirmed. Full Pipeline
+            # has no such gate at all and simply sweeps it into the zip;
+            # mode 8 now matches that already-validated behavior.
             if ((Get-NeverConvertedExtensions) -icontains $_.Extension) {
                 # Logged here, not just left silent like the scratch-file
                 # exclusion above (2026-09-02 fix) - a never-converted file

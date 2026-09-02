@@ -1408,15 +1408,33 @@ function Invoke-Mode {
                 # the canonical list - it silently never picked those up,
                 # so with the toggle ON, an unconverted BMP/HEIC/HEIF
                 # (magick missing, a future conversion failure) sailed
-                # past this gate and got zipped raw. ".gif" deliberately
-                # stays a blocker here even with the toggle on - it
-                # "counts as unconverted content" by its own, separate,
-                # explicit design decision the same day, unrelated to this
-                # toggle's own narrow, AVIF-specific purpose.
+                # past this gate and got zipped raw.
+                #
+                # Get-NeverConvertedExtensions() is ALSO subtracted here
+                # (2026-09-02 follow-up fix, same day, caught by a second
+                # full-codebase review) - an EARLIER version of this same
+                # fix deliberately kept ".gif" as a blocker in BOTH toggle
+                # branches, reasoning it "counts as unconverted content" so
+                # should always block. That reasoning was wrong in
+                # practice: Convert-ImageBatch never even attempts to
+                # convert a never-converted extension, and
+                # Get-LooseImageCandidates never returns it as a
+                # NeedsConversion candidate either - there is no failure
+                # for the user to ever resolve, so a chapter containing a
+                # ".gif" could NEVER be zipped by mode 8, on any run,
+                # forever, live-confirmed. Full Pipeline has no such gate
+                # at all (Controller.ps1's own Invoke-FullPipelineChapter
+                # calls Compress-FolderToZip directly, see that function's
+                # own comment for why) and simply sweeps a never-converted
+                # file into the zip alongside everything else - that's the
+                # already-validated-correct behavior this now matches.
+                # ".bmp"/".heic"/".heif" are NOT subtracted - those really
+                # do convert, so a leftover one really is a resolvable
+                # failure and should keep blocking.
                 $zipLooseExtensions = if ($Settings.ZipWithUnconvertedAnimated) {
-                    @((Get-LooseImageExtensions) | Where-Object { $_ -ne ".avif" })
+                    @((Get-LooseImageExtensions) | Where-Object { $_ -ne ".avif" -and (Get-NeverConvertedExtensions) -inotcontains $_ })
                 } else {
-                    Get-LooseImageExtensions
+                    @((Get-LooseImageExtensions) | Where-Object { (Get-NeverConvertedExtensions) -inotcontains $_ })
                 }
                 # Boxed, not a bare/$script: var - .GetNewClosure() puts
                 # $zipStep in its own dynamic module, so a plain

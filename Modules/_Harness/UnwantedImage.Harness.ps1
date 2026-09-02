@@ -250,6 +250,31 @@ Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*Hash mismatch*"
 Write-Host ""
 
 # ==============================================================================
+#  Scenario D2 (2026-09-02 review fix, live-confirmed): a ".tif" file must
+#  actually be scanned and matchable, not silently invisible to
+#  Invoke-UnwantedImageScan's own default -ImageExtensions. Before this
+#  fix, New-UnwantedImageProfileFromFile (the real "2 - Add Image" flow)
+#  applied no extension filter at all - System.Drawing.Image.FromFile
+#  reads both .tif and .tiff - so a user could add a profile from a real
+#  .tif cover, get the "will be caught on every future scan" green-light
+#  confirmation, and have it silently never match on any later scan. Not
+#  a data-loss risk (fails toward not deleting), but a real false promise
+#  this closes.
+# ==============================================================================
+Write-Host "=== Scenario D2: a .tif file is actually scanned and matchable, not silently invisible ===" -ForegroundColor Cyan
+$rootD2 = Join-Path $scratchDir "scenario-d2"
+New-Item -ItemType Directory -Path $rootD2 -Force | Out-Null
+$tifImgD2 = New-RealImage -Name "scenario-d2\cover.tif" -Width 70 -Height 50
+$tifProfileD2 = New-ProfileFromRealFile -File $tifImgD2 -Width 70 -Height 50 -Label "TIF Target"
+
+$resultD2 = Invoke-UnwantedImageScan -Path $rootD2 -Profiles @($tifProfileD2)
+
+Test-Assert ($resultD2.ScannedCount -eq 1) ("the .tif file was actually scanned, not silently skipped by extension (got ScannedCount=" + $resultD2.ScannedCount + ")")
+Test-Assert ($resultD2.DeletedCount -eq 1) "the .tif file was matched and deleted, same as any other extension on the list"
+Test-Assert (-not (Test-Path -LiteralPath $tifImgD2.FullName)) "the .tif file is actually gone"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario E: -DryRun counts as deleted but does not actually delete
 # ==============================================================================
 Write-Host "=== Scenario E: DryRun ===" -ForegroundColor Cyan

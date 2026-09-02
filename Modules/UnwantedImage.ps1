@@ -596,7 +596,16 @@ function Invoke-UnwantedImageScan {
         [Parameter(Mandatory)]
         [string]$Path,
         [array]$Profiles = (Get-AllUnwantedImageProfiles),
-        [string[]]$ImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff"),
+        # ".tif" added alongside ".tiff" (2026-09-02 review fix,
+        # live-confirmed) - New-UnwantedImageProfileFromFile itself
+        # applies no extension filter (System.Drawing.Image.FromFile
+        # decides what's readable, and it reads both .tif and .tiff), so
+        # a user could add a profile from a real .tif cover, get the
+        # "will be caught on every future scan" confirmation, and have it
+        # silently never matched - the scan's own extension list didn't
+        # agree with what the "add" flow actually accepts. Not a data-
+        # loss risk (fails toward not deleting), but a real false promise.
+        [string[]]$ImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff", ".tif"),
         [string[]]$ExcludePaths = @(),
         [bool]$DryRun = $false
     )

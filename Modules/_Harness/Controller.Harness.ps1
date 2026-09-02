@@ -918,6 +918,18 @@ $statsO = Invoke-Mode -Resolved @{ Mode = 'ImageConversionZip' } -TargetPath $sc
 Test-Assert ($statsO.LooseImgConverted.Success -eq 1) "ImageConversionZip: image conversion still ran and mapped correctly"
 Test-Assert ($zipHandlerCallsO.Count -eq 1) ("the zip-folder handler fired exactly once (got " + $zipHandlerCallsO.Count + ")")
 Test-Assert ($zipHandlerCallsO[0].LooseImageExtensions -contains ".avif") "ZipWithUnconvertedAnimated=false (default): .avif is in the blocking extension list"
+# 2026-09-02 follow-up fix (a second same-day review, after the first
+# 2026-09-02 fix below): ".gif" must NOT be in this list in EITHER
+# branch, not just the toggle-on one. An earlier version of this fix
+# deliberately kept ".gif" as a permanent blocker, reasoning it "counts
+# as unconverted content" - but Convert-ImageBatch never even attempts
+# to convert it and Get-LooseImageCandidates never returns it as a
+# candidate, so there is no failure for the user to ever resolve - a
+# chapter containing a ".gif" could NEVER be zipped by mode 8, on any
+# run, forever. Live-confirmed. Full Pipeline has no such gate at all
+# and simply sweeps a never-converted file into the zip; mode 8 now
+# matches that already-validated behavior in both toggle states.
+Test-Assert ($zipHandlerCallsO[0].LooseImageExtensions -notcontains ".gif") "ZipWithUnconvertedAnimated=false (default): .gif is NOT in the blocking list - it can never be 'resolved', so blocking on it would deadlock mode 8 forever"
 Test-Assert ($zipOutcomeBoxO.Value.Status -eq "Success" -and $zipOutcomeBoxO.Value.Detail -eq "4 entries") "the callback mapped the zip result into @{ Status; Detail } correctly"
 Test-Assert ($statsO.LooseFolderZipped.Success -eq 1 -and $statsO.LooseFolderZipped.Fail -eq 0 -and $statsO.LooseFolderZipped.Skipped -eq 0) ("mode 8's zip outcome IS reflected in LooseFolderZipped now (2026-08-28 fix) - got Success=" + $statsO.LooseFolderZipped.Success)
 Test-Assert ($statsO.LooseFolderDeleted.Success -eq 1 -and $statsO.LooseFolderDeleted.Fail -eq 0) "mode 8's folder-deletion outcome IS reflected in LooseFolderDeleted now"
@@ -933,12 +945,9 @@ Test-Assert ($zipHandlerCallsO[0].LooseImageExtensions -notcontains ".avif") "Zi
 # snapshot of the canonical list minus ".avif", taken BEFORE ".gif"/
 # ".bmp"/".heic"/".heif" were added to Get-LooseImageExtensions() - it
 # silently never picked those up, so with the toggle ON, an unconverted
-# BMP/HEIC/HEIF sailed past this gate and got zipped raw. ".gif" stays a
-# blocker here too (unrelated to this toggle's own narrow, AVIF-specific
-# purpose - it "counts as unconverted content" by its own separate
-# decision the same day).
+# BMP/HEIC/HEIF sailed past this gate and got zipped raw.
 Test-Assert ($zipHandlerCallsO[0].LooseImageExtensions -contains ".bmp" -and $zipHandlerCallsO[0].LooseImageExtensions -contains ".heic" -and $zipHandlerCallsO[0].LooseImageExtensions -contains ".heif") "ZipWithUnconvertedAnimated=true: .bmp/.heic/.heif still block - the toggle is AVIF-specific, not a blanket relax"
-Test-Assert ($zipHandlerCallsO[0].LooseImageExtensions -contains ".gif") "ZipWithUnconvertedAnimated=true: .gif still blocks too - it counts as unconverted content regardless of this toggle"
+Test-Assert ($zipHandlerCallsO[0].LooseImageExtensions -notcontains ".gif") "ZipWithUnconvertedAnimated=true: .gif is NOT in the blocking list either - see the toggle-off assertion above for why"
 Write-Host ""
 
 Write-Host "=== Scenario P: Invoke-Mode / blank MagickExe fails fast for magick-dependent modes ===" -ForegroundColor Cyan
