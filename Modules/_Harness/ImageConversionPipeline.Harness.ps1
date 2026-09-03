@@ -634,6 +634,43 @@ Test-Assert ($script:ccrActiveSeries.Count -eq 0) "series resolved and left the 
 Test-Assert ($totalsG.ConvertedSuccess -eq 1 -and $totalsG.ConvertedFail -eq 1) "conversion counts still correct with CCR on"
 
 # ==============================================================================
+#  Scenario G2 (2026-09-03 fix, real bug, live-reported, same fix as
+#  Controller.ps1's Invoke-FullPipeline): a series with zero qualifying
+#  chapters (e.g. already fully converted and zipped - nothing left but a
+#  .cbz and an info file, no chapter subfolders at all) must never call
+#  Start-SeriesProgress. Before this fix it did - Start-SeriesProgress's
+#  own docstring says a 0-chapter call "is rendered as an immediately-
+#  frozen '0/0' line" via Update-CleanConsoleDisplay, exactly the unwanted
+#  line the project owner asked to have suppressed entirely.
+#  $script:ccrActiveSeries is NOT the right observable (a 0-chapter call
+#  never enters it either way, by that same existing design) - spies
+#  directly on Start-SeriesProgress instead.
+# ==============================================================================
+Write-Host "=== Scenario G2: a series with zero qualifying chapters never calls Start-SeriesProgress ===" -ForegroundColor Cyan
+$rootG2 = New-Dir "scenario-g2"
+$emptySeriesG2 = New-Dir "scenario-g2\Empty Series"
+[System.IO.File]::WriteAllText((Join-Path $emptySeriesG2 "already-zipped.cbz"), "fake zip content")
+[System.IO.File]::WriteAllText((Join-Path $emptySeriesG2 "info.txt"), "not an image, not a chapter")
+
+$script:startSeriesProgressCallsG2 = New-Object System.Collections.Generic.List[string]
+$realStartSeriesProgressG2 = ${function:Start-SeriesProgress}
+function Start-SeriesProgress {
+    param([string]$SeriesName, [int]$TotalChapters)
+    $script:startSeriesProgressCallsG2.Add($SeriesName + ":" + $TotalChapters)
+}
+
+$script:CleanConsoleOutputEnabled = $true
+try {
+    $totalsG2 = Invoke-LooseImageConversionPipeline -Path $rootG2 -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
+} finally {
+    $script:CleanConsoleOutputEnabled = $false
+    ${function:Start-SeriesProgress} = $realStartSeriesProgressG2
+}
+
+Test-Assert ($script:startSeriesProgressCallsG2.Count -eq 0) ("Start-SeriesProgress was never called for the zero-chapter series (got: " + ($script:startSeriesProgressCallsG2 -join ", ") + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario H: the abort-registration fix, exercised for real mid-batch, not
 #  just before the call starts. Uses the Register-/Unregister-
 #  AbortCancellationSource spies to prove THIS pipeline's own CTS was the one

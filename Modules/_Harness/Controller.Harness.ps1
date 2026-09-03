@@ -676,6 +676,45 @@ Test-Assert ($totalsH.ZipCreatedSuccess -eq 1) "a Warning-tier outcome (a skip, 
 Write-Host ""
 
 # ==============================================================================
+#  Scenario H2 (2026-09-03 fix, real bug, live-reported): a series with zero
+#  qualifying chapters (e.g. already fully converted and zipped - nothing
+#  left in the folder but a .cbz and an info file, no chapter subfolders at
+#  all) must NEVER call Start-SeriesProgress at all. Before this fix it did
+#  - Start-SeriesProgress's own docstring says a 0-chapter call "is
+#  rendered as an immediately-frozen '0/0' line" via Update-CleanConsoleDisplay,
+#  which is exactly the unwanted line the project owner asked to have
+#  suppressed entirely, not just re-rendered differently. $script:ccrActiveSeries
+#  itself is NOT the right observable here (a 0-chapter call never enters
+#  it either way, by that same existing design) - spies directly on
+#  Start-SeriesProgress instead (same function-swap technique as Scenario
+#  Q2's Show-CoverDeletionMenu swap) to prove it's never invoked at all for
+#  the zero-chapter case.
+# ==============================================================================
+Write-Host "=== Scenario H2: a series with zero qualifying chapters never calls Start-SeriesProgress ===" -ForegroundColor Cyan
+$rootH2 = New-Dir "scenario-h2\Empty Series"
+[System.IO.File]::WriteAllText((Join-Path $rootH2 "already-zipped.cbz"), "fake zip content")
+[System.IO.File]::WriteAllText((Join-Path $rootH2 "info.txt"), "not an image, not a chapter")
+
+$script:startSeriesProgressCallsH2 = New-Object System.Collections.Generic.List[string]
+$realStartSeriesProgressH2 = ${function:Start-SeriesProgress}
+function Start-SeriesProgress {
+    param([string]$SeriesName, [int]$TotalChapters)
+    $script:startSeriesProgressCallsH2.Add($SeriesName + ":" + $TotalChapters)
+}
+
+$script:CleanConsoleOutputEnabled = $true
+try {
+    $totalsH2 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-h2") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+} finally {
+    $script:CleanConsoleOutputEnabled = $false
+    ${function:Start-SeriesProgress} = $realStartSeriesProgressH2
+}
+
+Test-Assert ($script:startSeriesProgressCallsH2.Count -eq 0) ("Start-SeriesProgress was never called for the zero-chapter series (got: " + ($script:startSeriesProgressCallsH2 -join ", ") + ")")
+Test-Assert ($totalsH2.SeriesCount -eq 1) "sanity check: the series WAS discovered and counted, just had no qualifying chapters"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario I: a chapter whose only "image" file is an ANIMATED WebP (cjxl
 #  has no multi-frame support - Convert-ImageBatch SKIPS it, does not fail
 #  it) plus a real animated .avif that converts successfully - zero .jxl

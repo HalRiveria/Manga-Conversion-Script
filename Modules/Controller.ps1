@@ -1053,13 +1053,22 @@ function Invoke-FullPipeline {
                 Write-Log ("Series '" + $series.Name + "': '" + $extraDir.Name + "' has unconverted content but wasn't found by chapter discovery (e.g. a stray .zip sitting alongside it, or files outside a normal chapter folder) - converting it anyway, but NOT treating it as zippable.") -Level Warn
             }
 
-            if ($script:CleanConsoleOutputEnabled) {
-                Start-SeriesProgress -SeriesName $series.Name -TotalChapters $chapterEntries.Count
-            }
-
+            # Empty-series check moved BEFORE Start-SeriesProgress (2026-09-03
+            # fix, real bug, live-reported): a series with zero qualifying
+            # chapters (e.g. already fully converted and zipped - nothing
+            # left but the zips + an info file) used to still register a
+            # 0/0-chapter entry with CCR, which then sat on the live display
+            # forever, never completed (the loop below never runs, so
+            # Complete-ChapterProgress is never called for it either) -
+            # project owner's own call: a series with nothing to convert
+            # shouldn't show up on the console at all.
             if ($chapterEntries.Count -eq 0) {
                 Write-Log ("Series '" + $series.Name + "': no qualifying chapters found.") -Level Info
                 continue
+            }
+
+            if ($script:CleanConsoleOutputEnabled) {
+                Start-SeriesProgress -SeriesName $series.Name -TotalChapters $chapterEntries.Count
             }
 
             Write-Log ("=== Series '" + $series.Name + "': " + $chapterEntries.Count + " chapter(s) ===")
