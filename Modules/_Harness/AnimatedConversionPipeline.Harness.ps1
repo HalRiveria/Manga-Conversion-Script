@@ -991,8 +991,7 @@ $pollAB = { param($inFlight) if ($inFlight.Count -gt 0) { $ctsAB.Cancel() } }.Ge
 [ConsoleCtrl]::IsCloseEvent = $true
 $swAB = [System.Diagnostics.Stopwatch]::StartNew()
 try {
-    $resultAB = Convert-AnimatedBatch -AnimatedFiles @($fileAB) -MagickExe $fakeMagickExe -AnimatedThreads 1 `
-        -CancelToken $ctsAB.Token -AbortPollCallback $pollAB -AbortTimeoutSeconds 30
+    $resultAB = Convert-AnimatedBatch -AnimatedFiles @($fileAB) -MagickExe $fakeMagickExe -AnimatedThreads 1 -CancelToken $ctsAB.Token -AbortPollCallback $pollAB -AbortTimeoutSeconds 30
 } finally {
     $swAB.Stop()
     [ConsoleCtrl]::IsCloseEvent = $false

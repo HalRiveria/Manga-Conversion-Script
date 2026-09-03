@@ -132,8 +132,9 @@ function Move-ToRecycleBin {
         ItemPath doesn't exist. Propagates any exception the underlying
         Recycle Bin operation throws (a locked file, for instance) -
         callers that want a best-effort "clean up if possible" call
-        (e.g. Logging.ps1's old-log-file cleanup) wrap this in their own
-        try/catch; this function does not swallow errors itself.
+        (e.g. Logging.ps1's split-log-mode stale Errors/Warnings clearing)
+        wrap this in their own try/catch; this function does not swallow
+        errors itself.
     .OUTPUTS
         $true if ItemPath existed and was sent to the Recycle Bin; $false
         if it didn't exist (nothing to do) - lets a caller log "skipped,

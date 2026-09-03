@@ -952,10 +952,32 @@ function Invoke-FullPipeline {
             $extraDirPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             foreach ($k in $imagesByDir.Keys)    { if (-not $chapterDirSet.Contains($k)) { $null = $extraDirPaths.Add($k) } }
             foreach ($k in $animatedByDir.Keys)  { if (-not $chapterDirSet.Contains($k)) { $null = $extraDirPaths.Add($k) } }
+            # $staleByDir.Keys included too (2026-09-03 fix, real bug found by
+            # code review): a directory already fully converted/zipped (so
+            # excluded from $chapters by Get-SeriesChapters' own "up to date"
+            # guard) but still holding a leftover stale source (e.g. a prior
+            # run's delete failed on a locked file) was never folded in as an
+            # extra dir before this - $chapterEntries only looked at
+            # $imagesByDir/$animatedByDir, so that directory's own $chStale
+            # entry (built further down, per chapter) was never reached and
+            # its stale file was never passed to Remove-StaleLooseSources,
+            # on this run or any future run (the same "up to date" gate
+            # reproduces identically every time). No log line for THIS
+            # reason specifically - stale-only extras are silent cleanup,
+            # not "unconverted content", so the existing Warn below (written
+            # for the image/animated case) would be misleading here.
+            $staleOnlyExtraDirPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($k in $staleByDir.Keys) {
+                if (-not $chapterDirSet.Contains($k) -and -not $extraDirPaths.Contains($k)) { $null = $staleOnlyExtraDirPaths.Add($k) }
+            }
             foreach ($extraDirPath in $extraDirPaths) {
                 $extraDir = if ($imagesByDir.ContainsKey($extraDirPath)) { $imagesByDir[$extraDirPath][0].Directory } else { $animatedByDir[$extraDirPath][0].Directory }
                 $chapterEntries.Add(@{ Dir = $extraDir; ZipOut = $null; IsZippable = $false })
                 Write-Log ("Series '" + $series.Name + "': '" + $extraDir.Name + "' has unconverted content but wasn't found by chapter discovery (e.g. a stray .zip sitting alongside it, or files outside a normal chapter folder) - converting it anyway, but NOT treating it as zippable.") -Level Warn
+            }
+            foreach ($extraDirPath in $staleOnlyExtraDirPaths) {
+                $extraDir = $staleByDir[$extraDirPath][0].Directory
+                $chapterEntries.Add(@{ Dir = $extraDir; ZipOut = $null; IsZippable = $false })
             }
 
             # Empty-series check moved BEFORE Start-SeriesProgress (2026-09-03

@@ -1656,6 +1656,52 @@ Test-Assert ($totalsZ4.ConvertedImageSuccess -eq 1 -and $totalsZ4.ConvertedAnima
 Write-Host ""
 
 # ==============================================================================
+#  Scenario Z5 (2026-09-03 fix, real bug found by code review): a directory
+#  Get-SeriesChapters doesn't discover as a real chapter (e.g. because it's
+#  already fully converted and zipped, excluded by that function's own "up
+#  to date" guard) but that still holds a leftover STALE source file must
+#  still get that file cleaned up - not silently orphaned forever. Before
+#  this fix, $extraDirPaths (the "chapter discovery missed this directory"
+#  completeness fallback) only looked at $imagesByDir/$animatedByDir
+#  (directories with something to CONVERT), never $staleByDir (directories
+#  with only something to CLEAN UP) - so a stale-only directory never
+#  entered $chapterEntries at all, and its own $chStale was never reached.
+#
+#  Function-swaps Get-SeriesChapters to simulate real exclusion (calls the
+#  REAL function, then filters OUT the stale-only chapter's directory from
+#  its result) rather than trying to reverse-engineer the exact real-world
+#  trigger for that exclusion - the fix under test is entirely about what
+#  Invoke-FullPipeline does once a directory is ALREADY excluded, not about
+#  how Get-SeriesChapters decides to exclude it.
+# ==============================================================================
+Write-Host "=== Scenario Z5: a directory chapter-discovery missed, holding only a stale source, still gets cleaned up ===" -ForegroundColor Cyan
+$chZ5Normal = New-Dir "scenario-z5\Series\01 - Chapter 1"
+New-FakeImageIn -DirPath $chZ5Normal -Name "page1.jpg" | Out-Null
+$chZ5StaleOnly = New-Dir "scenario-z5\Series\02 - Chapter 2"
+New-FakeImageIn -DirPath $chZ5StaleOnly -Name "old.jpg" | Out-Null
+Start-Sleep -Milliseconds 50
+[System.IO.File]::WriteAllText((Join-Path $chZ5StaleOnly "old.jxl"), "already converted on a prior run")
+
+$realGetSeriesChaptersZ5 = ${function:Get-SeriesChapters}
+function Get-SeriesChapters {
+    param([string]$SeriesPath, [string[]]$QualifyingExtensions, [string[]]$ExcludeStagingDirs, [bool]$ForceRezip)
+    $real = & $script:realGetSeriesChaptersZ5Ref -SeriesPath $SeriesPath -QualifyingExtensions $QualifyingExtensions -ExcludeStagingDirs $ExcludeStagingDirs -ForceRezip $ForceRezip
+    return @($real | Where-Object { $_.Dir.FullName -ne $script:chZ5StaleOnlyRef })
+}
+$script:realGetSeriesChaptersZ5Ref = $realGetSeriesChaptersZ5
+$script:chZ5StaleOnlyRef = (Get-Item -LiteralPath $chZ5StaleOnly).FullName
+
+try {
+    $totalsZ5 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-z5") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+} finally {
+    ${function:Get-SeriesChapters} = $realGetSeriesChaptersZ5
+}
+
+Test-Assert ($totalsZ5.ConvertedImageSuccess -eq 1) "sanity check: chapter 1's real image still converted normally"
+Test-Assert ($totalsZ5.StaleImageCleanedSuccess -eq 1) ("chapter 2's stale leftover was cleaned up despite chapter-discovery missing the directory entirely (got StaleImageCleanedSuccess=" + $totalsZ5.StaleImageCleanedSuccess + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

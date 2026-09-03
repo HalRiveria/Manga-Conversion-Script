@@ -725,6 +725,30 @@ function Convert-AnimatedBatch {
                 if ($running.Count -gt 0) { Start-Sleep -Milliseconds 250 }
             }
 
+            # One final completion-check pass before declaring anything
+            # force-stopped (2026-09-03 fix, real bug found by code review
+            # after the IsCloseEvent fast-path above was added) - same
+            # reasoning as the sibling module's identical fix, see
+            # ImageConversionPipeline.ps1's Convert-ImageBatch straggler
+            # drain for the full writeup: IsCloseEvent can exit the while
+            # loop above before even one poll of $running has happened, so a
+            # job whose process had ALREADY exited successfully could still
+            # be sitting in $running with nothing having checked HasExited
+            # for it yet - without this pass, the force-kill block below
+            # would delete that legitimate output as if it were partial/
+            # corrupt from a killed process.
+            if ($running.Count -gt 0) {
+                $stillWaiting = [System.Collections.Generic.List[hashtable]]::new()
+                foreach ($j in $running) {
+                    if ($j.Proc.HasExited) {
+                        Complete-AnimatedConversionJob -Job $j -BatchResult $batchResult -DoFullLogging $DoFullLogging -DoAnimatedDeleteSource $DoAnimatedDeleteSource -SharedBudget $SharedBudget -IsAbortDrain $true
+                    } else {
+                        $stillWaiting.Add($j)
+                    }
+                }
+                $running = $stillWaiting
+            }
+
             # Force-kill anything still running past the timeout
             if ($running.Count -gt 0) {
                 $batchResult.ForceKilledCount = $running.Count

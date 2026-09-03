@@ -1084,6 +1084,34 @@ function Convert-ImageBatch {
                 if ($running.Count -gt 0) { Start-Sleep -Milliseconds 250 }
             }
 
+            # One final completion-check pass before declaring anything
+            # force-stopped (2026-09-03 fix, real bug found by code review
+            # after the IsCloseEvent fast-path above was added). Same closing
+            # move Invoke-GracefulDrain's own drain loop already uses for the
+            # identical race at the normal -AbortTimeoutSeconds boundary -
+            # needed MORE here now, not less: IsCloseEvent can exit the while
+            # loop above on its very first condition check, before even one
+            # poll of $running has happened, so a job whose process had
+            # ALREADY exited successfully (a real, valid, fully-written .jxl)
+            # could still be sitting in $running with nothing having checked
+            # HasExited for it yet. Without this pass, the force-kill block
+            # below would delete that legitimate output as if it were
+            # partial/corrupt from a killed process - destroying finished
+            # work instead of just cleaning up a genuinely-still-running job.
+            if ($running.Count -gt 0) {
+                $stillWaiting = [System.Collections.Generic.List[hashtable]]::new()
+                foreach ($j in $running) {
+                    if ($j.Proc.HasExited) {
+                        if (Complete-ImageConversionJob -Job $j -BatchResult $batchResult -Pending $pending -MagickExe $MagickExe -DoFullLogging $DoFullLogging -ItemNoun $ItemNoun -SourceNoun $SourceNoun -SharedBudget $SharedBudget -IsAbortDrain $true) {
+                            continue
+                        }
+                    } else {
+                        $stillWaiting.Add($j)
+                    }
+                }
+                $running = $stillWaiting
+            }
+
             # Force-kill anything still running past the timeout
             if ($running.Count -gt 0) {
                 $batchResult.ForceKilledCount = $running.Count

@@ -1628,12 +1628,9 @@ $fileAJLossyJpeg = Join-Path $chAJ "lossy.jpg"
 $fileAJPng = Join-Path $chAJ "plain.png"
 [System.IO.File]::WriteAllText($fileAJPng, "ARGS_MARKER")
 
-$null = Convert-ImageBatch -ImageFiles @(Get-Item -LiteralPath $fileAJLosslessJpeg) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -DoFullLogging $false `
-    -DoJpegLossless $true -CancelToken ([System.Threading.CancellationToken]::None)
-$null = Convert-ImageBatch -ImageFiles @(Get-Item -LiteralPath $fileAJLossyJpeg) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -DoFullLogging $false `
-    -DoJpegLossless $false -DoJpegQuality 80 -CancelToken ([System.Threading.CancellationToken]::None)
-$null = Convert-ImageBatch -ImageFiles @(Get-Item -LiteralPath $fileAJPng) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -DoFullLogging $false `
-    -CancelToken ([System.Threading.CancellationToken]::None)
+$null = Convert-ImageBatch -ImageFiles @(Get-Item -LiteralPath $fileAJLosslessJpeg) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -DoFullLogging $false -DoJpegLossless $true -CancelToken ([System.Threading.CancellationToken]::None)
+$null = Convert-ImageBatch -ImageFiles @(Get-Item -LiteralPath $fileAJLossyJpeg) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -DoFullLogging $false -DoJpegLossless $false -DoJpegQuality 80 -CancelToken ([System.Threading.CancellationToken]::None)
+$null = Convert-ImageBatch -ImageFiles @(Get-Item -LiteralPath $fileAJPng) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -DoFullLogging $false -CancelToken ([System.Threading.CancellationToken]::None)
 
 $argsLosslessAJ = Get-Content -LiteralPath (Join-Path $chAJ "lossless.jxl") -Raw
 $argsLossyAJ    = Get-Content -LiteralPath (Join-Path $chAJ "lossy.jxl") -Raw
@@ -1664,8 +1661,7 @@ $pollAK = { param($inFlight) if ($inFlight.Count -gt 0) { $ctsAK.Cancel() } }
 [ConsoleCtrl]::IsCloseEvent = $true
 $swAK = [System.Diagnostics.Stopwatch]::StartNew()
 try {
-    $resultAK = Convert-ImageBatch -ImageFiles @($fileAK) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 5 -DoFullLogging $false `
-        -CancelToken $ctsAK.Token -AbortPollCallback $pollAK -AbortTimeoutSeconds 30
+    $resultAK = Convert-ImageBatch -ImageFiles @($fileAK) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 5 -DoFullLogging $false -CancelToken $ctsAK.Token -AbortPollCallback $pollAK -AbortTimeoutSeconds 30
 } finally {
     $swAK.Stop()
     [ConsoleCtrl]::IsCloseEvent = $false
