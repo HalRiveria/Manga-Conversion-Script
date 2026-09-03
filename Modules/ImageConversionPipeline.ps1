@@ -899,13 +899,22 @@ function Convert-ImageBatch {
 
             # JPEG encoding: controlled by the -DoJpegLossless / -DoJpegQuality params.
             # Non-JPEGs (PNG/WebP/TIFF): always lossy at quality 90.
+            # --num_threads=1 on every invocation (2026-09-03 fix, real bug,
+            # live-reported): cjxl's own default ("-1" = use machine
+            # default) was never overridden, so every concurrently-
+            # dispatched cjxl process independently grabbed its own
+            # machine-default thread pool - MaxCjxlProcs controlled how
+            # many PROCESSES ran, not how many real worker THREADS existed,
+            # so e.g. MaxCjxlProcs=4 could saturate far more than 4 threads
+            # system-wide. Pinning this makes MaxCjxlProcs mean what it
+            # says: one real worker thread per configured process slot.
             $isJpeg = ($cjxlSrc -imatch '\.jpe?g$')
             if ($isJpeg -and $DoJpegLossless) {
-                $psi.Arguments = "`"" + $cjxlSrc + "`" `"" + $j.JxlPath + "`" --lossless_jpeg=1"
+                $psi.Arguments = "`"" + $cjxlSrc + "`" `"" + $j.JxlPath + "`" --lossless_jpeg=1 --num_threads=1"
             } elseif ($isJpeg) {
-                $psi.Arguments = "`"" + $cjxlSrc + "`" `"" + $j.JxlPath + "`" --lossless_jpeg=0 --quality=$DoJpegQuality"
+                $psi.Arguments = "`"" + $cjxlSrc + "`" `"" + $j.JxlPath + "`" --lossless_jpeg=0 --quality=$DoJpegQuality --num_threads=1"
             } else {
-                $psi.Arguments = "`"" + $cjxlSrc + "`" `"" + $j.JxlPath + "`" --lossless_jpeg=0 --quality=90"
+                $psi.Arguments = "`"" + $cjxlSrc + "`" `"" + $j.JxlPath + "`" --lossless_jpeg=0 --quality=90 --num_threads=1"
             }
 
             Write-Log ("Converting " + $ItemNoun + ": '" + $j.SrcPath + "'")

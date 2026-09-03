@@ -1571,6 +1571,41 @@ $argsTextAI = Get-Content -LiteralPath $expectedJxlAI -Raw
 Test-Assert ($argsTextAI -match "--quality=90(\s|$)") ("omitting -DoJpegQuality produced --quality=90, not --quality=0 (got: '" + $argsTextAI.Trim() + "')")
 Write-Host ""
 
+# ==============================================================================
+#  Scenario AJ (2026-09-03 fix, real bug, live-reported): every cjxl
+#  invocation passes --num_threads=1, on all three argument-building
+#  branches (lossless JPEG, lossy JPEG, non-JPEG). Before this fix, cjxl's
+#  own default ("-1" = use machine default) was never overridden, so each
+#  concurrently-dispatched process grabbed its own machine-default thread
+#  pool independently of -MaxCjxlProcs - confirmed live (4 configured
+#  processes saturated far more than 4 real threads). Same ARGS_MARKER
+#  technique as Scenario AI, one file per branch.
+# ==============================================================================
+Write-Host "=== Scenario AJ: every cjxl invocation pins --num_threads=1 ===" -ForegroundColor Cyan
+$chAJ = New-Dir "scenario-aj\Series\Chapter 1"
+
+$fileAJLosslessJpeg = Join-Path $chAJ "lossless.jpg"
+[System.IO.File]::WriteAllText($fileAJLosslessJpeg, "ARGS_MARKER")
+$fileAJLossyJpeg = Join-Path $chAJ "lossy.jpg"
+[System.IO.File]::WriteAllText($fileAJLossyJpeg, "ARGS_MARKER")
+$fileAJPng = Join-Path $chAJ "plain.png"
+[System.IO.File]::WriteAllText($fileAJPng, "ARGS_MARKER")
+
+$null = Convert-ImageBatch -ImageFiles @(Get-Item -LiteralPath $fileAJLosslessJpeg) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -DoFullLogging $false `
+    -DoJpegLossless $true -CancelToken ([System.Threading.CancellationToken]::None)
+$null = Convert-ImageBatch -ImageFiles @(Get-Item -LiteralPath $fileAJLossyJpeg) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -DoFullLogging $false `
+    -DoJpegLossless $false -DoJpegQuality 80 -CancelToken ([System.Threading.CancellationToken]::None)
+$null = Convert-ImageBatch -ImageFiles @(Get-Item -LiteralPath $fileAJPng) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -DoFullLogging $false `
+    -CancelToken ([System.Threading.CancellationToken]::None)
+
+$argsLosslessAJ = Get-Content -LiteralPath (Join-Path $chAJ "lossless.jxl") -Raw
+$argsLossyAJ    = Get-Content -LiteralPath (Join-Path $chAJ "lossy.jxl") -Raw
+$argsPngAJ      = Get-Content -LiteralPath (Join-Path $chAJ "plain.jxl") -Raw
+Test-Assert ($argsLosslessAJ -match "--num_threads=1(\s|$)") ("lossless-JPEG branch pins --num_threads=1 (got: '" + $argsLosslessAJ.Trim() + "')")
+Test-Assert ($argsLossyAJ -match "--num_threads=1(\s|$)") ("lossy-JPEG branch pins --num_threads=1 (got: '" + $argsLossyAJ.Trim() + "')")
+Test-Assert ($argsPngAJ -match "--num_threads=1(\s|$)") ("non-JPEG branch pins --num_threads=1 (got: '" + $argsPngAJ.Trim() + "')")
+Write-Host ""
+
 if ($script:failCount -eq 0) {
     Write-Host ("ALL PASSED  (" + $script:passCount + " assertions)") -ForegroundColor Green
     exit 0

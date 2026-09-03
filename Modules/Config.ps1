@@ -117,6 +117,19 @@ function Get-DefaultScriptSettings {
         MagickPath                       = ""
         ZipParallelThreads               = 1
         MaxCjxlProcs                     = 8
+        # Default matches MaxCjxlProcs (2026-09-03 addition, real bug fix -
+        # see CHANGELOG.md) so upgrading doesn't silently change Full
+        # Pipeline's real concurrency - this replaces the shared-budget
+        # call site that used to reuse $Settings.MaxCjxlProcs directly,
+        # which meant Full Pipeline's combined image+animated process
+        # ceiling was ALWAYS MaxCjxlProcs alone, silently ignoring
+        # AnimatedThreads entirely. Dedicated setting, not a sum of the
+        # other two (MaxCjxlProcs + AnimatedThreads would silently double-
+        # count for anyone who doesn't realize the two get added) - a
+        # single number is the real total Full Pipeline will ever run at
+        # once; MaxCjxlProcs/AnimatedThreads keep meaning exactly what
+        # they say for solo modes 2/3, unaffected by this setting.
+        FullPipelineMaxConcurrentProcs   = 8
         FullLogging                      = $false
         DisableSummaryFile               = $false
         CleanConsoleOutputEnabled        = $false
@@ -224,6 +237,7 @@ function Test-ScriptSettingValue {
             'ZipParallelThreads' { return ($intValue -ge 1) }
             'MaxCjxlProcs'       { return ($intValue -ge 1) }
             'AnimatedThreads'    { return ($intValue -ge 1) }
+            'FullPipelineMaxConcurrentProcs' { return ($intValue -ge 1) }
             default              { return $true }
         }
     }

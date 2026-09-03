@@ -57,6 +57,10 @@ Test-Assert (
     $defA2.ContainsKey('AnimatedDeleteSource')
 ) "schema includes all five Animated* keys"
 Test-Assert ($defA2.ContainsKey('ZipWithUnconvertedAnimated') -and $defA2.ZipWithUnconvertedAnimated -eq $false) "schema includes ZipWithUnconvertedAnimated, default `$false"
+# 2026-09-03 addition, real bug fix (see CHANGELOG.md) - dedicated Full
+# Pipeline shared-budget setting, defaults to match MaxCjxlProcs (8) so
+# upgrading doesn't silently change real concurrency.
+Test-Assert ($defA2.ContainsKey('FullPipelineMaxConcurrentProcs') -and $defA2.FullPipelineMaxConcurrentProcs -eq 8) "schema includes FullPipelineMaxConcurrentProcs, default 8 (matches MaxCjxlProcs)"
 Write-Host ""
 
 # ==============================================================================
@@ -263,10 +267,16 @@ Test-Assert ($loadedH2.AnimatedThreads -eq 6 -and $loadedH2.AnimatedQuality -eq 
 Test-Assert ($loadedH2.AnimatedLossless -eq $true -and $loadedH2.AnimatedOverwrite -eq $true -and $loadedH2.AnimatedDeleteSource -eq $false) "the three Animated* bools round-tripped"
 
 $pathH3 = Join-Path $scratchDir "animated-bad-settings.json"
-'{ "AnimatedQuality": 0, "AnimatedThreads": -1 }' | Set-Content -LiteralPath $pathH3 -Encoding UTF8
+'{ "AnimatedQuality": 0, "AnimatedThreads": -1, "FullPipelineMaxConcurrentProcs": 0 }' | Set-Content -LiteralPath $pathH3 -Encoding UTF8
 $settingsH3 = Import-ScriptSettings -Path $pathH3
 Test-Assert ($settingsH3.AnimatedQuality -eq 90) "out-of-range AnimatedQuality (0) fell back to default (90)"
 Test-Assert ($settingsH3.AnimatedThreads -eq 8) "out-of-range AnimatedThreads (-1) fell back to default (8)"
+Test-Assert ($settingsH3.FullPipelineMaxConcurrentProcs -eq 8) "out-of-range FullPipelineMaxConcurrentProcs (0) fell back to default (8)"
+
+$pathH3b = Join-Path $scratchDir "full-pipeline-good-settings.json"
+'{ "FullPipelineMaxConcurrentProcs": 12 }' | Set-Content -LiteralPath $pathH3b -Encoding UTF8
+$settingsH3b = Import-ScriptSettings -Path $pathH3b
+Test-Assert ($settingsH3b.FullPipelineMaxConcurrentProcs -eq 12) "a valid FullPipelineMaxConcurrentProcs (12) round-trips, independent of MaxCjxlProcs"
 Write-Host ""
 
 # ==============================================================================

@@ -735,6 +735,12 @@ $fakeSettings = @{
     AnimatedLossless = $false; AnimatedQuality = 88; AnimatedThreads = 3; AnimatedOverwrite = $false; AnimatedDeleteSource = $true
     ZipParallelThreads = 2; PermanentDelete = $true; DeleteExtractedFoldersAfterRezip = $true
     CleanConsoleOutputEnabled = $false
+    # Deliberately distinct from MaxCjxlProcs (2026-09-03 addition, real
+    # bug fix, see CHANGELOG.md) - Scenario N below asserts THIS value,
+    # not MaxCjxlProcs, reaches Invoke-Mode's FullPipeline dispatch; the
+    # two used to be silently the same because the call site reused
+    # MaxCjxlProcs directly.
+    FullPipelineMaxConcurrentProcs = 9
 }
 
 Write-Host "=== Scenario J: Invoke-Mode / ImageConversion - param translation + result mapping ===" -ForegroundColor Cyan
@@ -782,7 +788,9 @@ Test-Assert ($statsM.ZipCreated.Success -eq 2 -and $statsM.FolderDeleted.Success
 Write-Host ""
 
 Write-Host "=== Scenario N: Invoke-Mode / FullPipeline - all three stat groups populated at once ===" -ForegroundColor Cyan
+$capturedN = @{ FullPipelineMaxConcurrentProcs = $null }
 $fakeFullHandlerN = { param($Path, $CjxlExe, $MagickExe, $JpegLossless, $JpegQuality, $AnimatedLossless, $AnimatedQuality, $AnimatedOverwrite, $AnimatedDeleteSource, $FullPipelineMaxConcurrentProcs, $FullLogging, $LogFile, $LogErrorFile, $LogWarnFile, $PermanentDelete)
+    $capturedN.FullPipelineMaxConcurrentProcs = $FullPipelineMaxConcurrentProcs
     return @{
         ConvertedImageSuccess = 5; ConvertedImageFail = 0; ConvertedImageSkipped = 0; DeletedImageSuccess = 5; DeletedImageFail = 0
         StaleImageCleanedSuccess = 0; StaleImageCleanedFail = 0
@@ -794,6 +802,11 @@ $fakeFullHandlerN = { param($Path, $CjxlExe, $MagickExe, $JpegLossless, $JpegQua
 $statsN = Invoke-Mode -Resolved @{ Mode = 'FullPipeline' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -FullPipelineHandler $fakeFullHandlerN
 Test-Assert ($statsN.LooseImgConverted.Success -eq 5 -and $statsN.LooseAnimatedConverted.Success -eq 2 -and $statsN.LooseFolderZipped.Success -eq 3) "FullPipeline: image + animated + zip stat groups all mapped in one call"
 Test-Assert ($statsN.InspectFailed.Count -eq 4) "FullPipeline: InspectFailedCount (both engines summed by Controller.ps1) mapped onto InspectFailed.Count"
+# 2026-09-03 addition, real bug fix (see CHANGELOG.md) - this call site
+# used to reuse $Settings.MaxCjxlProcs (6 in $fakeSettings) directly;
+# confirms it now reads the dedicated $Settings.FullPipelineMaxConcurrentProcs
+# (9) instead, not silently the same value.
+Test-Assert ($capturedN.FullPipelineMaxConcurrentProcs -eq 9) ("FullPipeline: Settings.FullPipelineMaxConcurrentProcs (9), not MaxCjxlProcs (6), reached the handler (got " + $capturedN.FullPipelineMaxConcurrentProcs + ")")
 Write-Host ""
 
 # ==============================================================================

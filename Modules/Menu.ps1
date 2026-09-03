@@ -280,6 +280,13 @@ function Get-OptionsMenuSchema {
         ) }
         @{ Key = '5'; Label = 'Permanent Delete';           Type = 'Bool';   SettingsKey = 'PermanentDelete'; Description = 'off = Recycle Bin (default), on = bypasses it entirely' }
         @{ Key = '6'; Label = 'Open Settings File Location'; Type = 'Action'; Action = 'OpenSettingsLocation'; Description = 'opens the settings folder in Explorer' }
+        # 2026-09-03 addition, real bug fix (see CHANGELOG.md) - Full
+        # Pipeline's shared image+animated process budget used to reuse
+        # MaxCjxlProcs alone as its total size, silently ignoring
+        # AnimatedThreads entirely. Dedicated setting instead of summing
+        # the other two (MaxCjxlProcs + AnimatedThreads would silently
+        # double-count for anyone who doesn't realize the two get added).
+        @{ Key = '7'; Label = 'Full Pipeline Max Concurrent Processes'; Type = 'Int'; SettingsKey = 'FullPipelineMaxConcurrentProcs'; Min = 1; Max = [int]::MaxValue; Description = 'total cjxl+magick processes Full Pipeline runs at once, shared dynamically between image and animated conversion - independent of CJXL Processes/Animated Threads, which still cap modes 2/3 on their own' }
     )
 }
 

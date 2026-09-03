@@ -236,13 +236,15 @@ Write-Host ""
 # ==============================================================================
 Write-Host "=== Scenario I: Get-OptionsMenuSchema shape and Config cross-check ===" -ForegroundColor Cyan
 $schemaI = Get-OptionsMenuSchema
-Test-Assert ($schemaI.Count -eq 6) "six top-level items (Image Conversion, Animated Conversion, Zip, Logging, Permanent Delete, Open Settings Location)"
+Test-Assert ($schemaI.Count -eq 7) "seven top-level items (Image Conversion, Animated Conversion, Zip, Logging, Permanent Delete, Open Settings Location, Full Pipeline Max Concurrent Processes)"
 Test-Assert ($schemaI[0].Type -eq 'Submenu' -and $schemaI[0].Items.Count -eq 3) "Image Conversion Settings is a 3-item submenu"
 Test-Assert ($schemaI[1].Type -eq 'Submenu' -and $schemaI[1].Items.Count -eq 5) "Animated Conversion Settings is a 5-item submenu"
 Test-Assert ($schemaI[2].Type -eq 'Submenu' -and $schemaI[2].Items.Count -eq 2) "Zip Settings is a 2-item submenu"
 Test-Assert ($schemaI[3].Type -eq 'Submenu' -and $schemaI[3].Items.Count -eq 3) "Logging is a 3-item submenu"
 Test-Assert ($schemaI[4].Type -eq 'Bool' -and $schemaI[4].SettingsKey -eq 'PermanentDelete') "item 5 is the direct Permanent Delete Bool toggle"
 Test-Assert ($schemaI[5].Type -eq 'Action' -and $schemaI[5].Action -eq 'OpenSettingsLocation') "item 6 is the Open Settings File Location action"
+# 2026-09-03 addition, real bug fix (see CHANGELOG.md)
+Test-Assert ($schemaI[6].Type -eq 'Int' -and $schemaI[6].SettingsKey -eq 'FullPipelineMaxConcurrentProcs') "item 7 is the direct Full Pipeline Max Concurrent Processes Int setting"
 
 $defaultsI = Get-DefaultScriptSettings
 function Get-AllSettingsKeysInSchema {
@@ -353,12 +355,12 @@ Write-Host ""
 Write-Host "=== Scenario O: invalid selection at a menu level re-prompts, does not throw ===" -ForegroundColor Cyan
 $settingsO = Get-DefaultScriptSettings
 $pathO = New-ScratchSettingsPath "scenario-o"
-$promptO = New-ScriptedPrompt -Responses @('7', '0')
+$promptO = New-ScriptedPrompt -Responses @('8', '0')
 $threwO = $false
 try {
     Show-OptionsMenuLevel -Items (Get-OptionsMenuSchema) -Settings $settingsO -SettingsPath $pathO -PromptFunc $promptO
 } catch { $threwO = $true }
-Test-Assert (-not $threwO) "an invalid top-level choice ('7', not in the schema) did not throw - just re-prompted"
+Test-Assert (-not $threwO) "an invalid top-level choice ('8', not in the schema - now 7 items, see 2026-09-03 addition) did not throw - just re-prompted"
 Write-Host ""
 
 # ==============================================================================
