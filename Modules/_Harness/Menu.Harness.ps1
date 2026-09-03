@@ -533,6 +533,53 @@ Test-Assert ((Show-PostRunPrompt -KeyReader $otherKeyReader) -eq 'ReturnToMenu')
 Write-Host ""
 
 # ==============================================================================
+#  Scenario U (2026-09-03 fix - the real FATAL crash): Show-CoverDeletionMenu's
+#  own switch cases must not leak a handler's non-$null return value (Run/
+#  Add/TrailingZero all return real hashtables in production) into ITS OWN
+#  output stream. Calls Show-CoverDeletionMenu directly and captures every
+#  bit of output from the whole call - before the $null = fix, this came
+#  back with the handlers' own return values mixed in.
+# ==============================================================================
+Write-Host "=== Scenario U: Show-CoverDeletionMenu doesn't leak Run/Add/TrailingZero handler return values ===" -ForegroundColor Cyan
+$runHandlerU = { param($ProfilesPath, $PromptFunc) @{ Ran = $true; Reason = $null } }
+$addHandlerU = { param($ProfilesPath, $PromptFunc) @{ Added = $true } }
+$trailingZeroHandlerU = { param($PromptFunc) @{ Ran = $true; Reason = $null; Result = @{ ReportPath = $null } } }
+$promptU = New-ScriptedPrompt -Responses @('1', '2', '5', '0')
+$outputU = Show-CoverDeletionMenu -ProfilesPath "unused" -PromptFunc $promptU -RunHandler $runHandlerU -AddHandler $addHandlerU -TrailingZeroHandler $trailingZeroHandlerU
+Test-Assert ($null -eq $outputU) ("Show-CoverDeletionMenu's own call produced no output despite its Run/Add/TrailingZero handlers all returning non-`$null hashtables (got: " + $outputU + ")")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario U2 (2026-09-03 fix, the actual live-reproduced crash): the full
+#  real chain - Show-ModeMenu's '5' branch into the REAL Show-CoverDeletionMenu,
+#  whose default -TrailingZeroHandler resolves to the real
+#  Invoke-TrailingZeroAuditRun (function-swapped here to a fake returning a
+#  real hashtable with no real file scan, same technique as Scenario Q2's
+#  Show-CoverDeletionMenu swap). Before the $null = fixes in both functions,
+#  Get-SelectedMode's `$resolved` came back as a 2-element array (the leaked
+#  hashtable, then the real resolved mode) the first time a real mode was
+#  picked right after visiting the trailing-zero audit - this is the actual
+#  repro for the live FATAL crash (CCO off -> mode 5 -> trailing-zero audit
+#  -> CCO back on -> attempt mode 1 -> crash).
+# ==============================================================================
+Write-Host "=== Scenario U2: Show-ModeMenu's real chain into Cover Deletion's real TrailingZeroHandler default doesn't corrupt `$resolved ===" -ForegroundColor Cyan
+$settingsU2 = Get-DefaultScriptSettings
+$pathU2 = New-ScratchSettingsPath "scenario-u2"
+$promptU2 = New-ScriptedPrompt -Responses @('5', '5', '0', '2')
+$fakeTrailingZeroU2 = { param($PromptFunc) @{ Ran = $true; Reason = $null; Result = @{ ReportPath = $null } } }
+$realInvokeTrailingZeroAuditRunU2 = ${function:Invoke-TrailingZeroAuditRun}
+${function:Invoke-TrailingZeroAuditRun} = $fakeTrailingZeroU2
+try {
+    $resultU2 = Show-ModeMenu -Settings $settingsU2 -SettingsPath $pathU2 -PromptFunc $promptU2
+} finally {
+    ${function:Invoke-TrailingZeroAuditRun} = $realInvokeTrailingZeroAuditRunU2
+}
+Test-Assert ($resultU2 -isnot [array]) ("`$resolved came back as a single object, not an array, after visiting the trailing-zero audit (got type: " + $resultU2.GetType().Name + ")")
+Test-Assert ($resultU2 -is [hashtable]) "`$resolved is a hashtable"
+Test-Assert ($resultU2.Mode -eq 'ImageConversion') "the real mode selection ('2') still resolved correctly right after the leak-prone branch ran"
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

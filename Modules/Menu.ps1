@@ -161,7 +161,14 @@ function Show-ModeMenu {
         $choice = (& $PromptFunc "Enter a number").Trim()
 
         if ($choice -eq '0') {
-            Show-OptionsMenuLevel -Items (Get-OptionsMenuSchema) -Settings $Settings -SettingsPath $SettingsPath -PromptFunc $PromptFunc -Title "Options"
+            # $null = (2026-09-03 fix - see this file's own header/CHANGELOG.md
+            # for the FATAL-crash root cause this same species caused via
+            # Show-CoverDeletionMenu below): a bare call's return value
+            # becomes part of THIS function's own output stream unless
+            # suppressed, silently corrupting the eventual `return $resolved`
+            # into a multi-element array the first time anything in this
+            # branch's call tree returns non-$null.
+            $null = Show-OptionsMenuLevel -Items (Get-OptionsMenuSchema) -Settings $Settings -SettingsPath $SettingsPath -PromptFunc $PromptFunc -Title "Options"
             Write-Host ""
             continue
         }
@@ -187,7 +194,17 @@ function Show-ModeMenu {
             # the scan the user is about to run.
             Initialize-CleanConsoleOutput -Enabled ([bool]$Settings.CleanConsoleOutputEnabled)
             Initialize-FileDeletion -PermanentDelete ([bool]$Settings.PermanentDelete)
-            Show-CoverDeletionMenu -PromptFunc $PromptFunc
+            # $null = (2026-09-03 fix): Show-CoverDeletionMenu's own '1'/'2'/'5'
+            # branches return a hashtable (Invoke-CoverDeletionRun/
+            # Show-AddUnwantedImageProfileFlow/Invoke-TrailingZeroAuditRun all
+            # do) from a bare, unsuppressed call of their own - that hashtable
+            # was escaping THIS call too, silently added to Show-ModeMenu's own
+            # output stream. Live-reproduced as the real FATAL crash: run
+            # Cover Deletion's trailing-zero audit, back out, pick a real mode
+            # next - Get-SelectedMode's `$resolved` came back as a 2-element
+            # array (the leaked hashtable, then the real resolved mode),
+            # crashing the first `$resolved.Mode`/property access downstream.
+            $null = Show-CoverDeletionMenu -PromptFunc $PromptFunc
             Write-Host ""
             continue
         }
@@ -395,7 +412,13 @@ function Show-OptionsMenuLevel {
 
         switch ($match.Type) {
             'Submenu' {
-                Show-OptionsMenuLevel -Items $match.Items -Settings $Settings -SettingsPath $SettingsPath -Title $match.Label -PromptFunc $PromptFunc -ActionHandler $ActionHandler
+                # $null = (2026-09-03 fix, same species as Show-ModeMenu's
+                # Show-CoverDeletionMenu leak) - defensive: this recursion
+                # never returns non-$null today (every path ends in a bare
+                # `return` with no value), but suppressing here means a
+                # future -ActionHandler/nested change can't silently corrupt
+                # every caller up the chain the way the Cover Deletion one did.
+                $null = Show-OptionsMenuLevel -Items $match.Items -Settings $Settings -SettingsPath $SettingsPath -Title $match.Label -PromptFunc $PromptFunc -ActionHandler $ActionHandler
             }
             'Bool' {
                 $Settings[$match.SettingsKey] = -not [bool]$Settings[$match.SettingsKey]
@@ -416,7 +439,8 @@ function Show-OptionsMenuLevel {
                 }
             }
             'Action' {
-                & $ActionHandler $match.Action $Settings $SettingsPath
+                # $null = (2026-09-03 fix, same reason as the Submenu branch above)
+                $null = & $ActionHandler $match.Action $Settings $SettingsPath
             }
         }
     }
@@ -593,12 +617,25 @@ function Show-CoverDeletionMenu {
         foreach ($line in (Get-CoverDeletionMenuLines)) { Write-Host $line }
         $choice = (& $PromptFunc "Enter a number").Trim()
 
+        # $null = on every handler call below (2026-09-03 fix) - this is the
+        # real source of the FATAL crash: -RunHandler/-AddHandler/
+        # -TrailingZeroHandler all return a real hashtable
+        # (Invoke-CoverDeletionRun/Show-AddUnwantedImageProfileFlow/
+        # Invoke-TrailingZeroAuditRun's own @{ Ran = ... } results), and a
+        # bare, unsuppressed call's return value becomes part of THIS
+        # function's own output stream. Since Show-ModeMenu's own call to
+        # Show-CoverDeletionMenu was equally unsuppressed, that hashtable
+        # escaped all the way up to Get-SelectedMode's `$resolved` - live-
+        # reproduced: run the trailing-zero audit, back out, pick a real
+        # mode next, and $resolved comes back as a 2-element array instead
+        # of the expected hashtable, crashing the first property access on
+        # it downstream. See CHANGELOG.md for the full repro.
         switch ($choice) {
             '0' { return }
-            '1' { & $RunHandler $ProfilesPath $PromptFunc; Write-Host "" }
-            '2' { & $AddHandler $ProfilesPath $PromptFunc; Write-Host "" }
-            '4' { & $ActionHandler 'OpenProfileLocation' $ProfilesPath }
-            '5' { & $TrailingZeroHandler $PromptFunc; Write-Host "" }
+            '1' { $null = & $RunHandler $ProfilesPath $PromptFunc; Write-Host "" }
+            '2' { $null = & $AddHandler $ProfilesPath $PromptFunc; Write-Host "" }
+            '4' { $null = & $ActionHandler 'OpenProfileLocation' $ProfilesPath }
+            '5' { $null = & $TrailingZeroHandler $PromptFunc; Write-Host "" }
             default { Write-Host "Invalid selection." -ForegroundColor Yellow }
         }
     }
