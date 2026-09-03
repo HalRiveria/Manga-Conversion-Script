@@ -407,12 +407,18 @@ $script:logMutex = $null
 Write-Host ""
 
 # ==============================================================================
-#  Scenario M: Initialize-LogPaths (full-logging mode) Recycle-Bins old log
-#  files from a previous run against the SAME target (same pathHash), and
-#  leaves a DIFFERENT target's log files alone. Move-ToRecycleBin is the
-#  forward-referenced stub defined near the top of this file.
+#  Scenario M (rewritten 2026-09-03 - real bug, live-reported): full-logging
+#  mode used to Recycle-Bin a previous run's own timestamped log the moment
+#  the NEXT run against the same target started - the log the user was
+#  actively looking at right after that run finished vanished out from
+#  under them. Project owner's own call: a uniquely-timestamped file has no
+#  reason to ever be auto-deleted (unlike split-log mode's fixed-name
+#  Errors/Warnings files, which genuinely need clearing so a clean run
+#  isn't confused with stale content - that behavior is UNCHANGED, see
+#  Scenario M3/M4 below). This scenario now locks in the opposite of what
+#  it used to prove: old timestamped logs for the same target survive.
 # ==============================================================================
-Write-Host "=== Scenario M: old full-logging files cleaned up via Move-ToRecycleBin ===" -ForegroundColor Cyan
+Write-Host "=== Scenario M: full-logging mode no longer deletes a previous run's own log ===" -ForegroundColor Cyan
 $script:recycleBinCalls.Clear()
 
 Reset-LoggingState
@@ -420,54 +426,27 @@ Initialize-LogPaths -TargetPath "C:\M-TargetA\Path" -FullLogging $true -ScriptDi
 $aFirstLogFile = $script:logFile
 Write-Log "target A, first run"
 
-Reset-LoggingState
-Initialize-LogPaths -TargetPath "C:\M-TargetB\Path" -FullLogging $true -ScriptDir $scratchDir
-$bLogFile = $script:logFile
-Write-Log "target B, only run"
-
 Start-Sleep -Milliseconds 1100   # distinct HHmmss timestamp for target A's second run
 Reset-LoggingState
-# Captured (2026-08-31 addition, caught by verifying a same-day
-# /code-review full-codebase pass) - Move-ToRecycleBin returns
-# $true/$false, and the unguarded call at this exact call site (clearing
-# target A's OLD log below) used to leak it onto Initialize-LogPaths' own
-# output stream, printing a stray "True" during bootstrap on every run
-# after the first against a given target (the real call site is a bare
-# statement in Conversion Script Main.ps1). The stub above now returns
-# $true like the real function, so this is the first version of this
-# scenario able to catch that.
 $outputM = Initialize-LogPaths -TargetPath "C:\M-TargetA\Path" -FullLogging $true -ScriptDir $scratchDir
 $aSecondLogFile = $script:logFile
+Write-Log "target A, second run"
 
-Test-Assert ($null -eq $outputM) ("Initialize-LogPaths produced no stray output while Recycle-Binning target A's old log (got: " + ($outputM -join ", ") + ")")
-Test-Assert ($aSecondLogFile -ne $aFirstLogFile) "target A's second run got its own distinct timestamped file"
-Test-Assert ($script:recycleBinCalls.Count -eq 1 -and $script:recycleBinCalls[0] -eq $aFirstLogFile) ("target A's old log was passed to Move-ToRecycleBin exactly once (got " + $script:recycleBinCalls.Count + " call(s))")
-Test-Assert (-not (Test-Path -LiteralPath $aFirstLogFile)) "target A's old log file is gone from disk after cleanup"
-Test-Assert (Test-Path -LiteralPath $bLogFile) "target B's log file (different pathHash) was left untouched"
-Test-Assert ($script:recycleBinCalls -notcontains $bLogFile) "target B's log file was never passed to Move-ToRecycleBin"
+Test-Assert ($null -eq $outputM) ("Initialize-LogPaths produced no stray output on a second run against the same target (got: " + ($outputM -join ", ") + ")")
+Test-Assert ($aSecondLogFile -ne $aFirstLogFile) "target A's second run still got its own distinct timestamped file"
+Test-Assert ($script:recycleBinCalls.Count -eq 0) ("Move-ToRecycleBin was never called for full-logging mode's own log files (got " + $script:recycleBinCalls.Count + " call(s))")
+Test-Assert (Test-Path -LiteralPath $aFirstLogFile) "target A's FIRST run's log file is still on disk after the second run - not auto-deleted"
+Test-Assert (Test-Path -LiteralPath $aSecondLogFile) "target A's second run's own log file exists too - both survive side by side"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario M2: a failing Move-ToRecycleBin (e.g. a locked file) must not
-#  propagate out of Initialize-LogPaths - the try/catch around that call
-#  site exists specifically so one un-deletable stale log can't block an
-#  entire run from starting.
+#  (Scenario M2 removed 2026-09-03: it tested full-logging mode's
+#  now-deleted old-log-cleanup try/catch, which no longer exists - see
+#  Scenario M above. Split-log mode's own equivalent "a failing
+#  Move-ToRecycleBin does not propagate" coverage already exists in
+#  Scenario M3 below, which throws on the Errors file specifically and
+#  confirms the run continues normally - no separate scenario needed.)
 # ==============================================================================
-Write-Host "=== Scenario M2: a failing Move-ToRecycleBin does not propagate ===" -ForegroundColor Cyan
-Reset-LoggingState
-Initialize-LogPaths -TargetPath "C:\M2\Path" -FullLogging $true -ScriptDir $scratchDir
-Write-Log "will become 'old' and fail to recycle"
-
-$originalMoveToRecycleBin = ${function:Move-ToRecycleBin}
-function Move-ToRecycleBin { param([string]$ItemPath) throw "simulated locked file" }
-
-Start-Sleep -Milliseconds 1100
-$initThrew = $false
-try { Initialize-LogPaths -TargetPath "C:\M2\Path" -FullLogging $true -ScriptDir $scratchDir } catch { $initThrew = $true }
-Test-Assert (-not $initThrew) "Initialize-LogPaths does not propagate an exception from a failing Move-ToRecycleBin call"
-
-${function:Move-ToRecycleBin} = $originalMoveToRecycleBin
-Write-Host ""
 
 # ==============================================================================
 #  Scenario M3 (2026-08-31 fix, caught by a same-day /code-review

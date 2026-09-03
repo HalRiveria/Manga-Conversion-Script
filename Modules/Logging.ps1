@@ -52,16 +52,19 @@
     a successful acquire, not a failure) so every WaitOne() call site
     doesn't need to repeat that handling itself.
 
-    Initialize-LogPaths Recycle-Bins old/stale log files left over from
-    previous runs against the same target, via Move-ToRecycleBin - now a
-    real function in Modules\FileDeletion.ps1 (confirmed matching
-    signature, see the comment at that call site). BOTH branches call it
-    (2026-08-31 fix - split-log mode used to permanently Remove-Item its
-    own stale Errors/Warnings logs instead, an inconsistent policy for
-    the identical kind of file). Callers that dot-source Logging.ps1
-    standalone (as the harness does) still need to stub that function
-    out, or dot-source FileDeletion.ps1
-    too.
+    Initialize-LogPaths Recycle-Bins stale log files via Move-ToRecycleBin
+    (Modules\FileDeletion.ps1) - split-log mode ONLY, clearing its own
+    fixed-name Errors/Warnings files from a previous run so a clean run's
+    absence of new errors/warnings isn't confused with stale ones (2026-08-31
+    fix - used to permanently Remove-Item them instead). Full-logging mode
+    does NOT do this (2026-09-03 fix, real bug, live-reported - it used to
+    Recycle-Bin every OTHER timestamped log for the same target on every
+    run, deleting a previous run's own log the moment the next run started;
+    a uniquely-timestamped file has no fixed-name ambiguity to clear, so
+    there was no real reason to auto-delete it). Callers that dot-source
+    Logging.ps1 standalone (as the harness does) still need to stub
+    Move-ToRecycleBin out, or dot-source FileDeletion.ps1 too, for the
+    split-log path.
 
     Log files are written UTF-8, not ASCII - the historical ASCII-only
     rule (see CHANGELOG.md v3.0/v4.0) was about emoji/unicode literally
@@ -173,44 +176,26 @@ function Initialize-LogPaths {
         $script:logWarnFile    = $null
         $script:SummaryFileEnabled = $true   # DisableSummaryFile is ignored in this mode - see param docs
 
-        # Clean up old full-logging files left over from previous runs
-        # against this same target (same $pathHashShort) - each run gets
-        # its own timestamped file and nothing ever deleted them before.
-        # Recycle-Bin'd, not permanently deleted, regardless of
-        # $PermanentDelete - these are the user's own log history, not a
-        # job-generated intermediate (see CLAUDE.md's deletion-semantics
-        # convention), so they get the safer default unconditionally.
-        #
-        # FORWARD REFERENCE: Move-ToRecycleBin isn't defined in this
-        # module - it's Modules\FileDeletion.ps1's function. RESOLVED
-        # (2026-08-14): FileDeletion.ps1 is now built for real, and its
-        # Move-ToRecycleBin signature (-ItemPath <string>, single
-        # file/dir path) matches this call exactly - no changes needed
-        # here. Callers must dot-source FileDeletion.ps1 (in either order
-        # relative to this file, just before Initialize-LogPaths's
-        # full-logging branch actually runs) for this to resolve.
-        # Logging.Harness.ps1 still stubs this function out, since
-        # Logging must stay standalone-testable without a real dependency
-        # on FileDeletion.
-        $oldLogPattern = "Conversion Log - * - " + $pathHashShort + ".log"
-        $oldLogs = Get-ChildItem -LiteralPath $ScriptDir -Filter $oldLogPattern -File -ErrorAction SilentlyContinue |
-                   Where-Object { $_.FullName -ne $script:logFile }
-        foreach ($oldLog in $oldLogs) {
-            # Swallowed deliberately: this is best-effort housekeeping of an
-            # OLD run's own already-complete log file, not this run's data -
-            # if it's locked/in use, next run's own cleanup pass gets
-            # another chance at it. Nothing this run writes is affected
-            # either way, since $script:logFile above is always a fresh,
-            # uniquely-timestamped path.
-            # $null = (2026-08-31 fix, caught by verifying a same-day
-            # /code-review full-codebase pass's own fixes) - Move-ToRecycleBin
-            # returns $true/$false; an unguarded call leaks that onto this
-            # function's own output stream, and Initialize-LogPaths is
-            # called as a bare statement at its real call site
-            # (Conversion Script Main.ps1), so an unguarded return value
-            # here would print a stray "True"/"False" line during bootstrap.
-            try { $null = Move-ToRecycleBin -ItemPath $oldLog.FullName } catch { }
-        }
+        # No old-log cleanup in this branch (2026-09-03 fix, real bug,
+        # live-reported: a previous run's own timestamped full-logging
+        # file - the one the user was actively looking at right after
+        # that run finished - got Recycle-Bin'd out from under them the
+        # moment the NEXT run against the same target started).
+        # Previously this block swept every OTHER "Conversion Log - * -
+        # <pathHash>.log" file for the same target into the Recycle Bin
+        # on every run, on the theory that a fresh timestamped file every
+        # run needed the same "clean up the old one" treatment split-log
+        # mode's fixed-name Errors/Warnings files get. That reasoning
+        # doesn't hold: a fixed-name file has to be cleared or it can't
+        # tell this run's own errors from a stale previous run's, but a
+        # UNIQUELY-timestamped file never has that ambiguity - there's no
+        # reason it can't just be left alone. Project owner's own
+        # explicit call: "if the logs are going to get a unique ID then
+        # they shouldn't get deleted on subsequent runs." A per-run
+        # accumulation toggle (keep every run's own file vs. the old
+        # append-to-one-file behavior) is tracked separately in Todo.md -
+        # this fix only stops the unwanted auto-deletion, it doesn't
+        # change the one-file-per-run design itself.
     } else {
         $script:logFile            = $null
         $script:SummaryFileEnabled = -not $DisableSummaryFile
