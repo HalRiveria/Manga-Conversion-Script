@@ -851,25 +851,19 @@ function Invoke-FullPipeline {
             $totals.SeriesCount++
 
             # Directories holding a file this series couldn't safely act
-            # on - either the AVIF classification step below couldn't
-            # resolve it, OR (2026-08-31 fix) Get-LooseImageCandidates
-            # flagged it as an unresolvable naming collision (see its own
-            # NamingCollisions field). Populated during/right after those
-            # two steps, consulted when building $chapterEntries further
-            # down to force IsZippable=$false for any chapter affected -
-            # same reasoning for both: a real, unconverted file that must
-            # not be zipped, and this run has no safe way to fix it
-            # automatically. Reset per series, same lifetime as
-            # $avifClassification.
+            # on - either the per-chapter AVIF classification step below
+            # couldn't resolve it, OR Get-LooseImageCandidates flagged it
+            # as an unresolvable naming collision (see its own
+            # NamingCollisions field). Consulted when building
+            # $chapterEntries further down to force IsZippable=$false for
+            # any chapter affected by a naming collision (known up front,
+            # series-wide); a classification failure adds to this same
+            # set from INSIDE the per-chapter loop instead, once that
+            # chapter's own avifs are actually classified - same
+            # reasoning for both: a real, unconverted file that must not
+            # be zipped, and this run has no safe way to fix it
+            # automatically. Reset per series.
             $failedClassificationDirs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            # Populated below, once classification runs - threaded into
-            # every Invoke-FullPipelineChapter call this series so
-            # Convert-AnimatedBatch/Convert-ImageBatch can each skip
-            # re-running Test-AvifAnimated on a file this step already
-            # classified (2026-08-31 efficiency fix - see the
-            # classification block's own comment).
-            $knownAnimatedPaths = $null
-            $knownStaticPaths   = $null
 
             $chapters = Get-SeriesChapters -SeriesPath $series.FullName -QualifyingExtensions $FolderQualifyingExtensions `
                 -ExcludeStagingDirs $FolderExcludeStagingDirs -ForceRezip $false
@@ -881,8 +875,8 @@ function Invoke-FullPipeline {
 
             # NamingCollisions (2026-08-31 fix, from a same-day
             # /code-review): counted into the same combined
-            # InspectFailedCount field the AVIF classification failure
-            # case below already uses, and its directory added to
+            # InspectFailedCount field the per-chapter AVIF classification
+            # failure case below also uses, and its directory added to
             # $failedClassificationDirs so the chapter holding it isn't
             # treated as zippable - see that variable's own comment above,
             # and ImageConversionPipeline.ps1's Get-LooseImageCandidates
@@ -890,131 +884,42 @@ function Invoke-FullPipeline {
             $totals.InspectFailedCount += $imageCandidates.NamingCollisions.Count
             foreach ($nc in $imageCandidates.NamingCollisions) { $null = $failedClassificationDirs.Add($nc.DirectoryName) }
 
-            # AVIF CLASSIFICATION (2026-08-28) - see this module's header.
-            # When -LooseImageExtensions includes .avif (the default,
-            # confirmed decision), the image and animated engines' own
-            # independent scans both discover the SAME .avif file - the
-            # image engine would convert+delete a static one while the
-            # animated engine concurrently identifies/converts an
-            # animated one, racing on any file both scans agree on.
-            # Resolve ownership HERE, once, before either engine's
-            # dispatch begins, so neither ever sees a file that isn't
-            # theirs. Reuses Test-AvifAnimated unchanged (decided
-            # 2026-08-28 - no byte-level rewrite). A file that can't be
-            # classified (a real identify failure) is excluded from BOTH
-            # engines this run - logged as an Error (a real problem, not
-            # an expected skip) and counted directly in this function's
-            # own InspectFailedCount, since the failure happens here, in
-            # Controller's own classification step, before either engine
-            # ever sees the file - not through either engine's counter.
-            if ($MagickExe -and ($LooseImageExtensions -icontains ".avif") -and $animatedCandidates.Count -gt 0) {
-                $animatedPathSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-                foreach ($af in $animatedCandidates) { $null = $animatedPathSet.Add($af.FullName) }
-
-                # Built ONCE per series, then used to filter BOTH lists
-                # below - a Dictionary, not two separate filter passes,
-                # so a file's classification can never disagree between
-                # the image-side filter and the animated-side filter.
-                #
-                # A single combined pass over BOTH candidate lists
-                # (2026-08-31 simplification - was two copy-paste-identical
-                # loops, one per list, each with its own try/catch/log
-                # body). StaleSources is walked second, same order as
-                # before, so a path already resolved via NeedsConversion is
-                # skipped via the ContainsKey guard rather than
-                # reclassified - preserves the original behavior exactly.
-                # StaleSources classification exists because
-                # Get-LooseImageCandidates matches staleness purely by
-                # basename (ANY source with a same-basename non-zero .jxl
-                # counts, regardless of which source actually produced it -
-                # see ImageConversionPipeline.ps1's own known gap), so an
-                # animated .avif kept around on purpose
-                # (AnimatedDeleteSource=$false) can look "stale" the moment
-                # an unrelated same-basename file (e.g. its own already-
-                # converted .webp) gets its .jxl. Without also classifying
-                # StaleSources, that .avif would be deleted by
-                # Remove-StaleLooseSources below while still sitting
-                # unfiltered in $animatedCandidates - deleted out from
-                # under the engine that still owned it, despite the
-                # setting whose entire point is to keep it.
-                $avifClassification = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-                foreach ($img in (@($imageCandidates.NeedsConversion) + @($imageCandidates.StaleSources))) {
-                    if ($img.Extension -ine ".avif" -or -not $animatedPathSet.Contains($img.FullName) -or $avifClassification.ContainsKey($img.FullName)) {
-                        continue   # not .avif, not claimed by both scans, or already classified
-                    }
-                    try {
-                        $isAnimated = Test-AvifAnimated -AvifPath $img.FullName -MagickExe $MagickExe
-                        $avifClassification[$img.FullName] = if ($isAnimated) { "Animated" } else { "Static" }
-                    } catch {
-                        Write-Log ("Could not determine if AVIF '" + $img.FullName + "' is animated - excluding it from BOTH engines this run: " + $_) -Level Error
-                        $totals.InspectFailedCount++
-                        $avifClassification[$img.FullName] = "Failed"
-                    }
-                }
-
-                if ($avifClassification.Count -gt 0) {
-                    # One shared predicate (2026-08-31 simplification - was
-                    # two separately-written but identical Where-Object
-                    # filters) - a "Static" AVIF genuinely IS safe to keep
-                    # in either list (safe to convert if in NeedsConversion,
-                    # safe to delete as stale if in StaleSources, since its
-                    # own .jxl already exists); only "Animated"/"Failed"
-                    # need to be pulled OUT so Remove-StaleLooseSources
-                    # below doesn't delete a file the animated engine
-                    # (Animated) or neither engine (Failed, ownership
-                    # unresolved) should be touching.
-                    $keepIfStatic = { -not $avifClassification.ContainsKey($_.FullName) -or $avifClassification[$_.FullName] -eq "Static" }
-                    $imageCandidates.NeedsConversion = @($imageCandidates.NeedsConversion | Where-Object $keepIfStatic)
-                    $imageCandidates.StaleSources     = @($imageCandidates.StaleSources    | Where-Object $keepIfStatic)
-                    $animatedCandidates = @($animatedCandidates | Where-Object {
-                        -not $avifClassification.ContainsKey($_.FullName) -or $avifClassification[$_.FullName] -eq "Animated"
-                    })
-                    # A chapter holding an unclassifiable file must NOT be
-                    # zipped this run - live-caught via this fix's own
-                    # harness (Scenario W): without this, the unclassified
-                    # source got swept into the zip in its raw, unconverted
-                    # form and its loose folder deleted anyway, since
-                    # neither engine's own merged status has any visibility
-                    # into a failure that happened before either of them
-                    # ran. Tracked by directory (not by file), same
-                    # granularity Get-MergedChapterStatus already zip-
-                    # blocks at.
-                    # $knownAnimatedPaths/$knownStaticPaths ARE derivable
-                    # from $avifClassification (a Dictionary keyed the same
-                    # way) - kept as separate HashSets rather than passing
-                    # the dictionary itself into Convert-AnimatedBatch/
-                    # Convert-ImageBatch (reviewed 2026-08-31): both were
-                    # built here, in the SAME loop that builds
-                    # $avifClassification, so there's no separate pass and
-                    # no drift risk in practice. A plain HashSet is also a
-                    # cleaner, self-explanatory parameter contract for
-                    # those two functions ("paths already known to be X")
-                    # than handing them a dictionary keyed by a third
-                    # module's own "Animated"/"Static"/"Failed" string
-                    # values they'd have no other reason to know about.
-                    $knownAnimatedPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-                    $knownStaticPaths   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-                    foreach ($entry in $avifClassification.GetEnumerator()) {
-                        if ($entry.Value -eq "Failed") {
-                            $failedAvifDir = [System.IO.Path]::GetDirectoryName($entry.Key)
-                            $null = $failedClassificationDirs.Add($failedAvifDir)
-                        } elseif ($entry.Value -eq "Animated") {
-                            $null = $knownAnimatedPaths.Add($entry.Key)
-                        } elseif ($entry.Value -eq "Static") {
-                            $null = $knownStaticPaths.Add($entry.Key)
-                        }
-                    }
-                }
-            }
-
-            $staleResult = Remove-StaleLooseSources -StaleSources $imageCandidates.StaleSources
-            $totals.StaleImageCleanedSuccess += $staleResult.Success
-            $totals.StaleImageCleanedFail    += $staleResult.Fail
-
+            # AVIF CLASSIFICATION moved to per-chapter (2026-09-03 fix, real
+            # bug, live-reported and quantified via two real user logs):
+            # this used to be one series-wide pre-pass here, classifying
+            # EVERY .avif across the WHOLE series (via Test-AvifAnimated,
+            # a real synchronous `magick identify` process spawn taking
+            # ~10-17s each) before any chapter began converting or logging
+            # anything - a 100+-chapter series with a few hundred avifs
+            # meant tens of minutes of complete silence before the first
+            # chapter even started. Classification itself (what it does,
+            # why it's needed - the image and animated engines' own
+            # independent scans both discover the SAME .avif file, and
+            # ownership must be resolved before either engine's dispatch
+            # begins so neither ever sees a file that isn't theirs) is
+            # unchanged - see the per-chapter block inside the loop below,
+            # right before each chapter's own dispatch, scoped to just
+            # that chapter's own avifs. This block now only builds the
+            # RAW (unclassified) per-directory groupings the per-chapter
+            # block reads from - no Test-AvifAnimated calls happen here.
             $imagesByDir = [System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[System.IO.FileInfo]]]::new([System.StringComparer]::OrdinalIgnoreCase)
             foreach ($img in $imageCandidates.NeedsConversion) {
                 if (-not $imagesByDir.ContainsKey($img.DirectoryName)) { $imagesByDir[$img.DirectoryName] = [System.Collections.Generic.List[System.IO.FileInfo]]::new() }
                 $imagesByDir[$img.DirectoryName].Add($img)
+            }
+            # StaleSources grouped the same way (2026-09-03 addition) - used
+            # to be deleted in one series-wide Remove-StaleLooseSources call
+            # right here; now deleted per-chapter, right after that
+            # chapter's own avifs (which may include a stale one) are
+            # classified, for the same reason NeedsConversion moved: an
+            # animated .avif kept on purpose (AnimatedDeleteSource=$false)
+            # can look "stale" purely by basename match (see
+            # ImageConversionPipeline.ps1's own known gap) and must not be
+            # deleted before classification says it's safe to.
+            $staleByDir = [System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[System.IO.FileInfo]]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($stale in $imageCandidates.StaleSources) {
+                if (-not $staleByDir.ContainsKey($stale.DirectoryName)) { $staleByDir[$stale.DirectoryName] = [System.Collections.Generic.List[System.IO.FileInfo]]::new() }
+                $staleByDir[$stale.DirectoryName].Add($stale)
             }
             $animatedByDir = [System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[System.IO.FileInfo]]]::new([System.StringComparer]::OrdinalIgnoreCase)
             foreach ($af in $animatedCandidates) {
@@ -1086,6 +991,86 @@ function Invoke-FullPipeline {
 
                 $chImages   = @(); if ($imagesByDir.ContainsKey($chapterDir.FullName))   { $chImages   = @($imagesByDir[$chapterDir.FullName]) }
                 $chAnimated = @(); if ($animatedByDir.ContainsKey($chapterDir.FullName)) { $chAnimated = @($animatedByDir[$chapterDir.FullName]) }
+                $chStale    = @(); if ($staleByDir.ContainsKey($chapterDir.FullName))    { $chStale    = @($staleByDir[$chapterDir.FullName]) }
+
+                # PER-CHAPTER AVIF CLASSIFICATION (2026-09-03 fix - moved
+                # from a series-wide pre-pass, see this function's own
+                # header comment above $imagesByDir for the full "why").
+                # Identical logic to the old series-wide block, just
+                # scoped to this one chapter's own $chImages/$chAnimated/
+                # $chStale instead of the whole series' candidate lists -
+                # resolves ownership of any .avif both engines' scans
+                # agree on, BEFORE this chapter's own dispatch begins, so
+                # neither engine ever sees a file that isn't theirs.
+                $chKnownAnimatedPaths = $null
+                $chKnownStaticPaths   = $null
+                $chapterClassificationFailed = $false
+                if ($MagickExe -and ($LooseImageExtensions -icontains ".avif") -and $chAnimated.Count -gt 0) {
+                    $chAnimatedPathSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                    foreach ($af in $chAnimated) { $null = $chAnimatedPathSet.Add($af.FullName) }
+
+                    $chAvifClassification = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                    foreach ($img in (@($chImages) + @($chStale))) {
+                        if ($img.Extension -ine ".avif" -or -not $chAnimatedPathSet.Contains($img.FullName) -or $chAvifClassification.ContainsKey($img.FullName)) {
+                            continue   # not .avif, not claimed by both scans, or already classified
+                        }
+                        try {
+                            $isAnimated = Test-AvifAnimated -AvifPath $img.FullName -MagickExe $MagickExe
+                            $chAvifClassification[$img.FullName] = if ($isAnimated) { "Animated" } else { "Static" }
+                        } catch {
+                            Write-Log ("Could not determine if AVIF '" + $img.FullName + "' is animated - excluding it from BOTH engines this run: " + $_) -Level Error
+                            $totals.InspectFailedCount++
+                            $chAvifClassification[$img.FullName] = "Failed"
+                        }
+                    }
+
+                    if ($chAvifClassification.Count -gt 0) {
+                        # Static is safe to keep in either list (safe to
+                        # convert if in $chImages, safe to delete as stale
+                        # if in $chStale, since its own .jxl already
+                        # exists); only Animated/Failed need to be pulled
+                        # OUT so the stale-cleanup below doesn't delete a
+                        # file the animated engine (Animated) or neither
+                        # engine (Failed, ownership unresolved) should be
+                        # touching.
+                        $keepIfStatic = { -not $chAvifClassification.ContainsKey($_.FullName) -or $chAvifClassification[$_.FullName] -eq "Static" }
+                        $chImages = @($chImages | Where-Object $keepIfStatic)
+                        $chStale  = @($chStale  | Where-Object $keepIfStatic)
+                        $chAnimated = @($chAnimated | Where-Object {
+                            -not $chAvifClassification.ContainsKey($_.FullName) -or $chAvifClassification[$_.FullName] -eq "Animated"
+                        })
+                        $chKnownAnimatedPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                        $chKnownStaticPaths   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                        foreach ($entry in $chAvifClassification.GetEnumerator()) {
+                            if ($entry.Value -eq "Failed") {
+                                $chapterClassificationFailed = $true
+                                $null = $failedClassificationDirs.Add($chapterDir.FullName)
+                            } elseif ($entry.Value -eq "Animated") {
+                                $null = $chKnownAnimatedPaths.Add($entry.Key)
+                            } elseif ($entry.Value -eq "Static") {
+                                $null = $chKnownStaticPaths.Add($entry.Key)
+                            }
+                        }
+                    }
+                }
+
+                # A chapter holding a file this chapter's own classification
+                # step just above couldn't resolve, OR a naming collision
+                # (known series-wide, before this loop) must NOT be zipped
+                # this run - live-caught via this fix's own harness: without
+                # this, the unclassified source got swept into the zip in
+                # its raw, unconverted form and its loose folder deleted
+                # anyway, since neither engine's own merged status has any
+                # visibility into a failure that happened before either of
+                # them ran. $isZippableNow, not $chapter.IsZippable, is used
+                # for the rest of this iteration - $chapter.IsZippable was
+                # computed before this chapter's own classification ran, so
+                # it can't yet reflect a failure discovered just above.
+                $isZippableNow = $chapter.IsZippable -and -not $chapterClassificationFailed
+
+                $staleResult = Remove-StaleLooseSources -StaleSources $chStale
+                $totals.StaleImageCleanedSuccess += $staleResult.Success
+                $totals.StaleImageCleanedFail    += $staleResult.Fail
 
                 # Always calls Invoke-FullPipelineChapter, even with zero
                 # files for both engines (2026-08-31 fix) - it already
@@ -1111,11 +1096,11 @@ function Invoke-FullPipeline {
                     Write-Log ("Processing chapter: '" + $chapterDir.FullName + "' (" + $chImages.Count + " image(s), " + $chAnimated.Count + " animated file(s))")
                 }
                 $chapterOutcome = Invoke-FullPipelineChapter -ChapterDir $chapterDir.FullName -ChapterImageFiles $chImages -ChapterAnimatedFiles $chAnimated `
-                    -IsZippable $chapter.IsZippable -ZipOut $chapter.ZipOut -CjxlExe $CjxlExe -MagickExe $MagickExe `
+                    -IsZippable $isZippableNow -ZipOut $chapter.ZipOut -CjxlExe $CjxlExe -MagickExe $MagickExe `
                     -JpegLossless $JpegLossless -JpegQuality $JpegQuality -AnimatedLossless $AnimatedLossless -AnimatedQuality $AnimatedQuality `
                     -AnimatedOverwrite $AnimatedOverwrite -AnimatedDeleteSource $AnimatedDeleteSource -FullLogging $FullLogging `
                     -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete $PermanentDelete `
-                    -SharedBudget $sharedBudget -Cts $fullCts -KnownAnimatedPaths $knownAnimatedPaths -KnownStaticPaths $knownStaticPaths
+                    -SharedBudget $sharedBudget -Cts $fullCts -KnownAnimatedPaths $chKnownAnimatedPaths -KnownStaticPaths $chKnownStaticPaths
 
                 if ($null -ne $chapterOutcome.ImageResult) {
                     $ir = $chapterOutcome.ImageResult
@@ -1146,7 +1131,7 @@ function Invoke-FullPipeline {
                     } else {
                         $totals.ZipCreatedFail++
                     }
-                } elseif ($chapter.IsZippable -and ($chapterOutcome.Status -eq 'Error' -or $fullCts.Token.IsCancellationRequested)) {
+                } elseif ($isZippableNow -and ($chapterOutcome.Status -eq 'Error' -or $fullCts.Token.IsCancellationRequested)) {
                     # -or $fullCts.Token.IsCancellationRequested (2026-08-31
                     # fix, caught by a same-day /code-review): the Cts-based
                     # zip gate added earlier today blocks a zip whenever the
@@ -1162,7 +1147,7 @@ function Invoke-FullPipeline {
                     # didn't get zipped, and the run was aborted" from a
                     # genuine Error found on some chapter in a normal run.
                     $totals.ZipSkippedDueToError++
-                } elseif (-not $chapter.IsZippable -and $failedClassificationDirs.Contains($chapterDir.FullName)) {
+                } elseif (-not $isZippableNow -and $failedClassificationDirs.Contains($chapterDir.FullName)) {
                     # 2026-08-31 fix: a chapter forced un-zippable because
                     # $failedClassificationDirs contains its directory
                     # (IsZippable was already $false, so the elseif above

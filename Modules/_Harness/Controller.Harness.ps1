@@ -1589,6 +1589,73 @@ $budgetZ3.Dispose()
 Write-Host ""
 
 # ==============================================================================
+#  Scenario Z4 (2026-09-03 fix, real bug, live-reported and quantified via
+#  two real user logs): AVIF classification must happen PER-CHAPTER, not as
+#  one series-wide pre-pass before any chapter starts. Before this fix, a
+#  series-wide pass classified EVERY avif across the WHOLE series (via
+#  Test-AvifAnimated) before the "=== Series ===" log line, let alone any
+#  chapter's own dispatch - a 100+-chapter series with a few hundred avifs
+#  meant tens of minutes of silence before the first chapter even started.
+#
+#  Builds a 2-chapter series: Chapter 1 has a plain image (no avif at all);
+#  Chapter 2 has one avif. Spies on BOTH Start-ChapterProgress and
+#  Test-AvifAnimated (real pass-through wrappers, same technique used
+#  elsewhere in this file) into ONE shared ordered timeline - NOT Write-Log,
+#  which is also called from inside the worker runspaces Invoke-FullPipeline
+#  dispatches, where a locally-redefined function referencing this scope's
+#  own $script: state isn't available (a runspace doesn't share the parent
+#  scope - see CLAUDE.md); Start-ChapterProgress and Test-AvifAnimated are
+#  both only ever called from the main thread, in Controller.ps1's own
+#  per-chapter loop, so spying on them is safe. The distinguishing signal:
+#  in the OLD series-wide-pre-pass code, classifying chapter 2's avif would
+#  happen BEFORE chapter 1's own Start-ChapterProgress call (classification
+#  ran before the per-chapter loop even started, chapter 1 included). In the
+#  per-chapter code, it can only happen once the loop actually REACHES
+#  chapter 2's own iteration - necessarily after chapter 1's call. This is a
+#  deterministic ORDERING assertion, not a timing one - no SLEEP_MS/
+#  Stopwatch flakiness risk. Requires Clean Console Output on, since
+#  Start-ChapterProgress is only called when that toggle is enabled.
+# ==============================================================================
+Write-Host "=== Scenario Z4: AVIF classification happens per-chapter, not as one series-wide pre-pass ===" -ForegroundColor Cyan
+$chZ4a = New-Dir "scenario-z4\Series\01 - Chapter 1"
+$chZ4b = New-Dir "scenario-z4\Series\02 - Chapter 2"
+New-FakeImageIn -DirPath $chZ4a -Name "page1.jpg" | Out-Null
+$avifZ4 = New-FakeAvifIn -DirPath $chZ4b -Name "anim1.avif" -Frames 4
+
+$script:eventOrderZ4 = New-Object System.Collections.Generic.List[string]
+$realStartChapterProgressZ4 = ${function:Start-ChapterProgress}
+function Start-ChapterProgress {
+    param([string]$SeriesName, [string]$ChapterName)
+    $script:eventOrderZ4.Add("CHAPTER:" + $ChapterName)
+    & $script:realStartChapterProgressZ4Ref -SeriesName $SeriesName -ChapterName $ChapterName
+}
+$script:realStartChapterProgressZ4Ref = $realStartChapterProgressZ4
+$realTestAvifAnimatedZ4 = ${function:Test-AvifAnimated}
+function Test-AvifAnimated {
+    param([string]$AvifPath, [string]$MagickExe)
+    $script:eventOrderZ4.Add("CLASSIFY:" + $AvifPath)
+    & $script:realTestAvifAnimatedZ4Ref -AvifPath $AvifPath -MagickExe $MagickExe
+}
+$script:realTestAvifAnimatedZ4Ref = $realTestAvifAnimatedZ4
+
+$script:CleanConsoleOutputEnabled = $true
+try {
+    $totalsZ4 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-z4") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+} finally {
+    $script:CleanConsoleOutputEnabled = $false
+    ${function:Start-ChapterProgress} = $realStartChapterProgressZ4
+    ${function:Test-AvifAnimated} = $realTestAvifAnimatedZ4
+}
+
+$chapter1IndexZ4 = $script:eventOrderZ4.FindIndex({ param($e) $e -eq "CHAPTER:01 - Chapter 1" })
+$classifyIndexZ4 = $script:eventOrderZ4.FindIndex({ param($e) $e -eq ("CLASSIFY:" + $avifZ4) })
+Test-Assert ($chapter1IndexZ4 -ge 0) "sanity check: chapter 1's own Start-ChapterProgress call was found in the event timeline"
+Test-Assert ($classifyIndexZ4 -ge 0) "sanity check: chapter 2's avif was actually classified during this run"
+Test-Assert ($chapter1IndexZ4 -lt $classifyIndexZ4) ("chapter 1's own dispatch started BEFORE chapter 2's avif was classified (chapter1 index=" + $chapter1IndexZ4 + ", classify index=" + $classifyIndexZ4 + ") - proves classification is per-chapter, not a series-wide pre-pass")
+Test-Assert ($totalsZ4.ConvertedImageSuccess -eq 1 -and $totalsZ4.ConvertedAnimatedSuccess -eq 1) "sanity check: both chapters still converted correctly end to end"
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="
