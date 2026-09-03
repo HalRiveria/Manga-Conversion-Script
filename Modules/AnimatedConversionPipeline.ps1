@@ -705,7 +705,14 @@ function Convert-AnimatedBatch {
         # Write-Log call below) had no equivalent guard, leaking every
         # remaining drain-list job's process handle and SharedBudget slot.
         try {
-            while ($running.Count -gt 0 -and $abortDeadline.Elapsed.TotalSeconds -lt $AbortTimeoutSeconds) {
+            # -not [ConsoleCtrl]::IsCloseEvent (2026-09-03 fix, real bug -
+            # same reasoning as the sibling module's identical fix, see
+            # ImageConversionPipeline.ps1's Convert-ImageBatch straggler
+            # drain for the full writeup): Windows force-kills the whole
+            # process ~5s after a CTRL_CLOSE_EVENT regardless of what this
+            # drain does, so waiting out any part of -AbortTimeoutSeconds
+            # can never fit - skip straight to the force-kill block below.
+            while ($running.Count -gt 0 -and -not [ConsoleCtrl]::IsCloseEvent -and $abortDeadline.Elapsed.TotalSeconds -lt $AbortTimeoutSeconds) {
                 $stillWaiting = [System.Collections.Generic.List[hashtable]]::new()
                 foreach ($j in $running) {
                     if ($j.Proc.HasExited) {

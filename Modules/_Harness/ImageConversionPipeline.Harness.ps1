@@ -1643,6 +1643,39 @@ Test-Assert ($argsLossyAJ -match "--num_threads=1(\s|$)") ("lossy-JPEG branch pi
 Test-Assert ($argsPngAJ -match "--num_threads=1(\s|$)") ("non-JPEG branch pins --num_threads=1 (got: '" + $argsPngAJ.Trim() + "')")
 Write-Host ""
 
+# ==============================================================================
+#  Scenario AK (2026-09-03 fix, real bug, live-reported and live-tested):
+#  the straggler-drain's wait-for-natural-completion loop must be skipped
+#  entirely when [ConsoleCtrl]::IsCloseEvent is true (a window-close abort),
+#  going straight to the force-kill block instead. Windows force-kills the
+#  whole process ~5s after a close event regardless, so waiting out any
+#  part of -AbortTimeoutSeconds can never fit. Same pattern as Scenario AH
+#  (a real still-sleeping fake cjxl process, cancelled via -AbortPollCallback)
+#  but with a LONG -AbortTimeoutSeconds (30s) that would normally still be
+#  waiting - timed with a Stopwatch to prove the whole call returns almost
+#  immediately instead of anywhere near that.
+# ==============================================================================
+Write-Host "=== Scenario AK: IsCloseEvent skips the straggler-drain wait entirely, force-kills immediately ===" -ForegroundColor Cyan
+$chAK = New-Dir "scenario-ak\Series\Chapter 1"
+$fileAK = Get-Item -LiteralPath (New-FakeImage -DirPath $chAK -Name "neverfinishes_ak.jpg" -SleepMs 30000)
+$ctsAK = [System.Threading.CancellationTokenSource]::new()
+$pollAK = { param($inFlight) if ($inFlight.Count -gt 0) { $ctsAK.Cancel() } }
+
+[ConsoleCtrl]::IsCloseEvent = $true
+$swAK = [System.Diagnostics.Stopwatch]::StartNew()
+try {
+    $resultAK = Convert-ImageBatch -ImageFiles @($fileAK) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 5 -DoFullLogging $false `
+        -CancelToken $ctsAK.Token -AbortPollCallback $pollAK -AbortTimeoutSeconds 30
+} finally {
+    $swAK.Stop()
+    [ConsoleCtrl]::IsCloseEvent = $false
+    $ctsAK.Dispose()
+}
+
+Test-Assert ($swAK.Elapsed.TotalSeconds -lt 5) ("returned in under 5s despite a 30s -AbortTimeoutSeconds and a 30s-sleeping job (took " + [int]$swAK.Elapsed.TotalSeconds + "s)")
+Test-Assert ($resultAK.ForceKilledCount -eq 1) ("the still-sleeping job was force-killed, not waited for (got ForceKilledCount=" + $resultAK.ForceKilledCount + ")")
+Write-Host ""
+
 if ($script:failCount -eq 0) {
     Write-Host ("ALL PASSED  (" + $script:passCount + " assertions)") -ForegroundColor Green
     exit 0

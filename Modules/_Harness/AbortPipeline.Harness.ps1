@@ -674,6 +674,32 @@ Reset-HarnessScenarioState
 Write-Host ""
 
 # ==============================================================================
+#  Scenario W (2026-09-03 fix, real bug, live-reported and live-tested):
+#  Invoke-GracefulDrain's own wait-for-natural-completion loop must be
+#  skipped entirely when [ConsoleCtrl]::IsCloseEvent is true, going
+#  straight to force-stopping every handle instead - Windows force-kills
+#  the whole process ~5s after a close event regardless, so waiting out
+#  any part of -TimeoutSeconds can never fit. Long delays (30s) with a
+#  long -TimeoutSeconds (30s) that would normally still be waiting, timed
+#  with a Stopwatch to prove the whole call returns almost immediately.
+# ==============================================================================
+Write-Host "=== Scenario W: IsCloseEvent skips Invoke-GracefulDrain's wait entirely, force-stops immediately ===" -ForegroundColor Cyan
+Reset-HarnessScenarioState
+
+$fakeW = New-FakeHandles -DelaysMs @(30000, 30000)
+[ConsoleCtrl]::IsCloseEvent = $true
+$swW = [System.Diagnostics.Stopwatch]::StartNew()
+$outcomeW = Invoke-GracefulDrain -Handles $fakeW.Handles -TimeoutSeconds 30
+$swW.Stop()
+[ConsoleCtrl]::IsCloseEvent = $false
+$fakeW.Pool.Close(); $fakeW.Pool.Dispose()
+
+Test-Assert ($swW.Elapsed.TotalSeconds -lt 5) ("returned in under 5s despite a 30s -TimeoutSeconds and 30s-delayed jobs (took " + [math]::Round($swW.Elapsed.TotalSeconds, 2) + "s)")
+Test-Assert ($outcomeW.ForceStoppedCount -eq 2) ("both still-running jobs were force-stopped immediately, not waited for (got ForceStoppedCount=" + $outcomeW.ForceStoppedCount + ")")
+Test-Assert ([ConsoleCtrl]::DrainComplete.IsSet) "DrainComplete was still signalled after the fast-path force-stop"
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

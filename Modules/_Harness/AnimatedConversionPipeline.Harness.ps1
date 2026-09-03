@@ -974,6 +974,36 @@ $budgetAA.Dispose()
 Write-Host ""
 
 # ==============================================================================
+#  Scenario AB (2026-09-03 fix, real bug, live-reported and live-tested):
+#  the straggler-drain's wait-for-natural-completion loop must be skipped
+#  entirely when [ConsoleCtrl]::IsCloseEvent is true (a window-close
+#  abort), going straight to the force-kill block instead - same fix and
+#  reasoning as the sibling module's identical Scenario AK. Uses a LONG
+#  -AbortTimeoutSeconds (30s) with a real still-sleeping fake magick
+#  process, timed with a Stopwatch to prove the whole call returns almost
+#  immediately instead of anywhere near that.
+# ==============================================================================
+Write-Host "=== Scenario AB: IsCloseEvent skips the straggler-drain wait entirely, force-kills immediately ===" -ForegroundColor Cyan
+$fileAB = New-FakeAvif -Name "chapter-ab\slow.avif" -Content "FRAMES:6`nSLEEP_MS:30000"
+$ctsAB = New-Object System.Threading.CancellationTokenSource
+$pollAB = { param($inFlight) if ($inFlight.Count -gt 0) { $ctsAB.Cancel() } }.GetNewClosure()
+
+[ConsoleCtrl]::IsCloseEvent = $true
+$swAB = [System.Diagnostics.Stopwatch]::StartNew()
+try {
+    $resultAB = Convert-AnimatedBatch -AnimatedFiles @($fileAB) -MagickExe $fakeMagickExe -AnimatedThreads 1 `
+        -CancelToken $ctsAB.Token -AbortPollCallback $pollAB -AbortTimeoutSeconds 30
+} finally {
+    $swAB.Stop()
+    [ConsoleCtrl]::IsCloseEvent = $false
+    $ctsAB.Dispose()
+}
+
+Test-Assert ($swAB.Elapsed.TotalSeconds -lt 5) ("returned in under 5s despite a 30s -AbortTimeoutSeconds and a 30s-sleeping job (took " + [int]$swAB.Elapsed.TotalSeconds + "s)")
+Test-Assert ($resultAB.ForceKilledCount -eq 1) ("the still-sleeping job was force-killed, not waited for (got ForceKilledCount=" + $resultAB.ForceKilledCount + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

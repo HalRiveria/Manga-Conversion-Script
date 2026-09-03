@@ -1055,7 +1055,21 @@ function Convert-ImageBatch {
         # data-loss shape applies here too - the drain's own polling loop
         # only reassigns $running after its whole foreach pass completes).
         try {
-            while ($running.Count -gt 0 -and $abortDeadline.Elapsed.TotalSeconds -lt $AbortTimeoutSeconds) {
+            # -not [ConsoleCtrl]::IsCloseEvent (2026-09-03 fix, real bug,
+            # live-reported and live-tested): Windows force-kills the whole
+            # process ~5s after a CTRL_CLOSE_EVENT (the X button) regardless
+            # of what this drain does - confirmed via this machine's
+            # WaitToKillAppTimeout registry value AND a live test (force-
+            # killing the parent mid-run left cjxl/magick child processes
+            # running as orphans, in both this script and the old reference
+            # script). Waiting out any part of -AbortTimeoutSeconds (default
+            # 60s) can never fit in that ~5s window, so a close event skips
+            # straight to the force-kill block below instead of wasting any
+            # of it. [ConsoleCtrl] is a compiled type (Add-Type,
+            # AbortPipeline.ps1) - its static fields are visible from this
+            # runspace worker without needing -SharedFunctionNames
+            # propagation, unlike a PowerShell function/variable.
+            while ($running.Count -gt 0 -and -not [ConsoleCtrl]::IsCloseEvent -and $abortDeadline.Elapsed.TotalSeconds -lt $AbortTimeoutSeconds) {
                 $stillWaiting = [System.Collections.Generic.List[hashtable]]::new()
                 foreach ($j in $running) {
                     if ($j.Proc.HasExited) {

@@ -609,7 +609,21 @@ function Invoke-GracefulDrain {
     # same day (move the risky work inside the try so the finally can't
     # be skipped).
     try {
-        while ($localHandles.Count -gt 0 -and $abortDeadline.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        # -not [ConsoleCtrl]::IsCloseEvent (2026-09-03 fix, real bug, live-
+        # tested): Windows force-kills the whole process ~5s after a
+        # CTRL_CLOSE_EVENT (the X button) regardless of what this drain
+        # does - confirmed via this machine's WaitToKillAppTimeout registry
+        # value AND a live test (force-killing the parent mid-run left
+        # cjxl/magick child processes running as orphans). Waiting out any
+        # part of -TimeoutSeconds (default 60s) can never fit in that ~5s
+        # window, so a close event skips straight to force-stopping every
+        # handle below instead of wasting any of it - this returns control
+        # to the native handler (via Complete-AbortDrain in the finally)
+        # as fast as possible, and each engine's OWN straggler drain
+        # (ImageConversionPipeline.ps1/AnimatedConversionPipeline.ps1, same
+        # fix) is what actually kills the real cjxl/magick child processes
+        # this function's own $h.PS.Stop() below does not reach.
+        while ($localHandles.Count -gt 0 -and -not [ConsoleCtrl]::IsCloseEvent -and $abortDeadline.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
             $localHandles = Receive-CompletedHandles -Handles $localHandles -ResultHandler $ResultHandler -ErrorHandler $ErrorHandler
             if ($null -ne $ConsoleQueue) { Flush-ConsoleQueue -Queue $ConsoleQueue }
             if ($localHandles.Count -gt 0) { Start-Sleep -Milliseconds 250 }
