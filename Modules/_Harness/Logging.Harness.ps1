@@ -691,6 +691,37 @@ Test-Assert ($logContentP -like "*a real line after init*") "Write-Log still wri
 Write-Host ""
 
 # ==============================================================================
+#  Scenario Q (2026-09-03 fix, real bug, live-reported): -ForceConsole
+#  bypasses the Clean Console Output console-echo gate. Mode 5/Cover
+#  Deletion has no CCR live-progress display of its own to replace the
+#  suppressed console lines with, so before this fix it reported nothing
+#  to the console at all with CCO on, silently, while still working and
+#  file-logging normally. Uses $script:workerConsoleQueue as the
+#  observable proxy for "did Write-Log get past its own CCO gate" (same
+#  technique as Scenario F) - CCO's early `return` fires before the
+#  worker-queue check, so an empty queue after the call means the gate
+#  caught it; a populated queue means -ForceConsole let it through.
+# ==============================================================================
+Write-Host "=== Scenario Q: Write-Log -ForceConsole bypasses the Clean Console Output gate ===" -ForegroundColor Cyan
+Reset-LoggingState
+Initialize-LogPaths -TargetPath "C:\Q\Path" -FullLogging $true -ScriptDir $scratchDir
+$script:CleanConsoleOutputEnabled = $true
+$script:workerConsoleQueue = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+
+Write-Log "suppressed under CCO" -Level Warn
+Test-Assert ($script:workerConsoleQueue.Count -eq 0) "without -ForceConsole, CCO still suppresses console echo entirely (queue stays empty)"
+
+Write-Log "forced through CCO" -Level Warn -ForceConsole
+Test-Assert ($script:workerConsoleQueue.Count -eq 1) "-ForceConsole gets past the CCO gate and reaches the normal post-gate path"
+$peekedQ = $null
+$null = $script:workerConsoleQueue.TryPeek([ref]$peekedQ)
+Test-Assert ($peekedQ.Message -eq "forced through CCO") "the forced-through item is the right one"
+
+$script:workerConsoleQueue = $null
+$script:CleanConsoleOutputEnabled = $false
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

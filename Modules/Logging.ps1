@@ -412,9 +412,23 @@ function Write-LogLineToFile {
 }
 
 function Write-Log {
+    <#
+    .PARAMETER ForceConsole
+        Bypasses the Clean Console Output console-echo gate below
+        (2026-09-03 fix - real bug, live-reported: mode 5/Cover Deletion
+        has no CCR live-progress display of its own to replace the
+        suppressed lines with, so with CCO on it reported nothing to the
+        console at all, silently, while still working and file-logging
+        normally). Only meant for a pipeline like Cover Deletion that
+        never starts a CCR live-redraw region - still routes through the
+        same $script:workerConsoleQueue check as the normal path, so it
+        stays cross-thread-safe if a future caller ever uses it from
+        inside a worker runspace, even though none does today.
+    #>
     param(
         [string]$Message,
-        [ValidateSet("Info", "Warn", "Error", "Summary")][string]$Level = "Info"
+        [ValidateSet("Info", "Warn", "Error", "Summary")][string]$Level = "Info",
+        [switch]$ForceConsole
     )
 
     $line = Format-LogLine -Message $Message -Level $Level
@@ -437,8 +451,9 @@ function Write-Log {
     # CleanConsoleRendering.ps1 owns all user-facing console output when
     # this toggle is on. Nothing gets enqueued in this branch either, so
     # Flush-ConsoleQueue naturally has nothing to drain - no change needed
-    # there.
-    if ($script:CleanConsoleOutputEnabled) { return }
+    # there. -ForceConsole (see this function's own .PARAMETER doc) is the
+    # one deliberate exception.
+    if ($script:CleanConsoleOutputEnabled -and -not $ForceConsole) { return }
 
     # Inside a runspace worker, $script:workerConsoleQueue is set and
     # cross-thread Write-Host is unsafe, so queue for the main thread to

@@ -530,7 +530,7 @@ function Test-UnwantedImageMatch {
         try {
             $fileHash = (Get-FileHash -LiteralPath $File.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
         } catch {
-            Write-Log ("Could not hash '" + $File.FullName + "' during unwanted-image scan: " + $_) -Level Warn
+            Write-Log ("Could not hash '" + $File.FullName + "' during unwanted-image scan: " + $_) -Level Warn -ForceConsole
             return @{ Status = 'HashFailure'; Profile = $profile; Width = $width; Height = $height; Hash = $null }
         }
         if ($fileHash -ne $profile.Hash) {
@@ -630,7 +630,7 @@ function Invoke-UnwantedImageScan {
         }
 
         if ($matchResult.Status -eq 'HashMismatch') {
-            Write-Log ("Hash mismatch (not deleted): [" + $matchResult.Profile.Label + "] '" + $file.FullName + "' | " + $file.Length + " bytes | " + $matchResult.Width + "x" + $matchResult.Height + " | " + $matchResult.Hash) -Level Warn
+            Write-Log ("Hash mismatch (not deleted): [" + $matchResult.Profile.Label + "] '" + $file.FullName + "' | " + $file.Length + " bytes | " + $matchResult.Width + "x" + $matchResult.Height + " | " + $matchResult.Hash) -Level Warn -ForceConsole
             $totals.HashMismatchCount++
             continue
         }
@@ -638,7 +638,7 @@ function Invoke-UnwantedImageScan {
         if ($matchResult.Status -ne 'Match') { continue }
 
         if ($DryRun) {
-            Write-Log ("WOULD DELETE: [" + $matchResult.Profile.Label + "] '" + $file.FullName + "' | " + $file.Length + " bytes | " + $matchResult.Width + "x" + $matchResult.Height)
+            Write-Log ("WOULD DELETE: [" + $matchResult.Profile.Label + "] '" + $file.FullName + "' | " + $file.Length + " bytes | " + $matchResult.Width + "x" + $matchResult.Height) -ForceConsole
             $totals.DeletedCount++
             continue
         }
@@ -646,15 +646,22 @@ function Invoke-UnwantedImageScan {
         try {
             $null = Remove-Source -ItemPath $file.FullName
             $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
-            Write-Log ("Deleted (" + $deleteDesc + "): [" + $matchResult.Profile.Label + "] '" + $file.FullName + "'")
+            Write-Log ("Deleted (" + $deleteDesc + "): [" + $matchResult.Profile.Label + "] '" + $file.FullName + "'") -ForceConsole
             $totals.DeletedCount++
         } catch {
-            Write-Log ("FAILED to delete '" + $file.FullName + "': " + $_) -Level Error
+            Write-Log ("FAILED to delete '" + $file.FullName + "': " + $_) -Level Error -ForceConsole
             $totals.DeleteFailedCount++
         }
     }
 
-    Write-Log ("Unwanted-image scan complete: " + $totals.DeletedCount + " deleted, " + $totals.HashMismatchCount + " hash mismatch(es), " + $totals.ScannedCount + " image(s) scanned.") -Level Summary
+    # -ForceConsole on every line above and below (2026-09-03 fix, real
+    # bug, live-reported): Cover Deletion has no CCR live-progress display
+    # to replace the console output Write-Log's own CCO gate normally
+    # expects something else to be providing - without it, a scan with
+    # Clean Console Output on reported nothing to the console at all,
+    # silently, while still working and file-logging normally. See
+    # Write-Log's own .PARAMETER doc (Logging.ps1) for the full reasoning.
+    Write-Log ("Unwanted-image scan complete: " + $totals.DeletedCount + " deleted, " + $totals.HashMismatchCount + " hash mismatch(es), " + $totals.ScannedCount + " image(s) scanned.") -Level Summary -ForceConsole
     return $totals
 }
 
@@ -719,12 +726,12 @@ function Get-TrailingZeroGroups {
         try {
             $fileHash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
         } catch {
-            Write-Log ("Could not hash '" + $file.FullName + "' during trailing-zero audit: " + $_) -Level Warn
+            Write-Log ("Could not hash '" + $file.FullName + "' during trailing-zero audit: " + $_) -Level Warn -ForceConsole
             $hashFailureCount++
             continue
         }
         if ([string]::IsNullOrEmpty($fileHash)) {
-            Write-Log ("Get-FileHash returned no hash for '" + $file.FullName + "' during trailing-zero audit.") -Level Warn
+            Write-Log ("Get-FileHash returned no hash for '" + $file.FullName + "' during trailing-zero audit.") -Level Warn -ForceConsole
             $hashFailureCount++
             continue
         }
@@ -810,13 +817,15 @@ function Invoke-TrailingZeroAudit {
     $scanResult = Get-TrailingZeroGroups -Path $Path -Suffixes $Suffixes -ExcludePaths $ExcludePaths
 
     if ($scanResult.Groups.Count -eq 0) {
-        Write-Log "Trailing-zero audit: no files with trailing-zero names found." -Level Summary
+        Write-Log "Trailing-zero audit: no files with trailing-zero names found." -Level Summary -ForceConsole
         return @{ UniqueFileCount = 0; HashFailureCount = $scanResult.HashFailureCount; ReportPath = $null }
     }
 
     $lines = Get-TrailingZeroReportLines -Groups $scanResult.Groups -SearchRoot $Path
     Set-Content -LiteralPath $ReportPath -Value $lines -Encoding UTF8
 
-    Write-Log ("Trailing-zero audit: " + $scanResult.Groups.Count + " unique file(s) found, report written to '" + $ReportPath + "'.") -Level Summary
+    # -ForceConsole (2026-09-03 fix) - same reason as Invoke-UnwantedImageScan's
+    # own fix above: no CCR display exists for this pipeline to report through.
+    Write-Log ("Trailing-zero audit: " + $scanResult.Groups.Count + " unique file(s) found, report written to '" + $ReportPath + "'.") -Level Summary -ForceConsole
     return @{ UniqueFileCount = $scanResult.Groups.Count; HashFailureCount = $scanResult.HashFailureCount; ReportPath = $ReportPath }
 }

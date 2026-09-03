@@ -20,9 +20,16 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "..\UnwantedImage.ps1")
 
 $script:logCalls = New-Object System.Collections.Generic.List[string]
+# -ForceConsole tracked separately, not folded into $logCalls' own string
+# shape (2026-09-03 addition) - Scenario Z below checks specifically that
+# every user-facing scan/audit line passes it, since that's the actual
+# fix for the real "mode 5 reports nothing under Clean Console Output"
+# bug (see Logging.ps1's Write-Log .PARAMETER doc for the full reasoning).
+$script:logCallsForceConsole = New-Object System.Collections.Generic.List[bool]
 function Write-Log {
-    param([string]$Message, [string]$Level = "Info")
+    param([string]$Message, [string]$Level = "Info", [switch]$ForceConsole)
     $script:logCalls.Add($Level + ": " + $Message)
+    $script:logCallsForceConsole.Add([bool]$ForceConsole)
 }
 
 $script:removeSourceCalls = New-Object System.Collections.Generic.List[string]
@@ -657,6 +664,48 @@ $flowResultX = Show-AddUnwantedImageProfileFlow -ProfilesPath $profilesPathX -Pr
 Test-Assert ($flowResultX.Added -eq $false) "not added a second time"
 Test-Assert ($flowResultX.ExistingLabel -eq "Already Tracked") "the message names the EXISTING profile's label, not the new one just typed in"
 Test-Assert ((Import-UnwantedImageProfiles -ProfilesPath $profilesPathX).Count -eq 1) "still only 1 persisted profile - no duplicate was written"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario Y (2026-09-03 fix, real bug, live-reported): every user-facing
+#  Invoke-UnwantedImageScan/Invoke-TrailingZeroAudit line passes
+#  -ForceConsole to Write-Log. Mode 5/Cover Deletion has no CCR live-
+#  progress display of its own to replace suppressed console lines with,
+#  so before this fix it silently reported nothing to the console at all
+#  with Clean Console Output on, while still working and file-logging
+#  normally - see Logging.ps1's Write-Log .PARAMETER doc for the full
+#  reasoning. This harness's own Write-Log stub can't verify the CCO gate
+#  itself (that's Logging.Harness.ps1's Scenario Q, against the real
+#  function) - it verifies the other half: that these call sites actually
+#  pass the flag at all.
+# ==============================================================================
+Write-Host "=== Scenario Y: scan/audit lines all pass -ForceConsole to Write-Log ===" -ForegroundColor Cyan
+$rootY = Join-Path $scratchDir "scenario-y"
+New-Item -ItemType Directory -Path $rootY -Force | Out-Null
+$matchImgY = New-RealImage -Name "scenario-y\match.png" -Width 62 -Height 42
+$matchProfileY = New-ProfileFromRealFile -File $matchImgY -Width 62 -Height 42 -Label "Y Target"
+$mismatchImgY = New-RealImage -Name "scenario-y\mismatch.png" -Width 63 -Height 43
+$mismatchProfileY = New-ProfileFromRealFile -File $mismatchImgY -Width 63 -Height 43 -Label "Y Mismatch"
+$mismatchProfileY.Hash = "2222222222222222222222222222222222222222222222222222222222222222"
+
+$script:logCalls.Clear()
+$script:logCallsForceConsole.Clear()
+$null = Invoke-UnwantedImageScan -Path $rootY -Profiles @($matchProfileY, $mismatchProfileY)
+Test-Assert ($script:logCalls.Count -ge 2) "the scan produced at least the deleted-match and hash-mismatch lines"
+Test-Assert (-not ($script:logCallsForceConsole -contains $false)) ("every Invoke-UnwantedImageScan line passed -ForceConsole (recorded: " + ($script:logCallsForceConsole -join ",") + ")")
+
+$rootY2 = Join-Path $scratchDir "scenario-y2"
+New-Item -ItemType Directory -Path $rootY2 -Force | Out-Null
+$imgY2a = New-RealImage -Name "scenario-y2\a_0.jpg" -Width 10 -Height 20
+$imgY2b = New-RealImage -Name "scenario-y2\sub\a_00.jpg" -Width 10 -Height 20
+Copy-Item -LiteralPath $imgY2a.FullName -Destination $imgY2b.FullName -Force
+$reportPathY2 = Join-Path $scratchDir "scenario-y2-report.txt"
+
+$script:logCalls.Clear()
+$script:logCallsForceConsole.Clear()
+$null = Invoke-TrailingZeroAudit -Path $rootY2 -ReportPath $reportPathY2
+Test-Assert ($script:logCalls.Count -ge 1) "the audit produced at least its own summary line"
+Test-Assert (-not ($script:logCallsForceConsole -contains $false)) ("every Invoke-TrailingZeroAudit line passed -ForceConsole (recorded: " + ($script:logCallsForceConsole -join ",") + ")")
 Write-Host ""
 
 # ==============================================================================
