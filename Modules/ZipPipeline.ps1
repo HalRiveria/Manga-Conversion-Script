@@ -359,6 +359,7 @@ function Invoke-ZipOnlyPipeline {
         FolderDeletedSuccess = 0
         FolderDeletedFail    = 0
         ForceStoppedCount    = 0
+        Aborted              = $false
     }
 
     # No outer catch here (2026-08-28, Phase 2 of the main-script-rewrite
@@ -488,6 +489,16 @@ function Invoke-ZipOnlyPipeline {
                 -MaxParallel $MaxParallel -Cts $script:zipOnlyCts -ResultHandler $zoResultHandler
 
             $totals.ForceStoppedCount = $zoOutcome.ForceStoppedCount
+            # Aborted (2026-09-03 fix, real bug caught by a same-session
+            # /code-review pass): read BEFORE the CTS is disposed in the
+            # finally block below - Controller.ps1's Invoke-Mode maps this
+            # onto Summary.ps1's new Aborted/ForceKilledCount fields the
+            # same way Invoke-FullPipeline/Invoke-LooseImageConversionPipeline
+            # already do, so mode 3's own summary can say "Processing
+            # ABORTED" too instead of always "Processing complete" - this
+            # pipeline previously had no Aborted field at all, only
+            # ForceStoppedCount.
+            $totals.Aborted = $script:zipOnlyCts.Token.IsCancellationRequested
         } finally {
             Unregister-AbortCancellationSource -Cts $script:zipOnlyCts
             $script:zipOnlyCts.Dispose()

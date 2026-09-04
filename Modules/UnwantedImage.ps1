@@ -515,44 +515,70 @@ function Test-UnwantedImageMatch {
     # original reporting for that case.
     $fallbackResult = $null
 
+    # Dimensions/hash are properties of $File itself, not of any one
+    # profile - computed at most ONCE per call and cached here (2026-09-03
+    # fix, real bug caught by a same-session /code-review pass: trying
+    # every matching profile, above, means a file matching N profiles by
+    # size used to have its dimensions read N times and be fully SHA-256'd
+    # N times, all recomputing the exact same answer - real, measurable
+    # waste on a large library where several profiles share dimensions).
+    # $dimsAttempted/$hashAttempted distinguish "not tried yet" from
+    # "tried and genuinely failed" so a failure is only logged/retried
+    # once, not once per matching profile either.
+    $dimsAttempted = $false
+    $cachedWidth    = $null
+    $cachedHeight   = $null
+    $hashAttempted  = $false
+    $cachedHash     = $null
+
     foreach ($profile in $Profiles) {
         $sizeDiff = [Math]::Abs($File.Length - $profile.SizeBytes)
         if ($sizeDiff -gt $profile.SizeTolerance) { continue }
 
-        $width  = $null
-        $height = $null
-        $dimOk  = Get-ImageDimensions -Path $File.FullName -OutWidth ([ref]$width) -OutHeight ([ref]$height)
-        if (-not $dimOk) { continue }
-        if ($width -ne $profile.Width -or $height -ne $profile.Height) { continue }
-
-        # try/catch (2026-09-02 review fix): Get-FileHash used to run bare,
-        # unlike Get-TrailingZeroGroups's own identical call further down
-        # this file - with the bootstrap's $ErrorActionPreference = 'Stop'
-        # inherited into this function, a file that disappears or gets
-        # locked (a sync client, an indexer, another app) in the window
-        # between the Get-ImageDimensions call above and this line throws
-        # a terminating error here. A size+dimension match is exactly the
-        # moment this function is most likely to be looking at a real,
-        # externally-touched file, not a made-up edge case. Same
-        # treatment as Get-TrailingZeroGroups: log a Warn and give up on
-        # this file, rather than letting it escape uncaught - see
-        # Invoke-MainLoop's own matching fix for why an uncaught throw
-        # here used to take down the whole script instead of just this
-        # one scan. Still returns immediately (unlike the HashMismatch
-        # case below) - a file that can't be hashed at all can't match
-        # ANY later profile either, so trying more of them would just
-        # repeat the identical failure and log the same Warn again.
-        try {
-            $fileHash = (Get-FileHash -LiteralPath $File.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
-        } catch {
-            Write-Log ("Could not hash '" + $File.FullName + "' during unwanted-image scan: " + $_) -Level Warn -ForceConsole
-            return @{ Status = 'HashFailure'; Profile = $profile; Width = $width; Height = $height; Hash = $null }
+        if (-not $dimsAttempted) {
+            $dimsAttempted = $true
+            $w = $null
+            $h = $null
+            if (Get-ImageDimensions -Path $File.FullName -OutWidth ([ref]$w) -OutHeight ([ref]$h)) {
+                $cachedWidth  = $w
+                $cachedHeight = $h
+            }
         }
-        if ($fileHash -ne $profile.Hash) {
-            if ($null -eq $fallbackResult) { $fallbackResult = @{ Status = 'HashMismatch'; Profile = $profile; Width = $width; Height = $height; Hash = $fileHash } }
+        if ($null -eq $cachedWidth) { continue }
+        if ($cachedWidth -ne $profile.Width -or $cachedHeight -ne $profile.Height) { continue }
+
+        if (-not $hashAttempted) {
+            # try/catch (2026-09-02 review fix): Get-FileHash used to run
+            # bare, unlike Get-TrailingZeroGroups's own identical call
+            # further down this file - with the bootstrap's
+            # $ErrorActionPreference = 'Stop' inherited into this
+            # function, a file that disappears or gets locked (a sync
+            # client, an indexer, another app) in the window between the
+            # Get-ImageDimensions call above and this line throws a
+            # terminating error here. A size+dimension match is exactly
+            # the moment this function is most likely to be looking at a
+            # real, externally-touched file, not a made-up edge case.
+            # Same treatment as Get-TrailingZeroGroups: log a Warn and
+            # give up on this file, rather than letting it escape
+            # uncaught - see Invoke-MainLoop's own matching fix for why
+            # an uncaught throw here used to take down the whole script
+            # instead of just this one scan. Still returns immediately
+            # (unlike the HashMismatch case below) - a file that can't be
+            # hashed at all can't match ANY later profile either.
+            $hashAttempted = $true
+            try {
+                $cachedHash = (Get-FileHash -LiteralPath $File.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+            } catch {
+                Write-Log ("Could not hash '" + $File.FullName + "' during unwanted-image scan: " + $_) -Level Warn -ForceConsole
+                return @{ Status = 'HashFailure'; Profile = $profile; Width = $cachedWidth; Height = $cachedHeight; Hash = $null }
+            }
+        }
+        if ($null -eq $cachedHash) { continue }
+        if ($cachedHash -ne $profile.Hash) {
+            if ($null -eq $fallbackResult) { $fallbackResult = @{ Status = 'HashMismatch'; Profile = $profile; Width = $cachedWidth; Height = $cachedHeight; Hash = $cachedHash } }
             continue
         }
-        return @{ Status = 'Match'; Profile = $profile; Width = $width; Height = $height; Hash = $fileHash }
+        return @{ Status = 'Match'; Profile = $profile; Width = $cachedWidth; Height = $cachedHeight; Hash = $cachedHash }
     }
 
     if ($null -ne $fallbackResult) { return $fallbackResult }

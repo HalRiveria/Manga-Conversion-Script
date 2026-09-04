@@ -90,7 +90,9 @@ Write-Host ""
 #  instead of being cleared at the start of every run): a previous run's
 #  own Error/Warn content survives a fresh Initialize-LogPaths call
 #  against the same target, and a "=== Run: ... ===" header is appended
-#  to mark where the new run's own content starts.
+#  to mark where the new run's own content starts (via Start-LogRun,
+#  called separately from Initialize-LogPaths as of the 2026-09-03
+#  session-scope fix - see Start-LogRun's own header comment).
 # ==============================================================================
 Write-Host "=== Scenario B: Initialize-LogPaths, split-log mode, previous run's content survives ===" -ForegroundColor Cyan
 Reset-LoggingState
@@ -108,6 +110,7 @@ $priorWarnPath   = Join-Path $scratchDir ("Conversion Log - Warnings - " + $prob
 "prior run's warn content"  | Out-File -FilePath $priorWarnPath  -Encoding ASCII
 
 Initialize-LogPaths -TargetPath "C:\Fake\Manga\Path" -FullLogging $false -ScriptDir $scratchDir
+Start-LogRun
 
 Test-Assert ($null -eq $script:logFile) "logFile is null in split-log mode"
 Test-Assert ($script:logSummaryFile -like "*Conversion Log - Summary - *.log") "logSummaryFile matches expected pattern"
@@ -165,6 +168,7 @@ Write-Host ""
 Write-Host "=== Scenario E: Write-Log, split-log mode ===" -ForegroundColor Cyan
 Reset-LoggingState
 Initialize-LogPaths -TargetPath "C:\E\Path" -FullLogging $false -ScriptDir $scratchDir
+Start-LogRun
 
 Write-Log "info line, should not persist" -Level Info
 Write-Log "an error happened" -Level Error
@@ -176,7 +180,7 @@ Test-Assert (-not (Test-Path -LiteralPath $script:logErrorFile) -or (Get-Content
 # array - wrap in @() so indexing/Count below operate on the line, not on
 # individual characters of it (the exact class of PowerShell collection-
 # collapsing gotcha documented in CLAUDE.md's "Lessons learned"). Each file
-# now has 2 lines - Initialize-LogPaths' own run-separator header (index 0),
+# now has 2 lines - Start-LogRun's own run-separator header (index 0),
 # then this run's one real line (index 1) - see Complete-LogRun for why
 # Write-Log itself still just appends here, not the header + line count.
 $errContent = @(Get-Content -LiteralPath $script:logErrorFile)
@@ -512,14 +516,25 @@ Write-Host ""
 #  prepend-block behavior for Summary.
 # ==============================================================================
 Write-Host "=== Scenario M5: Complete-LogRun moves this run's content to the top ===" -ForegroundColor Cyan
+# Deliberately ONE Initialize-LogPaths call for both "runs" (2026-09-03
+# fix, real bug caught by a same-session /code-review pass) - matches
+# the real Invoke-MainLoop, which calls Initialize-LogPaths once at
+# bootstrap and Start-LogRun once per iteration, NOT Initialize-LogPaths
+# per iteration. A prior version of this scenario called
+# Initialize-LogPaths again for "run 2", which re-captured a fresh
+# prior-content snapshot and masked the real bug (every run after the
+# first got no header and a stale snapshot, so Complete-LogRun's own
+# StartsWith check silently no-op'd) instead of catching it.
 Reset-LoggingState
 Initialize-LogPaths -TargetPath "C:\M5\Path" -FullLogging $false -ScriptDir $scratchDir
+$m5ErrorFile = $script:logErrorFile
+
+Start-LogRun
 Write-Log "run 1, first error" -Level Error
 Write-Log "run 1, second error" -Level Error
 Complete-LogRun
-$m5ErrorFile = $script:logErrorFile
 
-Initialize-LogPaths -TargetPath "C:\M5\Path" -FullLogging $false -ScriptDir $scratchDir
+Start-LogRun
 Write-Log "run 2, first error" -Level Error
 Write-Log "run 2, second error" -Level Error
 Complete-LogRun

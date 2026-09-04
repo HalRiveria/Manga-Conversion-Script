@@ -253,6 +253,61 @@ Test-Assert ($resultC2b.Status -eq 'HashMismatch' -and $resultC2b.Profile.Label 
 Write-Host ""
 
 # ==============================================================================
+#  Scenario C3 (2026-09-03 fix, real bug caught by a same-session
+#  /code-review pass): dimensions/hash are properties of the FILE, not of
+#  any one profile - trying every matching profile (the C2 fix above)
+#  must NOT mean re-reading dimensions and re-hashing the same file once
+#  per matching profile. Wraps the real Get-ImageDimensions/Get-FileHash
+#  with call-counting shadows (the same function-shadowing technique
+#  Scenario C's own locked-file test already uses in this file).
+# ==============================================================================
+Write-Host "=== Scenario C3: dimensions/hash are computed at most ONCE per file, not once per matching profile ===" -ForegroundColor Cyan
+$imgC3 = New-RealImage -Name "match-c3.png" -Width 50 -Height 30
+$realProfileC3 = New-ProfileFromRealFile -File $imgC3 -Width 50 -Height 30 -Label "Real Match"
+# 4 wrong-hash profiles sharing the exact same size+dimensions, THEN the
+# real match last - every one of the 4 reaches the hash compare and gets
+# a HashMismatch (the C2 fix's own "try every matching profile" behavior)
+# before the real Match is found, so this is exactly the worst case the
+# caching fix targets. (A test where the real match came FIRST would
+# short-circuit and pass even without caching, proving nothing.)
+$profilesC3 = @(1..4 | ForEach-Object {
+    $p = $realProfileC3.Clone()
+    $p.Label = "Wrong Hash " + $_
+    $p.Hash  = ("{0:x2}" -f $_) * 34
+    $p
+}) + @($realProfileC3)
+
+$script:getImageDimensionsCallsC3 = 0
+$originalGetImageDimensionsC3 = ${function:Get-ImageDimensions}
+function Get-ImageDimensions {
+    param([string]$Path, [ref]$OutWidth, [ref]$OutHeight)
+    $script:getImageDimensionsCallsC3++
+    & $script:originalGetImageDimensionsC3 -Path $Path -OutWidth $OutWidth -OutHeight $OutHeight
+}
+$script:originalGetImageDimensionsC3 = $originalGetImageDimensionsC3
+
+$script:getFileHashCallsC3 = 0
+$originalGetFileHashC3 = ${function:Get-FileHash}
+function Get-FileHash {
+    param([string]$LiteralPath, [string]$Algorithm, [string]$ErrorAction)
+    $script:getFileHashCallsC3++
+    & $script:originalGetFileHashC3 -LiteralPath $LiteralPath -Algorithm $Algorithm -ErrorAction $ErrorAction
+}
+$script:originalGetFileHashC3 = $originalGetFileHashC3
+
+try {
+    $resultC3 = Test-UnwantedImageMatch -File $imgC3 -Profiles $profilesC3
+} finally {
+    ${function:Get-ImageDimensions} = $originalGetImageDimensionsC3
+    ${function:Get-FileHash} = $originalGetFileHashC3
+}
+
+Test-Assert ($resultC3.Status -eq 'Match') "sanity check: still finds the real match among 5 identical-shape profiles"
+Test-Assert ($script:getImageDimensionsCallsC3 -eq 1) ("Get-ImageDimensions was called exactly once despite 5 matching profiles (got " + $script:getImageDimensionsCallsC3 + ")")
+Test-Assert ($script:getFileHashCallsC3 -eq 1) ("Get-FileHash was called exactly once despite 5 matching profiles (got " + $script:getFileHashCallsC3 + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario D: Invoke-UnwantedImageScan end-to-end - matched file deleted,
 #  hash-mismatch file logged but not deleted, non-matching file untouched
 # ==============================================================================

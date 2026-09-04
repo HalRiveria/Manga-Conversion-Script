@@ -173,6 +173,41 @@ Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*" }).Count -eq 
 Write-Host ""
 
 # ==============================================================================
+#  Scenario F4 (2026-09-03 fix, real bug caught by a same-session
+#  /code-review pass): a file that can't be READ (locked, momentarily
+#  inaccessible) must NOT get the same backup+repair-with-defaults
+#  treatment as genuinely corrupt JSON - that would permanently overwrite
+#  a perfectly good file's real customizations just because it couldn't
+#  be read at that instant. Uses the same function-shadowing technique
+#  UnwantedImage.Harness.ps1 uses for its own locked-file scenario (a
+#  function of the same name resolves before the cmdlet in this scope).
+# ==============================================================================
+Write-Host "=== Scenario F4: a locked/unreadable settings file uses defaults WITHOUT touching the file ===" -ForegroundColor Cyan
+$pathF4 = Join-Path $scratchDir "locked-settings.json"
+'{"JpegQuality": 55}' | Set-Content -LiteralPath $pathF4 -Encoding UTF8
+$originalContentF4 = Get-Content -LiteralPath $pathF4 -Raw
+
+function Get-Content {
+    param([Parameter(ValueFromPipelineByPropertyName)][string]$LiteralPath, [switch]$Raw, [string]$ErrorAction)
+    if ($LiteralPath -eq $pathF4) { throw "simulated: file locked by another process" }
+    Microsoft.PowerShell.Management\Get-Content @PSBoundParameters
+}
+$script:logCalls.Clear()
+$threwF4 = $false
+$settingsF4 = $null
+try { $settingsF4 = Import-ScriptSettings -Path $pathF4 } catch { $threwF4 = $true }
+Remove-Item Function:\Get-Content -ErrorAction SilentlyContinue
+
+Test-Assert (-not $threwF4) "Import-ScriptSettings does not throw when the file can't be read"
+Test-Assert ($null -ne $settingsF4 -and $settingsF4.JpegQuality -eq 90) "a read failure yields default values, same as any other fallback case"
+$backupsF4 = @(Get-ChildItem -LiteralPath (Split-Path $pathF4 -Parent) -Filter "locked-settings.json.corrupt-*.bak")
+Test-Assert ($backupsF4.Count -eq 0) "NO backup was created for a read failure - unlike genuine corruption, there was nothing to back up or repair"
+$contentAfterF4 = Get-Content -LiteralPath $pathF4 -Raw
+Test-Assert ($contentAfterF4 -eq $originalContentF4) "the file's real content is completely untouched - not overwritten with defaults"
+Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*could not be read*" }).Count -ge 1) "a Warn distinguishes a read failure from a parse failure"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario F2 (2026-08-31 fix): a settings file whose content is valid JSON
 #  but not a real settings OBJECT - the literal `null` (a realistic outcome
 #  of a truncated write, since Export-ScriptSettings's Set-Content isn't

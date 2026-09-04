@@ -812,11 +812,14 @@ Write-Host ""
 
 Write-Host "=== Scenario L: Invoke-Mode / ZipFolders - result mapping ===" -ForegroundColor Cyan
 $fakeZipHandlerL = { param($Path, $MaxParallel, $DeleteFolders, $FullLogging, $LogFile, $LogErrorFile, $LogWarnFile, $PermanentDelete)
-    return @{ CandidateCount = 5; ZippedSuccess = 4; ZippedFail = 1; FolderDeletedSuccess = 4; FolderDeletedFail = 0; ForceStoppedCount = 0 }
+    return @{ CandidateCount = 5; ZippedSuccess = 4; ZippedFail = 1; FolderDeletedSuccess = 4; FolderDeletedFail = 0; ForceStoppedCount = 3; Aborted = $true }
 }
 $statsL = Invoke-Mode -Resolved @{ Mode = 'ZipFolders' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ZipFoldersHandler $fakeZipHandlerL
 Test-Assert ($statsL.ZipOnlyZipped.Success -eq 4 -and $statsL.ZipOnlyZipped.Fail -eq 1) "ZipFolders: ZipOnlyZipped mapped correctly"
 Test-Assert ($statsL.ZipOnlyFolderDeleted.Success -eq 4) "ZipFolders: ZipOnlyFolderDeleted mapped correctly"
+# 2026-09-03 fix, real bug caught by a same-session /code-review pass:
+# ZipFolders used to map neither Aborted nor a force-killed count at all.
+Test-Assert ($statsL.Aborted -eq $true -and $statsL.ForceKilledCount -eq 3) "ZipFolders: Aborted/ForceKilledCount (from ForceStoppedCount) mapped onto Stats"
 Write-Host ""
 
 Write-Host "=== Scenario M: Invoke-Mode / ConvertZipped - result mapping ===" -ForegroundColor Cyan
@@ -963,7 +966,7 @@ $fakeImageHandlerO = {
     # J, above) already uses this exact box pattern successfully.
     $zipOutcome = & $ZipStepCallback @{ Dir = (Get-Item -LiteralPath $Path); ZipOut = (Join-Path $Path "Chapter.zip") }
     $zipOutcomeBoxO.Value = $zipOutcome
-    return @{ ConvertedSuccess = 1; ConvertedFail = 0; ConvertedSkipped = 0; DeletedSuccess = 1; DeletedFail = 0; StaleCleanedSuccess = 0; StaleCleanedFail = 0; InspectFailedCount = 0 }
+    return @{ ConvertedSuccess = 1; ConvertedFail = 0; ConvertedSkipped = 0; DeletedSuccess = 1; DeletedFail = 0; StaleCleanedSuccess = 0; StaleCleanedFail = 0; InspectFailedCount = 0; Aborted = $true; ForceKilledCount = 2 }
 }.GetNewClosure()
 
 $fakeSettingsO = $fakeSettings.Clone()
@@ -971,6 +974,10 @@ $fakeSettingsO.ZipWithUnconvertedAnimated = $false
 $statsO = Invoke-Mode -Resolved @{ Mode = 'ImageConversionZip' } -TargetPath $scratchDir -Settings $fakeSettingsO -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ImageConversionHandler $fakeImageHandlerO -ZipFolderHandler $fakeZipFolderHandlerO
 
 Test-Assert ($statsO.LooseImgConverted.Success -eq 1) "ImageConversionZip: image conversion still ran and mapped correctly"
+# 2026-09-03 fix, real bug caught by a same-session /code-review pass:
+# mode 8 used to map neither Aborted nor ForceKilledCount at all, despite
+# $ImageConversionHandler's own result already carrying both fields.
+Test-Assert ($statsO.Aborted -eq $true -and $statsO.ForceKilledCount -eq 2) "ImageConversionZip: Aborted/ForceKilledCount mapped onto Stats"
 Test-Assert ($zipHandlerCallsO.Count -eq 1) ("the zip-folder handler fired exactly once (got " + $zipHandlerCallsO.Count + ")")
 Test-Assert ($zipHandlerCallsO[0].LooseImageExtensions -contains ".avif") "ZipWithUnconvertedAnimated=false (default): .avif is in the blocking extension list"
 # 2026-09-02 follow-up fix (a second same-day review, after the first
@@ -1308,6 +1315,7 @@ $fakeSettingsU2b = @{ PermanentDelete = $false; CleanConsoleOutputEnabled = $fal
 $script:initLogPathsCallsU2b   = [System.Collections.Generic.List[bool]]::new()   # the -FullLogging value each call was made with
 $script:initLogMutexCallsU2b   = 0
 $script:completeLogRunCallsU2b = 0
+$script:startLogRunCallsU2b    = 0
 $fakeInitLogPathsU2b = {
     param($TargetPath, $FullLogging, $DisableSummaryFile, $ScriptDir)
     $script:initLogPathsCallsU2b.Add($FullLogging)
@@ -1317,6 +1325,7 @@ $fakeInitLogPathsU2b = {
 }
 $fakeInitLogMutexU2b   = { $script:initLogMutexCallsU2b++ }
 $fakeCompleteLogRunU2b = { $script:completeLogRunCallsU2b++ }
+$fakeStartLogRunU2b    = { $script:startLogRunCallsU2b++ }
 $fakeGetModeU2b = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
 $script:logFilesSeenU2b = [System.Collections.Generic.List[string]]::new()
 $fakeInvokeModeU2b = {
@@ -1333,7 +1342,7 @@ $fakePostRunU2b = { $script:postRunCallsU2b++; if ($script:postRunCallsU2b -ge 3
 
 Invoke-MainLoop -TargetPath "C:\fake\lib" -Settings $fakeSettingsU2b -SettingsPath "C:\fake\settings.json" -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ScriptDir "C:\fake\scriptdir" `
     -GetModeHandler $fakeGetModeU2b -InvokeModeHandler $fakeInvokeModeU2b -PostRunPromptHandler $fakePostRunU2b `
-    -InitializeLogPathsHandler $fakeInitLogPathsU2b -InitializeLogMutexHandler $fakeInitLogMutexU2b -CompleteLogRunHandler $fakeCompleteLogRunU2b
+    -InitializeLogPathsHandler $fakeInitLogPathsU2b -InitializeLogMutexHandler $fakeInitLogMutexU2b -CompleteLogRunHandler $fakeCompleteLogRunU2b -StartLogRunHandler $fakeStartLogRunU2b
 
 Test-Assert ($script:initLogPathsCallsU2b.Count -eq 1 -and @($script:initLogPathsCallsU2b)[0] -eq $true) ("Initialize-LogPaths was re-called exactly once, only on the iteration where FullLogging actually changed (got " + (@($script:initLogPathsCallsU2b) -join ',') + ")")
 Test-Assert ($script:initLogMutexCallsU2b -eq 1) "Initialize-LogMutex was re-called the same one time"
@@ -1341,6 +1350,12 @@ Test-Assert (@($script:logFilesSeenU2b)[0] -notlike "fake-log-*") "iteration 1 (
 Test-Assert (@($script:logFilesSeenU2b)[1] -eq "fake-log-True.log") "iteration 2 (FullLogging just flipped true) saw the REFRESHED LogFile from the re-sync"
 Test-Assert (@($script:logFilesSeenU2b)[2] -eq "fake-log-True.log") "iteration 3 (no further change) still sees the SAME refreshed LogFile, not reset or re-fetched again"
 Test-Assert ($script:completeLogRunCallsU2b -eq 3) "Complete-LogRun runs every iteration regardless of whether the toggle changed"
+# 2026-09-03 fix, real bug caught by a same-session /code-review pass:
+# Start-LogRun must ALSO run every iteration (paired with Complete-LogRun),
+# unlike Initialize-LogPaths which only re-fires on an actual toggle
+# change - conflating the two used to leave every run after the first in
+# a session with no run header and a stale prior-content snapshot.
+Test-Assert ($script:startLogRunCallsU2b -eq 3) "Start-LogRun runs every iteration too - not gated on the FullLogging/DisableSummaryFile toggle"
 # Reset the fake handler's relative "fake-log-*.log" paths back to $null -
 # left set, they'd leak into every LATER scenario in this same harness run
 # that logs an Error/Warn relying on ambient $script:logErrorFile/
@@ -1349,6 +1364,44 @@ Test-Assert ($script:completeLogRunCallsU2b -eq 3) "Complete-LogRun runs every i
 $script:logFile      = $null
 $script:logErrorFile = $null
 $script:logWarnFile  = $null
+Write-Host ""
+
+# ==============================================================================
+#  Scenario U2c (2026-09-03 fix, real bug caught by a same-session
+#  /code-review pass): the mid-loop mutex re-init used to abandon the
+#  PREVIOUS mutex object without disposing it - $TargetPath never changes
+#  mid-session, so every toggle flip re-created a handle to the exact same
+#  named mutex, leaking the old .NET object. Uses the REAL Initialize-
+#  LogPaths/Initialize-LogMutex (not fakes) so a real Mutex's Dispose
+#  state can actually be observed.
+# ==============================================================================
+Write-Host "=== Scenario U2c: the previous log mutex is disposed when the toggle re-sync creates a new one ===" -ForegroundColor Cyan
+$scratchDirU2c = Join-Path ([System.IO.Path]::GetTempPath()) ("controller-u2c-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $scratchDirU2c -Force | Out-Null
+$fakeSettingsU2c = @{ PermanentDelete = $false; CleanConsoleOutputEnabled = $false; FullLogging = $false; DisableSummaryFile = $false }
+Initialize-LogPaths -TargetPath $scratchDirU2c -FullLogging $false -ScriptDir $scratchDirU2c
+Initialize-LogMutex
+$mutexBeforeU2c = $script:logMutex
+
+$fakeGetModeU2c = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
+$fakeInvokeModeU2c = {
+    param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile)
+    $Settings.FullLogging = $true
+    return New-StatsTracker
+}
+$script:postRunCallsU2c = 0
+$fakePostRunU2c = { $script:postRunCallsU2c++; if ($script:postRunCallsU2c -ge 2) { return 'Exit' }; return 'ReturnToMenu' }
+
+Invoke-MainLoop -TargetPath $scratchDirU2c -Settings $fakeSettingsU2c -SettingsPath "C:\fake\settings.json" -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ScriptDir $scratchDirU2c `
+    -GetModeHandler $fakeGetModeU2c -InvokeModeHandler $fakeInvokeModeU2c -PostRunPromptHandler $fakePostRunU2c
+
+Test-Assert (-not [object]::ReferenceEquals($script:logMutex, $mutexBeforeU2c)) "sanity check: the toggle flip really did create a NEW mutex object"
+$disposedU2c = $false
+try { $null = $mutexBeforeU2c.WaitOne(0) } catch [System.ObjectDisposedException] { $disposedU2c = $true } catch { }
+Test-Assert $disposedU2c "the PREVIOUS mutex object was disposed, not abandoned, when the toggle created a new one"
+$newMutexUsableU2c = $false
+try { $null = $script:logMutex.WaitOne(0); $script:logMutex.ReleaseMutex(); $newMutexUsableU2c = $true } catch { }
+Test-Assert $newMutexUsableU2c "the NEW mutex is still genuinely usable (disposing the OLD one didn't affect it)"
 Write-Host ""
 
 # ==============================================================================

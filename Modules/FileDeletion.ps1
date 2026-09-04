@@ -125,6 +125,32 @@ function Invoke-DeleteTreatingVanishedAsFalse {
     }
 }
 
+function Resolve-ItemPathOrNull {
+    <#
+    .SYNOPSIS
+        Private helper - resolves $ItemPath to an absolute, provider-native
+        path via GetUnresolvedProviderPathFromPSPath (see Move-ToRecycleBin/
+        Remove-ItemPermanently's own header comments for why that specific
+        API, not Resolve-Path). Returns $null instead of throwing when the
+        path can't be resolved at all (2026-09-03 fix, real bug caught by a
+        same-session /code-review pass, verified live:
+        GetUnresolvedProviderPathFromPSPath throws for a path on a drive
+        that isn't currently mounted - e.g. a disconnected removable/
+        network drive - where Test-Path on the same string just returns
+        $false). Both callers treat a $null return the same as "doesn't
+        exist" ($false, nothing to do) - preserving the "$false if it
+        didn't exist" contract this fix was specifically meant to keep,
+        not silently break for exactly the kind of target (a removable
+        library drive) this project's own domain makes realistic.
+    #>
+    param([Parameter(Mandatory)][string]$ItemPath)
+    try {
+        return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ItemPath)
+    } catch {
+        return $null
+    }
+}
+
 function Move-ToRecycleBin {
     <#
     .SYNOPSIS
@@ -154,11 +180,21 @@ function Move-ToRecycleBin {
     # location, not [System.Environment]::CurrentDirectory - the exact
     # gotcha CLAUDE.md's "Lessons learned" documents, and the same root
     # cause the already-fixed LeafDirectoryDiscovery.ps1 relative-path bug
-    # had). GetUnresolvedProviderPathFromPSPath (not Resolve-Path) is used
-    # specifically because it doesn't require the path to already exist -
-    # Test-Path right below still needs to see a genuine miss as $false,
-    # not throw.
-    $ItemPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ItemPath)
+    # had). Resolve-ItemPathOrNull (not a bare GetUnresolvedProviderPathFromPSPath
+    # call) is used so a path that can't be resolved AT ALL (an unmounted
+    # drive - see that helper's own header) degrades to the same $false
+    # this function already returns for a path that resolves fine but
+    # doesn't exist, instead of throwing. The result is captured into a
+    # SEPARATE, untyped local first, not reassigned straight into
+    # $ItemPath - $ItemPath's own [string] parameter type would silently
+    # coerce a real $null back to "" (the exact "[string] binding to ''
+    # rather than $null" gotcha CLAUDE.md's "Lessons learned" documents),
+    # which then made Test-Path below throw ParameterBindingValidationException
+    # ("empty string") instead of degrading - caught live testing this
+    # exact fix.
+    $resolvedItemPath = Resolve-ItemPathOrNull -ItemPath $ItemPath
+    if ($null -eq $resolvedItemPath) { return $false }
+    $ItemPath = $resolvedItemPath
     if (-not (Test-Path -LiteralPath $ItemPath)) { return $false }
 
     return Invoke-DeleteTreatingVanishedAsFalse -Action {
@@ -206,8 +242,14 @@ function Remove-ItemPermanently {
     )
     # Resolved to an absolute, provider-native path FIRST - see
     # Move-ToRecycleBin's own matching comment above for the full
-    # reasoning (2026-09-03 fix, Todo.md finding).
-    $ItemPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ItemPath)
+    # reasoning (2026-09-03 fix, Todo.md finding), and Resolve-ItemPathOrNull's
+    # own header for why a bare GetUnresolvedProviderPathFromPSPath call
+    # isn't safe to use directly here. Captured into a separate, untyped
+    # local first - see Move-ToRecycleBin's own matching comment above for
+    # why reassigning straight into the [string]-typed $ItemPath is unsafe.
+    $resolvedItemPath = Resolve-ItemPathOrNull -ItemPath $ItemPath
+    if ($null -eq $resolvedItemPath) { return $false }
+    $ItemPath = $resolvedItemPath
     if (-not (Test-Path -LiteralPath $ItemPath)) { return $false }
 
     return Invoke-DeleteTreatingVanishedAsFalse -Action {
@@ -272,5 +314,5 @@ function Get-FileDeletionSharedFunctionNames {
         runspace worker. Single source of truth for this group - see
         Logging.ps1's Get-LoggingSharedFunctionNames for why this exists.
     #>
-    return @('Remove-Source', 'Move-ToRecycleBin', 'Remove-ItemPermanently', 'Invoke-DeleteTreatingVanishedAsFalse')
+    return @('Remove-Source', 'Move-ToRecycleBin', 'Remove-ItemPermanently', 'Invoke-DeleteTreatingVanishedAsFalse', 'Resolve-ItemPathOrNull')
 }

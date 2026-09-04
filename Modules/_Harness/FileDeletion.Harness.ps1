@@ -351,6 +351,39 @@ Test-Assert (-not (Test-Path -LiteralPath $relFileN2)) "Move-ToRecycleBin with a
 Write-Host ""
 
 # ==============================================================================
+#  Scenario O (2026-09-03 fix, real bug caught by a same-session
+#  /code-review pass on the fix above): a path on a drive letter that
+#  isn't currently mounted must still degrade to $false, not throw.
+#  GetUnresolvedProviderPathFromPSPath (unlike Test-Path) throws for a
+#  path whose drive doesn't exist as a PowerShell drive at all - verified
+#  live during that review against a genuinely unmounted letter. This
+#  scenario finds a real unmounted letter on whatever machine it runs on
+#  rather than hardcoding one, so it stays valid across environments.
+# ==============================================================================
+Write-Host "=== Scenario O: a path on an unmounted drive letter degrades to `$false, not a throw ===" -ForegroundColor Cyan
+$unmountedLetterO = $null
+foreach ($candidate in @('Z', 'Y', 'X', 'W', 'V', 'U', 'T')) {
+    if (-not (Test-Path -LiteralPath ($candidate + ":\"))) { $unmountedLetterO = $candidate; break }
+}
+if ($null -eq $unmountedLetterO) {
+    Write-Host "  (skipped - no unmounted drive letter found on this machine to test against)" -ForegroundColor DarkYellow
+} else {
+    $fakeUnmountedPathO = $unmountedLetterO + ":\nonexistent-dir\nonexistent-file.txt"
+    $threwO1 = $false
+    $resultO1 = $null
+    try { $resultO1 = Move-ToRecycleBin -ItemPath $fakeUnmountedPathO } catch { $threwO1 = $true }
+    Test-Assert (-not $threwO1) "Move-ToRecycleBin does not throw for a path on an unmounted drive"
+    Test-Assert ($resultO1 -eq $false) "...and returns `$false, same as any other nonexistent path"
+
+    $threwO2 = $false
+    $resultO2 = $null
+    try { $resultO2 = Remove-ItemPermanently -ItemPath $fakeUnmountedPathO } catch { $threwO2 = $true }
+    Test-Assert (-not $threwO2) "Remove-ItemPermanently does not throw for a path on an unmounted drive either"
+    Test-Assert ($resultO2 -eq $false) "...and also returns `$false"
+}
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

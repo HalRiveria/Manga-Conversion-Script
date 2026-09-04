@@ -261,7 +261,15 @@ function Import-ScriptSettings {
         valid one) is backed up (timestamped .bak) AND repaired in place
         with the defaults (2026-09-03 fix, Todo.md finding) - without the
         repair, the same corrupt file sat there forever, re-warning and
-        dropping a new .bak on every single future launch.
+        dropping a new .bak on every single future launch. A file that
+        merely can't be READ (locked, momentarily inaccessible - a second
+        instance of the script, an AV/sync-client hold) is handled
+        SEPARATELY and does NOT get the backup+repair treatment (2026-09-03
+        fix, real bug caught by a same-session /code-review pass) - it
+        just uses defaults for this run, leaving the file untouched, since
+        it may read fine on the very next launch. Only a genuine
+        ConvertFrom-Json failure on content that WAS successfully read
+        counts as corruption.
     .PARAMETER Path
         Defaults to Get-ScriptSettingsPath (real per-user AppData
         location). Pass explicitly to point at a test file instead.
@@ -279,12 +287,31 @@ function Import-ScriptSettings {
         return $settings
     }
 
-    $parsed = $null
+    # Read and parse are two SEPARATE try/catch blocks (2026-09-03 fix,
+    # real bug caught by a same-session /code-review pass) - they used to
+    # share one catch, so a file that's merely locked/momentarily
+    # inaccessible (a second instance of the script mid-Export-ScriptSettings,
+    # an AV/sync-client hold) was treated exactly like genuinely corrupt
+    # JSON: backed up and REPAIRED WITH DEFAULTS, permanently overwriting
+    # every real customization in a perfectly good file just because it
+    # couldn't be read at that instant. Only a real ConvertFrom-Json
+    # failure (content that was actually read, and IS genuinely bad) gets
+    # the backup+repair treatment now; a read failure degrades to "use
+    # defaults for this run" without touching the file at all - it might
+    # read fine next launch.
+    $raw = $null
     try {
         $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+    } catch {
+        Write-Log ("Settings file at '" + $Path + "' could not be read (" + $_.Exception.Message + ") - using defaults for this run without touching the file, since it may just be locked right now.") -Level Warn
+        return $settings
+    }
+
+    $parsed = $null
+    try {
         $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
     } catch {
-        Write-Log ("Settings file at '" + $Path + "' could not be read/parsed (" + $_.Exception.Message + ") - using defaults.") -Level Warn
+        Write-Log ("Settings file at '" + $Path + "' could not be parsed (" + $_.Exception.Message + ") - using defaults.") -Level Warn
         $backupPath = $Path + ".corrupt-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".bak"
         try { Copy-Item -LiteralPath $Path -Destination $backupPath -Force -ErrorAction Stop } catch { }
         # Repair the file with the defaults just fell back to (2026-09-03

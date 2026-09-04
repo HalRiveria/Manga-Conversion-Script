@@ -1370,8 +1370,24 @@ function Invoke-Mode {
                     -FullLogging $script:FullLogging -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete ([bool]$Settings.PermanentDelete)
                 $stats.ZipOnlyZipped.Success        = $r.ZippedSuccess;        $stats.ZipOnlyZipped.Fail        = $r.ZippedFail
                 $stats.ZipOnlyFolderDeleted.Success = $r.FolderDeletedSuccess; $stats.ZipOnlyFolderDeleted.Fail = $r.FolderDeletedFail
+                # Aborted/ForceKilledCount (2026-09-03 fix, real bug caught
+                # by a same-session /code-review pass): Invoke-ZipOnlyPipeline
+                # gained a real Aborted field the same day (previously it had
+                # only ForceStoppedCount, with no way to distinguish "the run
+                # was cancelled" from "the run finished with a slow drain") -
+                # $r.ForceStoppedCount maps onto Stats' ForceKilledCount name.
+                $stats.Aborted           = $r.Aborted
+                $stats.ForceKilledCount  = $r.ForceStoppedCount
             }
             'ConvertZipped' {
+                # Deliberately NOT given the Aborted/ForceKilledCount mapping
+                # its 'ZipFolders'/'ImageConversionZip' siblings got
+                # 2026-09-03 - RezipPipeline.ps1 (this mode's handler) has no
+                # Aborted field at all (same gap ZipPipeline.ps1 had until
+                # today), and mode 9 is hidden from the live menu (deprecated/
+                # minimal-effort direction, see RezipPipeline.ps1's own
+                # header) - not worth adding a new field to a deprioritized,
+                # unreachable-from-the-menu pipeline.
                 # [bool](...) casts - same reasoning as the ZipFolders case above.
                 $r = & $ConvertZippedHandler -Path $TargetPath -MaxParallel $Settings.ZipParallelThreads -DeleteFolders ([bool]$Settings.DeleteExtractedFoldersAfterRezip) `
                     -FullLogging $script:FullLogging -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete ([bool]$Settings.PermanentDelete) `
@@ -1500,6 +1516,14 @@ function Invoke-Mode {
                 $stats.LooseFolderZipped.Skipped   = $zipStatsBox.Skipped
                 $stats.LooseFolderDeleted.Success  = $zipStatsBox.FolderDeletedSuccess
                 $stats.LooseFolderDeleted.Fail      = $zipStatsBox.FolderDeletedFail
+                # Aborted/ForceKilledCount (2026-09-03 fix, real bug caught
+                # by a same-session /code-review pass - missed when the
+                # 'ImageConversion'/'AnimatedConversion'/'FullPipeline'
+                # branches got these two lines): mode 8 calls the same
+                # $ImageConversionHandler as 'ImageConversion' above, and
+                # $r carries the identical two fields.
+                $stats.Aborted           = $r.Aborted
+                $stats.ForceKilledCount  = $r.ForceKilledCount
             }
             default {
                 throw ("Invoke-Mode: unrecognized mode '" + $Resolved.Mode + "'.")
@@ -1556,6 +1580,13 @@ function Invoke-MainLoop {
         Initialize-LogPaths' own $PSScriptRoot fallback would resolve to
         Modules\ (where Logging.ps1 lives) when called from here, not the
         main script's own directory.
+    .PARAMETER StartLogRunHandler
+        Injectable, defaults to the real Logging.ps1 Start-LogRun. Called
+        every iteration, right before dispatch - unlike
+        InitializeLogPathsHandler below (only re-called when the log
+        PATHS actually change), each run needs its own header/prior-
+        content snapshot captured fresh, paired with CompleteLogRunHandler
+        at the end of the same iteration.
     .PARAMETER InitializeLogPathsHandler
     .PARAMETER InitializeLogMutexHandler
         Injectable, default to the real Initialize-LogPaths/
@@ -1592,6 +1623,7 @@ function Invoke-MainLoop {
         [scriptblock]$SetRunActiveHandler = ${function:Set-AbortHandlerRunActive},
         [scriptblock]$LogHandler = { param($m) Write-Log $m -Level Error },
         [scriptblock]$CompleteLogRunHandler = ${function:Complete-LogRun},
+        [scriptblock]$StartLogRunHandler = ${function:Start-LogRun},
         [scriptblock]$InitializeLogPathsHandler = ${function:Initialize-LogPaths},
         [scriptblock]$InitializeLogMutexHandler = ${function:Initialize-LogMutex}
     )
@@ -1667,7 +1699,22 @@ function Invoke-MainLoop {
         $currentDisableSummaryFile = [bool]$Settings.DisableSummaryFile
         if ($currentFullLogging -ne $lastFullLogging -or $currentDisableSummaryFile -ne $lastDisableSummaryFile) {
             & $InitializeLogPathsHandler -TargetPath $TargetPath -FullLogging $currentFullLogging -DisableSummaryFile $currentDisableSummaryFile -ScriptDir $ScriptDir
+            # Dispose the PREVIOUS mutex before re-creating (2026-09-03
+            # fix, real bug caught by a same-session /code-review pass) -
+            # Initialize-LogMutex's own docstring deliberately does NOT
+            # dispose it (ZipParallelProcessing.ps1's own save/restore
+            # pattern depends on that old reference staying valid) and
+            # says a caller that DOESN'T need the old reference back - this
+            # one doesn't, $TargetPath/$script:pathHash never change mid-
+            # session, so the new mutex always has the identical
+            # "JxlLogMutex_<hash>" name - is responsible for disposing it
+            # first itself. Without this, every FullLogging/
+            # DisableSummaryFile toggle flip during a long session
+            # abandoned one OS mutex handle to the finalizer for no
+            # functional gain.
+            $previousLogMutexForDispose = $script:logMutex
             & $InitializeLogMutexHandler
+            if ($null -ne $previousLogMutexForDispose) { try { $previousLogMutexForDispose.Dispose() } catch { } }
             $LogFile        = $script:logFile
             $LogErrorFile   = $script:logErrorFile
             $LogWarnFile    = $script:logWarnFile
@@ -1706,6 +1753,15 @@ function Invoke-MainLoop {
         # run still clears it - Reset-AbortState's own defensive reset at
         # the top of the NEXT iteration is the second layer, not the
         # only one.
+        # Start-LogRun (2026-09-03 fix, real bug caught by a same-session
+        # /code-review pass - see Start-LogRun's own header for the full
+        # story): must run EVERY iteration, not just when the
+        # FullLogging/DisableSummaryFile re-sync above fires - unlike
+        # Initialize-LogPaths (which only needs recomputing when the log
+        # PATHS actually change), each run needs its own header and prior-
+        # content snapshot captured fresh, or Complete-LogRun below has
+        # nothing correct to reorder against for the 2nd+ run in a session.
+        & $StartLogRunHandler
         & $SetRunActiveHandler -Active $true
         $runStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         try {

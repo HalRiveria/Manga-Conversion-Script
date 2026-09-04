@@ -103,6 +103,12 @@ try { Test-Assert ($archive1A.Entries.Count -eq 2) ("Chapter 1.zip has both real
 finally { $archive1A.Dispose() }
 
 Test-Assert ($null -eq $script:zipOnlyCts) "the CTS was disposed and cleared after a normal (non-aborted) run"
+# 2026-09-03 fix, real bug caught by a same-session /code-review pass:
+# Invoke-ZipOnlyPipeline previously had no Aborted field at all (only
+# ForceStoppedCount) - Controller.ps1's Invoke-Mode now maps this onto
+# Summary.ps1's Aborted/ForceKilledCount fields, so mode 3's own summary
+# can say "Processing ABORTED" too.
+Test-Assert ($totalsA.Aborted -eq $false) "a normal, non-aborted run reports Aborted = `$false"
 Write-Host ""
 
 # ==============================================================================

@@ -228,25 +228,67 @@ function Initialize-LogPaths {
         # run's - now that distinction is made by the run-separator
         # header instead of by deleting anything.
         #
-        # This run's pre-existing content is captured here so Complete-LogRun
-        # (called once, on the main thread, after the run finishes - see its
-        # own header comment) can move this run's newly-appended content
-        # above it. Real-time writes DURING the run (Write-Log, from the
-        # main thread or from concurrent runspace workers - Full Pipeline
-        # dispatches per-chapter jobs concurrently) still use the plain,
-        # proven-safe mutex-guarded APPEND (Write-LogLineToFile, unchanged) -
-        # reordering per-line instead would need every worker to know the
-        # true current file state to avoid one runspace's rewrite discarding
-        # another's, which would need threading extra state into every
-        # worker scriptblock that can log an Error/Warn for the same visible
-        # result. Doing it once, after the run, when the process is
-        # single-threaded again by construction, avoids that entirely.
-        $runHeader = "=== Run: " + (Get-Date -Format "yyyy-MM-dd HHmmss") + " ==="
+        # The header write + prior-content capture themselves do NOT
+        # happen here (2026-09-03 fix, real bug caught by a same-session
+        # /code-review pass: this function only runs once at bootstrap
+        # and again only when FullLogging/DisableSummaryFile actually
+        # changes - Invoke-MainLoop's own re-sync gates it on that - but
+        # Complete-LogRun runs after EVERY run. A session with 2+ runs
+        # between one Initialize-LogPaths call left every run after the
+        # first with no header and a stale $logErrorPriorContent, so
+        # Complete-LogRun's own StartsWith check silently failed and
+        # those runs' content was never promoted to the top - live-
+        # reproduced during that review). Start-LogRun (below) now owns
+        # both, called once per run from Invoke-MainLoop, paired with
+        # Complete-LogRun at the end of that same run.
+    }
+}
 
-        $script:logErrorPriorContent = if (Test-Path -LiteralPath $script:logErrorFile) { [System.IO.File]::ReadAllText($script:logErrorFile) } else { "" }
-        $script:logWarnPriorContent  = if (Test-Path -LiteralPath $script:logWarnFile)  { [System.IO.File]::ReadAllText($script:logWarnFile)  } else { "" }
-        Invoke-MutexGuardedWrite { $runHeader | Out-File -FilePath $script:logErrorFile -Append -Encoding UTF8 }
-        Invoke-MutexGuardedWrite { $runHeader | Out-File -FilePath $script:logWarnFile  -Append -Encoding UTF8 }
+function Start-LogRun {
+    <#
+    .SYNOPSIS
+        Call once, on the main thread, right before EACH run starts (not
+        just once per session) - captures this run's pre-existing
+        Errors/Warnings content and writes a "=== Run: <timestamp> ==="
+        header, so Complete-LogRun (called after the run finishes) has a
+        correct, THIS-RUN-specific boundary to reorder against. A no-op
+        in full-logging mode (nothing to do - one fresh file per run,
+        already handled by Initialize-LogPaths).
+    .DESCRIPTION
+        Deliberately separate from Initialize-LogPaths (2026-09-03 fix,
+        real bug - see Complete-LogRun's own header for the full story):
+        Initialize-LogPaths computes log file PATHS, which only need
+        recomputing when FullLogging/DisableSummaryFile actually changes
+        or at bootstrap - but a run's own header/prior-content capture
+        needs to happen at the start of EVERY run regardless. Conflating
+        the two meant every run after the first in a session (when
+        nothing had toggled) got no header and a stale prior-content
+        snapshot.
+
+        Errors/Warnings I/O is wrapped in try/catch (2026-09-03 fix,
+        same review pass) - a locked/AV-held log file used to have this
+        exact failure handled gracefully by the old stale-log-clearing
+        code this design replaced; the read/write calls below had lost
+        that protection. A failure here degrades to "this run's content
+        won't get a header/won't be reorderable" (logged as a Warn) -
+        Complete-LogRun's own StartsWith guard already treats a missing/
+        mismatched Prior as "leave the file alone", so this fails safe.
+    #>
+    if ($script:FullLogging) { return }
+
+    $runHeader = "=== Run: " + (Get-Date -Format "yyyy-MM-dd HHmmss") + " ==="
+    foreach ($target in @(
+        @{ FilePath = $script:logErrorFile; PriorVar = 'logErrorPriorContent' },
+        @{ FilePath = $script:logWarnFile;  PriorVar = 'logWarnPriorContent'  }
+    )) {
+        if ([string]::IsNullOrEmpty($target.FilePath)) { continue }
+        try {
+            $prior = if (Test-Path -LiteralPath $target.FilePath) { [System.IO.File]::ReadAllText($target.FilePath) } else { "" }
+            Set-Variable -Scope Script -Name $target.PriorVar -Value $prior
+            Invoke-MutexGuardedWrite { $runHeader | Out-File -FilePath $target.FilePath -Append -Encoding UTF8 }
+        } catch {
+            Write-Log ("Could not start a new run header in '" + $target.FilePath + "' - it may be locked or otherwise inaccessible. This run's own entries will still be appended, just without a run separator: " + $_) -Level Warn -ForceConsole
+        }
     }
 }
 
@@ -256,7 +298,7 @@ function Complete-LogRun {
         Call once, on the main thread, right after a run finishes (every
         worker runspace it dispatched has already joined back by then) -
         moves this run's newly-appended Errors/Warnings content (whatever
-        was written since Initialize-LogPaths captured
+        was written since Start-LogRun captured
         $script:logErrorPriorContent/$script:logWarnPriorContent) to the
         TOP of each file, so the newest run is always on top, matching
         Write-SummaryLog's own prepend-block behavior for the Summary
@@ -266,30 +308,49 @@ function Complete-LogRun {
         target, with nothing written at all - not even a header).
     .DESCRIPTION
         Deliberately a single end-of-run reorder rather than something
-        every Write-Log call does - see Initialize-LogPaths' split-log
-        branch for why: this keeps the real-time write path (used by
-        every runspace worker that can log an Error/Warn) exactly the
-        plain mutex-guarded append it always was, and only reorders
-        content once the run is back to being single-threaded. A
-        crash/force-kill mid-run simply means this never runs for that
-        run - its content stays appended at the BOTTOM of the file
-        instead of moved to the top; nothing is lost.
+        every Write-Log call does - see Start-LogRun for why: this keeps
+        the real-time write path (used by every runspace worker that can
+        log an Error/Warn) exactly the plain mutex-guarded append it
+        always was, and only reorders content once the run is back to
+        being single-threaded. A crash/force-kill mid-run simply means
+        this never runs for that run - its content stays appended at the
+        BOTTOM of the file instead of moved to the top; nothing is lost.
+
+        Wrapped in try/catch per file (2026-09-03 fix, real bug caught by
+        a same-session /code-review pass) - a locked/AV-held file used to
+        be handled gracefully by the old stale-log-clearing code this
+        design replaced; this rewrite's own ReadAllText/WriteAllText had
+        no such protection, so a locked Errors/Warnings file could throw
+        uncaught out of Invoke-MainLoop (this function's real call site),
+        killing the whole run loop for a run that had otherwise already
+        finished successfully. A failed reorder now just logs a Warn and
+        leaves this run's content appended at the bottom, same as the
+        "shouldn't happen" fallback below already does deliberately.
+        StartsWith/Substring use Ordinal comparison, not the culture-
+        sensitive default - a culture-aware match could treat two
+        different byte sequences as an equal prefix (relevant here since
+        these logs routinely carry non-ASCII manga filenames), splitting
+        $current at the wrong character count.
     #>
     foreach ($target in @(
         @{ FilePath = $script:logErrorFile; Prior = $script:logErrorPriorContent },
         @{ FilePath = $script:logWarnFile;  Prior = $script:logWarnPriorContent  }
     )) {
         if ($script:FullLogging -or [string]::IsNullOrEmpty($target.FilePath) -or -not (Test-Path -LiteralPath $target.FilePath)) { continue }
-        Invoke-MutexGuardedWrite {
-            $current = [System.IO.File]::ReadAllText($target.FilePath)
-            if ($current.StartsWith($target.Prior)) {
-                $thisRunContent = $current.Substring($target.Prior.Length)
-                [System.IO.File]::WriteAllText($target.FilePath, ($thisRunContent + $target.Prior), [System.Text.Encoding]::UTF8)
+        try {
+            Invoke-MutexGuardedWrite {
+                $current = [System.IO.File]::ReadAllText($target.FilePath)
+                if ($current.StartsWith($target.Prior, [System.StringComparison]::Ordinal)) {
+                    $thisRunContent = $current.Substring($target.Prior.Length)
+                    [System.IO.File]::WriteAllText($target.FilePath, ($thisRunContent + $target.Prior), [System.Text.Encoding]::UTF8)
+                }
+                # else: the file no longer starts with the content captured at
+                # Start-LogRun time (shouldn't happen under normal use) -
+                # leave it untouched rather than guess at a transformation that
+                # could scramble real content.
             }
-            # else: the file no longer starts with the content captured at
-            # Initialize-LogPaths time (shouldn't happen under normal use) -
-            # leave it untouched rather than guess at a transformation that
-            # could scramble real content.
+        } catch {
+            Write-Log ("Could not move this run's content to the top of '" + $target.FilePath + "' - it may be locked or otherwise inaccessible. The content is still there, just not reordered: " + $_) -Level Warn -ForceConsole
         }
     }
 }
