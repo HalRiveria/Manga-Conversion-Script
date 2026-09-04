@@ -1550,6 +1550,25 @@ function Invoke-MainLoop {
         (between calls) falls through to the OS's own default action
         instead of being caught and leaking into the next iteration's
         run (project owner's own explicit decision, 2026-08-31).
+    .PARAMETER ScriptDir
+        Where log files live - threaded through so a mid-session
+        FullLogging/DisableSummaryFile re-sync (see below) can call
+        Initialize-LogPaths with the right directory. Without this,
+        Initialize-LogPaths' own $PSScriptRoot fallback would resolve to
+        Modules\ (where Logging.ps1 lives) when called from here, not the
+        main script's own directory.
+    .PARAMETER InitializeLogPathsHandler
+    .PARAMETER InitializeLogMutexHandler
+        Injectable, default to the real Initialize-LogPaths/
+        Initialize-LogMutex. Called mid-loop (2026-09-03 fix, Todo.md's
+        mid-session-toggle finding) only when FullLogging or
+        DisableSummaryFile actually changed since the last call - now
+        safe to re-call at all only because neither logging mode
+        deletes/clears anything on a repeat call anymore (see Logging.ps1).
+        $LogFile/$LogErrorFile/$LogWarnFile are refreshed from the
+        resulting $script: state right after, so THIS iteration's
+        dispatch (and every worker it spawns) sees the new paths, not the
+        ones frozen at bootstrap.
     .OUTPUTS
         None - runs until exit, same as the main script's old inline loop.
     #>
@@ -1563,6 +1582,7 @@ function Invoke-MainLoop {
         [Parameter(Mandatory)]
         [string]$CjxlExe,
         [string]$MagickExe,
+        [string]$ScriptDir,
         [string]$LogFile,
         [string]$LogErrorFile,
         [string]$LogWarnFile,
@@ -1571,8 +1591,24 @@ function Invoke-MainLoop {
         [scriptblock]$PostRunPromptHandler = ${function:Show-PostRunPrompt},
         [scriptblock]$ResetAbortHandler = ${function:Reset-AbortState},
         [scriptblock]$SetRunActiveHandler = ${function:Set-AbortHandlerRunActive},
-        [scriptblock]$LogHandler = { param($m) Write-Log $m -Level Error }
+        [scriptblock]$LogHandler = { param($m) Write-Log $m -Level Error },
+        [scriptblock]$CompleteLogRunHandler = ${function:Complete-LogRun},
+        [scriptblock]$InitializeLogPathsHandler = ${function:Initialize-LogPaths},
+        [scriptblock]$InitializeLogMutexHandler = ${function:Initialize-LogMutex}
     )
+
+    # Tracks the FullLogging/DisableSummaryFile values Initialize-LogPaths
+    # was last actually called with, so the re-sync below (2026-09-03 fix -
+    # see Todo.md's mid-session-toggle finding) only re-calls it when either
+    # one has genuinely changed since the LAST iteration, not on every
+    # single one - now safe to re-call at all only because neither logging
+    # mode deletes/clears anything on a repeat call anymore (see
+    # Logging.ps1's Initialize-LogPaths header). Seeded from $Settings'
+    # current values since the bootstrap's own Initialize-LogPaths call
+    # (Conversion Script Main.ps1) already used them for whatever produced
+    # the $LogFile/$LogErrorFile/$LogWarnFile passed in here.
+    $lastFullLogging        = [bool]$Settings.FullLogging
+    $lastDisableSummaryFile = [bool]$Settings.DisableSummaryFile
 
     while ($true) {
         & $ResetAbortHandler
@@ -1615,15 +1651,30 @@ function Invoke-MainLoop {
         # using the stale bootstrap value while worker-runspace deletions
         # (which read $Settings.PermanentDelete fresh per dispatch) already
         # picked up the change, so a single run could silently mix
-        # Recycle-Bin and permanent deletions. Deliberately does NOT include
-        # Initialize-LogPaths/FullLogging here - that call also clears the
-        # PREVIOUS run's split-mode Error/Warn logs (or Recycle-Bins the
-        # full-logging file this run just wrote) as an intentional side
-        # effect of computing this run's own log paths, so blindly re-
-        # running it every iteration would delete/relocate the very log the
-        # user likely wants to look at right after the run that just
-        # finished - see Todo.md for that part of the gap, tracked
-        # separately rather than fixed here.
+        # Recycle-Bin and permanent deletions.
+        #
+        # FullLogging/DisableSummaryFile get the SAME re-sync treatment now
+        # (2026-09-03 fix - Todo.md's mid-session-toggle finding), gated on
+        # an actual change since Initialize-LogPaths' own $lastFullLogging/
+        # $lastDisableSummaryFile were last updated: neither logging mode
+        # deletes/clears anything on a repeat call anymore (Logging.ps1),
+        # so re-calling it is safe, but it's still only called when the
+        # toggle genuinely changed - not every iteration - since full-
+        # logging mode gets a FRESH timestamped file on every
+        # Initialize-LogPaths call, and a toggle that hasn't changed
+        # shouldn't fragment one run's-worth of full-logging output across
+        # a new file for every single menu round-trip.
+        $currentFullLogging        = [bool]$Settings.FullLogging
+        $currentDisableSummaryFile = [bool]$Settings.DisableSummaryFile
+        if ($currentFullLogging -ne $lastFullLogging -or $currentDisableSummaryFile -ne $lastDisableSummaryFile) {
+            & $InitializeLogPathsHandler -TargetPath $TargetPath -FullLogging $currentFullLogging -DisableSummaryFile $currentDisableSummaryFile -ScriptDir $ScriptDir
+            & $InitializeLogMutexHandler
+            $LogFile        = $script:logFile
+            $LogErrorFile   = $script:logErrorFile
+            $LogWarnFile    = $script:logWarnFile
+            $lastFullLogging        = $currentFullLogging
+            $lastDisableSummaryFile = $currentDisableSummaryFile
+        }
         # [bool](...) casts (2026-08-31 fix, caught by a same-day
         # /code-review): both -Enabled/-PermanentDelete are
         # [Parameter(Mandatory)][bool] - a $Settings hashtable missing
@@ -1665,6 +1716,15 @@ function Invoke-MainLoop {
             & $SetRunActiveHandler -Active $false
         }
         $runStopwatch.Stop()
+
+        # Complete-LogRun (2026-09-03 addition - split-log Errors/Warnings
+        # now accumulate across runs, newest on top): every worker runspace
+        # this run dispatched has already joined back by the time
+        # $InvokeModeHandler returns, so it's safe to do the reorder here,
+        # unconditionally, regardless of whether $stats came back $null - a
+        # crashed/aborted run's own logged Errors/Warnings still deserve to
+        # be promoted to the top like a normal run's would.
+        & $CompleteLogRunHandler
 
         if ($null -eq $stats) {
             # Invoke-Mode's own shared catch already logged the real cause

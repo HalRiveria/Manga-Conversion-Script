@@ -1291,6 +1291,64 @@ Test-Assert (@($script:ccrSeenU2)[0] -eq $false -and @($script:ccrSeenU2)[1] -eq
 Write-Host ""
 
 # ==============================================================================
+#  Scenario U2b (2026-09-03 fix - Todo.md's mid-session Full Logging /
+#  DisableSummaryFile toggle finding): Invoke-MainLoop only re-calls
+#  Initialize-LogPaths when FullLogging/DisableSummaryFile actually
+#  changed since the last iteration, not on every one (unlike
+#  PermanentDelete/CleanConsoleOutput above, which ARE safe to re-apply
+#  unconditionally) - and when it does, $LogFile/$LogErrorFile/$LogWarnFile
+#  passed to THIS and every later iteration's InvokeModeHandler reflect
+#  the refreshed paths, not the ones frozen at bootstrap.
+# ==============================================================================
+Write-Host "=== Scenario U2b: FullLogging/DisableSummaryFile re-sync only fires on an actual change ===" -ForegroundColor Cyan
+$fakeSettingsU2b = @{ PermanentDelete = $false; CleanConsoleOutputEnabled = $false; FullLogging = $false; DisableSummaryFile = $false }
+$script:initLogPathsCallsU2b   = [System.Collections.Generic.List[bool]]::new()   # the -FullLogging value each call was made with
+$script:initLogMutexCallsU2b   = 0
+$script:completeLogRunCallsU2b = 0
+$fakeInitLogPathsU2b = {
+    param($TargetPath, $FullLogging, $DisableSummaryFile, $ScriptDir)
+    $script:initLogPathsCallsU2b.Add($FullLogging)
+    $script:logFile      = "fake-log-" + $FullLogging + ".log"
+    $script:logErrorFile = "fake-errors-" + $FullLogging + ".log"
+    $script:logWarnFile  = "fake-warn-" + $FullLogging + ".log"
+}
+$fakeInitLogMutexU2b   = { $script:initLogMutexCallsU2b++ }
+$fakeCompleteLogRunU2b = { $script:completeLogRunCallsU2b++ }
+$fakeGetModeU2b = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
+$script:logFilesSeenU2b = [System.Collections.Generic.List[string]]::new()
+$fakeInvokeModeU2b = {
+    param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile)
+    $script:logFilesSeenU2b.Add($LogFile)
+    # Iteration 1: no change (baseline). Iteration 2: flip FullLogging on.
+    # Iteration 3: leave it on - proves the handler is skipped again once
+    # things are stable at the new value, not just re-triggered forever.
+    if ($script:logFilesSeenU2b.Count -eq 1) { $Settings.FullLogging = $true }
+    return New-StatsTracker
+}
+$script:postRunCallsU2b = 0
+$fakePostRunU2b = { $script:postRunCallsU2b++; if ($script:postRunCallsU2b -ge 3) { return 'Exit' }; return 'ReturnToMenu' }
+
+Invoke-MainLoop -TargetPath "C:\fake\lib" -Settings $fakeSettingsU2b -SettingsPath "C:\fake\settings.json" -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ScriptDir "C:\fake\scriptdir" `
+    -GetModeHandler $fakeGetModeU2b -InvokeModeHandler $fakeInvokeModeU2b -PostRunPromptHandler $fakePostRunU2b `
+    -InitializeLogPathsHandler $fakeInitLogPathsU2b -InitializeLogMutexHandler $fakeInitLogMutexU2b -CompleteLogRunHandler $fakeCompleteLogRunU2b
+
+Test-Assert ($script:initLogPathsCallsU2b.Count -eq 1 -and @($script:initLogPathsCallsU2b)[0] -eq $true) ("Initialize-LogPaths was re-called exactly once, only on the iteration where FullLogging actually changed (got " + (@($script:initLogPathsCallsU2b) -join ',') + ")")
+Test-Assert ($script:initLogMutexCallsU2b -eq 1) "Initialize-LogMutex was re-called the same one time"
+Test-Assert (@($script:logFilesSeenU2b)[0] -notlike "fake-log-*") "iteration 1 (no change yet) saw the ORIGINAL LogFile, not a re-synced one"
+Test-Assert (@($script:logFilesSeenU2b)[1] -eq "fake-log-True.log") "iteration 2 (FullLogging just flipped true) saw the REFRESHED LogFile from the re-sync"
+Test-Assert (@($script:logFilesSeenU2b)[2] -eq "fake-log-True.log") "iteration 3 (no further change) still sees the SAME refreshed LogFile, not reset or re-fetched again"
+Test-Assert ($script:completeLogRunCallsU2b -eq 3) "Complete-LogRun runs every iteration regardless of whether the toggle changed"
+# Reset the fake handler's relative "fake-log-*.log" paths back to $null -
+# left set, they'd leak into every LATER scenario in this same harness run
+# that logs an Error/Warn relying on ambient $script:logErrorFile/
+# $script:logWarnFile state, writing real content into stray relative-path
+# files at the harness's own CWD instead of nowhere/a real scratch path.
+$script:logFile      = $null
+$script:logErrorFile = $null
+$script:logWarnFile  = $null
+Write-Host ""
+
+# ==============================================================================
 #  Scenario U3 (2026-09-02 review fix): mode 5 (Cover Deletion)'s real work
 #  runs INSIDE $GetModeHandler (Get-SelectedMode -> Show-ModeMenu ->
 #  Show-CoverDeletionMenu), not inside $InvokeModeHandler like every other

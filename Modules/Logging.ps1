@@ -52,19 +52,27 @@
     a successful acquire, not a failure) so every WaitOne() call site
     doesn't need to repeat that handling itself.
 
-    Initialize-LogPaths Recycle-Bins stale log files via Move-ToRecycleBin
-    (Modules\FileDeletion.ps1) - split-log mode ONLY, clearing its own
-    fixed-name Errors/Warnings files from a previous run so a clean run's
-    absence of new errors/warnings isn't confused with stale ones (2026-08-31
-    fix - used to permanently Remove-Item them instead). Full-logging mode
-    does NOT do this (2026-09-03 fix, real bug, live-reported - it used to
-    Recycle-Bin every OTHER timestamped log for the same target on every
-    run, deleting a previous run's own log the moment the next run started;
-    a uniquely-timestamped file has no fixed-name ambiguity to clear, so
-    there was no real reason to auto-delete it). Callers that dot-source
-    Logging.ps1 standalone (as the harness does) still need to stub
-    Move-ToRecycleBin out, or dot-source FileDeletion.ps1 too, for the
-    split-log path.
+    Neither logging mode ever deletes or clears a previous run's own log
+    content (2026-09-03 fix, project owner's own explicit call): full-
+    logging mode gets a fresh uniquely-timestamped file every run (nothing
+    to clear - no fixed-name ambiguity); split-log mode's fixed-name
+    Errors/Warnings/Summary files all ACCUMULATE across runs instead, with
+    the NEWEST run always on top - each run's own content is marked off by
+    a "=== Run: <timestamp> ===" header. Summary already worked this way
+    (Write-SummaryLog collects the whole run's lines and prepends them as
+    one block); Errors/Warnings are written incrementally throughout a run
+    instead, from potentially several runspace workers at once (Full
+    Pipeline's per-chapter dispatch), so they use a different mechanism to
+    get the same "newest on top" result: Write-Log still just appends in
+    real time (Initialize-LogPaths captures the file's pre-run content
+    first), and Complete-LogRun (call once, on the main thread, right
+    after a run finishes) moves that run's newly-appended content above
+    the captured pre-run content - see that function's own header comment
+    for why it's done once at the end rather than per-line. A previous
+    design here Recycle-Binned Errors/Warnings at the start of every run
+    so a clean run's absence of new content wasn't confused with a stale
+    previous run's - that distinction is now made by the run-separator
+    header instead of by deleting anything.
 
     Log files are written UTF-8, not ASCII - the historical ASCII-only
     rule (see CHANGELOG.md v3.0/v4.0) was about emoji/unicode literally
@@ -110,13 +118,19 @@ $script:SummaryFileEnabled = $true   # only meaningful when FullLogging = $false
                                       # Initialize-LogPaths -DisableSummaryFile and
                                       # Write-SummaryLog
 $script:CleanConsoleOutputEnabled = $false   # see Initialize-CleanConsoleOutput
+$script:logErrorPriorContent = ""   # split-log mode only - the file's content from BEFORE
+$script:logWarnPriorContent  = ""   # this run started, captured once at Initialize-LogPaths -
+                                      # see Complete-LogRun, which uses this to move this run's
+                                      # own newly-appended content to the top of the file once
+                                      # the run finishes, so the newest run stays on top.
 
 function Initialize-LogPaths {
     <#
     .SYNOPSIS
         Computes this run's log file path(s) and $script:pathHash, and (in
-        split-log mode) clears stale Error/Warn logs from a previous run.
-        Call once, before anything calls Write-Log.
+        split-log mode) captures each file's pre-run content so
+        Complete-LogRun can move this run's own content above it once the
+        run finishes. Call once, before anything calls Write-Log.
     .PARAMETER TargetPath
         The directory being processed - hashed (SHA-256) to build
         $script:pathHash, so log/state/mutex names for different -Path
@@ -126,11 +140,12 @@ function Initialize-LogPaths {
         this first if a caller needs $script:pathHash for its own purposes
         too, rather than hashing $TargetPath a second time.
     .PARAMETER FullLogging
-        $true: one combined timestamped log file, every level.
+        $true: one combined timestamped log file, every level, a fresh
+        file every run.
         $false: three split files (Summary/Errors/Warnings), Info not
-        persisted. Split mode's Error/Warn files are cleared here so a
-        clean run's absence of new errors/warnings isn't confused with
-        stale ones from a previous run.
+        persisted, all three accumulating across runs - a "=== Run:
+        <timestamp> ===" header marks where each run's Error/Warn content
+        starts.
     .PARAMETER DisableSummaryFile
         Only meaningful when -FullLogging is $false. When set, the
         Summary log file is never created/written - Write-SummaryLog
@@ -203,43 +218,78 @@ function Initialize-LogPaths {
         $script:logErrorFile       = Join-Path $ScriptDir ("Conversion Log - Errors - "   + $pathHashShort + ".log")
         $script:logWarnFile        = Join-Path $ScriptDir ("Conversion Log - Warnings - " + $pathHashShort + ".log")
 
-        # Move-ToRecycleBin, not a permanent Remove-Item (2026-08-31 fix,
-        # caught by a same-day /code-review full-codebase pass) - matches
-        # the full-logging branch above's own stated policy: these are the
-        # user's own log history, not a job-generated intermediate (see
-        # CLAUDE.md's deletion-semantics convention), so they get the
-        # safer default unconditionally, same as that branch already does
-        # for ITS OWN stale-log cleanup. There was no stated reason for
-        # split-mode to treat the identical kind of file differently.
+        # No clearing here (2026-09-03 fix, project owner's own explicit
+        # call: split-log mode's Errors/Warnings/Summary files should all
+        # ACCUMULATE across runs, newest run on top - matching
+        # Write-SummaryLog's own already-existing prepend-block behavior,
+        # not just Summary's). Previously this block sent both files to
+        # the Recycle Bin at the start of every run so a clean run's
+        # absence of new content wasn't confused with a stale previous
+        # run's - now that distinction is made by the run-separator
+        # header instead of by deleting anything.
         #
-        # Both clears attempt FIRST, any warnings are collected and only
-        # written AFTER the loop (2026-08-31 fix, same pass) - the old
-        # code warned inline, inside the loop, via Write-Log, which in
-        # split mode appends into $script:logWarnFile. Clearing the Errors
-        # file first, then the Warnings file SECOND in the SAME loop, meant
-        # a real warning about the Errors file failing to clear got written
-        # into the Warnings file and then DELETED moments later by that
-        # same loop's own next iteration - the one case this warning
-        # exists for (a locked/read-only/AV-held log) silently lost the
-        # warning that was supposed to flag it.
-        $staleLogWarnings = New-Object System.Collections.Generic.List[string]
-        foreach ($staleLog in @($script:logErrorFile, $script:logWarnFile)) {
-            if (Test-Path -LiteralPath $staleLog) {
-                # NOT swallowed silently - this file's whole point is
-                # separating THIS run's errors/warnings from a stale one. A
-                # failed removal (locked file, read-only, AV hold) means
-                # old content survives into this run with nothing marking
-                # it stale, which could read as this run's own output -
-                # worth a real warning, not just a swallow.
-                try { $null = Move-ToRecycleBin -ItemPath $staleLog }
-                catch { $staleLogWarnings.Add("Could not clear stale log file '" + $staleLog + "' from a previous run - its old content may still be present below: " + $_) }
+        # This run's pre-existing content is captured here so Complete-LogRun
+        # (called once, on the main thread, after the run finishes - see its
+        # own header comment) can move this run's newly-appended content
+        # above it. Real-time writes DURING the run (Write-Log, from the
+        # main thread or from concurrent runspace workers - Full Pipeline
+        # dispatches per-chapter jobs concurrently) still use the plain,
+        # proven-safe mutex-guarded APPEND (Write-LogLineToFile, unchanged) -
+        # reordering per-line instead would need every worker to know the
+        # true current file state to avoid one runspace's rewrite discarding
+        # another's, which would need threading extra state into every
+        # worker scriptblock that can log an Error/Warn for the same visible
+        # result. Doing it once, after the run, when the process is
+        # single-threaded again by construction, avoids that entirely.
+        $runHeader = "=== Run: " + (Get-Date -Format "yyyy-MM-dd HHmmss") + " ==="
+
+        $script:logErrorPriorContent = if (Test-Path -LiteralPath $script:logErrorFile) { [System.IO.File]::ReadAllText($script:logErrorFile) } else { "" }
+        $script:logWarnPriorContent  = if (Test-Path -LiteralPath $script:logWarnFile)  { [System.IO.File]::ReadAllText($script:logWarnFile)  } else { "" }
+        Invoke-MutexGuardedWrite { $runHeader | Out-File -FilePath $script:logErrorFile -Append -Encoding UTF8 }
+        Invoke-MutexGuardedWrite { $runHeader | Out-File -FilePath $script:logWarnFile  -Append -Encoding UTF8 }
+    }
+}
+
+function Complete-LogRun {
+    <#
+    .SYNOPSIS
+        Call once, on the main thread, right after a run finishes (every
+        worker runspace it dispatched has already joined back by then) -
+        moves this run's newly-appended Errors/Warnings content (whatever
+        was written since Initialize-LogPaths captured
+        $script:logErrorPriorContent/$script:logWarnPriorContent) to the
+        TOP of each file, so the newest run is always on top, matching
+        Write-SummaryLog's own prepend-block behavior for the Summary
+        file. A no-op in full-logging mode (nothing to reorder - one
+        combined file, no split Errors/Warnings) and a no-op for a file
+        that doesn't exist (a genuinely clean first-ever run for this
+        target, with nothing written at all - not even a header).
+    .DESCRIPTION
+        Deliberately a single end-of-run reorder rather than something
+        every Write-Log call does - see Initialize-LogPaths' split-log
+        branch for why: this keeps the real-time write path (used by
+        every runspace worker that can log an Error/Warn) exactly the
+        plain mutex-guarded append it always was, and only reorders
+        content once the run is back to being single-threaded. A
+        crash/force-kill mid-run simply means this never runs for that
+        run - its content stays appended at the BOTTOM of the file
+        instead of moved to the top; nothing is lost.
+    #>
+    foreach ($target in @(
+        @{ FilePath = $script:logErrorFile; Prior = $script:logErrorPriorContent },
+        @{ FilePath = $script:logWarnFile;  Prior = $script:logWarnPriorContent  }
+    )) {
+        if ($script:FullLogging -or [string]::IsNullOrEmpty($target.FilePath) -or -not (Test-Path -LiteralPath $target.FilePath)) { continue }
+        Invoke-MutexGuardedWrite {
+            $current = [System.IO.File]::ReadAllText($target.FilePath)
+            if ($current.StartsWith($target.Prior)) {
+                $thisRunContent = $current.Substring($target.Prior.Length)
+                [System.IO.File]::WriteAllText($target.FilePath, ($thisRunContent + $target.Prior), [System.Text.Encoding]::UTF8)
             }
-        }
-        # Write-Log itself appends into $script:logWarnFile (by now
-        # already cleared above, so the warning lands in a fresh file, not
-        # one about to be wiped by a later iteration of the loop above).
-        foreach ($warning in $staleLogWarnings) {
-            Write-Log $warning -Level Warn
+            # else: the file no longer starts with the content captured at
+            # Initialize-LogPaths time (shouldn't happen under normal use) -
+            # leave it untouched rather than guess at a transformation that
+            # could scramble real content.
         }
     }
 }
@@ -425,6 +475,8 @@ function Write-Log {
         # Split-log mode, per target file - Summary is written later in
         # block form (Write-SummaryLog), and Info lines are not persisted
         # at all in this mode, so neither reaches Write-LogLineToFile here.
+        # Plain append, same as always - see Complete-LogRun for how this
+        # run's content still ends up on top of the file once it finishes.
         if ($Level -eq "Error") {
             Write-LogLineToFile -FilePath $script:logErrorFile -Line $line
         } elseif ($Level -eq "Warn") {

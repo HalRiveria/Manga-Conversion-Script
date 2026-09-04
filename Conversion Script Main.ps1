@@ -313,7 +313,7 @@ try {
     #  Show-PostRunPrompt, lives in Controller.ps1.
     # ==========================================================================
 
-    Invoke-MainLoop -TargetPath $Path -Settings $settings -SettingsPath $settingsPath -CjxlExe $resolvedCjxlPath -MagickExe $resolvedMagickPath `
+    Invoke-MainLoop -TargetPath $Path -Settings $settings -SettingsPath $settingsPath -CjxlExe $resolvedCjxlPath -MagickExe $resolvedMagickPath -ScriptDir $scriptDir `
         -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile
 } catch {
     $wasOwnAbort = $false

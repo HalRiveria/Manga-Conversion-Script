@@ -84,30 +84,40 @@ Test-Assert ($null -eq $script:logSummaryFile -and $null -eq $script:logErrorFil
 Write-Host ""
 
 # ==============================================================================
-#  Scenario B: Initialize-LogPaths, split-log mode + stale file cleanup
+#  Scenario B (rewritten 2026-09-03 - project owner's own explicit call:
+#  split-log mode's Errors/Warnings files should ACCUMULATE across runs,
+#  matching Write-SummaryLog's own already-existing append behavior,
+#  instead of being cleared at the start of every run): a previous run's
+#  own Error/Warn content survives a fresh Initialize-LogPaths call
+#  against the same target, and a "=== Run: ... ===" header is appended
+#  to mark where the new run's own content starts.
 # ==============================================================================
-Write-Host "=== Scenario B: Initialize-LogPaths, split-log mode, stale cleanup ===" -ForegroundColor Cyan
+Write-Host "=== Scenario B: Initialize-LogPaths, split-log mode, previous run's content survives ===" -ForegroundColor Cyan
 Reset-LoggingState
 
-# Pre-compute what the error/warn paths WILL be so we can seed stale files
-# at those exact paths before calling Initialize-LogPaths.
+# Pre-compute what the error/warn paths WILL be so we can seed prior-run
+# content at those exact paths before calling Initialize-LogPaths.
 $probeHashBytes = [System.Text.Encoding]::UTF8.GetBytes("C:\Fake\Manga\Path".ToLowerInvariant())
 $probeSha256     = [System.Security.Cryptography.SHA256]::Create()
 $probeHash       = ([System.BitConverter]::ToString($probeSha256.ComputeHash($probeHashBytes)) -replace "-", "")
 $probeSha256.Dispose()
 $probeHashShort  = $probeHash.Substring(0, 10)
-$staleErrorPath  = Join-Path $scratchDir ("Conversion Log - Errors - "   + $probeHashShort + ".log")
-$staleWarnPath   = Join-Path $scratchDir ("Conversion Log - Warnings - " + $probeHashShort + ".log")
-"stale error content" | Out-File -FilePath $staleErrorPath -Encoding ASCII
-"stale warn content"  | Out-File -FilePath $staleWarnPath  -Encoding ASCII
+$priorErrorPath  = Join-Path $scratchDir ("Conversion Log - Errors - "   + $probeHashShort + ".log")
+$priorWarnPath   = Join-Path $scratchDir ("Conversion Log - Warnings - " + $probeHashShort + ".log")
+"prior run's error content" | Out-File -FilePath $priorErrorPath -Encoding ASCII
+"prior run's warn content"  | Out-File -FilePath $priorWarnPath  -Encoding ASCII
 
 Initialize-LogPaths -TargetPath "C:\Fake\Manga\Path" -FullLogging $false -ScriptDir $scratchDir
 
 Test-Assert ($null -eq $script:logFile) "logFile is null in split-log mode"
 Test-Assert ($script:logSummaryFile -like "*Conversion Log - Summary - *.log") "logSummaryFile matches expected pattern"
-Test-Assert ($script:logErrorFile -eq $staleErrorPath) "logErrorFile path matches the pre-computed hash-based name"
-Test-Assert (-not (Test-Path -LiteralPath $staleErrorPath)) "stale error log from a previous run was deleted"
-Test-Assert (-not (Test-Path -LiteralPath $staleWarnPath)) "stale warn log from a previous run was deleted"
+Test-Assert ($script:logErrorFile -eq $priorErrorPath) "logErrorFile path matches the pre-computed hash-based name"
+$bErrorContent = Get-Content -LiteralPath $priorErrorPath -Raw
+$bWarnContent  = Get-Content -LiteralPath $priorWarnPath  -Raw
+Test-Assert ($bErrorContent -like "*prior run's error content*") "prior run's error content survived - NOT deleted"
+Test-Assert ($bWarnContent  -like "*prior run's warn content*")  "prior run's warn content survived - NOT deleted"
+Test-Assert ($bErrorContent -like "*=== Run: *") "a run-separator header was appended to the Errors file"
+Test-Assert ($bWarnContent  -like "*=== Run: *") "a run-separator header was appended to the Warnings file"
 Write-Host ""
 
 # ==============================================================================
@@ -161,15 +171,18 @@ Write-Log "an error happened" -Level Error
 Write-Log "a warning happened" -Level Warn
 Write-Log "a summary line" -Level Summary
 
-Test-Assert (-not (Test-Path -LiteralPath $script:logErrorFile) -or (Get-Content -LiteralPath $script:logErrorFile) -notlike "*info line*") "Info level did not leak into the error file"
+Test-Assert (-not (Test-Path -LiteralPath $script:logErrorFile) -or (Get-Content -LiteralPath $script:logErrorFile -Raw) -notlike "*info line*") "Info level did not leak into the error file"
 # Get-Content on a single-line file returns a bare String, not a 1-element
 # array - wrap in @() so indexing/Count below operate on the line, not on
 # individual characters of it (the exact class of PowerShell collection-
-# collapsing gotcha documented in CLAUDE.md's "Lessons learned").
+# collapsing gotcha documented in CLAUDE.md's "Lessons learned"). Each file
+# now has 2 lines - Initialize-LogPaths' own run-separator header (index 0),
+# then this run's one real line (index 1) - see Complete-LogRun for why
+# Write-Log itself still just appends here, not the header + line count.
 $errContent = @(Get-Content -LiteralPath $script:logErrorFile)
 $warnContent = @(Get-Content -LiteralPath $script:logWarnFile)
-Test-Assert ($errContent.Count -eq 1 -and $errContent[0] -like "*[Error]*an error happened*") "Error level went to the error file only"
-Test-Assert ($warnContent.Count -eq 1 -and $warnContent[0] -like "*[Warn]*a warning happened*") "Warn level went to the warn file only"
+Test-Assert ($errContent.Count -eq 2 -and $errContent[1] -like "*[Error]*an error happened*") "Error level went to the error file only"
+Test-Assert ($warnContent.Count -eq 2 -and $warnContent[1] -like "*[Warn]*a warning happened*") "Warn level went to the warn file only"
 Test-Assert (-not (Test-Path -LiteralPath $script:logSummaryFile)) "Summary level does not write the summary file per-line (that's Write-SummaryLog's job)"
 Write-Host ""
 
@@ -449,64 +462,95 @@ Write-Host ""
 # ==============================================================================
 
 # ==============================================================================
-#  Scenario M3 (2026-08-31 fix, caught by a same-day /code-review
-#  full-codebase pass): split-log mode's own stale Error/Warn log cleanup
-#  now (a) Recycle-Bins them via Move-ToRecycleBin instead of a permanent
-#  Remove-Item, matching the full-logging branch's own stated policy for
-#  the identical kind of file, and (b) attempts both clears BEFORE writing
-#  any warning about a failed one, so a warning about the Errors file
-#  failing to clear survives into the (by-then-cleared) Warnings file
-#  instead of being wiped by that same loop's own next iteration.
+#  Scenario M3 (rewritten 2026-09-03 - split-log mode no longer clears
+#  Errors/Warnings at all, so Move-ToRecycleBin is never called for
+#  either of them anymore): confirms real Error/Warn content written in
+#  one run is still present, verbatim, after a second Initialize-LogPaths
+#  call against the same target - multiple runs' content coexists in the
+#  same file, separated by their own run headers.
 # ==============================================================================
-Write-Host "=== Scenario M3: split-mode stale logs are Recycle-Binned, and a failed clear's warning survives ===" -ForegroundColor Cyan
+Write-Host "=== Scenario M3: split-mode Errors/Warnings accumulate real content across multiple runs ===" -ForegroundColor Cyan
 $script:recycleBinCalls.Clear()
 Reset-LoggingState
 Initialize-LogPaths -TargetPath "C:\M3\Path" -FullLogging $false -ScriptDir $scratchDir
 $m3ErrorFile = $script:logErrorFile
 $m3WarnFile  = $script:logWarnFile
-Write-Log "will become stale error content" -Level Error
-Write-Log "will become stale warn content" -Level Warn
-
-# Make the ERRORS file (processed FIRST in Initialize-LogPaths' own
-# @($script:logErrorFile, $script:logWarnFile) order) fail to clear -
-# proves its warning isn't lost when the Warnings file is cleared right
-# after it in the same pass.
-$originalMoveToRecycleBinM3 = ${function:Move-ToRecycleBin}
-function Move-ToRecycleBin {
-    param([string]$ItemPath)
-    $script:recycleBinCalls.Add($ItemPath)
-    if ($ItemPath -eq $script:logErrorFile) { throw "simulated locked Errors file" }
-    if (Test-Path -LiteralPath $ItemPath) { Remove-Item -LiteralPath $ItemPath -Force }
-}
+Write-Log "run 1 error content" -Level Error
+Write-Log "run 1 warn content" -Level Warn
 
 Initialize-LogPaths -TargetPath "C:\M3\Path" -FullLogging $false -ScriptDir $scratchDir
-${function:Move-ToRecycleBin} = $originalMoveToRecycleBinM3
+Write-Log "run 2 error content" -Level Error
+Write-Log "run 2 warn content" -Level Warn
 
-Test-Assert ($script:recycleBinCalls -contains $m3ErrorFile -and $script:recycleBinCalls -contains $m3WarnFile) "both stale files were passed to Move-ToRecycleBin, not a permanent Remove-Item"
-Test-Assert (Test-Path -LiteralPath $m3ErrorFile) "the Errors file that failed to clear is still on disk (the simulated lock), not silently lost either way"
-$m3WarnContent = if (Test-Path -LiteralPath $script:logWarnFile) { @(Get-Content -LiteralPath $script:logWarnFile) } else { @() }
-Test-Assert (($m3WarnContent | Where-Object { $_ -like "*Could not clear stale log file*" -and $_ -like "*Errors*" }).Count -eq 1) "the warning about the Errors file failing to clear survived into the (freshly-cleared) Warnings file, not deleted by that same file's own clear"
+Test-Assert ($script:recycleBinCalls.Count -eq 0) ("Move-ToRecycleBin is never called for split-log Errors/Warnings anymore (got " + $script:recycleBinCalls.Count + " call(s))")
+$m3ErrorContent = Get-Content -LiteralPath $m3ErrorFile -Raw
+$m3WarnContentM3 = Get-Content -LiteralPath $m3WarnFile -Raw
+Test-Assert ($m3ErrorContent -like "*run 1 error content*" -and $m3ErrorContent -like "*run 2 error content*") "both runs' error content are present in the same Errors file"
+Test-Assert ($m3WarnContentM3 -like "*run 1 warn content*" -and $m3WarnContentM3 -like "*run 2 warn content*") "both runs' warn content are present in the same Warnings file"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario M4 (2026-08-31 fix, caught by verifying a same-day
-#  /code-review full-codebase pass's own M3 fix): Move-ToRecycleBin
-#  returns $true/$false - an unguarded call inside Initialize-LogPaths
-#  leaks that value onto its own output stream. Initialize-LogPaths is
-#  called as a bare statement at its real call site (Conversion Script
-#  Main.ps1), so this would print a stray "True" line during bootstrap on
-#  every run with a stale log to clear (the split-log/default path, after
-#  the first run against a given target). The base Move-ToRecycleBin stub
-#  now returns $true like the real function (a plain Remove-Item, what
-#  the old stub did, returns nothing - it couldn't have caught this).
+#  Scenario M4 (rewritten 2026-09-03 - no clearing to fail at anymore, but
+#  Initialize-LogPaths' own run-header write must still produce no stray
+#  output on its own output stream on a repeat call against an existing,
+#  already-populated pair of Errors/Warnings files).
 # ==============================================================================
-Write-Host "=== Scenario M4: Initialize-LogPaths produces no stray output when clearing a stale log ===" -ForegroundColor Cyan
+Write-Host "=== Scenario M4: Initialize-LogPaths produces no stray output on a repeat call ===" -ForegroundColor Cyan
 Reset-LoggingState
 Initialize-LogPaths -TargetPath "C:\M4\Path" -FullLogging $false -ScriptDir $scratchDir
-Write-Log "will become stale, cleared cleanly next call" -Level Warn
+Write-Log "existing content from an earlier run" -Level Warn
 
 $outputM4 = Initialize-LogPaths -TargetPath "C:\M4\Path" -FullLogging $false -ScriptDir $scratchDir
-Test-Assert ($null -eq $outputM4) ("Initialize-LogPaths produced no output while clearing a stale log (got: " + ($outputM4 -join ", ") + ")")
+Test-Assert ($null -eq $outputM4) ("Initialize-LogPaths produced no output on a repeat call (got: " + ($outputM4 -join ", ") + ")")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario M5 (2026-09-03 addition): Complete-LogRun moves this run's own
+#  newly-appended Errors/Warnings content above whatever existed before the
+#  run started, preserving each side's own internal chronological order -
+#  the newest run ends up on top, matching Write-SummaryLog's own
+#  prepend-block behavior for Summary.
+# ==============================================================================
+Write-Host "=== Scenario M5: Complete-LogRun moves this run's content to the top ===" -ForegroundColor Cyan
+Reset-LoggingState
+Initialize-LogPaths -TargetPath "C:\M5\Path" -FullLogging $false -ScriptDir $scratchDir
+Write-Log "run 1, first error" -Level Error
+Write-Log "run 1, second error" -Level Error
+Complete-LogRun
+$m5ErrorFile = $script:logErrorFile
+
+Initialize-LogPaths -TargetPath "C:\M5\Path" -FullLogging $false -ScriptDir $scratchDir
+Write-Log "run 2, first error" -Level Error
+Write-Log "run 2, second error" -Level Error
+Complete-LogRun
+
+$m5Lines = @(Get-Content -LiteralPath $m5ErrorFile | Where-Object { $_ -like "*error*" })
+Test-Assert ($m5Lines.Count -eq 4) ("all 4 error lines across both runs are present (got " + $m5Lines.Count + ")")
+Test-Assert ($m5Lines[0] -like "*run 2, first error*" -and $m5Lines[1] -like "*run 2, second error*") "run 2's own lines are on top, in their own chronological order"
+Test-Assert ($m5Lines[2] -like "*run 1, first error*" -and $m5Lines[3] -like "*run 1, second error*") "run 1's older lines are preserved below, still in their own chronological order"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario M6: Complete-LogRun is a no-op in full-logging mode (nothing to
+#  reorder - one combined file, no split Errors/Warnings) and a no-op when
+#  a target file doesn't exist yet (a genuinely clean first-ever run).
+# ==============================================================================
+Write-Host "=== Scenario M6: Complete-LogRun no-ops in full-logging mode and for a missing file ===" -ForegroundColor Cyan
+Reset-LoggingState
+Initialize-LogPaths -TargetPath "C:\M6\Path" -FullLogging $true -ScriptDir $scratchDir
+Write-Log "full-logging content" -Level Error
+$m6FullLogContentBefore = Get-Content -LiteralPath $script:logFile -Raw
+$outputM6a = Complete-LogRun
+$m6FullLogContentAfter = Get-Content -LiteralPath $script:logFile -Raw
+Test-Assert ($null -eq $outputM6a) "Complete-LogRun produces no output in full-logging mode"
+Test-Assert ($m6FullLogContentBefore -eq $m6FullLogContentAfter) "the full-logging file is untouched by Complete-LogRun"
+
+Reset-LoggingState
+Initialize-LogPaths -TargetPath "C:\M6b\Path" -FullLogging $false -ScriptDir $scratchDir
+Remove-Item -LiteralPath $script:logErrorFile -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $script:logWarnFile  -Force -ErrorAction SilentlyContinue
+$outputM6b = Complete-LogRun
+Test-Assert ($null -eq $outputM6b) "Complete-LogRun produces no output when the target file doesn't exist"
 Write-Host ""
 
 # ==============================================================================
@@ -665,7 +709,7 @@ $script:FullLogging = $false
 # doesn't break the normal case.
 Initialize-LogPaths -TargetPath "C:\P\Path" -FullLogging $false -ScriptDir $scratchDir
 Write-Log "a real line after init" -Level Error
-$logContentP = Get-Content -LiteralPath $script:logErrorFile
+$logContentP = Get-Content -LiteralPath $script:logErrorFile -Raw
 Test-Assert ($logContentP -like "*a real line after init*") "Write-Log still writes normally once Initialize-LogPaths has actually run"
 Write-Host ""
 
