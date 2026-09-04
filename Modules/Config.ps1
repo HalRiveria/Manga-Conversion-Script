@@ -256,7 +256,12 @@ function Import-ScriptSettings {
         complete. Never throws: a missing file, unreadable/corrupt JSON,
         an unknown key, or a bad value for a known key all fall back to
         that key's default (with a Write-Log Warn for the latter three),
-        rather than failing the whole load.
+        rather than failing the whole load. A genuinely corrupt/unparseable
+        file (not just an unknown key or bad value within an otherwise
+        valid one) is backed up (timestamped .bak) AND repaired in place
+        with the defaults (2026-09-03 fix, Todo.md finding) - without the
+        repair, the same corrupt file sat there forever, re-warning and
+        dropping a new .bak on every single future launch.
     .PARAMETER Path
         Defaults to Get-ScriptSettingsPath (real per-user AppData
         location). Pass explicitly to point at a test file instead.
@@ -282,6 +287,16 @@ function Import-ScriptSettings {
         Write-Log ("Settings file at '" + $Path + "' could not be read/parsed (" + $_.Exception.Message + ") - using defaults.") -Level Warn
         $backupPath = $Path + ".corrupt-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".bak"
         try { Copy-Item -LiteralPath $Path -Destination $backupPath -Force -ErrorAction Stop } catch { }
+        # Repair the file with the defaults just fell back to (2026-09-03
+        # fix, Todo.md finding) - without this, the SAME corrupt file sat
+        # at $Path forever, so every future launch re-hit this exact
+        # branch: another timestamped .bak dropped and another Warn logged
+        # on every single run until someone manually deleted/fixed it.
+        # Best-effort only, matching the backup above - if the write
+        # itself fails (e.g. a read-only file), this function still
+        # returns usable defaults either way, it just won't have fixed
+        # the file for next time.
+        try { Export-ScriptSettings -Settings $settings -Path $Path } catch { }
         return $settings
     }
 
@@ -299,6 +314,9 @@ function Import-ScriptSettings {
         Write-Log ("Settings file at '" + $Path + "' did not contain a valid settings object - using defaults.") -Level Warn
         $backupPath = $Path + ".corrupt-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".bak"
         try { Copy-Item -LiteralPath $Path -Destination $backupPath -Force -ErrorAction Stop } catch { }
+        # Repair the file (2026-09-03 fix, Todo.md finding) - see the
+        # matching parse-failure branch above for why.
+        try { Export-ScriptSettings -Settings $settings -Path $Path } catch { }
         return $settings
     }
 

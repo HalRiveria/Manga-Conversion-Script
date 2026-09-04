@@ -155,6 +155,21 @@ Test-Assert ($settingsF.JpegQuality -eq 90) "corrupt file yields default values"
 $backupsF = @(Get-ChildItem -LiteralPath (Split-Path $pathF -Parent) -Filter "corrupt-settings.json.corrupt-*.bak")
 Test-Assert ($backupsF.Count -eq 1) "the corrupt file was preserved as a .bak rather than silently discarded"
 Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*" }).Count -ge 1) "a Warn-level Write-Log call fired for the corrupt file"
+
+# 2026-09-03 fix, Todo.md finding: the corrupt file used to be backed up
+# but never repaired, so it re-warned and dropped a new .bak on every
+# single future launch. It should now be REPAIRED with the defaults - a
+# second Import-ScriptSettings call against the SAME path must load
+# cleanly, with no new backup and no new Warn.
+$threwF3 = $false
+$settingsF3 = $null
+$script:logCalls.Clear()
+try { $settingsF3 = Import-ScriptSettings -Path $pathF } catch { $threwF3 = $true }
+Test-Assert (-not $threwF3) "a second Import-ScriptSettings call against the now-repaired file does not throw"
+Test-Assert ($null -ne $settingsF3 -and $settingsF3.JpegQuality -eq 90) "the repaired file still loads to defaults"
+$backupsF3 = @(Get-ChildItem -LiteralPath (Split-Path $pathF -Parent) -Filter "corrupt-settings.json.corrupt-*.bak")
+Test-Assert ($backupsF3.Count -eq 1) "no SECOND backup was created - the file is actually repaired now, not still corrupt"
+Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*" }).Count -eq 0) "no Warn was logged on the repaired file - it's genuinely valid now"
 Write-Host ""
 
 # ==============================================================================
