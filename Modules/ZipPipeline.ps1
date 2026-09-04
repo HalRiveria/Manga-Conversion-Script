@@ -406,9 +406,25 @@ function Invoke-ZipOnlyPipeline {
             if ($null -eq $next) { return $null }
             $totals.CandidateCount++
 
-            $relativePath = $next.Dir.FullName.Substring($trimmedPath.Length).TrimStart([System.IO.Path]::DirectorySeparatorChar)
-            $topLevelName = ($relativePath -split [regex]::Escape([System.IO.Path]::DirectorySeparatorChar))[0]
-            $seriesName = if ([string]::IsNullOrEmpty($topLevelName)) { $next.Dir.Name } else { $topLevelName }
+            # StartsWith check before the Substring (2026-09-03 fix,
+            # Todo.md finding) - Substring-by-length doesn't verify the
+            # prefix actually matches, it just chops off N characters
+            # regardless. A prefix mismatch (a symlink resolving
+            # elsewhere, UNC vs. mapped-drive normalization, any case
+            # where $next.Dir.FullName genuinely doesn't start with
+            # $trimmedPath) used to silently mis-slice into a bogus
+            # "series" name instead of failing loudly or degrading
+            # sanely. CCR display only - falling back to the leaf's own
+            # folder name has no effect on the actual zip/dispatch below.
+            $dirFullName = $next.Dir.FullName
+            if ($dirFullName.StartsWith($trimmedPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $relativePath = $dirFullName.Substring($trimmedPath.Length).TrimStart([System.IO.Path]::DirectorySeparatorChar)
+                $topLevelName = ($relativePath -split [regex]::Escape([System.IO.Path]::DirectorySeparatorChar))[0]
+                $seriesName = if ([string]::IsNullOrEmpty($topLevelName)) { $next.Dir.Name } else { $topLevelName }
+            } else {
+                Write-Log ("Zip-only: '" + $dirFullName + "' does not start with the scan root '" + $trimmedPath + "' as expected - using its own folder name for the Clean Console Output series display instead of deriving one.") -Level Warn
+                $seriesName = $next.Dir.Name
+            }
 
             # Gated on Test-CcrEnabledForZipOnly (2026-08-31 fix, caught by
             # a same-day /code-review full-codebase pass) - this whole

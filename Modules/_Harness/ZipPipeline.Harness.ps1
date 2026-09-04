@@ -179,6 +179,42 @@ Test-Assert ($warnLinesD2.Count -eq 1) ("the up-to-date-zip skip Warn was logged
 Write-Host ""
 
 # ==============================================================================
+#  Scenario D3 (2026-09-03 fix, Todo.md finding): the CCR series-name
+#  derivation used to blindly Substring $next.Dir.FullName by
+#  $trimmedPath's length with no check the prefix actually matches. A
+#  -Path ending in a literal "\." segment makes $trimmedPath keep that
+#  "\." (TrimEnd only strips a trailing separator, and "." isn't one) -
+#  .NET path resolution treats "\." as "this same directory" internally
+#  (the scan still works normally), but the un-resolved $Path STRING no
+#  longer matches $next.Dir.FullName's own fully-resolved prefix
+#  character-for-character, guaranteeing the exact mismatch this fix
+#  guards - without depending on Push-Location (which changes PowerShell's
+#  own $PWD, not the process's real current directory .NET path APIs
+#  actually resolve relative paths against - the exact class of gotcha
+#  CLAUDE.md's "Lessons learned" warns about, confirmed live: an earlier
+#  draft of this test used a relative -Path and found zero candidates).
+#  Must degrade to the leaf's own folder name (with a Warn explaining why)
+#  instead of mis-slicing into a bogus name or throwing - and the actual
+#  zip must still succeed either way, since this is CCR display only.
+# ==============================================================================
+Write-Host "=== Scenario D3: a Path whose literal string doesn't match FullName's prefix degrades gracefully, doesn't mis-slice or crash ===" -ForegroundColor Cyan
+$rootD3 = New-Dir "scenario-d3"
+$leafD3 = New-Dir "scenario-d3\Series\Chapter 1"
+New-FileIn -DirPath $leafD3 -Name "page1.jpg" | Out-Null
+
+$script:CleanConsoleOutputEnabled = $true
+try {
+    $totalsD3 = Invoke-ZipOnlyPipeline -Path ($rootD3 + "\.") -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -FullLogging $false -PermanentDelete $true
+} finally {
+    $script:CleanConsoleOutputEnabled = $false
+}
+
+Test-Assert ($totalsD3.ZippedSuccess -eq 1) "the actual zip still succeeded despite the Path/FullName mismatch - CCR series-name derivation is display-only"
+$mismatchWarnD3 = @(Get-Content -LiteralPath $script:logWarnFile | Where-Object { $_ -like "*does not start with the scan root*" })
+Test-Assert ($mismatchWarnD3.Count -ge 1) "a Warn was logged explaining the prefix mismatch, instead of silently mis-slicing"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario E: the former-container ("Only Images") case, exercised
 #  through the FULL pipeline (not calling Get-ZippableLeafDirs directly) -
 #  confirms end-to-end that a post-completion series folder is never
