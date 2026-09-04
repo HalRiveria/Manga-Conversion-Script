@@ -484,9 +484,10 @@ $fileS2 = Join-Path $scratchDir "not-a-folder-s2.txt"
 $realFolderS2 = Join-Path $scratchDir "real-folder-s2"
 New-Item -ItemType Directory -Path $realFolderS2 -Force | Out-Null
 
-function Invoke-UnwantedImageScan { param($Path, $Profiles) $script:unwantedScanCallsS2.Add($Path); return @{ ScannedPath = $Path } }
+function Invoke-UnwantedImageScan { param($Path, $Profiles, $DryRun) $script:unwantedScanCallsS2.Add($Path); $script:unwantedScanDryRunCallsS2.Add([bool]$DryRun); return @{ ScannedPath = $Path } }
 function Get-AllUnwantedImageProfiles { param($ProfilesPath) return @() }
 $script:unwantedScanCallsS2 = New-Object System.Collections.Generic.List[string]
+$script:unwantedScanDryRunCallsS2 = New-Object System.Collections.Generic.List[bool]
 
 $promptFileS2 = { param($m) $fileS2 }
 $resultRunFileS2 = Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc $promptFileS2
@@ -494,8 +495,24 @@ Test-Assert (-not $resultRunFileS2.Ran) "Invoke-CoverDeletionRun rejects a FILE 
 Test-Assert ($script:unwantedScanCallsS2.Count -eq 0) "the real scan function was never called for a rejected file path"
 
 $promptFolderS2 = { param($m) $realFolderS2 }
-$resultRunFolderS2 = Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc $promptFolderS2
-Test-Assert ($resultRunFolderS2.Ran -and $script:unwantedScanCallsS2.Count -eq 1 -and $script:unwantedScanCallsS2[0] -eq $realFolderS2) "a real folder is accepted and passed through to the real scan function"
+$promptFolderConfirmYS2 = New-ScriptedPrompt -Responses @($realFolderS2, 'Y')
+$resultRunFolderS2 = Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc $promptFolderConfirmYS2
+Test-Assert ($resultRunFolderS2.Ran -and $script:unwantedScanCallsS2.Count -eq 1 -and $script:unwantedScanCallsS2[0] -eq $realFolderS2) "a real folder + Y confirmation is accepted and passed through to the real scan function"
+Test-Assert ($resultRunFolderS2.DryRun -eq $false -and $script:unwantedScanDryRunCallsS2[0] -eq $false) "a Y confirmation runs for real, not a dry run"
+
+# 2026-09-03 fix, Todo.md finding: Invoke-CoverDeletionRun used to go
+# straight from path validation into the real, permanent-deletion-capable
+# scan with no confirmation and no reachable dry-run. Now confirms first -
+# Y runs for real (covered above), D runs a dry run, anything else cancels.
+$promptFolderCancelS2 = New-ScriptedPrompt -Responses @($realFolderS2, 'N')
+$resultCancelS2 = Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc $promptFolderCancelS2
+Test-Assert (-not $resultCancelS2.Ran) "declining the confirmation (anything other than Y/D) cancels - no scan is run"
+Test-Assert ($script:unwantedScanCallsS2.Count -eq 1) "the real scan function was NOT called again after a declined confirmation"
+
+$promptFolderDryRunS2 = New-ScriptedPrompt -Responses @($realFolderS2, 'D')
+$resultDryRunS2 = Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc $promptFolderDryRunS2
+Test-Assert ($resultDryRunS2.Ran -and $resultDryRunS2.DryRun -eq $true) "entering D runs a dry run, not a real deletion"
+Test-Assert ($script:unwantedScanCallsS2.Count -eq 2 -and $script:unwantedScanDryRunCallsS2[1] -eq $true) "the real scan function WAS called for the dry run, with -DryRun `$true"
 
 function Invoke-TrailingZeroAudit {
     param($Path, $ReportPath)

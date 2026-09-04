@@ -179,7 +179,7 @@ $null = Add-UnwantedImageProfile -Profile $profileA -ProfilesPath $profilesPathA
 $script:activeProfilesPath = $profilesPathA
 
 $fakeGetModeSettingsA = $fakeSettings.Clone()
-$promptA = New-ScriptedPrompt -Responses @('5', '1', $scanDirA, '0', '2')
+$promptA = New-ScriptedPrompt -Responses @('5', '1', $scanDirA, 'Y', '0', '2')
 $invokeModeCallsA = 0
 $fakeInvokeModeA = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) $script:invokeModeCallsA++; return $null }
 $postRunCallsA = 0

@@ -495,11 +495,20 @@ function Invoke-CoverDeletionRun {
     .SYNOPSIS
         The "1 - Run" item's real behavior: prompts for a folder to scan
         (same drag-and-drop-or-paste convention as
-        Show-AddUnwantedImageProfileFlow's path prompt), then runs
-        Invoke-UnwantedImageScan against it using every known profile
-        (built-in + persisted). A blank path or one that doesn't exist
-        cancels without scanning - no silent no-op against an empty
-        $Path.
+        Show-AddUnwantedImageProfileFlow's path prompt), confirms before
+        actually deleting anything (2026-09-03 fix, Todo.md finding - this
+        used to go straight from path validation into the real,
+        permanent-deletion-capable scan with no confirmation and no
+        reachable dry-run), then runs Invoke-UnwantedImageScan against it
+        using every known profile (built-in + persisted). A blank path,
+        one that doesn't exist, or a declined confirmation all cancel
+        without scanning - no silent no-op against an empty $Path, and no
+        surprise deletion either.
+        Confirmation reuses the same -PromptFunc as the path prompt above
+        (matches Show-AddUnwantedImageProfileFlow's own pattern of one
+        prompt function handling a queue of sequential questions) -
+        answers Y (run for real), D (dry run - reports matches, deletes
+        nothing), or anything else (cancel).
     #>
     param(
         [string]$ProfilesPath = (Get-UnwantedImageProfilesPath),
@@ -522,8 +531,17 @@ function Invoke-CoverDeletionRun {
         return @{ Ran = $false; Reason = "Folder not found." }
     }
 
-    $result = Invoke-UnwantedImageScan -Path $path -Profiles (Get-AllUnwantedImageProfiles -ProfilesPath $ProfilesPath)
-    return @{ Ran = $true; Reason = $null; Result = $result }
+    $confirmAnswer = (& $PromptFunc ("About to scan '" + $path + "' and delete any matching files (respecting your Recycle Bin/Permanent Delete setting). Enter Y to run for real, D for a dry run (reports matches, deletes nothing), or anything else to cancel"))
+    if ($null -ne $confirmAnswer) { $confirmAnswer = $confirmAnswer.Trim() }
+    if ($confirmAnswer -notin @('Y', 'y', 'D', 'd')) {
+        Write-Host "Cancelled - no scan was run." -ForegroundColor Yellow
+        return @{ Ran = $false; Reason = "Cancelled by user." }
+    }
+    $isDryRun = $confirmAnswer -in @('D', 'd')
+
+    $result = Invoke-UnwantedImageScan -Path $path -Profiles (Get-AllUnwantedImageProfiles -ProfilesPath $ProfilesPath) -DryRun $isDryRun
+    if ($isDryRun) { Write-Host "Dry run complete - nothing was deleted." -ForegroundColor Cyan }
+    return @{ Ran = $true; Reason = $null; Result = $result; DryRun = $isDryRun }
 }
 
 function Invoke-TrailingZeroAuditRun {
