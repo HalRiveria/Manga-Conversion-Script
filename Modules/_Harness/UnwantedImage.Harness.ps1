@@ -39,6 +39,7 @@ function Remove-Source {
     param([string]$ItemPath)
     if ($script:removeSourceShouldThrow) { throw "simulated delete failure" }
     $script:removeSourceCalls.Add($ItemPath)
+    if ($script:removeSourceShouldReturnFalse) { return $false }
     if (Test-Path -LiteralPath $ItemPath) { Remove-Item -LiteralPath $ItemPath -Force }
     return $true
 }
@@ -356,6 +357,30 @@ $script:removeSourceShouldThrow = $false
 
 Test-Assert (-not $threwG) "a delete failure does not crash the whole scan"
 Test-Assert ($resultG.DeleteFailedCount -eq 1 -and $resultG.DeletedCount -eq 0) "counted as a delete failure, not a success"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario G2 (2026-09-03 fix, Todo.md finding): Remove-Source's return
+#  value used to be discarded (`$null = Remove-Source ...`) - it returns
+#  $false (not an exception) when the file already vanished before
+#  deletion (a real TOCTOU gap between the match check and the delete
+#  call), so a file that was never actually there got logged and counted
+#  as a successful delete anyway. Must now be counted/logged distinctly.
+# ==============================================================================
+Write-Host "=== Scenario G2: a file that vanished before deletion is not miscounted as deleted ===" -ForegroundColor Cyan
+$rootG2 = Join-Path $scratchDir "scenario-g2"
+New-Item -ItemType Directory -Path $rootG2 -Force | Out-Null
+$imgG2 = New-RealImage -Name "scenario-g2\match.png" -Width 60 -Height 40
+$profileG2 = New-ProfileFromRealFile -File $imgG2 -Width 60 -Height 40
+
+$script:removeSourceShouldReturnFalse = $true
+$resultG2 = Invoke-UnwantedImageScan -Path $rootG2 -Profiles @($profileG2)
+$script:removeSourceShouldReturnFalse = $false
+
+Test-Assert ($resultG2.DeletedCount -eq 0) "a vanished file is NOT counted as deleted"
+Test-Assert ($resultG2.DeleteFailedCount -eq 0) "and NOT counted as a delete failure either - Remove-Source didn't throw, it just had nothing to do"
+Test-Assert ($resultG2.AlreadyGoneCount -eq 1) "counted in its own AlreadyGoneCount instead"
+Test-Assert (Test-Path -LiteralPath $imgG2.FullName) "sanity check: the real file was never actually touched by the stubbed Remove-Source"
 Write-Host ""
 
 # ==============================================================================

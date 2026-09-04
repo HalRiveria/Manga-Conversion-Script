@@ -633,6 +633,7 @@ function Invoke-UnwantedImageScan {
         DeleteFailedCount = 0
         HashMismatchCount = 0
         HashFailureCount  = 0
+        AlreadyGoneCount  = 0   # 2026-09-03 addition, Todo.md finding - see Remove-Source call below
     }
 
     $files = Get-ScannableFiles -Path $Path -ExcludePaths $ExcludePaths -ImageExtensions $ImageExtensions
@@ -661,10 +662,23 @@ function Invoke-UnwantedImageScan {
         }
 
         try {
-            $null = Remove-Source -ItemPath $file.FullName
-            $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
-            Write-Log ("Deleted (" + $deleteDesc + "): [" + $matchResult.Profile.Label + "] '" + $file.FullName + "'") -ForceConsole
-            $totals.DeletedCount++
+            # Return value checked, not discarded (2026-09-03 fix, Todo.md
+            # finding) - Remove-Source returns $false (not an exception)
+            # when the file already vanished before deletion (a real
+            # TOCTOU gap: something else - a sync client, another run -
+            # could remove it between Test-UnwantedImageMatch reading it
+            # and this call). Discarding that meant a file that was never
+            # actually there got logged and counted as a successful
+            # delete anyway.
+            $removed = Remove-Source -ItemPath $file.FullName
+            if ($removed) {
+                $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
+                Write-Log ("Deleted (" + $deleteDesc + "): [" + $matchResult.Profile.Label + "] '" + $file.FullName + "'") -ForceConsole
+                $totals.DeletedCount++
+            } else {
+                Write-Log ("Already gone before deletion (not counted as deleted): [" + $matchResult.Profile.Label + "] '" + $file.FullName + "'") -Level Warn -ForceConsole
+                $totals.AlreadyGoneCount++
+            }
         } catch {
             Write-Log ("FAILED to delete '" + $file.FullName + "': " + $_) -Level Error -ForceConsole
             $totals.DeleteFailedCount++
