@@ -623,18 +623,11 @@ function Invoke-FullPipelineChapter {
             # folder) permanently embeds the debris as a junk page, and the
             # only mode that produces "_tmp_overwrite.webp" in the first
             # place (-DoAnimatedOverwrite) only ever runs here.
-            # Patterns widened 2026-09-02 (BMP/HEIC/HEIF detour added to
-            # ImageConversionPipeline.ps1, plus a defensive numbered-output
-            # backstop for Invoke-IccStripRetryOrFail's own magick call) -
-            # see that module's own Get-LooseImageCandidates comment for
-            # the full story, including a real orphaned "_tmp_bmp2png.png"
-            # confirmed live to be missed by the pre-widening pattern here.
+            # Test-OrphanedScratchFileName (ImageConversionPipeline.ps1,
+            # single source of truth, 2026-09-03 cleanup) - see its own
+            # header for the full pattern reasoning.
             $orphanedScratchFiles = @(Get-ChildItem -LiteralPath $ChapterDir -Recurse -File -ErrorAction SilentlyContinue |
-                Where-Object {
-                    $_.Name -imatch '_tmp_iccstrip(-\d+)?\.png$' -or
-                    $_.Name -imatch '_tmp_(webp|avif|bmp|heic|heif)2png\.png$' -or
-                    $_.Name -imatch '_tmp_overwrite\.webp$'
-                })
+                Where-Object { Test-OrphanedScratchFileName -Name $_.Name })
             foreach ($orphan in $orphanedScratchFiles) {
                 # A failed delete (locked file, AV hold) is logged
                 # explicitly rather than swallowed silently (2026-08-31

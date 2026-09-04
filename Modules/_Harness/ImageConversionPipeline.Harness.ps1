@@ -362,6 +362,34 @@ Test-Assert ($animatedPipelineSource.Contains($expectedLiteral)) "AnimatedConver
 Write-Host ""
 
 # ==============================================================================
+#  Scenario A0b (2026-09-03 cleanup, Todo.md item): Test-OrphanedScratchFileName
+#  is the single source of truth this module and Controller.ps1 both call
+#  now, instead of the same 3-line regex trio hand-duplicated across this
+#  module, Controller.ps1, and ZipPipeline.ps1. ZipPipeline.ps1 keeps its
+#  own literal on purpose (its own standalone harness deliberately doesn't
+#  dot-source this module - same reasoning as AnimatedConversionPipeline.ps1's
+#  kept literal above) - checked here too, so a future edit to one and not
+#  the other is caught immediately instead of silently drifting.
+# ==============================================================================
+Write-Host "=== Scenario A0b: Test-OrphanedScratchFileName is the shared source of truth ===" -ForegroundColor Cyan
+Test-Assert (Test-OrphanedScratchFileName -Name "photo_tmp_iccstrip.png") "'_tmp_iccstrip.png' matches"
+Test-Assert (Test-OrphanedScratchFileName -Name "photo_tmp_iccstrip-2.png") "'_tmp_iccstrip-N.png' (numbered) matches"
+Test-Assert (Test-OrphanedScratchFileName -Name "photo_tmp_webp2png.png") "'_tmp_webp2png.png' matches"
+Test-Assert (Test-OrphanedScratchFileName -Name "photo_tmp_avif2png.png") "'_tmp_avif2png.png' matches"
+Test-Assert (Test-OrphanedScratchFileName -Name "photo_tmp_bmp2png.png") "'_tmp_bmp2png.png' matches"
+Test-Assert (Test-OrphanedScratchFileName -Name "photo_tmp_heic2png.png") "'_tmp_heic2png.png' matches"
+Test-Assert (Test-OrphanedScratchFileName -Name "photo_tmp_heif2png.png") "'_tmp_heif2png.png' matches"
+Test-Assert (Test-OrphanedScratchFileName -Name "anim_tmp_overwrite.webp") "'_tmp_overwrite.webp' matches"
+Test-Assert (-not (Test-OrphanedScratchFileName -Name "page1.jpg")) "a genuine loose image does NOT match"
+
+$zipPipelinePath   = Join-Path $PSScriptRoot "..\ZipPipeline.ps1"
+$zipPipelineSource = Get-Content -LiteralPath $zipPipelinePath -Raw
+foreach ($patternA0b in @('_tmp_iccstrip(-\d+)?\.png$', '_tmp_(webp|avif|bmp|heic|heif)2png\.png$', '_tmp_overwrite\.webp$')) {
+    Test-Assert ($zipPipelineSource.Contains($patternA0b)) ("ZipPipeline.ps1's own deliberately-kept-literal still contains pattern '" + $patternA0b + "' (not drifted)")
+}
+Write-Host ""
+
+# ==============================================================================
 #  Scenario A: multi-series, multi-chapter conversion end to end - correct
 #  per-chapter batching, source deletion on success, SeriesCount/ChapterCount.
 # ==============================================================================

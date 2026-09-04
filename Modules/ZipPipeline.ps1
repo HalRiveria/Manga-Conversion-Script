@@ -605,12 +605,18 @@ function Invoke-LooseFolderZip {
         # boundary-level backstop for when that cleanup couldn't run (a
         # force-killed process, a locked file swallowed by a bare
         # `catch {}`).
-        # Patterns widened 2026-09-02 (BMP/HEIC/HEIF detour added to
-        # ImageConversionPipeline.ps1, plus a defensive numbered-output
-        # backstop for Invoke-IccStripRetryOrFail's own magick call) - see
-        # that module's own Get-LooseImageCandidates comment for the full
-        # story, including a real orphaned "_tmp_bmp2png.png" confirmed
-        # live to be missed by the pre-widening pattern here.
+        # Kept as this module's own literal (2026-09-03 cleanup, Todo.md
+        # item) rather than calling ImageConversionPipeline.ps1's new
+        # Test-OrphanedScratchFileName (now the single source of truth
+        # for this pattern trio, also used by Controller.ps1) - this
+        # module's own standalone harness deliberately does NOT dot-source
+        # ImageConversionPipeline.ps1 (same "verified in isolation"
+        # precedent AnimatedConversionPipeline.ps1's own
+        # -FolderQualifyingExtensions default already follows, see
+        # ImageConversionPipeline.ps1's Get-LooseImageExtensions
+        # docstring), so a real forward-reference here would break that.
+        # Keep this literal in sync with Test-OrphanedScratchFileName's own
+        # pattern if either ever changes.
         $orphanedScratchFiles = @(Get-ChildItem -LiteralPath $FolderPath -Recurse -File -ErrorAction SilentlyContinue |
             Where-Object {
                 $_.Name -imatch '_tmp_iccstrip(-\d+)?\.png$' -or

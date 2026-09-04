@@ -210,6 +210,46 @@ function Get-LooseImageExtensions {
     return @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif", ".gif", ".bmp", ".heic", ".heif")
 }
 
+function Test-OrphanedScratchFileName {
+    <#
+    .SYNOPSIS
+        True if $Name matches one of this project's own scratch-file
+        naming patterns: "_tmp_iccstrip.png"/"_tmp_iccstrip-N.png" (this
+        module's own Invoke-IccStripRetryOrFail - the "-N" form is fully
+        reachable, not legacy, since that function's own magick call
+        deliberately doesn't select frame 0), "_tmp_<fmt>2png.png" (this
+        module's own WebP/AVIF/BMP/HEIC/HEIF pre-conversion detour), and
+        "_tmp_overwrite.webp" (AnimatedConversionPipeline.ps1's own
+        -DoAnimatedOverwrite staging file).
+    .DESCRIPTION
+        Single source of truth (2026-09-03 cleanup, Todo.md item) for a
+        3-line regex trio that used to be hand-duplicated across this
+        module's own Get-LooseImageCandidates, Controller.ps1's
+        Invoke-FullPipelineChapter, and ZipPipeline.ps1's
+        Invoke-LooseFolderZip - all three widened together 2026-09-02 for
+        the BMP/HEIC/HEIF detour and a defensive numbered-output backstop,
+        confirmed in sync at the time but with no shared getter to keep
+        them that way, matching the exact problem Get-LooseImageExtensions
+        (immediately above) already solved for this project's loose-image
+        extension list.
+
+        Every real leak path for these files already has its own cleanup
+        (retry-enqueue, failed-strip, force-kill drain, still-pending
+        sweep) - callers use this as the boundary-level backstop for when
+        that cleanup itself couldn't run (a force-killed process, a locked
+        file swallowed by a bare `catch {}`): without it, a leaked scratch
+        file gets treated as a real loose image by the very next run,
+        converted, and left behind permanently instead of recognized as
+        debris.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+    return (
+        $Name -imatch '_tmp_iccstrip(-\d+)?\.png$' -or
+        $Name -imatch '_tmp_(webp|avif|bmp|heic|heif)2png\.png$' -or
+        $Name -imatch '_tmp_overwrite\.webp$'
+    )
+}
+
 function Get-NeverConvertedExtensions {
     <#
     .SYNOPSIS
@@ -1271,37 +1311,11 @@ function Get-LooseImageCandidates {
     $allCandidates = @(Get-ChildItem -LiteralPath $ScanPath -Recurse -File -ErrorAction SilentlyContinue |
         Where-Object {
             if ($LooseImageExtensions -inotcontains $_.Extension) { return $false }
-            # Orphaned scratch files (2026-08-31 fix, caught by a same-day
-            # /code-review 4th pass; widened 2026-09-02 for the BMP/HEIC/
-            # HEIF detour and a defensive numbered-output backstop) -
-            # "_tmp_iccstrip.png"/"_tmp_iccstrip-N.png" (this file's own
-            # Invoke-IccStripRetryOrFail - the "-N" form is fully
-            # reachable, not legacy: that function's own magick call
-            # deliberately does NOT select frame 0, see its own header
-            # comment for why adding "[0]" was considered and rejected
-            # the same day this pattern was widened - this is a real,
-            # live cleanup path, not a dead backstop),
-            # "_tmp_<fmt>2png.png" (this file's own WebP/AVIF/BMP/HEIC/
-            # HEIF pre-conversion detour), and "_tmp_overwrite.webp"
-            # (AnimatedConversionPipeline.ps1's own -DoAnimatedOverwrite
-            # staging file) all carry extensions in $LooseImageExtensions.
-            # Every real leak path for these already has its own cleanup
-            # (retry-enqueue, failed-strip, force-kill drain, still-pending
-            # sweep) - this is the boundary-level backstop for the case
-            # cleanup itself can't run (force-killed process, machine power
-            # loss, a locked file swallowed by a bare `catch {}`): without
-            # it, a leaked scratch file gets treated as a real loose image
-            # by the very next run, converted, and left behind permanently
-            # instead of being recognized as debris. Confirmed live
-            # (2026-09-02 review) that the BMP/HEIC/HEIF variants of this
-            # pattern were missing entirely before this fix - a real
-            # orphaned "_tmp_bmp2png.png" was misclassified as a genuine
-            # NeedsConversion candidate.
-            if ($_.Name -imatch '_tmp_iccstrip(-\d+)?\.png$' -or
-                $_.Name -imatch '_tmp_(webp|avif|bmp|heic|heif)2png\.png$' -or
-                $_.Name -imatch '_tmp_overwrite\.webp$') {
-                return $false
-            }
+            # Orphaned scratch files - Test-OrphanedScratchFileName (this
+            # module, single source of truth, 2026-09-03 cleanup - see its
+            # own header for the full reasoning, also used by
+            # Controller.ps1/ZipPipeline.ps1's matching sweeps).
+            if (Test-OrphanedScratchFileName -Name $_.Name) { return $false }
             # Never-converted extensions (2026-09-02 fix, from a same-day
             # review, live-confirmed) - excluded here for the same reason
             # orphaned scratch files are excluded above: without this, a
