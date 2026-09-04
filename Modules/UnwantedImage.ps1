@@ -482,14 +482,15 @@ function Test-UnwantedImageMatch {
     <#
     .SYNOPSIS
         Checks $File against $Profiles, cheapest-first: file size
-        (tolerance-bounded) -> pixel dimensions -> SHA-256 hash. The
-        first profile whose size+dimensions match decides the outcome -
-        remaining profiles are not tried after that, matching the
-        original script's own "break on first size+dimension match"
-        behavior (two profiles sharing identical size+dimensions but
-        different hashes would only ever be checked against the first
-        one in the list - true of the original script too, not a
-        regression introduced here).
+        (tolerance-bounded) -> pixel dimensions -> SHA-256 hash. Every
+        profile whose size+dimensions match is tried until a real hash
+        Match is found (2026-09-03 fix, Todo.md finding - see below); if
+        none of them actually matches by hash, the FIRST one's own
+        HashMismatch is returned, matching this function's original
+        reporting for the "nothing really matched" case. A HashFailure
+        (the file itself couldn't be hashed at all - not a per-profile
+        problem) still returns immediately, since no later profile could
+        match an unhashable file either.
     .OUTPUTS
         @{ Status = 'Match'|'HashMismatch'|'HashFailure'|'NoMatch'; Profile;
            Width; Height; Hash } - Profile/Width/Height/Hash are all $null
@@ -501,6 +502,18 @@ function Test-UnwantedImageMatch {
         [Parameter(Mandatory)]
         [array]$Profiles
     )
+
+    # Fallback result (2026-09-03 fix, Todo.md finding - a real, previously
+    # unfixed shadowing risk): this used to return on the FIRST profile
+    # whose size+dimensions matched, even on a hash MISMATCH - so a
+    # later profile sharing the exact same size+dimensions but a
+    # genuinely matching hash was never even tried, and a real, wanted
+    # deletion was silently missed. Now every size+dimension-matching
+    # profile is tried; only a real Match returns immediately. If none of
+    # them actually matches by hash, the FIRST one's own HashMismatch is
+    # what gets returned (preserved here), matching this function's
+    # original reporting for that case.
+    $fallbackResult = $null
 
     foreach ($profile in $Profiles) {
         $sizeDiff = [Math]::Abs($File.Length - $profile.SizeBytes)
@@ -522,11 +535,13 @@ function Test-UnwantedImageMatch {
         # moment this function is most likely to be looking at a real,
         # externally-touched file, not a made-up edge case. Same
         # treatment as Get-TrailingZeroGroups: log a Warn and give up on
-        # this file (retrying against another profile would just hit the
-        # same failure again), rather than letting it escape uncaught -
-        # see Invoke-MainLoop's own matching fix for why an uncaught throw
+        # this file, rather than letting it escape uncaught - see
+        # Invoke-MainLoop's own matching fix for why an uncaught throw
         # here used to take down the whole script instead of just this
-        # one scan.
+        # one scan. Still returns immediately (unlike the HashMismatch
+        # case below) - a file that can't be hashed at all can't match
+        # ANY later profile either, so trying more of them would just
+        # repeat the identical failure and log the same Warn again.
         try {
             $fileHash = (Get-FileHash -LiteralPath $File.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
         } catch {
@@ -534,11 +549,13 @@ function Test-UnwantedImageMatch {
             return @{ Status = 'HashFailure'; Profile = $profile; Width = $width; Height = $height; Hash = $null }
         }
         if ($fileHash -ne $profile.Hash) {
-            return @{ Status = 'HashMismatch'; Profile = $profile; Width = $width; Height = $height; Hash = $fileHash }
+            if ($null -eq $fallbackResult) { $fallbackResult = @{ Status = 'HashMismatch'; Profile = $profile; Width = $width; Height = $height; Hash = $fileHash } }
+            continue
         }
         return @{ Status = 'Match'; Profile = $profile; Width = $width; Height = $height; Hash = $fileHash }
     }
 
+    if ($null -ne $fallbackResult) { return $fallbackResult }
     return @{ Status = 'NoMatch'; Profile = $null; Width = $null; Height = $null; Hash = $null }
 }
 

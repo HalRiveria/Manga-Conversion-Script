@@ -222,6 +222,36 @@ try {
 Write-Host ""
 
 # ==============================================================================
+#  Scenario C2 (2026-09-03 fix, Todo.md finding): a real, previously
+#  unfixed shadowing risk - a profile whose size+dimensions match but
+#  hash doesn't used to make Test-UnwantedImageMatch return HashMismatch
+#  immediately, WITHOUT trying any later profile - so a second profile
+#  sharing the exact same size+dimensions but a genuinely matching hash
+#  was permanently shadowed and never got to delete anything. Now every
+#  size+dimension-matching profile is tried until a real Match is found.
+# ==============================================================================
+Write-Host "=== Scenario C2: a later profile with the same size+dimensions is no longer shadowed by an earlier hash mismatch ===" -ForegroundColor Cyan
+$imgC2 = New-RealImage -Name "match-c2.png" -Width 50 -Height 30
+$realProfileC2 = New-ProfileFromRealFile -File $imgC2 -Width 50 -Height 30 -Label "Real Match"
+$shadowingProfileC2 = $realProfileC2.Clone()
+$shadowingProfileC2.Label = "Shadowing Profile"
+$shadowingProfileC2.Hash  = "0000000000000000000000000000000000000000000000000000000000000000"
+
+# The shadowing (wrong-hash) profile is FIRST in the list - the exact
+# shape that used to permanently hide the real match behind it.
+$resultC2 = Test-UnwantedImageMatch -File $imgC2 -Profiles @($shadowingProfileC2, $realProfileC2)
+Test-Assert ($resultC2.Status -eq 'Match' -and $resultC2.Profile.Label -eq 'Real Match') ("the real match (second in the list) was found despite an earlier same-size+dimensions profile with a wrong hash (got Status=" + $resultC2.Status + ", Profile=" + $resultC2.Profile.Label + ")")
+
+# Sanity check: when NOTHING actually matches by hash, the FIRST
+# profile's own HashMismatch is still what gets reported - preserving
+# this function's original behavior for the "nothing really matched" case.
+$wrongHashProfileC2a = $realProfileC2.Clone(); $wrongHashProfileC2a.Label = "Wrong A"; $wrongHashProfileC2a.Hash = "1111111111111111111111111111111111111111111111111111111111111111"
+$wrongHashProfileC2b = $realProfileC2.Clone(); $wrongHashProfileC2b.Label = "Wrong B"; $wrongHashProfileC2b.Hash = "2222222222222222222222222222222222222222222222222222222222222222"
+$resultC2b = Test-UnwantedImageMatch -File $imgC2 -Profiles @($wrongHashProfileC2a, $wrongHashProfileC2b)
+Test-Assert ($resultC2b.Status -eq 'HashMismatch' -and $resultC2b.Profile.Label -eq 'Wrong A') "when nothing matches by hash, the FIRST profile's own HashMismatch is still what's reported"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario D: Invoke-UnwantedImageScan end-to-end - matched file deleted,
 #  hash-mismatch file logged but not deleted, non-matching file untouched
 # ==============================================================================
