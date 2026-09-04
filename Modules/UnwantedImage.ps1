@@ -187,7 +187,25 @@ function Import-UnwantedImageProfiles {
     } catch {
         Write-Log ("Could not read unwanted-image profiles file '" + $ProfilesPath + "' - starting with none. (" + $_ + ")") -Level Warn
         $backupPath = $ProfilesPath + ".corrupt-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".bak"
-        try { Copy-Item -LiteralPath $ProfilesPath -Destination $backupPath -Force -ErrorAction Stop } catch { }
+        # Backup swallowed deliberately - best-effort only, matching
+        # Config.ps1's Import-ScriptSettings convention this function's own
+        # docstring claims to follow.
+        $backupOk = $false
+        try { Copy-Item -LiteralPath $ProfilesPath -Destination $backupPath -Force -ErrorAction Stop; $backupOk = $true } catch { }
+        if ($backupOk) {
+            # Repair the file with an empty list (2026-09-04 fix, real bug) -
+            # this function's own docstring already claimed "same resilience
+            # convention as Config.ps1's Import-ScriptSettings", but unlike
+            # that function it only backed up and never wrote good content
+            # back - the same corrupt file sat at $ProfilesPath forever, so
+            # every future Cover Deletion action re-hit this exact branch:
+            # another timestamped .bak and another Warn, indefinitely, until
+            # someone found and fixed it by hand. Gated on the backup having
+            # actually succeeded, same reasoning as Config.ps1's matching fix.
+            try { Export-UnwantedImageProfiles -Profiles @() -ProfilesPath $ProfilesPath } catch { }
+        } else {
+            Write-Log ("Could not back up the corrupt profiles file '" + $ProfilesPath + "' - leaving it untouched rather than risk overwriting it with no backup. It will be re-detected as corrupt on the next scan.") -Level Warn
+        }
         return @()
     }
     return ,$profiles
@@ -206,9 +224,19 @@ function Export-UnwantedImageProfiles {
     #>
     param(
         [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
         [array]$Profiles,
         [string]$ProfilesPath = (Get-UnwantedImageProfilesPath)
     )
+    # [AllowEmptyCollection()] (2026-09-04 fix, real bug caught by this
+    # session's own harness) - a Mandatory array parameter rejects an
+    # EMPTY array by default in PowerShell ("Cannot bind argument to
+    # parameter 'Profiles' because it is an empty collection"), distinct
+    # from rejecting $null. Import-UnwantedImageProfiles's new corrupt-
+    # file repair calls this with -Profiles @() to write back a valid
+    # empty list - without this attribute that call threw, silently
+    # swallowed by its own best-effort try/catch, so the "repair" never
+    # actually happened and the corrupt file was left untouched forever.
 
     $dir = Split-Path -Path $ProfilesPath -Parent
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
@@ -879,6 +907,8 @@ function Invoke-TrailingZeroAudit {
     }
 
     $lines = Get-TrailingZeroReportLines -Groups $scanResult.Groups -SearchRoot $Path
+    $reportDir = Split-Path -Path $ReportPath -Parent
+    if (-not (Test-Path -LiteralPath $reportDir)) { New-Item -ItemType Directory -Path $reportDir -Force | Out-Null }
     Set-Content -LiteralPath $ReportPath -Value $lines -Encoding UTF8
 
     # -ForceConsole (2026-09-03 fix) - same reason as Invoke-UnwantedImageScan's

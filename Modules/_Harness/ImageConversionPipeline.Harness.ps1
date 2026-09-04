@@ -224,6 +224,17 @@ class Program {
             Thread.Sleep(int.Parse(pm.Groups[1].Value));
             return 0;
         }
+        if (content.Contains("STDERR_FLOOD")) {
+            // 2026-09-04 addition, same technique as fake magick.exe's own
+            // stderr flood below - simulates a cjxl that emits more than
+            // the OS anonymous-pipe buffer (~4KB/~64KB depending on
+            // platform) of stderr before exiting, proving
+            // Convert-ImageBatch's async cjxl dispatch (which polls
+            // HasExited rather than reading synchronously inline) doesn't
+            // deadlock on it.
+            string flood = new string('E', 200);
+            for (int i = 0; i < 2000; i++) { Console.Error.WriteLine(flood); }
+        }
         if (content.Contains("STDOUT_MARKER")) {
             // Real cjxl writes progress info to stdout - normally empty
             // here, so Complete-ImageConversionJob's own "cjxl stdout for"
@@ -1230,6 +1241,28 @@ Test-Assert ($swX4.Elapsed.TotalSeconds -lt 15) ("returned promptly instead of d
 Write-Host ""
 
 # ==============================================================================
+#  Scenario X5 (2026-09-04 fix, real bug): Invoke-IccStripRetryOrFail's own
+#  Process::Start call was the one Process::Start in this file NOT wrapped
+#  in try/catch (its two siblings - the WebP/AVIF pre-conversion above, and
+#  the cjxl dispatch itself - both are). A bad/stale -MagickExe path there
+#  used to throw a raw, less-clear exception instead of the same clean
+#  "counted as a real failure" outcome Scenario Y already proves for a bad
+#  -CjxlExe path. Must fail fast and cleanly, not hang or crash the batch.
+# ==============================================================================
+Write-Host "=== Scenario X5: a bad -MagickExe path during an ICC-strip retry fails fast and cleanly ===" -ForegroundColor Cyan
+$imgX5 = Join-Path (New-Dir "scenario-x5\Series\Chapter 1") "cover.jpg"
+[System.IO.File]::WriteAllText($imgX5, "ICC_MISMATCH")
+$badMagickExeX5 = Join-Path $scratchDir "does_not_exist_magick.exe"
+
+$swX5 = [System.Diagnostics.Stopwatch]::StartNew()
+$totalsX5 = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-x5") -CjxlExe $fakeCjxlExe -MagickExe $badMagickExeX5 -MaxCjxlProcs 2 -FullLogging $false
+$swX5.Stop()
+
+Test-Assert ($swX5.Elapsed.TotalSeconds -lt 15) ("returned promptly instead of hanging (took " + [int]$swX5.Elapsed.TotalSeconds + "s)")
+Test-Assert ($totalsX5.ConvertedFail -eq 1 -and $totalsX5.ConvertedSuccess -eq 0) ("the failed ICC-strip retry start is counted as a real failure, not silently dropped or crashed past (got ConvertedFail=" + $totalsX5.ConvertedFail + ", ConvertedSuccess=" + $totalsX5.ConvertedSuccess + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario Y (2026-08-31 fix): Process.Start() throwing (a stale/bad
 #  -CjxlExe path) used to hang the dispatch loop indefinitely - a raw .NET
 #  exception there isn't terminating in this scriptblock, so execution
@@ -1698,6 +1731,53 @@ try {
 
 Test-Assert ($swAK.Elapsed.TotalSeconds -lt 5) ("returned in under 5s despite a 30s -AbortTimeoutSeconds and a 30s-sleeping job (took " + [int]$swAK.Elapsed.TotalSeconds + "s)")
 Test-Assert ($resultAK.ForceKilledCount -eq 1) ("the still-sleeping job was force-killed, not waited for (got ForceKilledCount=" + $resultAK.ForceKilledCount + ")")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario AL (2026-09-04 fix, real bug): the cjxl job in Convert-ImageBatch's
+#  async dispatch loop is polled via HasExited, not read synchronously
+#  inline - both redirected streams must be drained as soon as the process
+#  starts (not only once it's found HasExited), or a cjxl that writes more
+#  than the OS pipe buffer to stderr before exiting would block on that
+#  write forever, hanging the whole batch with no error and no timeout.
+#  Run on a background runspace with a bounded wait, NOT called directly -
+#  a real regression here would hang forever, and this proves it fails
+#  the assertion instead of hanging the whole harness process.
+# ==============================================================================
+Write-Host "=== Scenario AL: a cjxl job with a stderr flood does not deadlock the dispatch loop ===" -ForegroundColor Cyan
+$chAL = New-Dir "scenario-al\Series\Chapter 1"
+$fileAL = Join-Path $chAL "flood_al.jpg"
+[System.IO.File]::WriteAllText($fileAL, "STDERR_FLOOD")
+
+$runspaceAL = [runspacefactory]::CreateRunspace()
+$runspaceAL.Open()
+$psAL = [PowerShell]::Create()
+$psAL.Runspace = $runspaceAL
+$null = $psAL.AddScript({
+    param($ModulesDir, $CjxlExe, $FilePath)
+    . (Join-Path $ModulesDir "FileDeletion.ps1")
+    . (Join-Path $ModulesDir "AbortPipeline.ps1")
+    . (Join-Path $ModulesDir "Logging.ps1")
+    . (Join-Path $ModulesDir "AnimatedConversionPipeline.ps1")
+    . (Join-Path $ModulesDir "ImageConversionPipeline.ps1")
+    Convert-ImageBatch -ImageFiles @((Get-Item -LiteralPath $FilePath)) -CjxlExe $CjxlExe -MaxCjxlProcs 2 -DoFullLogging $false -CancelToken ([System.Threading.CancellationToken]::None)
+}).AddArgument($modulesDir).AddArgument($fakeCjxlExe).AddArgument($fileAL)
+
+$handleAL = $psAL.BeginInvoke()
+$completedAL = $handleAL.AsyncWaitHandle.WaitOne(15000)
+if ($completedAL) {
+    $resultAL = $psAL.EndInvoke($handleAL)[0]
+} else {
+    $psAL.Stop()
+}
+$psAL.Dispose()
+$runspaceAL.Close()
+$runspaceAL.Dispose()
+
+Test-Assert $completedAL "Convert-ImageBatch returned within 15s instead of hanging on the stderr flood"
+if ($completedAL) {
+    Test-Assert ($resultAL.ConvertedCount -eq 1) ("the file still converted successfully despite the stderr flood (got ConvertedCount=" + $resultAL.ConvertedCount + ")")
+}
 Write-Host ""
 
 if ($script:failCount -eq 0) {

@@ -112,6 +112,69 @@ Test-Assert ($totalsA.Aborted -eq $false) "a normal, non-aborted run reports Abo
 Write-Host ""
 
 # ==============================================================================
+#  Scenario A2 (2026-09-04 fix, real bug): $script:zipOnlyWorker's own
+#  bootstrap never set $script:CleanConsoleOutputEnabled in its own
+#  runspace's independent script scope - Write-Log's CCO gate never fired
+#  there, so every worker line was enqueued and printed straight to the
+#  console through Flush-ConsoleQueue's own unconditional drain, even with
+#  Clean Console Output on. Write-LogLineToHost shadowed to record every
+#  line actually reaching the console (both the direct-write and the
+#  queue-flush paths go through it).
+# ==============================================================================
+Write-Host "=== Scenario A2: mode 3's worker respects Clean Console Output - its own lines are not printed ===" -ForegroundColor Cyan
+$rootA2 = New-Dir "scenario-a2"
+$leafA2 = New-Dir "scenario-a2\Chapter 1"
+New-FileIn -DirPath $leafA2 -Name "page1.jpg" | Out-Null
+
+$script:hostLinesA2 = [System.Collections.Generic.List[string]]::new()
+$realWriteLogLineToHostA2 = ${function:Write-LogLineToHost}
+function Write-LogLineToHost {
+    param([string]$Line, [string]$Level)
+    $script:hostLinesA2.Add($Line)
+}
+$script:CleanConsoleOutputEnabled = $true
+try {
+    $totalsA2 = Invoke-ZipOnlyPipeline -Path $rootA2 -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -DeleteFolders $true -FullLogging $false -PermanentDelete $true
+} finally {
+    $script:CleanConsoleOutputEnabled = $false
+    ${function:Write-LogLineToHost} = $realWriteLogLineToHostA2
+}
+
+Test-Assert ($totalsA2.ZippedSuccess -eq 1) "sanity check: the zip itself still succeeded with Clean Console Output on"
+Test-Assert (@($script:hostLinesA2 | Where-Object { $_ -like "*Zipping*" -or $_ -like "*ZIP OK*" }).Count -eq 0) ("none of the worker's own 'Zipping'/'ZIP OK' lines reached the console while Clean Console Output was on (got " + $script:hostLinesA2.Count + " unrelated line(s))")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario A3 (2026-09-04 fix, real bug): mode 3's own worker had NO
+#  orphaned-"_tmp_*"-scratch-file sweep at all, unlike Invoke-LooseFolderZip
+#  (Scenario G2) and Invoke-FullPipelineChapter - a leftover scratch file
+#  from an earlier force-killed conversion run got permanently archived
+#  into the .cbz as a junk page, with the source folder then deleted right
+#  after.
+# ==============================================================================
+Write-Host "=== Scenario A3: mode 3's worker sweeps orphaned scratch files instead of archiving them ===" -ForegroundColor Cyan
+$rootA3 = New-Dir "scenario-a3"
+$leafA3 = New-Dir "scenario-a3\Chapter 1"
+New-FileIn -DirPath $leafA3 -Name "page1.jxl" | Out-Null
+New-FileIn -DirPath $leafA3 -Name "photo_tmp_iccstrip.png" | Out-Null
+New-FileIn -DirPath $leafA3 -Name "photo_tmp_webp2png.png" | Out-Null
+New-FileIn -DirPath $leafA3 -Name "photo_tmp_overwrite.webp" | Out-Null
+
+$totalsA3 = Invoke-ZipOnlyPipeline -Path $rootA3 -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -DeleteFolders $true -FullLogging $false -PermanentDelete $true
+
+Test-Assert ($totalsA3.ZippedSuccess -eq 1) ("the chapter still zipped successfully (got ZippedSuccess=" + $totalsA3.ZippedSuccess + ")")
+$zipA3 = Join-Path $rootA3 "Chapter 1.zip"
+Test-Assert (Test-Path -LiteralPath $zipA3) "the zip file exists"
+if (Test-Path -LiteralPath $zipA3) {
+    $archiveA3 = [System.IO.Compression.ZipFile]::OpenRead($zipA3)
+    try { $entryNamesA3 = @($archiveA3.Entries | ForEach-Object { $_.Name }) }
+    finally { $archiveA3.Dispose() }
+    Test-Assert (@($entryNamesA3 | Where-Object { $_ -match '_tmp_' }).Count -eq 0) ("none of the 3 scratch files were archived into the zip (got entries: " + ($entryNamesA3 -join ", ") + ")")
+    Test-Assert ($entryNamesA3 -contains "page1.jxl") "the real .jxl entry is still there"
+}
+Write-Host ""
+
+# ==============================================================================
 #  Scenario B: no qualifying leaf directories - all totals stay zero, a
 #  clear warning is logged, no error.
 # ==============================================================================
@@ -253,6 +316,35 @@ Test-Assert ($resultF.EntryCount -eq 2) "EntryCount is 2"
 Test-Assert ($resultF.FolderDeleted -eq $true) "the source folder was deleted after a successful zip"
 Test-Assert (-not (Test-Path -LiteralPath $dirF)) "the source folder is actually gone"
 Test-Assert (Test-Path -LiteralPath $zipOutF) "the zip file exists"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario F2 (2026-09-04 fix, real bug, same species as
+#  UnwantedImage.ps1's Invoke-UnwantedImageScan Scenario G2 and
+#  Controller.Harness.ps1's Scenario C4c): Remove-Source's $false return
+#  (the folder already vanished before deletion, a real TOCTOU gap) used
+#  to be discarded here - FolderDeleted was reported $true regardless.
+#  Remove-Source shadowed to return $false unconditionally.
+# ==============================================================================
+Write-Host "=== Scenario F2: Invoke-LooseFolderZip does not miscount an already-gone folder as deleted ===" -ForegroundColor Cyan
+$dirF2 = New-Dir "scenario-f2"
+New-FileIn -DirPath $dirF2 -Name "page1.jxl" | Out-Null
+$zipOutF2 = Join-Path $scratchDir "scenario-f2.zip"
+
+$realRemoveSourceF2 = ${function:Remove-Source}
+function Remove-Source {
+    param([string]$ItemPath)
+    return $false
+}
+try {
+    $resultF2 = Invoke-LooseFolderZip -FolderPath $dirF2 -ZipOut $zipOutF2 -LooseImageExtensions @(".jpg", ".png")
+} finally {
+    ${function:Remove-Source} = $realRemoveSourceF2
+}
+
+Test-Assert ($resultF2.Status -eq "Success") "sanity check: the zip itself still succeeded"
+Test-Assert ($resultF2.FolderDeleted -eq $false) "FolderDeleted is `$false, not miscounted as a real delete, when Remove-Source reports the folder already gone"
+Test-Assert ($resultF2.FolderDeleteFailed -eq $false) "FolderDeleteFailed is also `$false - an already-gone folder is neither a success nor a real failure"
 Write-Host ""
 
 # ==============================================================================

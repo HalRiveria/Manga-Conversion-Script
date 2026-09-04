@@ -351,7 +351,19 @@ function Invoke-IccStripRetryOrFail {
     # buffer, it blocks writing while nothing ever drains the pipes, so
     # WaitForExit() never returns. Draining both asynchronously before
     # WaitForExit() prevents either buffer from ever filling.
-    $stripProc = [System.Diagnostics.Process]::Start($stripPsi)
+    # Start() itself guarded (2026-09-04 fix) - both sibling Process::Start
+    # calls in this file (the magick pre-conversion above, and the cjxl
+    # dispatch in Convert-ImageBatch) already wrap Start in try/catch for a
+    # stale/missing exe path; this one didn't, so the same failure here
+    # (e.g. MagickExe cached from a since-uninstalled install) threw a raw
+    # exception past this function's own tail-path logging instead of a
+    # clear, consistent message.
+    try {
+        $stripProc = [System.Diagnostics.Process]::Start($stripPsi)
+    } catch {
+        Write-Log ("Could not start ICC-strip retry process for '" + $Job.SrcPath + "': " + $_) -Level Error
+        return $false
+    }
     try {
         $stripStdoutTask = $stripProc.StandardOutput.ReadToEndAsync()
         $stripStderrTask = $stripProc.StandardError.ReadToEndAsync()
@@ -453,8 +465,16 @@ function Complete-ImageConversionJob {
     # rest of the run under Controller.ps1's Full Pipeline, where the
     # budget is shared with the animated engine.
     try {
-        $stdout = $Job.Proc.StandardOutput.ReadToEnd()
-        $stderr = $Job.Proc.StandardError.ReadToEnd()
+        # Await the tasks started right after Process::Start (2026-09-04
+        # fix) rather than a synchronous ReadToEnd() here - by the time
+        # this function runs the process has already exited (both call
+        # sites gate on HasExited first), so this just collects output
+        # that was draining concurrently all along instead of being the
+        # thing that could deadlock a chatty child. Falls back to a
+        # synchronous read for any job that predates this field (defensive
+        # only - every real dispatch path now sets it).
+        $stdout = if ($Job.StdoutTask) { $Job.StdoutTask.GetAwaiter().GetResult() } else { $Job.Proc.StandardOutput.ReadToEnd() }
+        $stderr = if ($Job.StderrTask) { $Job.StderrTask.GetAwaiter().GetResult() } else { $Job.Proc.StandardError.ReadToEnd() }
         $code   = $Job.Proc.ExitCode
     } finally {
         $Job.Proc.Dispose()
@@ -960,6 +980,19 @@ function Convert-ImageBatch {
             Write-Log ("Converting " + $ItemNoun + ": '" + $j.SrcPath + "'")
 
             $j.Proc = [System.Diagnostics.Process]::Start($psi)
+            # Start draining both redirected streams immediately, not when
+            # the job is later found HasExited - same redirect-deadlock
+            # species as the magick pre-conversion fix above and
+            # Invoke-IccStripRetryOrFail's own fix (2026-09-04): this cjxl
+            # job is polled via HasExited rather than read synchronously
+            # inline, so a cjxl that writes more than the OS pipe buffer to
+            # stdout/stderr before exiting would otherwise block on that
+            # write forever - HasExited never becomes true, and this job
+            # sits in $running for the rest of the run with no timeout.
+            # Complete-ImageConversionJob awaits these tasks instead of
+            # calling ReadToEnd() itself.
+            $j.StdoutTask = $j.Proc.StandardOutput.ReadToEndAsync()
+            $j.StderrTask = $j.Proc.StandardError.ReadToEndAsync()
             $running.Add($j)
             } catch {
                 Write-Log ("FAILED to start conversion process for '" + $j.SrcPath + "': " + $_) -Level Error

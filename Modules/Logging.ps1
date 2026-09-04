@@ -287,7 +287,13 @@ function Start-LogRun {
             Set-Variable -Scope Script -Name $target.PriorVar -Value $prior
             Invoke-MutexGuardedWrite { $runHeader | Out-File -FilePath $target.FilePath -Append -Encoding UTF8 }
         } catch {
-            Write-Log ("Could not start a new run header in '" + $target.FilePath + "' - it may be locked or otherwise inaccessible. This run's own entries will still be appended, just without a run separator: " + $_) -Level Warn -ForceConsole
+            # Report straight to the console rather than through Write-Log -
+            # Write-Log routes a Warn back into this SAME file in split-log
+            # mode, and a second failure there would throw uncaught out of
+            # this function (the file is still locked), defeating the whole
+            # point of this try/catch. Direct Write-Host can't hit that file.
+            $warnLine = Format-LogLine -Message ("Could not start a new run header in '" + $target.FilePath + "' - it may be locked or otherwise inaccessible. This run's own entries will still be appended, just without a run separator: " + $_) -Level "Warn"
+            try { Write-LogLineToHost -Line $warnLine -Level "Warn" } catch { }
         }
     }
 }
@@ -350,7 +356,12 @@ function Complete-LogRun {
                 # could scramble real content.
             }
         } catch {
-            Write-Log ("Could not move this run's content to the top of '" + $target.FilePath + "' - it may be locked or otherwise inaccessible. The content is still there, just not reordered: " + $_) -Level Warn -ForceConsole
+            # Same reasoning as Start-LogRun's catch: Write-Log would route a
+            # Warn right back into this same locked file and throw again,
+            # uncaught, out of this function - the exact crash this try/catch
+            # exists to prevent. Write-Host directly instead.
+            $warnLine = Format-LogLine -Message ("Could not move this run's content to the top of '" + $target.FilePath + "' - it may be locked or otherwise inaccessible. The content is still there, just not reordered: " + $_) -Level "Warn"
+            try { Write-LogLineToHost -Line $warnLine -Level "Warn" } catch { }
         }
     }
 }

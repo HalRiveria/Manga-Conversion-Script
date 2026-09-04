@@ -672,10 +672,22 @@ function Invoke-FullPipelineChapter {
             $zipResult.EntryCount = $verify.EntryCount
 
             try {
-                $null = Remove-Source -ItemPath $ChapterDir
-                $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
-                Write-Log ("Deleted folder (" + $deleteDesc + "): '" + $ChapterDir + "'")
-                $zipResult.FolderDeleted = $true
+                # Return value checked, not discarded (2026-09-04 fix, same
+                # species as UnwantedImage.ps1's Invoke-UnwantedImageScan
+                # fix) - Remove-Source returns $false (not an exception) when
+                # the folder already vanished before deletion (something
+                # else removed it between the zip and this call). Neither a
+                # success nor a real failure - left as neither FolderDeleted
+                # nor FolderDeleteFailed rather than falsely reporting a
+                # delete that didn't happen.
+                $removed = Remove-Source -ItemPath $ChapterDir
+                if ($removed) {
+                    $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
+                    Write-Log ("Deleted folder (" + $deleteDesc + "): '" + $ChapterDir + "'")
+                    $zipResult.FolderDeleted = $true
+                } else {
+                    Write-Log ("Folder already gone before deletion (not counted as deleted): '" + $ChapterDir + "'") -Level Warn
+                }
             } catch {
                 Write-Log ("FAILED to delete folder '" + $ChapterDir + "': " + $_) -Level Error
                 $zipResult.FolderDeleteFailed = $true
@@ -1026,6 +1038,17 @@ function Invoke-FullPipeline {
 
                     $chAvifClassification = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::OrdinalIgnoreCase)
                     foreach ($img in (@($chImages) + @($chStale))) {
+                        # Abort check inside this inner loop (2026-09-04 fix,
+                        # real bug) - previously only the outer series/chapter
+                        # loops polled Test-AbortSignal, so a Ctrl+C mid-
+                        # classification still finished spawning a real
+                        # ~10-17s magick identify per remaining contested
+                        # .avif in this chapter before the abort was honored.
+                        # Breaking here just stops classifying further files;
+                        # the abort check right after this block (before
+                        # Remove-StaleLooseSources) is what actually stops
+                        # this chapter's own deletion/conversion work.
+                        if (Test-AbortSignal) { break }
                         if ($img.Extension -ine ".avif" -or -not $chAnimatedPathSet.Contains($img.FullName) -or $chAvifClassification.ContainsKey($img.FullName)) {
                             continue   # not .avif, not claimed by both scans, or already classified
                         }
@@ -1082,6 +1105,15 @@ function Invoke-FullPipeline {
                 # computed before this chapter's own classification ran, so
                 # it can't yet reflect a failure discovered just above.
                 $isZippableNow = $chapter.IsZippable -and -not $chapterClassificationFailed
+
+                # Re-checked here, not just at the top of this loop
+                # (2026-09-04 fix, real bug) - an abort raised mid-
+                # classification (just above) would otherwise still reach
+                # Remove-StaleLooseSources's real deletions and a full
+                # Invoke-FullPipelineChapter dispatch for this chapter before
+                # the NEXT chapter's own check at the top of this loop ever
+                # ran.
+                if (Test-AbortSignal) { $totals.Aborted = $true; break }
 
                 $staleResult = Remove-StaleLooseSources -StaleSources $chStale
                 $totals.StaleImageCleanedSuccess += $staleResult.Success
@@ -1478,7 +1510,16 @@ function Invoke-Mode {
                 $zipStatsBox = @{ Success = 0; Fail = 0; Skipped = 0; FolderDeletedSuccess = 0; FolderDeletedFail = 0 }
                 $zipStep = {
                     param($Info)
-                    $zipResult = & $ZipFolderHandler -FolderPath $Info.Dir.FullName -ZipOut $Info.ZipOut -LooseImageExtensions $zipLooseExtensions
+                    # -RequireJxlEntry, computed the same way Invoke-FullPipelineChapter
+                    # computes $imageActuallyConverted (2026-09-04 fix, real bug): a
+                    # chapter whose only images are never-converted formats (e.g. all
+                    # .gif) or all-animated-avif-routed-elsewhere has $Info.ChapterResult
+                    # with ConvertedCount 0 (or $null when Get-ChapterProgressStatus's own
+                    # $null-ChapterResult "nothing needed converting" case applies) -
+                    # legitimately zero .jxl entries. Without this, Invoke-LooseFolderZip's
+                    # $true default rejected every such zip via Test-ZipArchive, forever.
+                    $imageActuallyConverted = ($null -ne $Info.ChapterResult -and $Info.ChapterResult.ConvertedCount -gt 0)
+                    $zipResult = & $ZipFolderHandler -FolderPath $Info.Dir.FullName -ZipOut $Info.ZipOut -LooseImageExtensions $zipLooseExtensions -RequireJxlEntry $imageActuallyConverted
                     switch ($zipResult.Status) {
                         'Success' { $zipStatsBox.Success++ }
                         'Fail'    { $zipStatsBox.Fail++ }
@@ -1778,14 +1819,20 @@ function Invoke-MainLoop {
         # $InvokeModeHandler returns, so it's safe to do the reorder here,
         # unconditionally, regardless of whether $stats came back $null - a
         # crashed/aborted run's own logged Errors/Warnings still deserve to
-        # be promoted to the top like a normal run's would.
-        & $CompleteLogRunHandler
-
+        # be promoted to the top like a normal run's would. Moved to AFTER
+        # the $stats-null Warn below (2026-09-04 fix, real bug) - it used to
+        # run BEFORE that Warn was logged, so the Warn landed appended at
+        # the bottom of Warnings.txt, detached from its own run's just-
+        # reordered header, and the NEXT run's Start-LogRun then captured it
+        # as stale prior content, so it was never correctly reordered on any
+        # later pass either - exactly the failure path a user is most
+        # likely to go check the warnings file for.
         if ($null -eq $stats) {
             # Invoke-Mode's own shared catch already logged the real cause
             # (Invoke-AbortOrFatalHandler) - a $null return means the run
             # did NOT complete, so there is no real $stats to report.
             Write-Log "Run did not complete - see the error above." -Level Warn
+            & $CompleteLogRunHandler
         } else {
             $elapsedString = Format-ElapsedTime -Elapsed $runStopwatch.Elapsed
             $summaryLines = Get-SummaryLines -Stats $stats -ElapsedString $elapsedString -ModeFlags $resolved
@@ -1796,6 +1843,7 @@ function Invoke-MainLoop {
             # this one (Initialize-CleanConsoleOutput/Initialize-FileDeletion)
             # already got this exact cast.
             Write-SummaryReport -Lines $summaryLines -FullLogging $script:FullLogging
+            & $CompleteLogRunHandler
         }
 
         $postRun = & $PostRunPromptHandler

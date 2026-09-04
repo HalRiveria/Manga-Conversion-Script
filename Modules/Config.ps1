@@ -313,17 +313,31 @@ function Import-ScriptSettings {
     } catch {
         Write-Log ("Settings file at '" + $Path + "' could not be parsed (" + $_.Exception.Message + ") - using defaults.") -Level Warn
         $backupPath = $Path + ".corrupt-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".bak"
-        try { Copy-Item -LiteralPath $Path -Destination $backupPath -Force -ErrorAction Stop } catch { }
-        # Repair the file with the defaults just fell back to (2026-09-03
-        # fix, Todo.md finding) - without this, the SAME corrupt file sat
-        # at $Path forever, so every future launch re-hit this exact
-        # branch: another timestamped .bak dropped and another Warn logged
-        # on every single run until someone manually deleted/fixed it.
-        # Best-effort only, matching the backup above - if the write
-        # itself fails (e.g. a read-only file), this function still
-        # returns usable defaults either way, it just won't have fixed
-        # the file for next time.
-        try { Export-ScriptSettings -Settings $settings -Path $Path } catch { }
+        # Backup swallowed here deliberately - a transient failure (file
+        # lock, full disk, ACL) shouldn't stop the fallback-to-defaults
+        # below. But the repair (overwriting $Path with defaults) is now
+        # GATED on this actually succeeding (2026-09-04 fix, real bug) -
+        # it used to run unconditionally, so a failed backup plus the
+        # unconditional repair meant the user's real settings content
+        # could be lost with no backup and nothing logged about the
+        # missing backup. A failed backup now skips the repair entirely
+        # and says so - the corrupt file is left alone for manual
+        # recovery instead of being silently overwritten.
+        $backupOk = $false
+        try { Copy-Item -LiteralPath $Path -Destination $backupPath -Force -ErrorAction Stop; $backupOk = $true } catch { }
+        if ($backupOk) {
+            # Repair the file with the defaults just fell back to (2026-09-03
+            # fix, Todo.md finding) - without this, the SAME corrupt file sat
+            # at $Path forever, so every future launch re-hit this exact
+            # branch: another timestamped .bak dropped and another Warn logged
+            # on every single run until someone manually deleted/fixed it.
+            # Best-effort only - if the write itself fails (e.g. a read-only
+            # file), this function still returns usable defaults either way,
+            # it just won't have fixed the file for next time.
+            try { Export-ScriptSettings -Settings $settings -Path $Path } catch { }
+        } else {
+            Write-Log ("Could not back up the corrupt settings file at '" + $Path + "' - leaving it untouched rather than risk overwriting it with no backup. It will be re-detected as corrupt on the next launch.") -Level Warn
+        }
         return $settings
     }
 
@@ -340,10 +354,17 @@ function Import-ScriptSettings {
         # failure above.
         Write-Log ("Settings file at '" + $Path + "' did not contain a valid settings object - using defaults.") -Level Warn
         $backupPath = $Path + ".corrupt-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".bak"
-        try { Copy-Item -LiteralPath $Path -Destination $backupPath -Force -ErrorAction Stop } catch { }
-        # Repair the file (2026-09-03 fix, Todo.md finding) - see the
-        # matching parse-failure branch above for why.
-        try { Export-ScriptSettings -Settings $settings -Path $Path } catch { }
+        # Same backup-success gate as the parse-failure branch above
+        # (2026-09-04 fix, real bug) - see that branch's comment for why.
+        $backupOk = $false
+        try { Copy-Item -LiteralPath $Path -Destination $backupPath -Force -ErrorAction Stop; $backupOk = $true } catch { }
+        if ($backupOk) {
+            # Repair the file (2026-09-03 fix, Todo.md finding) - see the
+            # matching parse-failure branch above for why.
+            try { Export-ScriptSettings -Settings $settings -Path $Path } catch { }
+        } else {
+            Write-Log ("Could not back up the corrupt settings file at '" + $Path + "' - leaving it untouched rather than risk overwriting it with no backup. It will be re-detected as corrupt on the next launch.") -Level Warn
+        }
         return $settings
     }
 

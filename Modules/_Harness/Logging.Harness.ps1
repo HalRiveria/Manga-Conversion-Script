@@ -569,6 +569,36 @@ Test-Assert ($null -eq $outputM6b) "Complete-LogRun produces no output when the 
 Write-Host ""
 
 # ==============================================================================
+#  Scenario M7 (2026-09-04 fix, real bug, live-reproduced): a locked
+#  Warnings file used to make Start-LogRun/Complete-LogRun's own "degrade
+#  to a Warn instead of throwing" catch throw a SECOND time, uncaught -
+#  the catch's Write-Log call routed straight back into the same locked
+#  file it was reporting on. Both functions must now survive a locked
+#  Warnings file without throwing at all.
+# ==============================================================================
+Write-Host "=== Scenario M7: Start-LogRun/Complete-LogRun survive a locked Warnings file ===" -ForegroundColor Cyan
+Reset-LoggingState
+Initialize-LogPaths -TargetPath "C:\M7\Path" -FullLogging $false -ScriptDir $scratchDir
+# Establish a real prior run first so Complete-LogRun has something to
+# (attempt to) reorder, then lock the file for both calls under test.
+Start-LogRun
+Write-Log "m7 pre-lock warning" -Level Warn
+Complete-LogRun
+
+$lockM7 = [System.IO.File]::Open($script:logWarnFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+try {
+    $m7StartThrew = $false
+    try { Start-LogRun } catch { $m7StartThrew = $true }
+    $m7CompleteThrew = $false
+    try { Complete-LogRun } catch { $m7CompleteThrew = $true }
+} finally {
+    $lockM7.Close()
+}
+Test-Assert (-not $m7StartThrew) "Start-LogRun does not throw when the Warnings file is locked"
+Test-Assert (-not $m7CompleteThrew) "Complete-LogRun does not throw when the Warnings file is locked"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario N: Initialize-LogMutex creates a working mutex from
 #  $script:pathHash (set by a prior Initialize-LogPaths call).
 # ==============================================================================

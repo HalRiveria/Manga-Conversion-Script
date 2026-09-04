@@ -434,6 +434,41 @@ Test-Assert ($resultQ2.Mode -eq 'ImageConversion') "the loop still resolved a mo
 Write-Host ""
 
 # ==============================================================================
+#  Scenario Q3 (2026-09-04 fix, real bug): Cover Deletion's own real work
+#  (Show-CoverDeletionMenu) never went through Invoke-MainLoop's own
+#  Invoke-Mode dispatch, so it was never bracketed by that loop's
+#  Start-LogRun/Complete-LogRun pair - in split-log mode its Warn/Error
+#  lines landed with no run-separator header, and the next real run's
+#  Start-LogRun then mis-captured them as belonging to whatever ran
+#  before. Show-ModeMenu's own '5' branch must now bracket the call
+#  itself. Start-LogRun/Complete-LogRun are shadowed (real Logging.ps1
+#  functions, not injectable handlers here) to record call order.
+# ==============================================================================
+Write-Host "=== Scenario Q3: choosing Cover Deletion brackets it with Start-LogRun/Complete-LogRun ===" -ForegroundColor Cyan
+$settingsQ3 = Get-DefaultScriptSettings
+$pathQ3 = New-ScratchSettingsPath "scenario-q3"
+$promptQ3 = New-ScriptedPrompt -Responses @('5', '2')
+
+$script:eventOrderQ3 = [System.Collections.Generic.List[string]]::new()
+$realStartLogRunQ3 = ${function:Start-LogRun}
+$realCompleteLogRunQ3 = ${function:Complete-LogRun}
+$realShowCoverDeletionMenuQ3 = ${function:Show-CoverDeletionMenu}
+function Start-LogRun { $script:eventOrderQ3.Add("START") }
+function Complete-LogRun { $script:eventOrderQ3.Add("COMPLETE") }
+${function:Show-CoverDeletionMenu} = { param($PromptFunc) $script:eventOrderQ3.Add("COVER") }.GetNewClosure()
+try {
+    $resultQ3 = Show-ModeMenu -Settings $settingsQ3 -SettingsPath $pathQ3 -PromptFunc $promptQ3
+} finally {
+    ${function:Start-LogRun} = $realStartLogRunQ3
+    ${function:Complete-LogRun} = $realCompleteLogRunQ3
+    ${function:Show-CoverDeletionMenu} = $realShowCoverDeletionMenuQ3
+}
+
+Test-Assert (($script:eventOrderQ3 -join ',') -eq "START,COVER,COMPLETE") ("Start-LogRun, then Cover Deletion's own work, then Complete-LogRun, in that order (got " + ($script:eventOrderQ3 -join ',') + ")")
+Test-Assert ($resultQ3.Mode -eq 'ImageConversion') "the loop still resolved a mode normally afterward"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario R: Show-CoverDeletionMenu - Run, Add, and Trailing-Zero (5,
 #  2026-08-31 addition) all dispatch through their injected handlers and
 #  return to the SAME submenu (not the caller) until Back is chosen

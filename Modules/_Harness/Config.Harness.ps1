@@ -208,6 +208,39 @@ Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*could not be re
 Write-Host ""
 
 # ==============================================================================
+#  Scenario F5 (2026-09-04 fix, real bug): the corrupt-JSON repair used to
+#  be unconditional on the backup actually succeeding - if Copy-Item
+#  failed (locked destination, full disk, ACL), the corrupt file still got
+#  overwritten with defaults right after, losing the user's real content
+#  with no backup at all. The repair must now be GATED on the backup
+#  succeeding - Copy-Item shadowed to fail unconditionally.
+# ==============================================================================
+Write-Host "=== Scenario F5: corrupt JSON is left UNTOUCHED when the backup itself fails, not repaired anyway ===" -ForegroundColor Cyan
+$pathF5 = Join-Path $scratchDir "corrupt-settings-f5.json"
+"{ this is not valid json " | Set-Content -LiteralPath $pathF5 -Encoding UTF8
+$originalContentF5 = Get-Content -LiteralPath $pathF5 -Raw
+
+function Copy-Item {
+    param([Parameter(ValueFromPipelineByPropertyName)][string]$LiteralPath, [string]$Destination, [switch]$Force, [string]$ErrorAction)
+    if ($LiteralPath -eq $pathF5) { throw "simulated: destination is on a read-only volume" }
+    Microsoft.PowerShell.Management\Copy-Item @PSBoundParameters
+}
+$script:logCalls.Clear()
+$threwF5 = $false
+$settingsF5 = $null
+try { $settingsF5 = Import-ScriptSettings -Path $pathF5 } catch { $threwF5 = $true }
+Remove-Item Function:\Copy-Item -ErrorAction SilentlyContinue
+
+Test-Assert (-not $threwF5) "Import-ScriptSettings does not throw when the backup itself fails"
+Test-Assert ($null -ne $settingsF5 -and $settingsF5.JpegQuality -eq 90) "defaults are still returned for THIS run, even though the file wasn't repaired"
+$backupsF5 = @(Get-ChildItem -LiteralPath (Split-Path $pathF5 -Parent) -Filter "corrupt-settings-f5.json.corrupt-*.bak")
+Test-Assert ($backupsF5.Count -eq 0) "no backup file exists - Copy-Item genuinely failed, nothing to show for it"
+$contentAfterF5 = Get-Content -LiteralPath $pathF5 -Raw
+Test-Assert ($contentAfterF5 -eq $originalContentF5) "the corrupt file's own content is completely untouched - NOT overwritten with defaults when the backup failed"
+Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*Could not back up*" }).Count -ge 1) "a distinct Warn explains the backup failure, not just the original corruption"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario F2 (2026-08-31 fix): a settings file whose content is valid JSON
 #  but not a real settings OBJECT - the literal `null` (a realistic outcome
 #  of a truncated write, since Export-ScriptSettings's Set-Content isn't

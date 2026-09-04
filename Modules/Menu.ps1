@@ -194,6 +194,24 @@ function Show-ModeMenu {
             # the scan the user is about to run.
             Initialize-CleanConsoleOutput -Enabled ([bool]$Settings.CleanConsoleOutputEnabled)
             Initialize-FileDeletion -PermanentDelete ([bool]$Settings.PermanentDelete)
+            # Start-LogRun/Complete-LogRun bracket (2026-09-04 fix, real bug) -
+            # Cover Deletion is the one mode whose real work (scan, hash,
+            # delete, all inside Show-CoverDeletionMenu below) never goes
+            # through Invoke-MainLoop's own Invoke-Mode dispatch, so it was
+            # never bracketed by that loop's Start-LogRun/Complete-LogRun
+            # pair either. In split-log mode its Warn/Error lines landed
+            # appended with no run-separator header, and the NEXT real run's
+            # Start-LogRun then snapshotted those un-headered lines as
+            # "prior content" belonging to whatever ran before them -
+            # Complete-LogRun's reorder permanently stranded Cover
+            # Deletion's own output under an unrelated earlier run instead
+            # of giving it its own newest-on-top section. Called directly
+            # (not via an injected handler, unlike Invoke-MainLoop's own
+            # pair) - Start-LogRun/Complete-LogRun are ordinary Logging.ps1
+            # functions in the same script scope as every other module here,
+            # and this is the one call site outside Invoke-MainLoop itself
+            # that needs them.
+            Start-LogRun
             # $null = (2026-09-03 fix): Show-CoverDeletionMenu's own '1'/'2'/'5'
             # branches return a hashtable (Invoke-CoverDeletionRun/
             # Show-AddUnwantedImageProfileFlow/Invoke-TrailingZeroAuditRun all
@@ -205,6 +223,7 @@ function Show-ModeMenu {
             # array (the leaked hashtable, then the real resolved mode),
             # crashing the first `$resolved.Mode`/property access downstream.
             $null = Show-CoverDeletionMenu -PromptFunc $PromptFunc
+            Complete-LogRun
             Write-Host ""
             continue
         }

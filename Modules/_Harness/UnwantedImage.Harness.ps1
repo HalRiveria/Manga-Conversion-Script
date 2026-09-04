@@ -507,6 +507,20 @@ $reportPathK2 = Join-Path $scratchDir "should-not-exist.txt"
 $auditK2 = Invoke-TrailingZeroAudit -Path $rootK2 -ReportPath $reportPathK2
 Test-Assert ($auditK2.UniqueFileCount -eq 0 -and $null -eq $auditK2.ReportPath) "nothing found -> UniqueFileCount 0, ReportPath `$null"
 Test-Assert (-not (Test-Path -LiteralPath $reportPathK2)) "no report file was created when nothing was found"
+
+# 2026-09-04 fix, real bug, live-reproduced: -ReportPath's parent directory
+# didn't exist (a fresh install where nothing had created
+# %LOCALAPPDATA%\ConversionScript\ yet) - Set-Content threw
+# DirectoryNotFoundException instead of the directory being created first,
+# matching every other writer under that same app-data folder.
+$reportDirK3   = Join-Path $scratchDir "scenario-k3-no-parent-dir\nested"
+$reportPathK3  = Join-Path $reportDirK3 "trailing_zeros_report.txt"
+Test-Assert (-not (Test-Path -LiteralPath $reportDirK3)) "sanity check: the report's parent directory does not exist yet"
+$threwK3 = $false
+$auditK3 = $null
+try { $auditK3 = Invoke-TrailingZeroAudit -Path $rootI -ReportPath $reportPathK3 } catch { $threwK3 = $true }
+Test-Assert (-not $threwK3) "Invoke-TrailingZeroAudit does not throw when the report's parent directory is missing"
+Test-Assert (Test-Path -LiteralPath $reportPathK3) "the report file was written after its parent directory was created"
 Write-Host ""
 
 # ==============================================================================
@@ -539,6 +553,19 @@ try { $loadedM2 = Import-UnwantedImageProfiles -ProfilesPath $corruptPathM } cat
 Test-Assert (-not $threwM -and @($loadedM2).Count -eq 0) "a corrupt profiles file returns an empty array, does not throw"
 Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*" }).Count -ge 1) "a Warn was logged for the corrupt file"
 Test-Assert (@(Get-ChildItem -LiteralPath (Split-Path $corruptPathM -Parent) -Filter "*.corrupt-*.bak").Count -eq 1) "the corrupt file was backed up, not silently discarded"
+
+# 2026-09-04 fix, real bug: this function's own docstring claimed the same
+# resilience convention as Config.ps1's Import-ScriptSettings (backup AND
+# repair), but only backed up - the corrupt file sat at $ProfilesPath
+# forever, re-triggering the same Warn/backup on every future call. It must
+# now be repaired with a valid empty-array file, same as settings.json is
+# repaired with defaults.
+Test-Assert ((Get-Content -LiteralPath $corruptPathM -Raw) -notlike "*not valid json*") "the corrupt file's content was actually replaced (repaired), not left in place"
+$script:logCalls.Clear()
+$bakCountBeforeM = @(Get-ChildItem -LiteralPath (Split-Path $corruptPathM -Parent) -Filter "*.corrupt-*.bak").Count
+$loadedM2b = Import-UnwantedImageProfiles -ProfilesPath $corruptPathM
+Test-Assert (@($loadedM2b).Count -eq 0) "the repaired file loads cleanly as an empty array on the next call"
+Test-Assert ((@(Get-ChildItem -LiteralPath (Split-Path $corruptPathM -Parent) -Filter "*.corrupt-*.bak").Count) -eq $bakCountBeforeM) "no NEW backup was dropped on the next call - the file is genuinely repaired, not still corrupt"
 
 # 2026-09-02 review fix: valid JSON (so the parse step above never
 # catches it), but a non-numeric value in one of the [int]/[int64]-cast

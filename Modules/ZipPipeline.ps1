@@ -230,6 +230,7 @@ $script:zipOnlyWorker = {
         [bool]$DoFullLogging,
         [bool]$DeleteFolders,
         [bool]$DoPermanentDelete,
+        [bool]$CleanConsoleOutputEnabled,
         [System.Threading.Mutex]$LogMutex,
         [System.Collections.Concurrent.ConcurrentQueue[object]]$ConsoleQueue,
         [System.Threading.CancellationToken]$CancelToken
@@ -249,6 +250,13 @@ $script:zipOnlyWorker = {
     $script:logErrorFile       = $LogErrorFile
     $script:logWarnFile        = $LogWarnFile
     $script:PermanentDelete    = $DoPermanentDelete
+    # 2026-09-04 fix, real bug: this was the one worker bootstrap in the
+    # codebase that didn't set this flag (Controller.ps1's chapter worker
+    # does, at its own bootstrap). Left unset, it's $null in this runspace's
+    # independent script scope, so Write-Log's CCO gate (Logging.ps1) never
+    # fires here - every log line from this worker was enqueued and printed
+    # straight into CCR's live-redraw region instead of being suppressed.
+    $script:CleanConsoleOutputEnabled = $CleanConsoleOutputEnabled
 
     # SeriesName is pass-through only - this runspace never touches CCR
     # (every CCR call is main-thread-only, see this module's header) - it
@@ -274,6 +282,35 @@ $script:zipOnlyWorker = {
     }
 
     try {
+        # Orphaned "_tmp_*" scratch file sweep (2026-09-04 fix, real bug) -
+        # this worker was the one zip path in this file with no sweep at
+        # all: a chapter left with a leftover _tmp_iccstrip.png/etc. from an
+        # earlier force-killed conversion run got that debris permanently
+        # archived into the .cbz as a junk page, with the source folder
+        # then deleted right after. Same literal pattern as
+        # Invoke-LooseFolderZip's own sweep in this file (kept inline, not
+        # calling ImageConversionPipeline.ps1's Test-OrphanedScratchFileName -
+        # this module's harness deliberately doesn't dot-source that module;
+        # see Invoke-LooseFolderZip's own comment for why) - keep in sync if
+        # either ever changes. Mode 3 has no post-conversion "unconverted
+        # source remains" guard by design (it never converts anything - see
+        # CLAUDE.md's Known limitations), so this sweep is the only
+        # protection this path has against archiving stale scratch debris.
+        $orphanedScratchFiles = @(Get-ChildItem -LiteralPath $FolderPath -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.Name -imatch '_tmp_iccstrip(-\d+)?\.png$' -or
+                $_.Name -imatch '_tmp_(webp|avif|bmp|heic|heif)2png\.png$' -or
+                $_.Name -imatch '_tmp_overwrite\.webp$'
+            })
+        foreach ($orphan in $orphanedScratchFiles) {
+            try {
+                [System.IO.File]::Delete($orphan.FullName)
+                Write-Log ("Deleted orphaned scratch file (its owning cleanup could not run earlier): '" + $orphan.FullName + "'") -Level Warn
+            } catch {
+                Write-Log ("Could not delete orphaned scratch file '" + $orphan.FullName + "' - it will be archived into this folder's zip: " + $_) -Level Warn
+            }
+        }
+
         Write-Log ("Zipping '" + $FolderPath + "' -> '" + $ZipOutPath + "'")
 
         $zipSize = Compress-FolderToZip -SourceDir $FolderPath -ZipOut $ZipOutPath
@@ -284,10 +321,18 @@ $script:zipOnlyWorker = {
 
         if ($DeleteFolders) {
             try {
-                $null = Remove-Source -ItemPath $FolderPath
-                $deleteDesc = if ($DoPermanentDelete) { "permanently" } else { "Recycle Bin" }
-                Write-Log ("Deleted source folder (" + $deleteDesc + "): '" + $FolderPath + "'")
-                $result.FolderDeleted = 1
+                # Return value checked, not discarded (2026-09-04 fix, same
+                # species as UnwantedImage.ps1's Invoke-UnwantedImageScan
+                # fix) - see Controller.ps1's Invoke-FullPipelineChapter's
+                # matching fix for the full reasoning.
+                $removed = Remove-Source -ItemPath $FolderPath
+                if ($removed) {
+                    $deleteDesc = if ($DoPermanentDelete) { "permanently" } else { "Recycle Bin" }
+                    Write-Log ("Deleted source folder (" + $deleteDesc + "): '" + $FolderPath + "'")
+                    $result.FolderDeleted = 1
+                } else {
+                    Write-Log ("Source folder already gone before deletion (not counted as deleted): '" + $FolderPath + "'") -Level Warn
+                }
             } catch {
                 Write-Log ("FAILED to delete folder '" + $FolderPath + "': " + $_) -Level Error
                 $result.FolderDeleteFailed = 1
@@ -462,6 +507,7 @@ function Invoke-ZipOnlyPipeline {
                 DoFullLogging     = $FullLogging
                 DeleteFolders     = $DeleteFolders
                 DoPermanentDelete = $PermanentDelete
+                CleanConsoleOutputEnabled = (Test-CcrEnabledForZipOnly)
             }
         }.GetNewClosure()
 
@@ -675,10 +721,18 @@ function Invoke-LooseFolderZip {
             $result.EntryCount = $verify.EntryCount
 
             try {
-                $null = Remove-Source -ItemPath $FolderPath
-                $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
-                Write-Log ("Deleted folder (" + $deleteDesc + "): '" + $FolderPath + "'")
-                $result.FolderDeleted = $true
+                # Return value checked, not discarded (2026-09-04 fix, same
+                # species as UnwantedImage.ps1's Invoke-UnwantedImageScan
+                # fix) - see Controller.ps1's Invoke-FullPipelineChapter's
+                # matching fix for the full reasoning.
+                $removed = Remove-Source -ItemPath $FolderPath
+                if ($removed) {
+                    $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
+                    Write-Log ("Deleted folder (" + $deleteDesc + "): '" + $FolderPath + "'")
+                    $result.FolderDeleted = $true
+                } else {
+                    Write-Log ("Folder already gone before deletion (not counted as deleted): '" + $FolderPath + "'") -Level Warn
+                }
             } catch {
                 Write-Log ("FAILED to delete folder '" + $FolderPath + "': " + $_) -Level Error
                 $result.FolderDeleteFailed = $true

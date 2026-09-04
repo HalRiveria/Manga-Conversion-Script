@@ -414,6 +414,40 @@ Test-Assert (Test-Path -LiteralPath (Join-Path $chC4b "page1.jpg")) "the source 
 Write-Host ""
 
 # ==============================================================================
+#  Scenario C4c (2026-09-04 fix, real bug, same species as
+#  UnwantedImage.ps1's Invoke-UnwantedImageScan Scenario G2): Remove-Source
+#  returns $false (not an exception) when the chapter folder already
+#  vanished before deletion - a real TOCTOU gap between the zip finishing
+#  and this call. This used to be discarded, reporting a successful
+#  delete anyway. Remove-Source shadowed to return $false unconditionally.
+# ==============================================================================
+Write-Host "=== Scenario C4c: a chapter folder already gone before deletion is not miscounted as deleted ===" -ForegroundColor Cyan
+$chC4c = New-Dir "scenario-c4c\Series\Chapter 1"
+$imgC4c = New-FakeImageIn -DirPath $chC4c -Name "page1.jpg"
+$budgetC4c = [System.Threading.SemaphoreSlim]::new(2, 2)
+$ctsC4c = [System.Threading.CancellationTokenSource]::new()
+
+$realRemoveSourceC4c = ${function:Remove-Source}
+function Remove-Source {
+    param([string]$ItemPath)
+    return $false
+}
+
+try {
+    $resultC4c = Invoke-FullPipelineChapter -ChapterDir $chC4c -ChapterImageFiles @((Get-Item -LiteralPath $imgC4c)) -IsZippable $true -ZipOut (Join-Path $scratchDir "scenario-c4c.zip") `
+        -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullLogging $false -PermanentDelete $true -SharedBudget $budgetC4c -Cts $ctsC4c
+} finally {
+    ${function:Remove-Source} = $realRemoveSourceC4c
+    $budgetC4c.Dispose()
+    $ctsC4c.Dispose()
+}
+
+Test-Assert ($resultC4c.ZipResult.Status -eq 'Success') "sanity check: the zip itself still succeeded"
+Test-Assert ($resultC4c.ZipResult.FolderDeleted -eq $false) "FolderDeleted is `$false, not miscounted as a real delete, when Remove-Source reports the folder already gone"
+Test-Assert ($resultC4c.ZipResult.FolderDeleteFailed -eq $false) "FolderDeleteFailed is also `$false - an already-gone folder is neither a success nor a real failure"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario C5 (2026-08-31 fix): $resultHandler's else branch used to
 #  treat ANY non-Image object as the animated result - Invoke-ZipParallelProcessing
 #  passes every object a worker's runspace emits to -ResultHandler, not
@@ -948,8 +982,8 @@ Write-Host "=== Scenario O: Invoke-Mode / ImageConversionZip (mode 8) - real zip
 # a callback object gets constructed and never used.
 $zipHandlerCallsO = [System.Collections.Generic.List[hashtable]]::new()
 $fakeZipFolderHandlerO = {
-    param($FolderPath, $ZipOut, $LooseImageExtensions)
-    $zipHandlerCallsO.Add(@{ FolderPath = $FolderPath; ZipOut = $ZipOut; LooseImageExtensions = $LooseImageExtensions })
+    param($FolderPath, $ZipOut, $LooseImageExtensions, $RequireJxlEntry)
+    $zipHandlerCallsO.Add(@{ FolderPath = $FolderPath; ZipOut = $ZipOut; LooseImageExtensions = $LooseImageExtensions; RequireJxlEntry = $RequireJxlEntry })
     return @{ Status = "Success"; ZipSize = 123; EntryCount = 4; FolderDeleted = $true; FolderDeleteFailed = $false }
 }.GetNewClosure()
 $zipOutcomeBoxO = @{ Value = $null }
@@ -964,6 +998,10 @@ $fakeImageHandlerO = {
     # Docs/lessons-learned.md and CLAUDE.md's "Lessons learned", same
     # trap this project has been bitten by before. $capturedJ (Scenario
     # J, above) already uses this exact box pattern successfully.
+    # ChapterResult omitted (2026-09-04: this is the "nothing needed
+    # converting" shape - e.g. an all-.gif or all-avif-routed-elsewhere
+    # chapter) - $Info.ChapterResult reads as $null, same as the real
+    # ImageConversionPipeline.ps1 passes when $chapterResult stayed $null.
     $zipOutcome = & $ZipStepCallback @{ Dir = (Get-Item -LiteralPath $Path); ZipOut = (Join-Path $Path "Chapter.zip") }
     $zipOutcomeBoxO.Value = $zipOutcome
     return @{ ConvertedSuccess = 1; ConvertedFail = 0; ConvertedSkipped = 0; DeletedSuccess = 1; DeletedFail = 0; StaleCleanedSuccess = 0; StaleCleanedFail = 0; InspectFailedCount = 0; Aborted = $true; ForceKilledCount = 2 }
@@ -995,6 +1033,23 @@ Test-Assert ($zipHandlerCallsO[0].LooseImageExtensions -notcontains ".gif") "Zip
 Test-Assert ($zipOutcomeBoxO.Value.Status -eq "Success" -and $zipOutcomeBoxO.Value.Detail -eq "4 entries") "the callback mapped the zip result into @{ Status; Detail } correctly"
 Test-Assert ($statsO.LooseFolderZipped.Success -eq 1 -and $statsO.LooseFolderZipped.Fail -eq 0 -and $statsO.LooseFolderZipped.Skipped -eq 0) ("mode 8's zip outcome IS reflected in LooseFolderZipped now (2026-08-28 fix) - got Success=" + $statsO.LooseFolderZipped.Success)
 Test-Assert ($statsO.LooseFolderDeleted.Success -eq 1 -and $statsO.LooseFolderDeleted.Fail -eq 0) "mode 8's folder-deletion outcome IS reflected in LooseFolderDeleted now"
+# 2026-09-04 fix, real bug: mode 8's zip step used to omit -RequireJxlEntry
+# entirely, always taking Invoke-LooseFolderZip's $true default - a
+# chapter with nothing to convert (ChapterResult $null, this call's own
+# shape) must pass $false, or a real gif-only/never-converted chapter
+# would fail Test-ZipArchive's ".jxl entry required" check forever.
+Test-Assert ($zipHandlerCallsO[0].RequireJxlEntry -eq $false) "RequireJxlEntry is `$false when ChapterResult is `$null (nothing needed converting)"
+
+# Same callback, but this time with a real ChapterResult carrying a
+# ConvertedCount > 0 - RequireJxlEntry must be $true.
+$zipHandlerCallsO.Clear()
+$fakeImageHandlerOConverted = {
+    param($Path, $CjxlExe, $MagickExe, $JpegLossless, $JpegQuality, $MaxCjxlProcs, $FullLogging, $ZipStepCallback)
+    $zipOutcome = & $ZipStepCallback @{ Dir = (Get-Item -LiteralPath $Path); ZipOut = (Join-Path $Path "Chapter.zip"); ChapterResult = @{ ConvertedCount = 3 } }
+    return @{ ConvertedSuccess = 1; ConvertedFail = 0; ConvertedSkipped = 0; DeletedSuccess = 1; DeletedFail = 0; StaleCleanedSuccess = 0; StaleCleanedFail = 0; InspectFailedCount = 0; Aborted = $false; ForceKilledCount = 0 }
+}.GetNewClosure()
+$null = Invoke-Mode -Resolved @{ Mode = 'ImageConversionZip' } -TargetPath $scratchDir -Settings $fakeSettingsO -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ImageConversionHandler $fakeImageHandlerOConverted -ZipFolderHandler $fakeZipFolderHandlerO
+Test-Assert ($zipHandlerCallsO[0].RequireJxlEntry -eq $true) "RequireJxlEntry is `$true when ChapterResult.ConvertedCount is greater than 0"
 
 # Flip the setting: .avif should be EXCLUDED from the blocking list, so an
 # unconverted .avif sitting in the folder no longer blocks zipping.
@@ -1402,6 +1457,48 @@ Test-Assert $disposedU2c "the PREVIOUS mutex object was disposed, not abandoned,
 $newMutexUsableU2c = $false
 try { $null = $script:logMutex.WaitOne(0); $script:logMutex.ReleaseMutex(); $newMutexUsableU2c = $true } catch { }
 Test-Assert $newMutexUsableU2c "the NEW mutex is still genuinely usable (disposing the OLD one didn't affect it)"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario U2d (2026-09-04 fix, real bug): when $InvokeModeHandler returns
+#  $null (a crashed/aborted run), the "Run did not complete" Warn used to
+#  be logged AFTER CompleteLogRunHandler had already run - in split-log
+#  mode that meant the Warn landed appended below the just-reordered
+#  block instead of being part of it, and the NEXT run's Start-LogRun then
+#  captured it as stale prior content, so it was never correctly reordered
+#  on any later pass either. The Warn must now be logged BEFORE
+#  CompleteLogRunHandler runs. Write-Log itself is shadowed (not just the
+#  injected handler) since the Warn comes from a real Write-Log call
+#  inside Invoke-MainLoop, not from an injectable handler.
+# ==============================================================================
+Write-Host "=== Scenario U2d: the `"Run did not complete`" Warn is logged BEFORE Complete-LogRun runs, not after ===" -ForegroundColor Cyan
+$script:eventOrderU2d = [System.Collections.Generic.List[string]]::new()
+$realWriteLogU2d = ${function:Write-Log}
+function Write-Log {
+    param([string]$Message, [string]$Level = "Info", [switch]$ForceConsole)
+    if ($Message -like "*Run did not complete*") { $script:eventOrderU2d.Add("WARN") }
+    & $script:realWriteLogU2dRef -Message $Message -Level $Level -ForceConsole:$ForceConsole
+}
+$script:realWriteLogU2dRef = $realWriteLogU2d
+
+$fakeSettingsU2d = @{ PermanentDelete = $false; CleanConsoleOutputEnabled = $false; FullLogging = $false; DisableSummaryFile = $false }
+$fakeGetModeU2d = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
+$fakeInvokeModeU2d = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) return $null }
+$fakeStartLogRunU2d    = { }
+$fakeCompleteLogRunU2d = { $script:eventOrderU2d.Add("COMPLETE") }
+$script:postRunCallsU2d = 0
+$fakePostRunU2d = { $script:postRunCallsU2d++; return 'Exit' }
+
+try {
+    Invoke-MainLoop -TargetPath "C:\fake\lib" -Settings $fakeSettingsU2d -SettingsPath "C:\fake\settings.json" -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ScriptDir "C:\fake\scriptdir" `
+        -GetModeHandler $fakeGetModeU2d -InvokeModeHandler $fakeInvokeModeU2d -PostRunPromptHandler $fakePostRunU2d `
+        -StartLogRunHandler $fakeStartLogRunU2d -CompleteLogRunHandler $fakeCompleteLogRunU2d
+} finally {
+    ${function:Write-Log} = $realWriteLogU2d
+}
+
+Test-Assert ($script:eventOrderU2d.Count -eq 2) ("both the Warn and Complete-LogRun fired exactly once each (got " + ($script:eventOrderU2d -join ',') + ")")
+Test-Assert (@($script:eventOrderU2d)[0] -eq "WARN" -and @($script:eventOrderU2d)[1] -eq "COMPLETE") ("the Warn was logged BEFORE Complete-LogRun ran, not after (order: " + ($script:eventOrderU2d -join ',') + ")")
 Write-Host ""
 
 # ==============================================================================
@@ -1813,6 +1910,47 @@ try {
 
 Test-Assert ($totalsZ5.ConvertedImageSuccess -eq 1) "sanity check: chapter 1's real image still converted normally"
 Test-Assert ($totalsZ5.StaleImageCleanedSuccess -eq 1) ("chapter 2's stale leftover was cleaned up despite chapter-discovery missing the directory entirely (got StaleImageCleanedSuccess=" + $totalsZ5.StaleImageCleanedSuccess + ")")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario Z6 (2026-09-04 fix, real bug): an abort raised mid per-chapter
+#  AVIF classification must (a) stop classifying further contested files in
+#  THAT chapter immediately, not spawn every remaining ~10-17s magick
+#  identify first, and (b) stop that chapter's own Remove-StaleLooseSources
+#  deletion from running at all - not just be picked up by the NEXT
+#  chapter's own top-of-loop check. Test-AvifAnimated shadowed so the
+#  FIRST classification call raises the abort - a second contested AVIF in
+#  the SAME chapter must never be classified.
+# ==============================================================================
+Write-Host "=== Scenario Z6: abort mid-AVIF-classification stops further classification AND this chapter's own stale cleanup ===" -ForegroundColor Cyan
+$chZ6 = New-Dir "scenario-z6\Series\Chapter 1"
+New-FakeAvifIn -DirPath $chZ6 -Name "animated1.avif" -Frames 5 | Out-Null
+New-FakeAvifIn -DirPath $chZ6 -Name "animated2.avif" -Frames 5 | Out-Null
+New-FakeImageIn -DirPath $chZ6 -Name "stale.jpg" | Out-Null
+Start-Sleep -Milliseconds 50
+[System.IO.File]::WriteAllText((Join-Path $chZ6 "stale.jxl"), "already converted on a prior run")
+
+$script:classifyCallsZ6 = 0
+$realTestAvifAnimatedZ6 = ${function:Test-AvifAnimated}
+function Test-AvifAnimated {
+    param([string]$AvifPath, [string]$MagickExe)
+    $script:classifyCallsZ6++
+    [ConsoleCtrl]::AbortRequested = $true
+    & $script:realTestAvifAnimatedZ6Ref -AvifPath $AvifPath -MagickExe $MagickExe
+}
+$script:realTestAvifAnimatedZ6Ref = $realTestAvifAnimatedZ6
+
+try {
+    $totalsZ6 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-z6") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+} finally {
+    ${function:Test-AvifAnimated} = $realTestAvifAnimatedZ6
+    Reset-AbortState
+}
+
+Test-Assert ($script:classifyCallsZ6 -eq 1) ("classification stopped after the first call once abort was raised, not both (got " + $script:classifyCallsZ6 + ")")
+Test-Assert ($totalsZ6.Aborted -eq $true) "the run's own totals record the abort"
+Test-Assert ($totalsZ6.StaleImageCleanedSuccess -eq 0 -and $totalsZ6.StaleImageCleanedFail -eq 0) ("this chapter's own stale cleanup did NOT run after the abort (got Success=" + $totalsZ6.StaleImageCleanedSuccess + ", Fail=" + $totalsZ6.StaleImageCleanedFail + ")")
+Test-Assert (Test-Path -LiteralPath (Join-Path $chZ6 "stale.jpg")) "the stale source file is still there - it was never touched"
 Write-Host ""
 
 # ==============================================================================
