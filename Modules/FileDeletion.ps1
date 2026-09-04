@@ -144,6 +144,21 @@ function Move-ToRecycleBin {
         [Parameter(Mandatory)]
         [string]$ItemPath
     )
+    # Resolved to an absolute, provider-native path FIRST (2026-09-03 fix,
+    # Todo.md finding - latent, not live: every current call site already
+    # passes an absolute path) - a relative $ItemPath would otherwise pass
+    # Test-Path (resolved against PowerShell's own $PWD/provider location)
+    # but then the VB FileIO/.NET calls below resolve it against the
+    # PROCESS's real current directory instead, which can silently differ
+    # from $PWD (Set-Location/Push-Location only move PowerShell's own
+    # location, not [System.Environment]::CurrentDirectory - the exact
+    # gotcha CLAUDE.md's "Lessons learned" documents, and the same root
+    # cause the already-fixed LeafDirectoryDiscovery.ps1 relative-path bug
+    # had). GetUnresolvedProviderPathFromPSPath (not Resolve-Path) is used
+    # specifically because it doesn't require the path to already exist -
+    # Test-Path right below still needs to see a genuine miss as $false,
+    # not throw.
+    $ItemPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ItemPath)
     if (-not (Test-Path -LiteralPath $ItemPath)) { return $false }
 
     return Invoke-DeleteTreatingVanishedAsFalse -Action {
@@ -189,6 +204,10 @@ function Remove-ItemPermanently {
         [Parameter(Mandatory)]
         [string]$ItemPath
     )
+    # Resolved to an absolute, provider-native path FIRST - see
+    # Move-ToRecycleBin's own matching comment above for the full
+    # reasoning (2026-09-03 fix, Todo.md finding).
+    $ItemPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ItemPath)
     if (-not (Test-Path -LiteralPath $ItemPath)) { return $false }
 
     return Invoke-DeleteTreatingVanishedAsFalse -Action {

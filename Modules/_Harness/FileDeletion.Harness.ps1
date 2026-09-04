@@ -310,6 +310,47 @@ Test-Assert (-not (Test-Path -LiteralPath $hiddenFileM2)) "Move-ToRecycleBin del
 Write-Host ""
 
 # ==============================================================================
+#  Scenario N (2026-09-03 fix, Todo.md finding - latent, not live: every
+#  real call site already passes an absolute path): a RELATIVE -ItemPath
+#  used to pass Test-Path (resolved against PowerShell's own $PWD/provider
+#  location) but then get deleted via .NET/VB FileIO calls that resolve
+#  relative paths against the PROCESS's real current directory instead -
+#  which Push-Location/Set-Location does NOT change (only PowerShell's
+#  own $PWD moves; [System.Environment]::CurrentDirectory does not,
+#  confirmed live earlier this session by ZipPipeline.Harness.ps1's own
+#  Scenario D3 hitting the identical gotcha). Both functions now resolve
+#  -ItemPath via GetUnresolvedProviderPathFromPSPath FIRST, so the actual
+#  delete always targets the exact same file Test-Path already confirmed
+#  exists - proven here by Push-Location'ing somewhere PS $PWD and the
+#  process CWD genuinely diverge, then passing a bare relative filename.
+# ==============================================================================
+Write-Host "=== Scenario N: a relative -ItemPath resolves against PowerShell's `$PWD, not a stale process CWD ===" -ForegroundColor Cyan
+$relDirN = Join-Path $scratchDir "scenario-n"
+New-Item -ItemType Directory -Path $relDirN -Force | Out-Null
+$relFileN = Join-Path $relDirN "relative-target.txt"
+"relative-path content" | Out-File -FilePath $relFileN -Encoding UTF8
+
+Push-Location $relDirN
+try {
+    Test-Assert ((Get-Location).Path -eq (Get-Item -LiteralPath $relDirN).FullName) "sanity check: PowerShell's `$PWD is genuinely the scratch dir now"
+    $null = Remove-ItemPermanently -ItemPath "relative-target.txt"
+} finally {
+    Pop-Location
+}
+Test-Assert (-not (Test-Path -LiteralPath $relFileN)) "Remove-ItemPermanently with a bare relative filename deleted the REAL file at PowerShell's `$PWD, not a stale/wrong location"
+
+$relFileN2 = Join-Path $relDirN "relative-target-2.txt"
+"relative-path content 2" | Out-File -FilePath $relFileN2 -Encoding UTF8
+Push-Location $relDirN
+try {
+    $null = Move-ToRecycleBin -ItemPath "relative-target-2.txt"
+} finally {
+    Pop-Location
+}
+Test-Assert (-not (Test-Path -LiteralPath $relFileN2)) "Move-ToRecycleBin with a bare relative filename also resolves against PowerShell's `$PWD correctly"
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="
