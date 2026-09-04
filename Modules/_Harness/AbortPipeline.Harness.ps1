@@ -604,6 +604,35 @@ Reset-HarnessScenarioState
 Write-Host ""
 
 # ==============================================================================
+#  Scenario S2 (2026-09-03 fix, Todo.md finding): a bug in the CALLER's own
+#  -ResultHandler (the worker itself SUCCEEDS here) must propagate as ITS
+#  OWN real exception, not get caught by the same try/catch as a genuine
+#  EndInvoke() failure and mislabeled as "Error collecting runspace result
+#  during abort drain" - a caller-side ResultHandler bug and a real
+#  runspace failure are different problems needing different messages.
+# ==============================================================================
+Write-Host "=== Scenario S2: a throwing -ResultHandler propagates as its own exception, not mislabeled ===" -ForegroundColor Cyan
+Reset-HarnessScenarioState
+$fakeS2 = New-FakeHandles -DelaysMs @(0) -Worker $fakeWorkerOk
+$throwingResultHandlerS2 = { param($r) throw "simulated bug inside the caller's own ResultHandler" }
+$s2ErrorHandlerCalls = [System.Collections.Generic.List[string]]::new()
+$s2ErrorHandler = { param($msg) $s2ErrorHandlerCalls.Add($msg) }
+$caughtS2 = $null
+try {
+    $null = Invoke-GracefulDrain -Handles $fakeS2.Handles -ResultHandler $throwingResultHandlerS2 -ErrorHandler $s2ErrorHandler -TimeoutSeconds 5
+} catch {
+    $caughtS2 = $_
+}
+$fakeS2.Pool.Close(); $fakeS2.Pool.Dispose()
+
+Test-Assert ($null -ne $caughtS2) "the injected -ResultHandler failure propagated out of Invoke-GracefulDrain, not silently swallowed"
+Test-Assert ($null -ne $caughtS2 -and $caughtS2.ToString() -like "*simulated bug inside the caller's own ResultHandler*") "the propagated exception is the CALLER's real message"
+Test-Assert ($s2ErrorHandlerCalls.Count -eq 0) "-ErrorHandler was NOT invoked for this - the worker itself succeeded, only the caller's own ResultHandler is broken"
+Test-Assert ([ConsoleCtrl]::DrainComplete.IsSet) "DrainComplete was still signalled despite the -ResultHandler throw - the native abort handler is not left parked"
+Reset-HarnessScenarioState
+Write-Host ""
+
+# ==============================================================================
 #  Scenario T (2026-08-31 addition, project owner's own explicit
 #  decision): Ctrl+C/Ctrl+Break while [ConsoleCtrl]::RunActive is $false
 #  (idle at the menu) must fall through to the OS's own default action

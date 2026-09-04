@@ -203,9 +203,9 @@ function Invoke-ZipParallelProcessing {
             $localStillPending = [System.Collections.Generic.List[hashtable]]::new()
             foreach ($h in $localHandles) {
                 if ($h.Handle.IsCompleted) {
+                    $localResults = $null
                     try {
                         $localResults = $h.PS.EndInvoke($h.Handle)
-                        foreach ($r in $localResults) { & $ResultHandler $r }
                         if ($h.PS.HadErrors) {
                             foreach ($e in $h.PS.Streams.Error) { Write-Log ("Runspace error: " + $e.ToString()) -Level Error }
                         }
@@ -213,6 +213,21 @@ function Invoke-ZipParallelProcessing {
                         Write-Log ("Error collecting runspace result: " + $_) -Level Error
                     } finally {
                         $h.PS.Dispose()
+                    }
+                    # -ResultHandler runs OUTSIDE the try/catch above
+                    # (2026-09-03 fix, Todo.md finding) - a bug in the
+                    # CALLER's own -ResultHandler used to be caught here
+                    # too and mislabeled as "Error collecting runspace
+                    # result", silently dropping any remaining results
+                    # from this same job with no indication the real bug
+                    # was in the caller's own code, not the runspace.
+                    # Letting it propagate uncaught surfaces the real
+                    # exception with its own message/stack, and this
+                    # function's own outer `finally` still tears down the
+                    # pool/mutex normally - $h.PS is already disposed
+                    # above either way.
+                    if ($null -ne $localResults) {
+                        foreach ($r in $localResults) { & $ResultHandler $r }
                     }
                 } else {
                     $localStillPending.Add($h)

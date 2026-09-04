@@ -322,6 +322,37 @@ Test-Assert ($resultsD.Count -eq 0) "no result was recorded for the failed worke
 Write-Host ""
 
 # ==============================================================================
+#  Scenario D2 (2026-09-03 fix, Todo.md finding): a bug in the CALLER's own
+#  -ResultHandler (not the runspace/worker) must propagate as ITS OWN real
+#  exception, not get caught and mislabeled as "Error collecting runspace
+#  result" - a genuine runspace failure and a caller-side ResultHandler bug
+#  are different problems and need different messages to actually debug.
+#  The worker itself succeeds normally here; only the handler is broken.
+# ==============================================================================
+Write-Host "=== Scenario D2: a throwing -ResultHandler propagates as its own exception, not mislabeled ===" -ForegroundColor Cyan
+
+Initialize-LogMutex
+$callerMutexD2 = $script:logMutex
+$script:cts = [System.Threading.CancellationTokenSource]::new()
+$jobParamsD2 = [System.Collections.Generic.List[hashtable]]::new()
+$jobParamsD2.Add(@{ JobId = 1; DelayMs = 50; DoFullLogging = $FullLogging; LogFile = $logFile; LogErrorFile = $logErrorFile; LogWarnFile = $logWarnFile })
+$handlerD2 = { param($r) throw "simulated bug inside the caller's own ResultHandler" }
+
+$caughtD2 = $null
+try {
+    $null = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -JobParams $jobParamsD2 `
+        -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile') -MaxParallel 2 -Cts $script:cts -ResultHandler $handlerD2
+} catch {
+    $caughtD2 = $_
+}
+$script:cts.Dispose()
+
+Test-Assert ($null -ne $caughtD2) "Invoke-ZipParallelProcessing DOES propagate a -ResultHandler's own exception, rather than swallowing it"
+Test-Assert ($null -ne $caughtD2 -and $caughtD2.ToString() -like "*simulated bug inside the caller's own ResultHandler*") "the propagated exception is the CALLER's real message, not a generic 'Error collecting runspace result' one"
+Test-Assert ([object]::ReferenceEquals($script:logMutex, $callerMutexD2)) "the caller's log mutex is still restored via the outer finally even when -ResultHandler throws"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario C (slow, ~65s): abort mid-run should gracefully drain fast jobs,
 #  then force-stop anything still running after the 60s timeout.
 #  Only runs with -RunSlowTest.

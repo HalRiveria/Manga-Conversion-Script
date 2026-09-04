@@ -487,17 +487,26 @@ function Receive-CompletedHandles {
     $stillActive = [System.Collections.Generic.List[hashtable]]::new()
     foreach ($h in $Handles) {
         if ($h.Handle.IsCompleted) {
+            $results = $null
             try {
                 $results = $h.PS.EndInvoke($h.Handle)
-                if ($null -ne $ResultHandler) {
-                    foreach ($r in $results) { & $ResultHandler $r }
-                }
             } catch {
                 if ($null -ne $ErrorHandler) {
                     & $ErrorHandler ("Error collecting runspace result during abort drain: " + $_)
                 }
             } finally {
                 $h.PS.Dispose()
+            }
+            # -ResultHandler runs OUTSIDE the try/catch above (2026-09-03
+            # fix, Todo.md finding) - a bug in the CALLER's own
+            # -ResultHandler used to be caught by the same catch as a real
+            # EndInvoke() failure, mislabeled as "Error collecting runspace
+            # result during abort drain" and silently dropping any
+            # remaining results from this same job. Letting it propagate
+            # uncaught surfaces the real exception with its own message/
+            # stack instead - $h.PS is already disposed above either way.
+            if ($null -ne $ResultHandler -and $null -ne $results) {
+                foreach ($r in $results) { & $ResultHandler $r }
             }
         } else {
             $stillActive.Add($h)
