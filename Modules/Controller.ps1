@@ -1342,6 +1342,8 @@ function Invoke-Mode {
                 $stats.LooseImgDeleted.Success   = $r.DeletedSuccess;   $stats.LooseImgDeleted.Fail   = $r.DeletedFail
                 $stats.LooseStaleCleaned.Success = $r.StaleCleanedSuccess; $stats.LooseStaleCleaned.Fail = $r.StaleCleanedFail
                 $stats.InspectFailed.Count       = $r.InspectFailedCount
+                $stats.Aborted                   = $r.Aborted
+                $stats.ForceKilledCount          = $r.ForceKilledCount
             }
             'AnimatedConversion' {
                 # [bool](...) casts (2026-08-31 fix, from a FOURTH same-day
@@ -1361,6 +1363,8 @@ function Invoke-Mode {
                 $stats.LooseAnimatedConverted.Success = $r.ConvertedSuccess; $stats.LooseAnimatedConverted.Fail = $r.ConvertedFail; $stats.LooseAnimatedConverted.Skipped = $r.ConvertedSkipped
                 $stats.LooseAnimatedDeleted.Success   = $r.DeletedSuccess;   $stats.LooseAnimatedDeleted.Fail   = $r.DeletedFail
                 $stats.InspectFailed.Count            = $r.InspectFailedCount
+                $stats.Aborted                        = $r.Aborted
+                $stats.ForceKilledCount               = $r.ForceKilledCount
             }
             'ZipFolders' {
                 # [bool](...) casts (2026-08-31 fix, from a same-day
@@ -1399,6 +1403,8 @@ function Invoke-Mode {
                 $stats.LooseFolderZipped.Success      = $r.ZipCreatedSuccess;        $stats.LooseFolderZipped.Fail      = $r.ZipCreatedFail;        $stats.LooseFolderZipped.Skipped = $r.ZipSkippedDueToError
                 $stats.LooseFolderDeleted.Success     = $r.FolderDeletedSuccess;     $stats.LooseFolderDeleted.Fail     = $r.FolderDeletedFail
                 $stats.InspectFailed.Count            = $r.InspectFailedCount
+                $stats.Aborted                        = $r.Aborted
+                $stats.ForceKilledCount               = $r.ForceKilledCount
             }
             'ImageConversionZip' {
                 # Mode 8's real zip-step wiring (2026-08-28, Phase 2 of the

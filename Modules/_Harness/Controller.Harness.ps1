@@ -788,7 +788,7 @@ $fakeImageHandlerJ = {
     param($Path, $CjxlExe, $MagickExe, $JpegLossless, $JpegQuality, $MaxCjxlProcs, $FullLogging)
     $capturedJ.Path = $Path; $capturedJ.CjxlExe = $CjxlExe; $capturedJ.MagickExe = $MagickExe
     $capturedJ.JpegQuality = $JpegQuality; $capturedJ.MaxCjxlProcs = $MaxCjxlProcs; $capturedJ.FullLogging = $FullLogging
-    return @{ ConvertedSuccess = 3; ConvertedFail = 1; ConvertedSkipped = 2; DeletedSuccess = 3; DeletedFail = 0; StaleCleanedSuccess = 1; StaleCleanedFail = 0; InspectFailedCount = 2 }
+    return @{ ConvertedSuccess = 3; ConvertedFail = 1; ConvertedSkipped = 2; DeletedSuccess = 3; DeletedFail = 0; StaleCleanedSuccess = 1; StaleCleanedFail = 0; InspectFailedCount = 2; Aborted = $true; ForceKilledCount = 5 }
 }.GetNewClosure()
 $statsJ = Invoke-Mode -Resolved @{ Mode = 'ImageConversion' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ImageConversionHandler $fakeImageHandlerJ
 
@@ -796,16 +796,18 @@ Test-Assert ($capturedJ.Path -eq "C:\fake\lib" -and $capturedJ.CjxlExe -eq "fake
 Test-Assert ($statsJ.LooseImgConverted.Success -eq 3 -and $statsJ.LooseImgConverted.Fail -eq 1 -and $statsJ.LooseImgConverted.Skipped -eq 2) "ImageConversion: LooseImgConverted mapped correctly"
 Test-Assert ($statsJ.LooseImgDeleted.Success -eq 3 -and $statsJ.LooseStaleCleaned.Success -eq 1) "ImageConversion: LooseImgDeleted/LooseStaleCleaned mapped correctly"
 Test-Assert ($statsJ.InspectFailed.Count -eq 2) "ImageConversion: InspectFailedCount mapped onto InspectFailed.Count"
+Test-Assert ($statsJ.Aborted -eq $true -and $statsJ.ForceKilledCount -eq 5) "ImageConversion: Aborted/ForceKilledCount mapped onto Stats (2026-09-03 fix, Todo.md finding)"
 Write-Host ""
 
 Write-Host "=== Scenario K: Invoke-Mode / AnimatedConversion - param translation + result mapping ===" -ForegroundColor Cyan
 $fakeAnimHandlerK = { param($Path, $MagickExe, $AnimatedLossless, $AnimatedQuality, $AnimatedThreads, $AnimatedOverwrite, $AnimatedDeleteSource, $FullLogging)
-    return @{ ConvertedSuccess = 4; ConvertedFail = 0; ConvertedSkipped = 1; DeletedSuccess = 4; DeletedFail = 0; InspectFailedCount = 1 }
+    return @{ ConvertedSuccess = 4; ConvertedFail = 0; ConvertedSkipped = 1; DeletedSuccess = 4; DeletedFail = 0; InspectFailedCount = 1; Aborted = $true; ForceKilledCount = 2 }
 }
 $statsK = Invoke-Mode -Resolved @{ Mode = 'AnimatedConversion' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -AnimatedConversionHandler $fakeAnimHandlerK
 Test-Assert ($statsK.LooseAnimatedConverted.Success -eq 4 -and $statsK.LooseAnimatedConverted.Skipped -eq 1) "AnimatedConversion: LooseAnimatedConverted mapped correctly"
 Test-Assert ($statsK.LooseAnimatedDeleted.Success -eq 4) "AnimatedConversion: LooseAnimatedDeleted mapped correctly"
 Test-Assert ($statsK.InspectFailed.Count -eq 1) "AnimatedConversion: InspectFailedCount mapped onto InspectFailed.Count"
+Test-Assert ($statsK.Aborted -eq $true -and $statsK.ForceKilledCount -eq 2) "AnimatedConversion: Aborted/ForceKilledCount mapped onto Stats (2026-09-03 fix, Todo.md finding)"
 Write-Host ""
 
 Write-Host "=== Scenario L: Invoke-Mode / ZipFolders - result mapping ===" -ForegroundColor Cyan
@@ -835,12 +837,13 @@ $fakeFullHandlerN = { param($Path, $CjxlExe, $MagickExe, $JpegLossless, $JpegQua
         StaleImageCleanedSuccess = 0; StaleImageCleanedFail = 0
         ConvertedAnimatedSuccess = 2; ConvertedAnimatedFail = 0; ConvertedAnimatedSkipped = 0; DeletedAnimatedSuccess = 2; DeletedAnimatedFail = 0
         ZipCreatedSuccess = 3; ZipCreatedFail = 0; ZipSkippedDueToError = 0; FolderDeletedSuccess = 3; FolderDeletedFail = 0
-        ForceKilledCount = 0; InspectFailedCount = 4; SeriesCount = 1; ChapterCount = 3; Aborted = $false
+        ForceKilledCount = 7; InspectFailedCount = 4; SeriesCount = 1; ChapterCount = 3; Aborted = $true
     }
 }
 $statsN = Invoke-Mode -Resolved @{ Mode = 'FullPipeline' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -FullPipelineHandler $fakeFullHandlerN
 Test-Assert ($statsN.LooseImgConverted.Success -eq 5 -and $statsN.LooseAnimatedConverted.Success -eq 2 -and $statsN.LooseFolderZipped.Success -eq 3) "FullPipeline: image + animated + zip stat groups all mapped in one call"
 Test-Assert ($statsN.InspectFailed.Count -eq 4) "FullPipeline: InspectFailedCount (both engines summed by Controller.ps1) mapped onto InspectFailed.Count"
+Test-Assert ($statsN.Aborted -eq $true -and $statsN.ForceKilledCount -eq 7) "FullPipeline: Aborted/ForceKilledCount mapped onto Stats (2026-09-03 fix, Todo.md finding)"
 # 2026-09-03 addition, real bug fix (see CHANGELOG.md) - this call site
 # used to reuse $Settings.MaxCjxlProcs (6 in $fakeSettings) directly;
 # confirms it now reads the dedicated $Settings.FullPipelineMaxConcurrentProcs

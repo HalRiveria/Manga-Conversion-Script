@@ -89,6 +89,8 @@ function New-StatsTracker {
         ZipOnlyZipped          = @{ Success = 0; Fail = 0 }
         ZipOnlyFolderDeleted   = @{ Success = 0; Fail = 0 }
         InspectFailed          = @{ Count = 0 }
+        Aborted                = $false
+        ForceKilledCount       = 0
     }
 }
 
@@ -166,7 +168,22 @@ function Get-SummaryLines {
     }
 
     $lines.Add("Time taken          : " + $ElapsedString)
-    $lines.Add("=== Processing complete ===")
+    # Aborted/ForceKilledCount (2026-09-03 fix, Todo.md finding): every
+    # pipeline that has an abort loop tracks these ($totals.Aborted/
+    # $totals.ForceKilledCount in Controller.ps1) but this function used to
+    # ignore both, so an aborted run's summary ended with the exact same
+    # "Processing complete" framing as a normal finish - no visible sign
+    # the run didn't actually run to completion. Shown unconditionally
+    # when Aborted is true (a real, run-defining fact, not noise); the
+    # force-killed count is folded into that same line rather than a
+    # separate row, since it's only ever meaningful in the aborted case
+    # (a normal completion has nothing force-stopped by definition).
+    if ($Stats.Aborted) {
+        $lines.Add("Run was ABORTED     : " + $Stats.ForceKilledCount + " job(s) force-stopped after the drain timeout")
+        $lines.Add("=== Processing ABORTED ===")
+    } else {
+        $lines.Add("=== Processing complete ===")
+    }
 
     return ,$lines.ToArray()
 }

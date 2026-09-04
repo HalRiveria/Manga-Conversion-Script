@@ -59,6 +59,8 @@ Test-Assert (
     $statsA2.ContainsKey('LooseAnimatedConverted') -and $statsA2.ContainsKey('LooseAnimatedDeleted')
 ) "schema includes the new LooseAnimatedConverted/LooseAnimatedDeleted groups"
 Test-Assert ($statsA2.ContainsKey('InspectFailed') -and $statsA2.InspectFailed.Count -eq 0) "schema includes InspectFailed (2026-08-28), defaulting to 0"
+Test-Assert ($statsA2.ContainsKey('Aborted') -and $statsA2.Aborted -eq $false) "schema includes Aborted (2026-09-03), defaulting to `$false"
+Test-Assert ($statsA2.ContainsKey('ForceKilledCount') -and $statsA2.ForceKilledCount -eq 0) "schema includes ForceKilledCount (2026-09-03), defaulting to 0"
 Write-Host ""
 
 # ==============================================================================
@@ -145,6 +147,30 @@ Test-Assert ($linesF.Count -eq 3) "exactly 3 lines with no group rows: header, t
 Test-Assert ($linesF -contains "=== SUMMARY ===") "still has the header"
 Test-Assert (($linesF -join "`n") -match "Time taken\s+: 00h 00m 00s") "still reports elapsed time"
 Test-Assert ($linesF -contains "=== Processing complete ===") "still has the footer"
+Test-Assert (($linesF -join "`n") -notmatch "ABORTED") "a normal (non-aborted) run's footer says nothing about being aborted"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario F2 (2026-09-03 fix, Todo.md finding): an aborted run's summary
+#  used to end with the exact same "Processing complete" footer as a
+#  normal finish - Stats.Aborted/Stats.ForceKilledCount (already tracked
+#  by every pipeline with an abort loop, per Controller.ps1's own
+#  $totals) now actually reach Get-SummaryLines' output.
+# ==============================================================================
+Write-Host "=== Scenario F2: Get-SummaryLines reflects an aborted run, not 'Processing complete' ===" -ForegroundColor Cyan
+$statsF2 = New-StatsTracker
+$statsF2.Aborted = $true
+$statsF2.ForceKilledCount = 3
+$linesF2 = Get-SummaryLines -Stats $statsF2 -ElapsedString "00h 00m 05s" -ModeFlags (Get-AllModeFlagsFalse)
+$blobF2 = $linesF2 -join "`n"
+Test-Assert ($linesF2 -notcontains "=== Processing complete ===") "the normal 'Processing complete' footer is NOT used for an aborted run"
+Test-Assert ($linesF2 -contains "=== Processing ABORTED ===") "the footer clearly marks the run as aborted"
+Test-Assert ($blobF2 -match "ABORTED") "the report visibly mentions the abort somewhere"
+Test-Assert ($blobF2 -match "3") "the force-killed count (3) is reported"
+
+$statsF2b = New-StatsTracker
+$linesF2b = Get-SummaryLines -Stats $statsF2b -ElapsedString "00h 00m 05s" -ModeFlags (Get-AllModeFlagsFalse)
+Test-Assert ($linesF2b -contains "=== Processing complete ===") "sanity check: Stats.Aborted = `$false (the default) still gets the normal footer"
 Write-Host ""
 
 # ==============================================================================
