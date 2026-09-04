@@ -103,6 +103,47 @@ Test-Assert ($emptySplit.Count -eq 1 -and $emptySplit[0] -eq "") "empty text ret
 Write-Host ""
 
 # ==============================================================================
+#  Scenario C2 (2026-09-03 fix, Todo.md finding): Get-DisplayWidth/
+#  Set-PadToDisplayWidth/Split-TextToWidth all treat a CJK character as 2
+#  console columns, not 1 - $Text.Length (a .NET UTF-16 code-unit count)
+#  used to be treated as a column count, so a chunk that fit within
+#  $Width CHARACTERS could still be wider than $Width COLUMNS on screen,
+#  triggering the terminal's own automatic wrap and desyncing this
+#  module's row-count math for every row after it. This can't be verified
+#  against a REAL console from a harness (no live terminal in tests, same
+#  caveat the original finding noted) - these scenarios cover the
+#  underlying width/chunking/padding MATH directly instead, which is
+#  exactly what the desync traced back to.
+# ==============================================================================
+Write-Host "=== Scenario C2: CJK-aware display width, chunking, and padding ===" -ForegroundColor Cyan
+# Built from explicit Unicode code points, not literal CJK characters in
+# the source - a PS 5.1 .ps1 file without a BOM can misread literal
+# non-ASCII source characters depending on the encoding it's saved/read
+# with (confirmed live: literal characters here garbled on first draft).
+# 0x65E5 0x672C 0x8A9E = "日本語" ("Japanese language"), 0x30C1 0x30E3
+# 0x30D7 0x30BF 0x30FC = "チャプター" ("chapter", katakana).
+$nihongo  = [string]([char]0x65E5) + [string]([char]0x672C) + [string]([char]0x8A9E)
+$chapterJ = -join @(0x30C1, 0x30E3, 0x30D7, 0x30BF, 0x30FC | ForEach-Object { [char]$_ })
+
+Test-Assert ((Get-DisplayWidth -Text "hello") -eq 5) "plain ASCII: display width equals character count"
+Test-Assert ((Get-DisplayWidth -Text "") -eq 0) "empty string has zero display width"
+Test-Assert ((Get-DisplayWidth -Text $nihongo) -eq 6) "3 CJK characters report a display width of 6, not 3 (2 columns each)"
+Test-Assert ((Get-DisplayWidth -Text ("ab" + $nihongo.Substring(0,2) + "cd")) -eq 8) "mixed ASCII + CJK sums correctly (4 ASCII x1 + 2 CJK x2 = 8)"
+
+$cjkText  = $nihongo + $chapterJ
+$cjkSplit = @(Split-TextToWidth -Text $cjkText -Width 10)
+Test-Assert (($cjkSplit | ForEach-Object { Get-DisplayWidth -Text $_ } | Measure-Object -Maximum).Maximum -le 10) "every CJK chunk fits within the requested display width in COLUMNS, not just in character count"
+Test-Assert (($cjkSplit -join "") -eq $cjkText) "rejoining the CJK chunks reproduces the original text exactly - nothing lost or duplicated"
+
+$padAsciiC2 = Set-PadToDisplayWidth -Text "abc" -Width 6
+Test-Assert ($padAsciiC2 -eq "abc   ") "plain ASCII pads exactly like .PadRight would"
+$padCjkC2 = Set-PadToDisplayWidth -Text $nihongo.Substring(0,2) -Width 6
+Test-Assert ((Get-DisplayWidth -Text $padCjkC2) -eq 6 -and $padCjkC2 -eq ($nihongo.Substring(0,2) + "  ")) "a 2-character CJK string (4 display columns) gets only 2 trailing spaces, not `$Width minus the character COUNT"
+$padExactC2 = Set-PadToDisplayWidth -Text $nihongo -Width 6
+Test-Assert ($padExactC2 -eq $nihongo) "a CJK string already exactly at the target display width is returned unchanged, no trailing spaces"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario D: Format-SeriesLines - now returns @{ Text; Color } objects,
 #  not bare strings, so colors can be verified directly here.
 # ==============================================================================

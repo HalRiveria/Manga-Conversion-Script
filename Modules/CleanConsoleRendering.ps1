@@ -154,15 +154,88 @@ function Get-ProgressBarString {
     return ("[" + ("#" * $filled) + ("-" * $empty) + "]")
 }
 
+function Test-WideCharacter {
+    <#
+    .SYNOPSIS
+        True if $Char renders as 2 console columns wide (CJK/fullwidth),
+        false for a normal 1-column-wide character. Covers the ranges
+        this project's own domain actually hits (this is a manga-library
+        tool - Japanese/Korean/Chinese filenames are routine, see
+        Logging.ps1's own non-ASCII handling) - not a complete Unicode
+        East Asian Width table, the practically-relevant subset of it.
+    #>
+    param([Parameter(Mandatory)][char]$Char)
+    $code = [int][char]$Char
+    return (
+        ($code -ge 0x1100 -and $code -le 0x115F) -or   # Hangul Jamo
+        ($code -ge 0x2E80 -and $code -le 0x303E) -or   # CJK radicals/punctuation
+        ($code -ge 0x3041 -and $code -le 0x33FF) -or   # Hiragana/Katakana/CJK symbols
+        ($code -ge 0x3400 -and $code -le 0x4DBF) -or   # CJK Extension A
+        ($code -ge 0x4E00 -and $code -le 0x9FFF) -or   # CJK Unified Ideographs
+        ($code -ge 0xA000 -and $code -le 0xA4CF) -or   # Yi
+        ($code -ge 0xAC00 -and $code -le 0xD7A3) -or   # Hangul Syllables
+        ($code -ge 0xF900 -and $code -le 0xFAFF) -or   # CJK Compatibility Ideographs
+        ($code -ge 0xFF00 -and $code -le 0xFF60) -or   # Fullwidth forms
+        ($code -ge 0xFFE0 -and $code -le 0xFFE6)       # Fullwidth signs
+    )
+}
+
+function Get-DisplayWidth {
+    <#
+    .SYNOPSIS
+        Total console column width of $Text - 2 per wide/CJK character
+        (Test-WideCharacter), 1 per everything else. $Text.Length is a
+        .NET UTF-16 code-unit count, not a column count - the two only
+        diverge for wide characters, but that divergence is exactly what
+        the CJK CCR redraw desync (2026-09-03 fix, Todo.md finding) traced
+        back to: a chunk sized in CHARACTERS could still be wider than
+        the console in actual COLUMNS, so the terminal's own automatic
+        wrap kicked in and desynced this module's row-count math for
+        every line drawn after it.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    $width = 0
+    foreach ($ch in $Text.ToCharArray()) {
+        $width += if (Test-WideCharacter -Char $ch) { 2 } else { 1 }
+    }
+    return $width
+}
+
+function Set-PadToDisplayWidth {
+    <#
+    .SYNOPSIS
+        Pads $Text with trailing spaces until its DISPLAY width (not
+        $Text.Length) reaches $Width - the .PadRight equivalent for the
+        same CJK/wide-character gap Get-DisplayWidth exists for. Returns
+        $Text unchanged if its display width already meets or exceeds
+        $Width, matching .PadRight's own no-op behavior in that case.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Text,
+        [Parameter(Mandatory)]
+        [int]$Width
+    )
+    $currentWidth = Get-DisplayWidth -Text $Text
+    if ($currentWidth -ge $Width) { return $Text }
+    return $Text + (" " * ($Width - $currentWidth))
+}
+
 function Split-TextToWidth {
     <#
     .SYNOPSIS
-        Splits $Text into fixed-$Width chunks (the last one shorter if
-        it doesn't divide evenly). Used so long series/chapter names wrap
-        under this module's own control instead of relying on the
-        terminal's automatic wrap - needed because the redraw algorithm
-        must know exactly how many physical rows each logical line will
-        occupy to move the cursor correctly.
+        Splits $Text into chunks that each fit within $Width console
+        COLUMNS (not characters - see Get-DisplayWidth), the last one
+        shorter if it doesn't divide evenly. Used so long series/chapter
+        names wrap under this module's own control instead of relying on
+        the terminal's automatic wrap - needed because the redraw
+        algorithm must know exactly how many physical rows each logical
+        line will occupy to move the cursor correctly. Chunking by
+        character count alone (pre-2026-09-03) let a CJK-heavy chunk
+        render wider than $Width columns despite fitting within $Width
+        characters, triggering the terminal's own wrap and desyncing the
+        row-count math for every row after it (Todo.md finding).
     .OUTPUTS
         string[] - always at least one element, even for empty input.
     #>
@@ -177,12 +250,23 @@ function Split-TextToWidth {
     if ($Text.Length -eq 0) { return @("") }
 
     $chunks = [System.Collections.Generic.List[string]]::new()
-    $pos = 0
-    while ($pos -lt $Text.Length) {
-        $len = [Math]::Min($Width, $Text.Length - $pos)
-        $chunks.Add($Text.Substring($pos, $len))
-        $pos += $len
+    $current = [System.Text.StringBuilder]::new()
+    $currentWidth = 0
+    foreach ($ch in $Text.ToCharArray()) {
+        $chWidth = if (Test-WideCharacter -Char $ch) { 2 } else { 1 }
+        # Flush before appending if this character would overflow the
+        # chunk - unless the chunk is still empty (a single wide
+        # character in a $Width=1 line unavoidably exceeds it; better to
+        # let that one chunk run 1 column over than emit an empty chunk).
+        if (($currentWidth + $chWidth) -gt $Width -and $current.Length -gt 0) {
+            $chunks.Add($current.ToString())
+            $current = [System.Text.StringBuilder]::new()
+            $currentWidth = 0
+        }
+        $null = $current.Append($ch)
+        $currentWidth += $chWidth
     }
+    if ($current.Length -gt 0 -or $chunks.Count -eq 0) { $chunks.Add($current.ToString()) }
     # Deliberately NO leading comma here, unlike the List-returning
     # functions elsewhere in this project (e.g. Get-ZippableLeafDirs) -
     # this function's only real caller uses `foreach (... in (Split-TextToWidth ...))`,
@@ -359,7 +443,13 @@ function Update-CleanConsoleDisplay {
             if ($oldCount -gt 0) {
                 [Console]::SetCursorPosition(0, [Console]::CursorTop - $oldCount)
             }
-            foreach ($row in $newContentRows) { Write-ColoredConsoleRow -Text $row.Text.PadRight($effectiveWidth) -Color $row.Color }
+            # Set-PadToDisplayWidth, not .PadRight (2026-09-03 fix, Todo.md
+            # finding) - .PadRight pads by character COUNT, so a CJK row
+            # already at $effectiveWidth characters (but narrower than
+            # that in actual columns) got padded to the WRONG on-screen
+            # width, leaving stale characters from a longer previous row
+            # visible past the end of the new one.
+            foreach ($row in $newContentRows) { Write-ColoredConsoleRow -Text (Set-PadToDisplayWidth -Text $row.Text -Width $effectiveWidth) -Color $row.Color }
             if ($newContentRows.Count -lt $oldCount) {
                 $blankRowsNeeded = $oldCount - $newContentRows.Count
                 for ($i = 0; $i -lt $blankRowsNeeded; $i++) { Write-Host ("".PadRight($effectiveWidth)) }
