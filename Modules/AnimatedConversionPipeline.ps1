@@ -260,8 +260,16 @@ function Complete-AnimatedConversionJob {
     # Controller.ps1's Full Pipeline, where the budget is shared with the
     # image engine.
     try {
-        $stdout = $Job.Proc.StandardOutput.ReadToEnd()
-        $stderr = $Job.Proc.StandardError.ReadToEnd()
+        # Await the tasks started right after Process::Start (2026-09-08
+        # fix) rather than a synchronous ReadToEnd() here - by the time
+        # this function runs the process has already exited (both call
+        # sites gate on HasExited first), so this just collects output
+        # that was draining concurrently all along instead of being the
+        # thing that could deadlock a chatty child. Falls back to a
+        # synchronous read for any job that predates this field (defensive
+        # only - every real dispatch path now sets it).
+        $stdout = if ($Job.StdoutTask) { $Job.StdoutTask.GetAwaiter().GetResult() } else { $Job.Proc.StandardOutput.ReadToEnd() }
+        $stderr = if ($Job.StderrTask) { $Job.StderrTask.GetAwaiter().GetResult() } else { $Job.Proc.StandardError.ReadToEnd() }
         $code   = $Job.Proc.ExitCode
     } finally {
         $Job.Proc.Dispose()
@@ -595,6 +603,20 @@ function Convert-AnimatedBatch {
             Write-Log ("Converting animated: '" + $j.SrcPath + "'")
 
             $j.Proc          = [System.Diagnostics.Process]::Start($psi)
+            # Start draining both redirected streams immediately, not when
+            # the job is later found HasExited (2026-09-08 fix, real bug -
+            # same species as Convert-ImageBatch's own cjxl fix, missed
+            # here at the time since this file's async magick dispatch is
+            # polled the same way, not read synchronously inline): a magick
+            # invocation that writes more than the OS pipe buffer to stderr
+            # before exiting (e.g. per-frame warnings on a malformed/quirky
+            # animated AVIF) would otherwise block on that write forever -
+            # HasExited never becomes true, and this job sits in $running
+            # for the rest of the run with no timeout. Live-reproduced.
+            # Complete-AnimatedConversionJob awaits these tasks instead of
+            # calling ReadToEnd() itself.
+            $j.StdoutTask    = $j.Proc.StandardOutput.ReadToEndAsync()
+            $j.StderrTask    = $j.Proc.StandardError.ReadToEndAsync()
             $j.StartTime     = [System.Diagnostics.Stopwatch]::StartNew()
             $j.LastHeartbeat = [timespan]::Zero
             $running.Add($j)
@@ -1048,13 +1070,22 @@ function Invoke-LooseAnimatedConversionPipeline {
                 Write-Log ("Series '" + $series.Name + "': '" + $extraDir.Name + "' has unconverted animated file(s) but wasn't found by chapter discovery (e.g. a stray .zip sitting alongside it, or files outside a normal chapter folder) - converting it anyway.") -Level Warn
             }
 
-            if ($script:CleanConsoleOutputEnabled) {
-                Start-SeriesProgress -SeriesName $series.Name -TotalChapters $chapterDirs.Count
-            }
-
+            # Empty-series check moved BEFORE Start-SeriesProgress (2026-09-08
+            # fix, real bug caught by a full-codebase review - same fix as
+            # ImageConversionPipeline.ps1/Controller.ps1 already got
+            # 2026-09-03, missed here at the time): a series with zero
+            # qualifying chapters (e.g. already fully converted) used to
+            # still register a 0/0-chapter entry with CCR, printing a
+            # frozen "0/0 chapters" line per empty series - project owner's
+            # own call: a series with nothing to convert shouldn't show up
+            # on the console at all.
             if ($chapterDirs.Count -eq 0) {
                 Write-Log ("Series '" + $series.Name + "': no qualifying chapters found.") -Level Info
                 continue
+            }
+
+            if ($script:CleanConsoleOutputEnabled) {
+                Start-SeriesProgress -SeriesName $series.Name -TotalChapters $chapterDirs.Count
             }
 
             Write-Log ("=== Series '" + $series.Name + "': " + $chapterDirs.Count + " chapter(s) ===")

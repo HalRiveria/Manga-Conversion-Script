@@ -201,6 +201,17 @@ class Program {
         string dst = args[args.Length - 1];
         string srcContent = File.Exists(src) ? File.ReadAllText(src) : "";
 
+        if (srcContent.Contains("STDERR_FLOOD")) {
+            // 2026-09-08 addition, same technique as the "identify" branch's
+            // own FAIL_IDENTIFY_HUGE_STDERR above and ImageConversionPipeline's
+            // fake cjxl.exe - simulates a magick conversion (not identify)
+            // that emits more than the OS pipe buffer of stderr before
+            // exiting, proving Convert-AnimatedBatch's async dispatch
+            // (polled via HasExited rather than read synchronously inline)
+            // doesn't deadlock on it.
+            string floodLine = new string('E', 200) + Environment.NewLine;
+            for (int i = 0; i < 2000; i++) { Console.Error.Write(floodLine); }
+        }
         if (srcContent.Contains("FAIL_MAGICK_AFTER_PARTIAL_WRITE")) {
             // Simulates magick actually opening/writing to its output
             // path before crashing mid-encode - proves the 2026-08-31
@@ -299,6 +310,56 @@ Test-Assert ($resultB.DeletedCount -eq 1) "source deleted (DoAnimatedDeleteSourc
 Test-Assert (-not (Test-Path -LiteralPath $fileB.FullName)) "source file is actually gone"
 $webpB = [System.IO.Path]::ChangeExtension($fileB.FullName, ".webp")
 Test-Assert (Test-Path -LiteralPath $webpB) "output .webp was created"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario B2 (2026-09-08 fix, real bug, live-reproduced): the magick
+#  conversion job in Convert-AnimatedBatch's async dispatch loop is polled
+#  via HasExited, not read synchronously inline - both redirected streams
+#  must be drained as soon as the process starts (not only once it's found
+#  HasExited), or a magick that writes more than the OS pipe buffer to
+#  stderr before exiting would block on that write forever, hanging the
+#  whole batch with no error and no timeout - the exact species already
+#  fixed in ImageConversionPipeline.ps1's Convert-ImageBatch, missed here.
+#  Run on a background runspace with a bounded wait, NOT called directly -
+#  a real regression here would hang forever, and this proves it fails the
+#  assertion instead of hanging the whole harness process.
+# ==============================================================================
+Write-Host "=== Scenario B2: a magick job with a stderr flood does not deadlock the dispatch loop ===" -ForegroundColor Cyan
+$fileB2 = New-FakeAvif -Name "chapter-b2\flood.avif" -Content "FRAMES:5 STDERR_FLOOD"
+
+$runspaceB2 = [runspacefactory]::CreateRunspace()
+$runspaceB2.Open()
+$psB2 = [PowerShell]::Create()
+$psB2.Runspace = $runspaceB2
+$null = $psB2.AddScript({
+    param($ModulesDir, $MagickExe, $FilePath)
+    . (Join-Path $ModulesDir "AnimatedConversionPipeline.ps1")
+    function Write-Log { param([string]$Message, [string]$Level = "Info") }
+    function Remove-Source {
+        param([string]$ItemPath)
+        if (Test-Path -LiteralPath $ItemPath) { Remove-Item -LiteralPath $ItemPath -Force }
+        return $true
+    }
+    $script:PermanentDelete = $true
+    Convert-AnimatedBatch -AnimatedFiles @((Get-Item -LiteralPath $FilePath)) -MagickExe $MagickExe -AnimatedThreads 2 -CancelToken ([System.Threading.CancellationToken]::None)
+}).AddArgument($modulesDirAC).AddArgument($fakeMagickExe).AddArgument($fileB2.FullName)
+
+$handleB2 = $psB2.BeginInvoke()
+$completedB2 = $handleB2.AsyncWaitHandle.WaitOne(15000)
+if ($completedB2) {
+    $resultB2 = $psB2.EndInvoke($handleB2)[0]
+} else {
+    $psB2.Stop()
+}
+$psB2.Dispose()
+$runspaceB2.Close()
+$runspaceB2.Dispose()
+
+Test-Assert $completedB2 "Convert-AnimatedBatch returned within 15s instead of hanging on the stderr flood"
+if ($completedB2) {
+    Test-Assert ($resultB2.ConvertedCount -eq 1) ("the file still converted successfully despite the stderr flood (got ConvertedCount=" + $resultB2.ConvertedCount + ")")
+}
 Write-Host ""
 
 # ==============================================================================
@@ -578,6 +639,29 @@ $totalsP = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "
 
 Test-Assert ($totalsP.SeriesCount -eq 1) "the empty series was still walked"
 Test-Assert ($totalsP.ChapterCount -eq 0) "zero chapters counted"
+
+# 2026-09-08 fix, real bug caught by a full-codebase review - same fix as
+# ImageConversionPipeline.ps1/Controller.ps1 already got 2026-09-03: the
+# empty-chapters check used to run AFTER Start-SeriesProgress, so a series
+# with nothing to convert still registered a 0/0-chapter entry with CCR,
+# printing a frozen "0/0 chapters" line. Start-SeriesProgress shadowed to
+# prove it's never called for an empty series with Clean Console Output on.
+$script:startSeriesProgressCallsP = 0
+$realStartSeriesProgressP = ${function:Start-SeriesProgress}
+function Start-SeriesProgress {
+    param([string]$SeriesName, [int]$TotalChapters)
+    $script:startSeriesProgressCallsP++
+    & $script:realStartSeriesProgressPRef -SeriesName $SeriesName -TotalChapters $TotalChapters
+}
+$script:realStartSeriesProgressPRef = $realStartSeriesProgressP
+$script:CleanConsoleOutputEnabled = $true
+try {
+    $totalsP2 = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-p") -MagickExe $fakeMagickExe -AnimatedThreads 2 -FullLogging $false
+} finally {
+    $script:CleanConsoleOutputEnabled = $false
+    ${function:Start-SeriesProgress} = $realStartSeriesProgressP
+}
+Test-Assert ($script:startSeriesProgressCallsP -eq 0) ("Start-SeriesProgress was never called for the empty series - no 0/0-chapter CCR entry registered (got " + $script:startSeriesProgressCallsP + " call(s))")
 Write-Host ""
 
 # ==============================================================================
