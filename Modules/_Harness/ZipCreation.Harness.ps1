@@ -108,6 +108,46 @@ try {
 Write-Host ""
 
 # ==============================================================================
+#  Scenario B2 (2026-09-08 fix, real bug caught by a full-codebase audit,
+#  same species as this project's other Remove-Source call sites):
+#  Remove-Source's $false return (the pre-existing ZIP already vanished in
+#  the narrow gap between Test-Path and this call) was discarded, logging
+#  "Deleted existing ZIP" regardless. Remove-Source shadowed to still
+#  clear the file (so Compress-FolderToZip's own CreateFromDirectory call
+#  right after still succeeds, matching what a real concurrent delete
+#  would leave behind) but always report $false.
+# ==============================================================================
+Write-Host "=== Scenario B2: an already-gone pre-existing ZIP logs distinctly, not as a real delete ===" -ForegroundColor Cyan
+$sourceB2 = New-ScratchSourceDir -Name "scenario-b2-source" -FileCount 1
+$zipOutB2 = Join-Path $scratchDir "scenario-b2-source.zip"
+"stale zip content, not a real zip" | Out-File -FilePath $zipOutB2 -Encoding UTF8
+$script:logLinesB2 = [System.Collections.Generic.List[string]]::new()
+$realRemoveSourceB2 = ${function:Remove-Source}
+$realWriteLogB2 = ${function:Write-Log}
+function Remove-Source {
+    param([string]$ItemPath)
+    if (Test-Path -LiteralPath $ItemPath) { Remove-Item -LiteralPath $ItemPath -Force }
+    return $false
+}
+function Write-Log {
+    param([string]$Message, [string]$Level = "Info")
+    $script:logLinesB2.Add($Level + ": " + $Message)
+    & $script:realWriteLogB2Ref -Message $Message -Level $Level
+}
+$script:realWriteLogB2Ref = $realWriteLogB2
+try {
+    $sizeB2 = Compress-FolderToZip -SourceDir $sourceB2 -ZipOut $zipOutB2
+} finally {
+    ${function:Remove-Source} = $realRemoveSourceB2
+    ${function:Write-Log} = $realWriteLogB2
+}
+
+Test-Assert ($sizeB2 -gt 0) "sanity check: the new ZIP was still created successfully"
+Test-Assert (@($script:logLinesB2 | Where-Object { $_ -like "*Deleted existing ZIP*" }).Count -eq 0) "no 'Deleted existing ZIP' line was logged - Remove-Source reported it already gone"
+Test-Assert (@($script:logLinesB2 | Where-Object { $_ -like "*already gone*" }).Count -eq 1) "a distinct 'already gone' line was logged instead"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario C: SourceDir that doesn't exist - propagates a real, clear
 #  exception rather than silently producing a bad/empty ZIP.
 # ==============================================================================

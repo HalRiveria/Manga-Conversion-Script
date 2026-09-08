@@ -528,8 +528,21 @@ function Test-UnwantedImageMatch {
         [Parameter(Mandatory)]
         [System.IO.FileInfo]$File,
         [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
         [array]$Profiles
     )
+    # [AllowEmptyCollection()] (2026-09-08 fix, latent gap caught by a
+    # full-codebase audit - same species as Export-UnwantedImageProfiles's
+    # own real bug, 2026-09-04): a Mandatory array parameter rejects an
+    # EMPTY array by default in PowerShell ("Cannot bind argument...
+    # because it is an empty collection"). Not reachable via any real
+    # caller today (Invoke-UnwantedImageScan's own -Profiles defaults to
+    # Get-AllUnwantedImageProfiles, which always includes the hardcoded
+    # built-in table), but Invoke-UnwantedImageScan's own -Profiles IS a
+    # documented override point ("or -Profiles, if supplied, to override
+    # entirely") - a future caller passing -Profiles @() would otherwise
+    # throw on the first scanned file instead of correctly reporting
+    # every file as NoMatch.
 
     # Fallback result (2026-09-03 fix, Todo.md finding - a real, previously
     # unfixed shadowing risk): this used to return on the FIRST profile

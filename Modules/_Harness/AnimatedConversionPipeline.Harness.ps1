@@ -363,6 +363,32 @@ if ($completedB2) {
 Write-Host ""
 
 # ==============================================================================
+#  Scenario B3 (2026-09-08 fix, real bug caught by a full-codebase audit,
+#  same species as this project's other Remove-Source call sites):
+#  Remove-Source's $false return (the source already vanished before
+#  deletion - a real TOCTOU gap) was discarded here, reporting a
+#  successful delete regardless. Remove-Source shadowed to return $false
+#  unconditionally.
+# ==============================================================================
+Write-Host "=== Scenario B3: an already-gone source is not miscounted as deleted ===" -ForegroundColor Cyan
+$fileB3 = New-FakeAvif -Name "chapter-b3\page1.avif" -Content "FRAMES:8"
+
+$realRemoveSourceB3 = ${function:Remove-Source}
+function Remove-Source {
+    param([string]$ItemPath)
+    return $false
+}
+try {
+    $resultB3 = Convert-AnimatedBatch -AnimatedFiles @($fileB3) -MagickExe $fakeMagickExe -AnimatedThreads 2 -CancelToken ([System.Threading.CancellationToken]::None)
+} finally {
+    ${function:Remove-Source} = $realRemoveSourceB3
+}
+
+Test-Assert ($resultB3.ConvertedCount -eq 1) "sanity check: the conversion itself still succeeded"
+Test-Assert ($resultB3.DeletedCount -eq 0) ("DeletedCount stays 0, not falsely incremented, when Remove-Source reports the source already gone (got " + $resultB3.DeletedCount + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario C: static AVIF is left entirely untouched
 # ==============================================================================
 Write-Host "=== Scenario C: static AVIF left untouched ===" -ForegroundColor Cyan

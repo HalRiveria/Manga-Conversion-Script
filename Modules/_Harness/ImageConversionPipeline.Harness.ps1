@@ -486,6 +486,34 @@ $totalsC = Invoke-LooseImageConversionPipeline -Path $rootC -CjxlExe $fakeCjxlEx
 Test-Assert ($totalsC.StaleCleanedSuccess -eq 1) ("1 stale source cleaned (got " + $totalsC.StaleCleanedSuccess + ")")
 Test-Assert ($totalsC.ConvertedSuccess -eq 0) "nothing sent to cjxl for the stale source"
 Test-Assert (-not (Test-Path -LiteralPath $staleSrcC)) "stale source deleted"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario C1b (2026-09-08 fix, real bug caught by a full-codebase audit,
+#  same species as this project's other Remove-Source call sites):
+#  Remove-Source's $false return was discarded in
+#  Remove-StaleLooseSources, reporting a successful cleanup regardless.
+#  Remove-Source shadowed to return $false unconditionally.
+# ==============================================================================
+Write-Host "=== Scenario C1b: an already-gone stale source is not miscounted as cleaned ===" -ForegroundColor Cyan
+$chC1b = New-Dir "scenario-c1b\Series\Chapter 1"
+$staleSrcC1b = New-FakeImage -DirPath $chC1b -Name "already_done.jpg"
+[System.IO.File]::WriteAllText((Join-Path $chC1b "already_done.jxl"), "real jxl bytes")
+[System.IO.File]::SetLastWriteTimeUtc($staleSrcC1b, ([DateTime]::UtcNow.AddMinutes(-5)))
+
+$realRemoveSourceC1b = ${function:Remove-Source}
+function Remove-Source {
+    param([string]$ItemPath)
+    return $false
+}
+try {
+    $totalsC1b = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-c1b") -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
+} finally {
+    ${function:Remove-Source} = $realRemoveSourceC1b
+}
+
+Test-Assert ($totalsC1b.StaleCleanedSuccess -eq 0) ("StaleCleanedSuccess stays 0, not falsely incremented, when Remove-Source reports the stale source already gone (got " + $totalsC1b.StaleCleanedSuccess + ")")
+Write-Host ""
 
 # ==============================================================================
 #  Scenario C2 (2026-08-31, corrected same day): a same-basename extension
@@ -1027,6 +1055,33 @@ Test-Assert (-not (Test-Path -LiteralPath (Join-Path $chQ2 "cover.jxl"))) "no .j
 $totalsQ2 = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-q2") -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
 Test-Assert ($totalsQ2.ConvertedSuccess -eq 0 -and $totalsQ2.ConvertedFail -eq 0 -and $totalsQ2.ConvertedSkipped -eq 0) ("through the real end-to-end pipeline, the .gif is invisible before ever reaching Convert-ImageBatch - not skipped there, just never a candidate at all (got Success=" + $totalsQ2.ConvertedSuccess + ", Fail=" + $totalsQ2.ConvertedFail + ", Skipped=" + $totalsQ2.ConvertedSkipped + ")")
 Test-Assert (Test-Path -LiteralPath $gifQ2) "the GIF source is still untouched after the real end-to-end pipeline run too"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario Q2b (2026-09-08 fix, real bug caught by a full-codebase audit,
+#  same species as this project's other Remove-Source call sites):
+#  Remove-Source's $false return (the source already vanished before
+#  deletion - a real TOCTOU gap) was discarded in
+#  Complete-ImageConversionJob, reporting a successful delete regardless.
+#  Remove-Source shadowed to return $false unconditionally.
+# ==============================================================================
+Write-Host "=== Scenario Q2b: an already-gone source is not miscounted as deleted ===" -ForegroundColor Cyan
+$chQ2b = New-Dir "scenario-q2b\Series\Chapter 1"
+$imgQ2b = New-FakeImage -DirPath $chQ2b -Name "page1.jpg"
+
+$realRemoveSourceQ2b = ${function:Remove-Source}
+function Remove-Source {
+    param([string]$ItemPath)
+    return $false
+}
+try {
+    $resultQ2b = Convert-ImageBatch -ImageFiles @(Get-Item -LiteralPath $imgQ2b) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -DoFullLogging $false -CancelToken ([System.Threading.CancellationToken]::None)
+} finally {
+    ${function:Remove-Source} = $realRemoveSourceQ2b
+}
+
+Test-Assert ($resultQ2b.ConvertedCount -eq 1) "sanity check: the conversion itself still succeeded"
+Test-Assert ($resultQ2b.DeletedCount -eq 0) ("DeletedCount stays 0, not falsely incremented, when Remove-Source reports the source already gone (got " + $resultQ2b.DeletedCount + ")")
 Write-Host ""
 
 Write-Host "=== Scenario Q3: .bmp/.heic/.heif each convert through the WebP-style temp-PNG detour ===" -ForegroundColor Cyan

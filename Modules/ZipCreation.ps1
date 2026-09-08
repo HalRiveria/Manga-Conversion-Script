@@ -60,15 +60,24 @@ function Compress-FolderToZip {
     )
 
     if (Test-Path -LiteralPath $ZipOut) {
-        # $null = : Remove-Source now returns $true/$false (see
-        # FileDeletion.ps1) - uncaptured, that return value would leak
-        # into THIS function's own output stream and silently turn the
-        # single Int64 $zipSize return into a 2-element array. Caught
-        # live via ZipCreation.Harness.ps1 Scenario B (`$sizeB -gt 0`
-        # failed with "Cannot convert System.Object[] to Boolean").
-        $null = Remove-Source -ItemPath $ZipOut
-        $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
-        Write-Log ("Deleted existing ZIP (" + $deleteDesc + ") before re-zipping: '" + $ZipOut + "'")
+        # Captured into $removed, not discarded (2026-09-08 fix, same
+        # species as this project's other Remove-Source call sites) - the
+        # ORIGINAL reason this was `$null =` still applies and is why a
+        # captured variable is used here too, not a bare call: an
+        # uncaptured Remove-Source return would leak into THIS function's
+        # own output stream and silently turn the single Int64 $zipSize
+        # return into a 2-element array (caught live via
+        # ZipCreation.Harness.ps1 Scenario B - see that history). The
+        # ADDITIONAL fix here is checking $removed itself - a $false
+        # (the file vanished in the narrow gap between Test-Path above and
+        # this call) used to still log "Deleted existing ZIP" regardless.
+        $removed = Remove-Source -ItemPath $ZipOut
+        if ($removed) {
+            $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
+            Write-Log ("Deleted existing ZIP (" + $deleteDesc + ") before re-zipping: '" + $ZipOut + "'")
+        } else {
+            Write-Log ("Existing ZIP already gone before re-zipping (not counted as deleted): '" + $ZipOut + "'") -Level Warn
+        }
     }
 
     try {

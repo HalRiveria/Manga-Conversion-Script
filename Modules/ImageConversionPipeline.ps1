@@ -568,10 +568,21 @@ function Complete-ImageConversionJob {
 
     if ($convOk) {
         try {
-            $null = Remove-Source -ItemPath $Job.SrcPath
-            $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
-            Write-Log ("Deleted " + $SourceNoun + " (" + $deleteDesc + "): '" + $Job.SrcPath + "'")
-            $BatchResult.DeletedCount++
+            # Return value checked, not discarded (2026-09-08 fix, same
+            # species as this project's other Remove-Source call sites -
+            # see FileDeletion.ps1's own .OUTPUTS) - Remove-Source returns
+            # $false (not an exception) when the source already vanished
+            # before deletion (a real TOCTOU gap). Neither a success nor a
+            # real failure - left uncounted rather than falsely reporting
+            # a delete that didn't happen.
+            $removed = Remove-Source -ItemPath $Job.SrcPath
+            if ($removed) {
+                $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
+                Write-Log ("Deleted " + $SourceNoun + " (" + $deleteDesc + "): '" + $Job.SrcPath + "'")
+                $BatchResult.DeletedCount++
+            } else {
+                Write-Log ($SourceNoun.Substring(0,1).ToUpperInvariant() + $SourceNoun.Substring(1) + " already gone before deletion (not counted as deleted): '" + $Job.SrcPath + "'") -Level Warn
+            }
         } catch {
             Write-Log ("FAILED to delete " + $SourceNoun + " '" + $Job.SrcPath + "': " + $_) -Level Error
             $BatchResult.DeleteFailedCount++
@@ -1490,10 +1501,18 @@ function Remove-StaleLooseSources {
     foreach ($stale in $StaleSources) {
         if (Test-AbortSignal) { break }
         try {
-            $null = Remove-Source -ItemPath $stale.FullName
-            $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
-            Write-Log ("Deleted stale source image (" + $deleteDesc + ", .jxl already exists): '" + $stale.FullName + "'")
-            $result.Success++
+            # Return value checked, not discarded (2026-09-08 fix, same
+            # species as this project's other Remove-Source call sites) -
+            # see Complete-ImageConversionJob's matching fix above for the
+            # full reasoning.
+            $removed = Remove-Source -ItemPath $stale.FullName
+            if ($removed) {
+                $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
+                Write-Log ("Deleted stale source image (" + $deleteDesc + ", .jxl already exists): '" + $stale.FullName + "'")
+                $result.Success++
+            } else {
+                Write-Log ("Stale source image already gone before deletion (not counted as deleted): '" + $stale.FullName + "'") -Level Warn
+            }
         } catch {
             Write-Log ("FAILED to delete stale source image '" + $stale.FullName + "': " + $_) -Level Error
             $result.Fail++

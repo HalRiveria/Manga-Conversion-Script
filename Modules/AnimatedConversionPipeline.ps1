@@ -381,10 +381,21 @@ function Complete-AnimatedConversionJob {
 
     if ($convOk -and $DoAnimatedDeleteSource) {
         try {
-            $null = Remove-Source -ItemPath $Job.SrcPath
-            $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
-            Write-Log ("Deleted source (" + $deleteDesc + "): '" + $Job.SrcPath + "'")
-            $BatchResult.DeletedCount++
+            # Return value checked, not discarded (2026-09-08 fix, same
+            # species as this project's other Remove-Source call sites -
+            # see FileDeletion.ps1's own .OUTPUTS) - Remove-Source returns
+            # $false (not an exception) when the source already vanished
+            # before deletion (a real TOCTOU gap). Neither a success nor a
+            # real failure - left uncounted rather than falsely reporting
+            # a delete that didn't happen.
+            $removed = Remove-Source -ItemPath $Job.SrcPath
+            if ($removed) {
+                $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
+                Write-Log ("Deleted source (" + $deleteDesc + "): '" + $Job.SrcPath + "'")
+                $BatchResult.DeletedCount++
+            } else {
+                Write-Log ("Source already gone before deletion (not counted as deleted): '" + $Job.SrcPath + "'") -Level Warn
+            }
         } catch {
             Write-Log ("FAILED to delete source '" + $Job.SrcPath + "': " + $_) -Level Error
             $BatchResult.DeleteFailedCount++

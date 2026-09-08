@@ -188,6 +188,18 @@ $badDimProfileC.Width = 9999
 $resultC4 = Test-UnwantedImageMatch -File $imgC -Profiles @($badDimProfileC)
 Test-Assert ($resultC4.Status -eq 'NoMatch') "correct size but wrong dimensions -> NoMatch"
 
+# 2026-09-08 fix, latent gap caught by a full-codebase audit: a Mandatory
+# array parameter rejects an EMPTY array by default in PowerShell
+# ("Cannot bind argument... because it is an empty collection"), distinct
+# from rejecting $null - -Profiles @() used to throw instead of correctly
+# reporting NoMatch for every file. Same species as
+# Export-UnwantedImageProfiles's own real bug fixed 2026-09-04.
+$threwC4b = $false
+$resultC4b = $null
+try { $resultC4b = Test-UnwantedImageMatch -File $imgC -Profiles @() } catch { $threwC4b = $true }
+Test-Assert (-not $threwC4b) "an empty -Profiles array does not throw"
+Test-Assert ($null -ne $resultC4b -and $resultC4b.Status -eq 'NoMatch') "an empty -Profiles array correctly reports NoMatch"
+
 $nonImgC = New-NonImageFile -Name "notimage-c.jpg" -Content "x" * 100
 $profileNonImgC = @{ Label = "N/A"; Width = 1; Height = 1; SizeBytes = $nonImgC.Length; SizeTolerance = 0; Hash = "irrelevant" }
 $resultC5 = Test-UnwantedImageMatch -File $nonImgC -Profiles @($profileNonImgC)
