@@ -576,6 +576,49 @@ Test-Assert ($script:trailingZeroOpenCallsS2.Count -eq 1 -and $script:trailingZe
 Write-Host ""
 
 # ==============================================================================
+#  Scenario S3 (2026-09-09, "Approved new functionality" from Todo.md):
+#  Invoke-CoverDeletionRun/Invoke-TrailingZeroAuditRun's new -DefaultPath
+#  (remembered-folder reuse on blank input) and Invoke-TrailingZeroAuditRun's
+#  new -Path bypass (skip the prompt entirely) - both real functions, same
+#  stubbed UnwantedImage.ps1 dependencies as Scenario S2.
+# ==============================================================================
+Write-Host "=== Scenario S3: -DefaultPath reuse and -Path bypass ===" -ForegroundColor Cyan
+$script:unwantedScanCallsS2.Clear()
+$script:unwantedScanDryRunCallsS2.Clear()
+
+# Blank input (just pressing Enter) at BOTH the path prompt and the
+# confirmation reuses -DefaultPath and still runs for real - Y is the
+# scripted confirmation answer here, not blank, since only the PATH
+# prompt is meant to fall back to the remembered default.
+$promptBlankReuseS3 = New-ScriptedPrompt -Responses @('', 'Y')
+$resultReuseS3 = Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc $promptBlankReuseS3 -DefaultPath $realFolderS2
+Test-Assert ($resultReuseS3.Ran -and $resultReuseS3.ResolvedPath -eq $realFolderS2) "blank input at the path prompt reuses -DefaultPath (got ResolvedPath='$($resultReuseS3.ResolvedPath)')"
+Test-Assert ($script:unwantedScanCallsS2.Count -eq 1 -and $script:unwantedScanCallsS2[0] -eq $realFolderS2) "the reused default path was what actually got scanned"
+
+# Blank input with NO -DefaultPath still cancels exactly like before -
+# reuse is additive, not a change to the no-default case.
+$promptBlankNoDefaultS3 = New-ScriptedPrompt -Responses @('')
+$resultNoDefaultS3 = Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc $promptBlankNoDefaultS3
+Test-Assert (-not $resultNoDefaultS3.Ran -and $null -eq $resultNoDefaultS3.ResolvedPath) "blank input with no -DefaultPath still cancels (unchanged behavior)"
+
+# Same reuse convention for Invoke-TrailingZeroAuditRun.
+$script:trailingZeroAuditCallsS2.Clear()
+$script:trailingZeroFoundS2 = $false
+$promptTZReuseS3 = New-ScriptedPrompt -Responses @('')
+$resultTZReuseS3 = Invoke-TrailingZeroAuditRun -ReportPath $reportPathS2 -PromptFunc $promptTZReuseS3 -OpenHandler $openHandlerS2 -DefaultPath $realFolderS2
+Test-Assert ($resultTZReuseS3.Ran -and $resultTZReuseS3.ResolvedPath -eq $realFolderS2) "Invoke-TrailingZeroAuditRun also reuses -DefaultPath on blank input"
+
+# -Path bypass: no prompt at all, even one that would throw if called
+# (New-ScriptedPrompt throws when asked for more responses than queued -
+# an empty queue here means ANY prompt call fails this scenario).
+$script:trailingZeroAuditCallsS2.Clear()
+$noPromptS3 = New-ScriptedPrompt -Responses @()
+$resultTZPathS3 = Invoke-TrailingZeroAuditRun -ReportPath $reportPathS2 -PromptFunc $noPromptS3 -OpenHandler $openHandlerS2 -Path $realFolderS2
+Test-Assert ($resultTZPathS3.Ran -and $resultTZPathS3.ResolvedPath -eq $realFolderS2) "-Path bypasses the prompt entirely and scans the given path directly"
+Test-Assert ($script:trailingZeroAuditCallsS2.Count -eq 1 -and $script:trailingZeroAuditCallsS2[0] -eq $realFolderS2) "the real audit function received the -Path value, not a prompted one"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario T: Show-PostRunPrompt - Escape returns 'Exit', any other key
 #  returns 'ReturnToMenu'
 # ==============================================================================
@@ -601,6 +644,47 @@ $trailingZeroHandlerU = { param($PromptFunc) @{ Ran = $true; Reason = $null; Res
 $promptU = New-ScriptedPrompt -Responses @('1', '2', '5', '0')
 $outputU = Show-CoverDeletionMenu -ProfilesPath "unused" -PromptFunc $promptU -RunHandler $runHandlerU -AddHandler $addHandlerU -TrailingZeroHandler $trailingZeroHandlerU
 Test-Assert ($null -eq $outputU) ("Show-CoverDeletionMenu's own call produced no output despite its Run/Add/TrailingZero handlers all returning non-`$null hashtables (got: " + $outputU + ")")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario U3 (2026-09-09, "Approved new functionality" from Todo.md):
+#  Show-CoverDeletionMenu's two new behaviors - (a) persisting
+#  $Settings.LastCoverDeletionPath via -SaveSettingsHandler immediately
+#  after item 1 OR item 5 resolves a real path, and (b) item 1 firing
+#  -AutoTrailingZeroHandler automatically with that same resolved path,
+#  no second prompt. All handlers here are fakes (same technique as
+#  Scenario U above) so this proves DISPATCH, not real scan/report
+#  behavior - that's Scenario S3's job.
+# ==============================================================================
+Write-Host "=== Scenario U3: persisted LastCoverDeletionPath + automatic post-scan trailing-zero report ===" -ForegroundColor Cyan
+$fakePathU3 = "C:\fake\resolved\path"
+$runHandlerU3 = { param($ProfilesPath, $PromptFunc, $DefaultPath) $script:defaultPathSeenU3 = $DefaultPath; @{ Ran = $true; Reason = $null; ResolvedPath = $fakePathU3 } }
+$autoTZHandlerU3 = { param($Path) $script:autoTZCallsU3.Add($Path); @{ Ran = $true } }
+$saveHandlerU3 = { param($Settings, $SettingsPath) $script:saveCallsU3.Add(@{ Path = $Settings.LastCoverDeletionPath; SettingsPath = $SettingsPath }) }
+$script:autoTZCallsU3 = New-Object System.Collections.Generic.List[string]
+$script:saveCallsU3 = New-Object System.Collections.Generic.List[hashtable]
+$settingsU3 = @{ LastCoverDeletionPath = "C:\old\remembered\path" }
+$promptU3 = New-ScriptedPrompt -Responses @('1', '0')
+
+Show-CoverDeletionMenu -ProfilesPath "unused" -PromptFunc $promptU3 -RunHandler $runHandlerU3 `
+    -AutoTrailingZeroHandler $autoTZHandlerU3 -Settings $settingsU3 -SettingsPath "C:\fake\settings.json" `
+    -SaveSettingsHandler $saveHandlerU3 | Out-Null
+
+Test-Assert ($script:defaultPathSeenU3 -eq "C:\old\remembered\path") "the previously-remembered path was offered to -RunHandler as -DefaultPath"
+Test-Assert ($script:autoTZCallsU3.Count -eq 1 -and $script:autoTZCallsU3[0] -eq $fakePathU3) "the auto trailing-zero handler fired exactly once, with item 1's own resolved path"
+Test-Assert ($script:saveCallsU3.Count -eq 1 -and $script:saveCallsU3[0].Path -eq $fakePathU3 -and $script:saveCallsU3[0].SettingsPath -eq "C:\fake\settings.json") "the resolved path was saved immediately (not batched), to the real -SettingsPath"
+Test-Assert ($settingsU3.LastCoverDeletionPath -eq $fakePathU3) "`$Settings itself was mutated in place, not just a copy - same convention Show-OptionsMenuLevel already uses"
+
+# No -Settings supplied at all (the original, still-default behavior for
+# every existing caller/test) - persistence is skipped entirely, but the
+# auto trailing-zero report still fires unconditionally, since that
+# doesn't depend on remembering anything.
+$script:autoTZCallsU3.Clear()
+$script:saveCallsU3.Clear()
+$promptU3b = New-ScriptedPrompt -Responses @('1', '0')
+Show-CoverDeletionMenu -ProfilesPath "unused" -PromptFunc $promptU3b -RunHandler $runHandlerU3 -AutoTrailingZeroHandler $autoTZHandlerU3 -SaveSettingsHandler $saveHandlerU3 | Out-Null
+Test-Assert ($script:autoTZCallsU3.Count -eq 1) "the auto trailing-zero report still fires with no -Settings at all"
+Test-Assert ($script:saveCallsU3.Count -eq 0) "nothing was saved with no -Settings supplied - matches original behavior exactly"
 Write-Host ""
 
 # ==============================================================================

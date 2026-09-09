@@ -222,7 +222,7 @@ function Show-ModeMenu {
             # next - Get-SelectedMode's `$resolved` came back as a 2-element
             # array (the leaked hashtable, then the real resolved mode),
             # crashing the first `$resolved.Mode`/property access downstream.
-            $null = Show-CoverDeletionMenu -PromptFunc $PromptFunc
+            $null = Show-CoverDeletionMenu -PromptFunc $PromptFunc -Settings $Settings -SettingsPath $SettingsPath
             Complete-LogRun
             Write-Host ""
             continue
@@ -528,17 +528,37 @@ function Invoke-CoverDeletionRun {
         prompt function handling a queue of sequential questions) -
         answers Y (run for real), D (dry run - reports matches, deletes
         nothing), or anything else (cancel).
+    .PARAMETER DefaultPath
+        Last-used folder (Show-CoverDeletionMenu threads this from
+        $Settings.LastCoverDeletionPath), offered as a reusable default -
+        blank input reuses it instead of being treated as "no path
+        entered." Empty string (the default) means no remembered path
+        yet, matching original behavior exactly.
+    .OUTPUTS
+        Adds `ResolvedPath` to the existing result shape: the real path
+        actually used when Ran is $true (freshly typed or reused from
+        -DefaultPath), $null otherwise - Show-CoverDeletionMenu persists
+        this back to settings.json.
     #>
     param(
         [string]$ProfilesPath = (Get-UnwantedImageProfilesPath),
-        [scriptblock]$PromptFunc = { param($Message) Read-Host $Message }
+        [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
+        [string]$DefaultPath = ""
     )
 
-    $path = (& $PromptFunc "Enter the folder to scan (drag & drop the folder in, or paste the path)")
+    $promptMessage = "Enter the folder to scan (drag & drop the folder in, or paste the path)"
+    if (-not [string]::IsNullOrWhiteSpace($DefaultPath)) {
+        $promptMessage += " [Enter to reuse: '" + $DefaultPath + "']"
+    }
+    $path = (& $PromptFunc $promptMessage)
     if ($null -ne $path) { $path = $path.Trim().Trim('"') }
     if ([string]::IsNullOrWhiteSpace($path)) {
-        Write-Host "No path entered - cancelled." -ForegroundColor Yellow
-        return @{ Ran = $false; Reason = "No path entered." }
+        if (-not [string]::IsNullOrWhiteSpace($DefaultPath)) {
+            $path = $DefaultPath
+        } else {
+            Write-Host "No path entered - cancelled." -ForegroundColor Yellow
+            return @{ Ran = $false; Reason = "No path entered."; ResolvedPath = $null }
+        }
     }
     # -PathType Container (2026-08-31 fix, caught by a same-day
     # /code-review full-codebase pass): a bare Test-Path matches a FILE
@@ -547,20 +567,20 @@ function Invoke-CoverDeletionRun {
     # rejected with a clear message.
     if (-not (Test-Path -LiteralPath $path -PathType Container)) {
         Write-Host ("Folder not found: '" + $path + "'") -ForegroundColor Red
-        return @{ Ran = $false; Reason = "Folder not found." }
+        return @{ Ran = $false; Reason = "Folder not found."; ResolvedPath = $null }
     }
 
     $confirmAnswer = (& $PromptFunc ("About to scan '" + $path + "' and delete any matching files (respecting your Recycle Bin/Permanent Delete setting). Enter Y to run for real, D for a dry run (reports matches, deletes nothing), or anything else to cancel"))
     if ($null -ne $confirmAnswer) { $confirmAnswer = $confirmAnswer.Trim() }
     if ($confirmAnswer -notin @('Y', 'y', 'D', 'd')) {
         Write-Host "Cancelled - no scan was run." -ForegroundColor Yellow
-        return @{ Ran = $false; Reason = "Cancelled by user." }
+        return @{ Ran = $false; Reason = "Cancelled by user."; ResolvedPath = $null }
     }
     $isDryRun = $confirmAnswer -in @('D', 'd')
 
     $result = Invoke-UnwantedImageScan -Path $path -Profiles (Get-AllUnwantedImageProfiles -ProfilesPath $ProfilesPath) -DryRun $isDryRun
     if ($isDryRun) { Write-Host "Dry run complete - nothing was deleted." -ForegroundColor Cyan }
-    return @{ Ran = $true; Reason = $null; Result = $result; DryRun = $isDryRun }
+    return @{ Ran = $true; Reason = $null; Result = $result; DryRun = $isDryRun; ResolvedPath = $path }
 }
 
 function Invoke-TrailingZeroAuditRun {
@@ -576,10 +596,22 @@ function Invoke-TrailingZeroAuditRun {
         itself returns a $null ReportPath and writes no file at all in
         that case - "don't create an empty report" is that function's own
         documented behavior, not something to work around here).
+    .PARAMETER Path
+        Optional (default "" - matches original behavior, always
+        prompts). When supplied, skips the prompt entirely and scans
+        this path directly - used by Show-CoverDeletionMenu's '1' branch
+        to auto-run this report against item 1's own just-scanned folder
+        (2026-09-02 approved-but-not-built feature: item 5 running
+        automatically right after item 1, instead of a separate manual
+        step). Still re-validated with the same -PathType Container
+        check as the prompted path, even though a caller like item 1's
+        own resolved path should already be valid - cheap, and this is a
+        real function boundary.
     #>
     param(
         [string]$ReportPath = (Get-TrailingZeroReportPath),
         [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
+        [string]$Path = "",
         # Start-Process -FilePath (2026-08-31 fix, caught by verifying a
         # same-day /code-review pass) - NOT Open-FolderInExplorer, which
         # opens $Path's PARENT FOLDER, not $Path itself. Every piece of
@@ -591,18 +623,35 @@ function Invoke-TrailingZeroAuditRun {
         # path launches it via the OS's own default handler for that
         # extension (Notepad or whatever .txt is associated with), same
         # as double-clicking the file in Explorer.
-        [scriptblock]$OpenHandler = { param($Path) Start-Process -FilePath $Path }
+        [scriptblock]$OpenHandler = { param($Path) Start-Process -FilePath $Path },
+        # Same -DefaultPath convention as Invoke-CoverDeletionRun (see its
+        # own .PARAMETER doc) - Show-CoverDeletionMenu threads the same
+        # $Settings.LastCoverDeletionPath into both, one remembered
+        # folder shared across the whole submenu.
+        [string]$DefaultPath = ""
     )
 
-    $path = (& $PromptFunc "Enter the folder to scan (drag & drop the folder in, or paste the path)")
-    if ($null -ne $path) { $path = $path.Trim().Trim('"') }
-    if ([string]::IsNullOrWhiteSpace($path)) {
-        Write-Host "No path entered - cancelled." -ForegroundColor Yellow
-        return @{ Ran = $false; Reason = "No path entered." }
+    if (-not [string]::IsNullOrWhiteSpace($Path)) {
+        $path = $Path.Trim().Trim('"')
+    } else {
+        $promptMessage = "Enter the folder to scan (drag & drop the folder in, or paste the path)"
+        if (-not [string]::IsNullOrWhiteSpace($DefaultPath)) {
+            $promptMessage += " [Enter to reuse: '" + $DefaultPath + "']"
+        }
+        $path = (& $PromptFunc $promptMessage)
+        if ($null -ne $path) { $path = $path.Trim().Trim('"') }
+        if ([string]::IsNullOrWhiteSpace($path)) {
+            if (-not [string]::IsNullOrWhiteSpace($DefaultPath)) {
+                $path = $DefaultPath
+            } else {
+                Write-Host "No path entered - cancelled." -ForegroundColor Yellow
+                return @{ Ran = $false; Reason = "No path entered."; ResolvedPath = $null }
+            }
+        }
     }
     if (-not (Test-Path -LiteralPath $path -PathType Container)) {
         Write-Host ("Folder not found: '" + $path + "'") -ForegroundColor Red
-        return @{ Ran = $false; Reason = "Folder not found." }
+        return @{ Ran = $false; Reason = "Folder not found."; ResolvedPath = $null }
     }
 
     $reportDir = Split-Path -Path $ReportPath -Parent
@@ -611,12 +660,12 @@ function Invoke-TrailingZeroAuditRun {
     $result = Invoke-TrailingZeroAudit -Path $path -ReportPath $ReportPath
     if ($null -eq $result.ReportPath) {
         Write-Host "No trailing-zero filenames found - nothing to report." -ForegroundColor Yellow
-        return @{ Ran = $true; Reason = $null; Result = $result }
+        return @{ Ran = $true; Reason = $null; Result = $result; ResolvedPath = $path }
     }
 
     Write-Host ("Report written: '" + $result.ReportPath + "' (" + $result.UniqueFileCount + " unique file(s))") -ForegroundColor Green
     & $OpenHandler $result.ReportPath
-    return @{ Ran = $true; Reason = $null; Result = $result }
+    return @{ Ran = $true; Reason = $null; Result = $result; ResolvedPath = $path }
 }
 
 function Show-CoverDeletionMenu {
@@ -647,39 +696,85 @@ function Show-CoverDeletionMenu {
     .PARAMETER TrailingZeroHandler
         Defaults to Invoke-TrailingZeroAuditRun. Injectable for the same
         reason as -RunHandler/-AddHandler.
+    .PARAMETER AutoTrailingZeroHandler
+        Defaults to a real Invoke-TrailingZeroAuditRun -Path call (the
+        -Path bypass, not -PromptFunc - no second prompt). Fired once,
+        automatically, right after item 1 resolves a real path -
+        approved-but-not-built feature (2026-09-02): item 5's report used
+        to be a separate manual step, now runs unprompted against
+        whatever item 1 just scanned. Injectable so a harness can verify
+        it fired (and with which path) without a real scan.
+    .PARAMETER Settings
+        Optional (default $null - matches original behavior exactly,
+        including every existing caller/test that doesn't pass it). When
+        supplied, $Settings.LastCoverDeletionPath is offered as items
+        1/5's reusable default folder, and updated + persisted (via
+        -SaveSettingsHandler) immediately after either one resolves a
+        real path - same "saves immediately, nothing lost on a mid-menu
+        Ctrl+C" convention Show-OptionsMenuLevel already uses, not
+        batched until some later point.
+    .PARAMETER SaveSettingsHandler
+        Defaults to a real Export-ScriptSettings call, writing to
+        -SettingsPath (matches Show-OptionsMenuLevel's own save
+        convention - $SettingsPath is a real, respected override
+        elsewhere in this file, not just a theoretical one). Injectable
+        so a harness can verify a save was triggered without writing a
+        real settings.json.
+    .PARAMETER SettingsPath
+        Passed straight to -SaveSettingsHandler's default. Same meaning
+        as Get-SelectedMode/Show-OptionsMenuLevel's own -SettingsPath.
     #>
     param(
         [string]$ProfilesPath = (Get-UnwantedImageProfilesPath),
         [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
-        [scriptblock]$RunHandler = { param($ProfilesPath, $PromptFunc) Invoke-CoverDeletionRun -ProfilesPath $ProfilesPath -PromptFunc $PromptFunc },
+        [scriptblock]$RunHandler = { param($ProfilesPath, $PromptFunc, $DefaultPath) Invoke-CoverDeletionRun -ProfilesPath $ProfilesPath -PromptFunc $PromptFunc -DefaultPath $DefaultPath },
         [scriptblock]$AddHandler = { param($ProfilesPath, $PromptFunc) Show-AddUnwantedImageProfileFlow -ProfilesPath $ProfilesPath -PromptFunc $PromptFunc },
         [scriptblock]$ActionHandler = { param($ActionName, $ProfilesPath) Invoke-CoverDeletionAction -ActionName $ActionName -ProfilesPath $ProfilesPath },
-        [scriptblock]$TrailingZeroHandler = { param($PromptFunc) Invoke-TrailingZeroAuditRun -PromptFunc $PromptFunc }
+        [scriptblock]$TrailingZeroHandler = { param($PromptFunc, $DefaultPath) Invoke-TrailingZeroAuditRun -PromptFunc $PromptFunc -DefaultPath $DefaultPath },
+        [scriptblock]$AutoTrailingZeroHandler = { param($Path) Invoke-TrailingZeroAuditRun -Path $Path },
+        [hashtable]$Settings = $null,
+        [string]$SettingsPath,
+        [scriptblock]$SaveSettingsHandler = { param($Settings, $SettingsPath) Export-ScriptSettings -Settings $Settings -Path $SettingsPath }
     )
 
     while ($true) {
         foreach ($line in (Get-CoverDeletionMenuLines)) { Write-Host $line }
         $choice = (& $PromptFunc "Enter a number").Trim()
 
-        # $null = on every handler call below (2026-09-03 fix) - this is the
-        # real source of the FATAL crash: -RunHandler/-AddHandler/
-        # -TrailingZeroHandler all return a real hashtable
-        # (Invoke-CoverDeletionRun/Show-AddUnwantedImageProfileFlow/
-        # Invoke-TrailingZeroAuditRun's own @{ Ran = ... } results), and a
-        # bare, unsuppressed call's return value becomes part of THIS
-        # function's own output stream. Since Show-ModeMenu's own call to
-        # Show-CoverDeletionMenu was equally unsuppressed, that hashtable
-        # escaped all the way up to Get-SelectedMode's `$resolved` - live-
-        # reproduced: run the trailing-zero audit, back out, pick a real
-        # mode next, and $resolved comes back as a 2-element array instead
-        # of the expected hashtable, crashing the first property access on
-        # it downstream. See CHANGELOG.md for the full repro.
+        $defaultPath = ""
+        if ($null -ne $Settings -and $Settings.ContainsKey('LastCoverDeletionPath')) {
+            $defaultPath = [string]$Settings.LastCoverDeletionPath
+        }
+
+        # Captured into a real variable (not bare/unsuppressed) so
+        # -RunHandler/-TrailingZeroHandler's ResolvedPath can be read
+        # below - still never left bare, so the 2026-09-03 leak fix (see
+        # the comment this replaced) still holds: a NAMED assignment
+        # doesn't add anything to this function's own output stream,
+        # only an unassigned bare call does.
         switch ($choice) {
             '0' { return }
-            '1' { $null = & $RunHandler $ProfilesPath $PromptFunc; Write-Host "" }
+            '1' {
+                $runResult = & $RunHandler $ProfilesPath $PromptFunc $defaultPath
+                if ($runResult -and $runResult.ResolvedPath) {
+                    if ($null -ne $Settings) {
+                        $Settings.LastCoverDeletionPath = $runResult.ResolvedPath
+                        & $SaveSettingsHandler $Settings $SettingsPath
+                    }
+                    $null = & $AutoTrailingZeroHandler $runResult.ResolvedPath
+                }
+                Write-Host ""
+            }
             '2' { $null = & $AddHandler $ProfilesPath $PromptFunc; Write-Host "" }
             '4' { $null = & $ActionHandler 'OpenProfileLocation' $ProfilesPath }
-            '5' { $null = & $TrailingZeroHandler $PromptFunc; Write-Host "" }
+            '5' {
+                $tzResult = & $TrailingZeroHandler $PromptFunc $defaultPath
+                if ($null -ne $Settings -and $tzResult -and $tzResult.ResolvedPath) {
+                    $Settings.LastCoverDeletionPath = $tzResult.ResolvedPath
+                    & $SaveSettingsHandler $Settings $SettingsPath
+                }
+                Write-Host ""
+            }
             default { Write-Host "Invalid selection." -ForegroundColor Yellow }
         }
     }

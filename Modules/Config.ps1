@@ -144,6 +144,7 @@ function Get-DefaultScriptSettings {
         AnimatedOverwrite                = $false
         AnimatedDeleteSource             = $true
         ZipWithUnconvertedAnimated       = $false
+        LastCoverDeletionPath            = ""
     }
 }
 
