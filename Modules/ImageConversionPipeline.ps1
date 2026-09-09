@@ -1603,15 +1603,26 @@ function Get-ZipBlockedStatusOverride {
         existing Error alone (already correctly severe, and already the
         reason zipping was skipped, not this).
 
-        DOCUMENTED DUPLICATE (2026-09-09, see Docs/zip-blocked-status-
-        design.md's "Decided" section for why): an identical copy of this
-        function lives in Controller.ps1 for Full Pipeline's own three
-        block-reason cases. Neither CleanConsoleRendering.ps1 (its own
-        header explicitly says it "never interprets -Detail's contents,"
-        so a why-interpreting function doesn't belong there) nor
-        Summary.ps1 (its domain is the final run summary, not live
-        per-chapter status) was a clean fit - keep this copy in sync with
-        Controller.ps1's if either one ever changes.
+        SOLE DEFINITION, reused by Controller.ps1 (2026-09-09, revised
+        same day by a code-review fix - see Docs/zip-blocked-status-
+        design.md's "Decided" section for the original "documented
+        duplicate" reasoning, and CHANGELOG.md for why that shape got
+        replaced with this one): originally an identical copy also lived
+        in Controller.ps1 for Full Pipeline's own three block-reason
+        cases, but both files are always dot-sourced into the same script
+        scope (Controller.ps1 already unconditionally depends on this
+        module being loaded first, in real runs and in
+        Controller.Harness.ps1 alike) - two same-named function
+        definitions there don't coexist, the later-loaded one silently
+        wins for every caller, so the "duplicate" was never actually two
+        independently-live copies. Neither CleanConsoleRendering.ps1 (its
+        own header explicitly says it "never interprets -Detail's
+        contents," so a why-interpreting function doesn't belong there)
+        nor Summary.ps1 (its domain is the final run summary, not live
+        per-chapter status) was a clean fit as a shared home either, but
+        this module already being a required dependency of Controller.ps1
+        makes it one - not exported via -SharedFunctionNames since both
+        callers are main-thread-only code, never a runspace worker.
     .OUTPUTS
         Two values: Status, Detail - same shape as
         Get-ChapterProgressStatus, ready to pass straight to
@@ -1625,7 +1636,12 @@ function Get-ZipBlockedStatusOverride {
         [string]$BlockedReason
     )
     if ($Status -eq 'Error') { return $Status, $Detail }
-    $newDetail = if ($Detail) { $Detail + " | Zip skipped: " + $BlockedReason } else { "Zip skipped: " + $BlockedReason }
+    # Lowercase "zip skipped" (2026-09-09, code-review fix), matching
+    # ZipPipeline.ps1's own existing "zip skipped: ..." Detail text for
+    # the identical concept - was "Zip skipped" (capital Z), a
+    # user-visible casing mismatch between two pipelines' Detail text
+    # for the same underlying event.
+    $newDetail = if ($Detail) { $Detail + " | zip skipped: " + $BlockedReason } else { "zip skipped: " + $BlockedReason }
     return 'Warning', $newDetail
 }
 

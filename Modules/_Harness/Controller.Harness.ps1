@@ -1764,6 +1764,100 @@ Test-Assert ($null -ne $callX2b -and $callX2b.Status -eq 'Warning' -and $callX2b
 Write-Host ""
 
 # ==============================================================================
+#  Scenario X3 (2026-09-09, code-review fix on the zip-blocked-status fix
+#  itself): a SINGLE chapter hitting BOTH block reasons at once (a naming
+#  collision AND its own AVIF classification failure) used to silently
+#  lose one of the two - $failedClassificationDirs's AVIF-failure add-site
+#  used plain indexer assignment, which overwrote whatever reason the
+#  naming-collision prepass had already written for that same directory.
+#  Now the second write appends instead of overwriting, so the live CCR
+#  Detail names both.
+# ==============================================================================
+Write-Host "=== Scenario X3: a chapter with BOTH a naming collision and an AVIF classification failure shows BOTH reasons, not just one ===" -ForegroundColor Cyan
+$chX3 = New-Dir "scenario-x3\Series\Chapter 1"
+[System.IO.File]::WriteAllText((Join-Path $chX3 "photo.jxl"), "real jxl bytes from a since-deleted photo.jpg")
+Start-Sleep -Milliseconds 50
+New-FakeImageIn -DirPath $chX3 -Name "photo.png" | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $chX3 "corrupt.avif"), "FAIL_IDENTIFY")
+New-FakeAvifIn -DirPath $chX3 -Name "animated.avif" -Frames 5 | Out-Null
+
+$script:ccrCallsX3 = New-Object System.Collections.Generic.List[hashtable]
+$realCompleteChapterProgressX3 = ${function:Complete-ChapterProgress}
+function Complete-ChapterProgress {
+    param([string]$SeriesName, [string]$ChapterName, [string]$Status, [string]$Detail = "")
+    $script:ccrCallsX3.Add(@{ ChapterName = $ChapterName; Status = $Status; Detail = $Detail })
+    & $script:realCompleteChapterProgressX3Ref -SeriesName $SeriesName -ChapterName $ChapterName -Status $Status -Detail $Detail
+}
+$script:realCompleteChapterProgressX3Ref = $realCompleteChapterProgressX3
+$script:CleanConsoleOutputEnabled = $true
+
+try {
+    $totalsX3 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-x3") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+} finally {
+    $script:CleanConsoleOutputEnabled = $false
+    ${function:Complete-ChapterProgress} = $realCompleteChapterProgressX3
+}
+
+$callX3 = $script:ccrCallsX3 | Where-Object { $_.ChapterName -eq 'Chapter 1' } | Select-Object -First 1
+Test-Assert ($null -ne $callX3 -and $callX3.Detail -like '*naming collision*' -and $callX3.Detail -like '*AVIF classification failure*') ("the chapter's live CCR Detail names BOTH block reasons, neither one silently overwriting the other (got Detail='" + $(if ($callX3) { $callX3.Detail } else { '<none>' }) + "')")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario X4 (2026-09-09, code-review fix on the zip-blocked-status fix
+#  itself): an "extra" chapter-equivalent entry (IsZippable=$false
+#  unconditionally, ZipOut=$null - a directory chapter discovery didn't
+#  find, folded in via $extraDirPaths so its content still gets converted)
+#  was never going to zip regardless of $failedClassificationDirs. Before
+#  this fix, if that directory's own naming collision ALSO landed it in
+#  $failedClassificationDirs, its live CCR line got a "zip skipped: ..."
+#  note anyway - misleading, since no zip was ever going to happen there
+#  in the first place. Same guard ImageConversionPipeline.ps1's own
+#  IsExtra flag already applies for its naming-collision case.
+#
+#  Function-swaps Get-SeriesChapters (same technique as Scenario Z5) to
+#  exclude this chapter's directory from real chapter discovery, forcing
+#  it through the $extraDirPaths fallback instead.
+# ==============================================================================
+Write-Host "=== Scenario X4: an 'extra' entry with a naming collision does NOT get a spurious zip-skipped note ===" -ForegroundColor Cyan
+$chX4 = New-Dir "scenario-x4\Series\Chapter 1"
+[System.IO.File]::WriteAllText((Join-Path $chX4 "photo.jxl"), "real jxl bytes from a since-deleted photo.jpg")
+Start-Sleep -Milliseconds 50
+New-FakeImageIn -DirPath $chX4 -Name "photo.png" | Out-Null
+New-FakeImageIn -DirPath $chX4 -Name "page2.jpg" | Out-Null
+
+$realGetSeriesChaptersX4 = ${function:Get-SeriesChapters}
+function Get-SeriesChapters {
+    param([string]$SeriesPath, [string[]]$QualifyingExtensions, [string[]]$ExcludeStagingDirs, [bool]$ForceRezip)
+    $real = & $script:realGetSeriesChaptersX4Ref -SeriesPath $SeriesPath -QualifyingExtensions $QualifyingExtensions -ExcludeStagingDirs $ExcludeStagingDirs -ForceRezip $ForceRezip
+    return @($real | Where-Object { $_.Dir.FullName -ne $script:chX4Ref })
+}
+$script:realGetSeriesChaptersX4Ref = $realGetSeriesChaptersX4
+$script:chX4Ref = (Get-Item -LiteralPath $chX4).FullName
+
+$script:ccrCallsX4 = New-Object System.Collections.Generic.List[hashtable]
+$realCompleteChapterProgressX4 = ${function:Complete-ChapterProgress}
+function Complete-ChapterProgress {
+    param([string]$SeriesName, [string]$ChapterName, [string]$Status, [string]$Detail = "")
+    $script:ccrCallsX4.Add(@{ ChapterName = $ChapterName; Status = $Status; Detail = $Detail })
+    & $script:realCompleteChapterProgressX4Ref -SeriesName $SeriesName -ChapterName $ChapterName -Status $Status -Detail $Detail
+}
+$script:realCompleteChapterProgressX4Ref = $realCompleteChapterProgressX4
+$script:CleanConsoleOutputEnabled = $true
+
+try {
+    $totalsX4 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-x4") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+} finally {
+    ${function:Get-SeriesChapters} = $realGetSeriesChaptersX4
+    $script:CleanConsoleOutputEnabled = $false
+    ${function:Complete-ChapterProgress} = $realCompleteChapterProgressX4
+}
+
+Test-Assert ($totalsX4.InspectFailedCount -ge 1) ("sanity check: the naming collision was still detected and counted (got InspectFailedCount=" + $totalsX4.InspectFailedCount + ")")
+$callX4 = $script:ccrCallsX4 | Where-Object { $_.ChapterName -eq 'Chapter 1' } | Select-Object -First 1
+Test-Assert ($null -ne $callX4 -and $callX4.Detail -notlike '*zip skipped*') ("the extra entry's live CCR Detail does NOT get a spurious zip-skipped note - it was never zippable by design (got Status='" + $(if ($callX4) { $callX4.Status } else { '<none>' }) + "', Detail='" + $(if ($callX4) { $callX4.Detail } else { '<none>' }) + "')")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario Y (2026-08-31 fix, caught by verifying a same-day /code-review
 #  4th pass on ImageConversionPipeline.ps1): an orphaned "_tmp_*" scratch
 #  file (its owning cleanup couldn't run) sitting in a chapter this
