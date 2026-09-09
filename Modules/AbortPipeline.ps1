@@ -83,10 +83,12 @@
         never needs CleanConsoleRendering.ps1 dot-sourced at all.
     Core abort mechanics (CTS registry, drain loop, force-kill) are
     unchanged by any of this - only the console-output call sites.
-    Complete-AbortDrain also now finalizes the CCR display (force-
-    resolving any still-active series via Complete-AllActiveSeriesProgress,
-    same gating) before signalling DrainComplete - so a still-live
-    progress region isn't left stuck forever when a run ends mid-abort.
+    Complete-AbortDrain also finalizes the CCR display (force-resolving
+    any still-active series via Complete-AllActiveSeriesProgress) before
+    signalling DrainComplete, but ONLY for a CTRL_CLOSE_EVENT (see that
+    function's own header for why a plain Ctrl+C must NOT do this too) -
+    so a still-live progress region isn't left stuck forever when the
+    process might be force-killed moments after a window close.
 
 .NOTES
     Extracted from Conversion Script Main.ps1's ConsoleCtrl type, script-scope
@@ -367,16 +369,35 @@ function Complete-AbortDrain {
         too; it's for paths that need to unblock the handler without going
         through a drain (e.g. abort detected before any job was dispatched).
     .DESCRIPTION
-        When Clean Console Output is on, also finalizes CCR's display
+        When Clean Console Output is on AND this is a CTRL_CLOSE_EVENT
+        (window close), also finalizes CCR's display
         (Complete-AllActiveSeriesProgress) BEFORE signalling DrainComplete -
-        deliberately in that order, since CTRL_CLOSE_EVENT gives the OS
+        deliberately in that order, since a close event gives the OS
         license to force-kill the process shortly after DrainComplete
         unblocks the native handler, and a still-live progress region left
         stuck would otherwise never get finalized. No-ops cleanly (via
         Complete-AllActiveSeriesProgress's own no-active-series no-op) when
         there's nothing to finalize.
+
+        Gated on IsCloseEvent, NOT called for a plain Ctrl+C (2026-09-08
+        fix, real bug, live-reported): a Ctrl+C doesn't kill the process -
+        every real pipeline (Controller.ps1's Invoke-FullPipeline,
+        ImageConversionPipeline.ps1, AnimatedConversionPipeline.ps1,
+        ZipPipeline.ps1) keeps running its own normal per-chapter/per-run
+        completion code afterward, including its OWN
+        Complete-ChapterProgress/Complete-AllActiveSeriesProgress calls in
+        an outer try/finally that fires no matter how the function exits.
+        Finalizing every active series HERE, mid-drain, for a Ctrl+C meant
+        that later, legitimate call found the series already resolved and
+        threw "not an active series" - a real FATAL ERROR that killed an
+        otherwise-successful run (the chapter's own files had already
+        converted correctly via the abort drain; only the CCR bookkeeping
+        call failed). A close event has no such later call to protect -
+        Windows can force-kill the process before any of it runs - so this
+        function is still the only chance CCR gets to finalize in that
+        case, and stays unconditional there.
     #>
-    if ($script:CleanConsoleOutputEnabled) {
+    if ($script:CleanConsoleOutputEnabled -and [ConsoleCtrl]::IsCloseEvent) {
         try { Complete-AllActiveSeriesProgress } catch { }
     }
     try { [ConsoleCtrl]::DrainComplete.Set() } catch { }

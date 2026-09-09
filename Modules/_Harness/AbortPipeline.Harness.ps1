@@ -331,22 +331,38 @@ Write-Host ""
 
 # ==============================================================================
 #  Scenario K: Complete-AbortDrain finalizes the CCR display (via
-#  Complete-AllActiveSeriesProgress) when Clean Console Output is on -
-#  and does NOT call it at all when the toggle is off, so a caller that
-#  never dot-sourced CleanConsoleRendering.ps1 is never forced to have it
-#  loaded just because Complete-AbortDrain ran.
+#  Complete-AllActiveSeriesProgress) when Clean Console Output is on AND
+#  this is a window-close event - NOT for a plain Ctrl+C (2026-09-08 fix,
+#  real bug, live-reported: finalizing every active series here for an
+#  ordinary Ctrl+C meant the run's own NORMAL per-chapter completion call,
+#  made moments later once the abort-drain's in-flight files finished,
+#  found the series already resolved and threw "not an active series" -
+#  a real FATAL ERROR ending an otherwise-successful run). Also does NOT
+#  call it at all when the toggle is off, so a caller that never
+#  dot-sourced CleanConsoleRendering.ps1 is never forced to have it loaded
+#  just because Complete-AbortDrain ran.
 # ==============================================================================
-Write-Host "=== Scenario K: Complete-AbortDrain finalizes CCR display when the toggle is on ===" -ForegroundColor Cyan
+Write-Host "=== Scenario K: Complete-AbortDrain finalizes CCR display only for a window-close event, not a plain Ctrl+C ===" -ForegroundColor Cyan
 Reset-HarnessScenarioState
 $script:CleanConsoleOutputEnabled = $true
+[ConsoleCtrl]::IsCloseEvent = $true
 Complete-AbortDrain
-Test-Assert ($script:completeAllActiveSeriesProgressCallCount -eq 1) "Complete-AllActiveSeriesProgress was called once when the toggle is on"
+Test-Assert ($script:completeAllActiveSeriesProgressCallCount -eq 1) "Complete-AllActiveSeriesProgress was called once for a window-close event with the toggle on"
 Test-Assert ([ConsoleCtrl]::DrainComplete.IsSet) "DrainComplete is still signalled afterward"
 
 Reset-HarnessScenarioState
+$script:CleanConsoleOutputEnabled = $true
+[ConsoleCtrl]::IsCloseEvent = $false
 Complete-AbortDrain
-Test-Assert ($script:completeAllActiveSeriesProgressCallCount -eq 0) "Complete-AllActiveSeriesProgress is NOT called when the toggle is off"
+Test-Assert ($script:completeAllActiveSeriesProgressCallCount -eq 0) "Complete-AllActiveSeriesProgress is NOT called for a plain Ctrl+C, even with the toggle on - the run's own later, normal completion call is what should resolve it"
 Test-Assert ([ConsoleCtrl]::DrainComplete.IsSet) "DrainComplete is still signalled either way"
+
+Reset-HarnessScenarioState
+[ConsoleCtrl]::IsCloseEvent = $true
+Complete-AbortDrain
+Test-Assert ($script:completeAllActiveSeriesProgressCallCount -eq 0) "Complete-AllActiveSeriesProgress is NOT called when the toggle is off, even for a window-close event"
+Test-Assert ([ConsoleCtrl]::DrainComplete.IsSet) "DrainComplete is still signalled either way"
+[ConsoleCtrl]::IsCloseEvent = $false
 Write-Host ""
 
 # ==============================================================================
@@ -478,6 +494,12 @@ Write-Host "=== Scenario O: Invoke-AbortOrFatalHandler - own-abort branch ===" -
 Reset-HarnessScenarioState
 $script:abortRequested = $true
 $script:CleanConsoleOutputEnabled = $true
+# IsCloseEvent true here (2026-09-08 update, matching Complete-AbortDrain's
+# own fix - see Scenario K) - this scenario is specifically proving
+# Invoke-AbortOrFatalHandler really calls Complete-AbortDrain, not a
+# reimplementation; Complete-AbortDrain itself only finalizes CCR for a
+# close event, which Scenario K already covers on its own.
+[ConsoleCtrl]::IsCloseEvent = $true
 $logCallsO = [System.Collections.Generic.List[string]]::new()
 $logHandlerO = { param($m) $logCallsO.Add($m) }.GetNewClosure()
 
