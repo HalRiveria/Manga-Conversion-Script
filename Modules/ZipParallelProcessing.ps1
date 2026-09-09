@@ -90,7 +90,21 @@ function Invoke-ZipParallelProcessing {
         [System.Threading.CancellationTokenSource]$Cts,
         [Parameter(Mandatory)]
         [scriptblock]$ResultHandler,
-        [string]$AbortWaitMessage = "[ABORT] Waiting for current jobs to finish (up to 60s)..."
+        [string]$AbortWaitMessage = "[ABORT] Waiting for current jobs to finish (up to 60s)...",
+        # $null default = unchanged behavior for every existing caller
+        # (2026-09-09 addition, Full Pipeline's dispatch-redesign
+        # migration, step 4 of 4). Invoked once per dispatch-loop pass,
+        # right after Flush-ConsoleQueue below - same cadence, same
+        # reasoning: a caller running two Invoke-ChapterDispatch instances
+        # concurrently inside this function's own two worker runspaces
+        # needs a way to drain a SEPARATE cross-worker event queue (Clean
+        # Console Output updates neither worker can safely call directly -
+        # see Docs/dispatch-redesign-design.md's Problem 3) on the main
+        # thread, at a real cadence, without this function needing to know
+        # anything about what that queue holds or what draining it means.
+        # Takes no parameters - a caller with per-pass state closes over it
+        # the same way -ResultHandler/-NextJobProvider already do.
+        [scriptblock]$PollCallback = $null
     )
 
     if ($null -eq $JobParams -and $null -eq $NextJobProvider) {
@@ -199,6 +213,7 @@ function Invoke-ZipParallelProcessing {
 
             $null = Test-AbortSignal
             Flush-ConsoleQueue -Queue $localConsoleQueue
+            if ($null -ne $PollCallback) { & $PollCallback }
 
             $localStillPending = [System.Collections.Generic.List[hashtable]]::new()
             foreach ($h in $localHandles) {
@@ -266,6 +281,13 @@ function Invoke-ZipParallelProcessing {
         }
 
         Flush-ConsoleQueue -Queue $localConsoleQueue
+        # One final drain (2026-09-09 addition, same call): a job that
+        # completed on the very last pass through the loop above can leave
+        # a PollCallback-relevant event enqueued with no further pass ever
+        # coming to drain it otherwise - mirrors this exact function's own
+        # final Flush-ConsoleQueue call immediately above, for the same
+        # reason.
+        if ($null -ne $PollCallback) { & $PollCallback }
     } finally {
         # Dispose any $localHandles left over (2026-08-31 addition, project
         # owner approved as an easy fix). On the normal completion path

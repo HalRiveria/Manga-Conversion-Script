@@ -297,6 +297,39 @@ Test-Assert ($outcomeB.ForceStoppedCount -eq 0) "ForceStoppedCount is 0 on a cle
 Write-Host ""
 
 # ==============================================================================
+#  Scenario B2 (2026-09-09, Full Pipeline dispatch-redesign step 4):
+#  -PollCallback fires at least once per dispatch-loop pass, and at least
+#  once more after the final drain - proves a caller can rely on it to
+#  drain a cross-worker event queue on a real cadence, not just once at
+#  the very end.
+# ==============================================================================
+Write-Host "=== Scenario B2: -PollCallback fires per pass and after the final drain ===" -ForegroundColor Cyan
+
+$script:cts = [System.Threading.CancellationTokenSource]::new()
+$resultsB2 = [System.Collections.Generic.List[hashtable]]::new()
+$jobParamsB2 = [System.Collections.Generic.List[hashtable]]::new()
+for ($i = 1; $i -le 6; $i++) {
+    $jobParamsB2.Add(@{ JobId = $i; DelayMs = (Get-Random -Minimum 100 -Maximum 400); DoFullLogging = $FullLogging; LogFile = $logFile; LogErrorFile = $logErrorFile; LogWarnFile = $logWarnFile })
+}
+$handlerB2 = { param($r) $resultsB2.Add($r) }
+$pollCountB2 = @{ N = 0 }
+$pollCallbackB2 = { $pollCountB2.N++ }
+
+$outcomeB2 = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -JobParams $jobParamsB2 `
+    -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile') `
+    -MaxParallel 2 -Cts $script:cts -ResultHandler $handlerB2 -PollCallback $pollCallbackB2
+$script:cts.Dispose()
+
+Test-Assert ($resultsB2.Count -eq 6) ("all 6 jobs still returned a result with -PollCallback supplied (got " + $resultsB2.Count + ")")
+# -MaxParallel 2 against 6 jobs forces at least 3 dispatch waves, each
+# needing at least one poll pass to notice a slot freed up - a bare
+# "greater than 0" assertion wouldn't distinguish "fires every pass" from
+# "fires exactly once regardless", the actual behavior this scenario exists
+# to prove.
+Test-Assert ($pollCountB2.N -ge 3) ("-PollCallback fired at least 3 times across multiple dispatch-loop passes (got " + $pollCountB2.N + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario D: a worker throws immediately - Invoke-ZipParallelProcessing must
 #  catch it, log it, and return normally rather than crashing the batch.
 # ==============================================================================
