@@ -1534,6 +1534,51 @@ Test-Assert ($null -ne $resultAD -and $resultAD.FailedCount -eq 1) ("the locked 
 Write-Host ""
 
 # ==============================================================================
+#  Scenario AD2 (2026-09-09, architecture-consistency extraction - see
+#  Todo.md's matching entry and Test-WebPAnimated's own header): direct
+#  coverage of Test-WebPAnimated itself (previously untestable in
+#  isolation, inline in Convert-ImageBatch's own pre-pass) and of
+#  Convert-ImageBatch actually skipping a real animated WebP - a real,
+#  pre-existing gap (only the locked-file/error path above had coverage,
+#  never the actual animation-flag-detected/skip path).
+# ==============================================================================
+Write-Host "=== Scenario AD2: Test-WebPAnimated direct coverage + Convert-ImageBatch skips a real animated WebP ===" -ForegroundColor Cyan
+function New-FakeWebp {
+    <#
+    .SYNOPSIS
+        A minimal real WebP RIFF/VP8X header (24 bytes - the same amount
+        Test-WebPAnimated itself reads) - "RIFF"/size/"WEBP"/"VP8X"/
+        chunk-size/flags, with the animation bit (0x02) in the flags'
+        least-significant byte set or clear per -Animated.
+    #>
+    param([string]$Path, [bool]$Animated)
+    $bytes = New-Object byte[] 24
+    [System.Text.Encoding]::ASCII.GetBytes("RIFF").CopyTo($bytes, 0)
+    [System.Text.Encoding]::ASCII.GetBytes("WEBP").CopyTo($bytes, 8)
+    [System.Text.Encoding]::ASCII.GetBytes("VP8X").CopyTo($bytes, 12)
+    if ($Animated) { $bytes[20] = 0x02 }
+    [System.IO.File]::WriteAllBytes($Path, $bytes)
+}
+
+$chAD2 = New-Dir "scenario-ad2\Series\Chapter 1"
+$animatedWebpAD2 = Join-Path $chAD2 "animated.webp"
+$staticWebpAD2 = Join-Path $chAD2 "static.webp"
+$noVp8xWebpAD2 = Join-Path $chAD2 "no-vp8x.webp"
+New-FakeWebp -Path $animatedWebpAD2 -Animated $true
+New-FakeWebp -Path $staticWebpAD2 -Animated $false
+[System.IO.File]::WriteAllBytes($noVp8xWebpAD2, [System.Text.Encoding]::ASCII.GetBytes("not a real webp at all"))
+
+Test-Assert ((Test-WebPAnimated -WebPPath $animatedWebpAD2) -eq $true) "Test-WebPAnimated detects a real VP8X animation flag"
+Test-Assert ((Test-WebPAnimated -WebPPath $staticWebpAD2) -eq $false) "Test-WebPAnimated reports false for a VP8X chunk with the animation bit clear"
+Test-Assert ((Test-WebPAnimated -WebPPath $noVp8xWebpAD2) -eq $false) "Test-WebPAnimated reports false (not a throw) for a file with no VP8X chunk at all"
+
+$resultAD2 = Convert-ImageBatch -ImageFiles @((Get-Item -LiteralPath $animatedWebpAD2), (Get-Item -LiteralPath $staticWebpAD2)) `
+    -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -MaxCjxlProcs 2 -DoFullLogging $false -CancelToken ([System.Threading.CancellationToken]::None)
+Test-Assert ($resultAD2.SkippedCount -eq 1 -and $resultAD2.SkippedPaths -contains $animatedWebpAD2) "Convert-ImageBatch actually skips a real animated WebP (not converted, not counted as failed)"
+Test-Assert ($resultAD2.ConvertedCount -eq 1) "the real static WebP in the same batch still converts normally"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario AE (2026-08-31 fix, caught by verifying this same day's
 #  /code-review 4th pass): the collision-guard pre-pass (fix 1) never
 #  checked $CancelToken, so cancelling mid-run still ran a real `magick

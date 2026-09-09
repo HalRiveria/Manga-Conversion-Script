@@ -592,6 +592,44 @@ function Complete-ImageConversionJob {
     return $false
 }
 
+function Test-WebPAnimated {
+    <#
+    .SYNOPSIS
+        True if $WebPPath's VP8X chunk has the animation flag set (bit
+        0x02) - a direct byte read, no ImageMagick spawn needed (unlike
+        Test-AvifAnimated - WebP's animation flag lives directly in the
+        container header at a fixed offset, no format-specific decoder
+        required to answer this). A file with no VP8X chunk at all (a
+        plain/simple WebP, no extended features) is never animated.
+        Throws on a real I/O failure - same "let the caller decide"
+        contract as Test-AvifAnimated, for consistency between this
+        project's two animated-format classification checks (2026-09-09,
+        architecture-consistency only - see Todo.md's matching entry.
+        This is byte-for-byte the same logic Convert-ImageBatch's own
+        pre-pass used inline before, just extracted into a named,
+        independently-testable function so both formats' "is this file
+        animated" answer comes from the same kind of place - NOT a
+        behavior change, and NOT the start of an animated-WebP
+        conversion pipeline, which this project has no plans to ever
+        build).
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$WebPPath
+    )
+
+    $bytes = New-Object byte[] 24
+    $bytesRead = 0
+    $stream = [System.IO.File]::OpenRead($WebPPath)
+    try { $bytesRead = $stream.Read($bytes, 0, 24) } finally { $stream.Dispose() }
+
+    if ($bytesRead -lt 24) { return $false }
+    $chunkId = [System.Text.Encoding]::ASCII.GetString($bytes, 12, 4)
+    if ($chunkId -ne 'VP8X') { return $false }
+    $flags = [System.BitConverter]::ToUInt32($bytes, 20)
+    return ($flags -band 0x02) -ne 0
+}
+
 function Convert-ImageBatch {
     <#
     .SYNOPSIS
@@ -726,33 +764,26 @@ function Convert-ImageBatch {
             continue
         }
         if ($MagickExe -and $srcPath -imatch '\.webp$') {
-            # Same cheap VP8X-chunk read as the (now-removed) in-loop check -
-            # no magick spawn needed for WebP. try/catch (2026-08-31 fix,
-            # caught by verifying this same day's /code-review 4th pass):
-            # this read used to sit INSIDE the dispatch loop's own per-job
-            # try/catch (added earlier the same day for Process.Start
-            # failures) - hoisting it into this pre-pass without its own
-            # guard meant a locked/deleted/inaccessible .webp threw
-            # straight out of Convert-ImageBatch and ended the whole run,
-            # instead of failing just that one file the way every other
-            # per-file I/O error in this function does.
+            # Test-WebPAnimated (2026-09-09 extraction, see its own header) -
+            # same cheap VP8X-chunk read as before, now a named function so
+            # both animated-format checks (WebP here, AVIF just below) share
+            # the same "ask a dedicated classifier, throw on failure" shape.
+            # try/catch (2026-08-31 fix, caught by verifying this same day's
+            # /code-review 4th pass): this read used to sit INSIDE the
+            # dispatch loop's own per-job try/catch (added earlier the same
+            # day for Process.Start failures) - hoisting it into this
+            # pre-pass without its own guard meant a locked/deleted/
+            # inaccessible .webp threw straight out of Convert-ImageBatch
+            # and ended the whole run, instead of failing just that one
+            # file the way every other per-file I/O error in this function
+            # does.
             $isAnimatedWebp = $false
             try {
-                $webpBytes  = New-Object byte[] 24
-                $webpBytesRead = 0
-                $webpStream = [System.IO.File]::OpenRead($srcPath)
-                try { $webpBytesRead = $webpStream.Read($webpBytes, 0, 24) } finally { $webpStream.Dispose() }
+                $isAnimatedWebp = Test-WebPAnimated -WebPPath $srcPath
             } catch {
                 Write-Log ("FAILED to read '" + $srcPath + "' to check for WebP animation: " + $_) -Level Error
                 $batchResult.FailedCount++
                 continue
-            }
-            if ($webpBytesRead -ge 24) {
-                $chunkId = [System.Text.Encoding]::ASCII.GetString($webpBytes, 12, 4)
-                if ($chunkId -eq 'VP8X') {
-                    $flags          = [System.BitConverter]::ToUInt32($webpBytes, 20)
-                    $isAnimatedWebp = ($flags -band 0x02) -ne 0
-                }
             }
             if ($isAnimatedWebp) {
                 Write-Log ("SKIPPING animated WebP '" + $srcPath + "': Animation flag set in VP8X chunk - animated WebP cannot be converted to JXL (no multi-frame support). File left untouched.") -Level Warn
@@ -1962,7 +1993,10 @@ function Get-ImageConversionSharedFunctionNames {
         gap this leaves (deliberately, not an oversight either). Includes
         Get-NeverConvertedExtensions (2026-09-02) - Convert-ImageBatch's
         own pre-pass calls it directly to decide whether to skip a file
-        (currently just ".gif") rather than dispatch it to cjxl.
+        (currently just ".gif") rather than dispatch it to cjxl. Includes
+        Test-WebPAnimated (2026-09-09 extraction, this same module) -
+        Convert-ImageBatch's own WebP pre-pass calls it directly, same
+        reason as Test-AvifAnimated above.
     #>
-    return @('Convert-ImageBatch', 'Complete-ImageConversionJob', 'Invoke-IccStripRetryOrFail', 'Test-AvifAnimated', 'Get-NeverConvertedExtensions')
+    return @('Convert-ImageBatch', 'Complete-ImageConversionJob', 'Invoke-IccStripRetryOrFail', 'Test-AvifAnimated', 'Get-NeverConvertedExtensions', 'Test-WebPAnimated')
 }
