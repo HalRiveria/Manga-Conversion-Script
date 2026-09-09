@@ -577,6 +577,46 @@ $null = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenar
 Test-Assert ($zipCallsC2.Count -eq 0) "the chapter holding the naming collision is never treated as zippable - ZipStepCallback (mode 8's own zip-step wiring) is never invoked for it"
 
 # ==============================================================================
+#  Scenario C2c (2026-09-09, zip-blocked-status fix): the live CCR display
+#  actually shows "Zip skipped: naming collision" for a real chapter
+#  blocked this way (same fixture as Scenario C2), and does NOT show a
+#  spurious override for an "extra" entry (Scenario M's own fixture
+#  shape - a stray image directly in the series root) that was never
+#  zippable by design in the first place.
+# ==============================================================================
+Write-Host "=== Scenario C2c: live CCR status names the real zip-block reason, and skips extras ===" -ForegroundColor Cyan
+$rootC2c = New-Dir "scenario-c2c"
+$chC2c = New-Dir "scenario-c2c\Series\Chapter 1"
+[System.IO.File]::WriteAllText((Join-Path $chC2c "photo.jxl"), "real jxl bytes from a since-deleted photo.jpg")
+Start-Sleep -Milliseconds 50
+New-FakeImage -DirPath $chC2c -Name "photo.png" | Out-Null
+New-FakeImage -DirPath (Join-Path $rootC2c "Series") -Name "cover.jpg" | Out-Null   # the "extra" - no chapter subfolder
+
+$script:ccrCallsC2c = New-Object System.Collections.Generic.List[hashtable]
+$realCompleteChapterProgressC2c = ${function:Complete-ChapterProgress}
+function Complete-ChapterProgress {
+    param([string]$SeriesName, [string]$ChapterName, [string]$Status, [string]$Detail = "")
+    $script:ccrCallsC2c.Add(@{ ChapterName = $ChapterName; Status = $Status; Detail = $Detail })
+    & $script:realCompleteChapterProgressC2cRef -SeriesName $SeriesName -ChapterName $ChapterName -Status $Status -Detail $Detail
+}
+$script:realCompleteChapterProgressC2cRef = $realCompleteChapterProgressC2c
+$script:CleanConsoleOutputEnabled = $true
+
+try {
+    $totalsC2c = Invoke-LooseImageConversionPipeline -Path $rootC2c -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
+} finally {
+    $script:CleanConsoleOutputEnabled = $false
+    ${function:Complete-ChapterProgress} = $realCompleteChapterProgressC2c
+}
+
+$callC2cChapter = $script:ccrCallsC2c | Where-Object { $_.ChapterName -eq 'Chapter 1' } | Select-Object -First 1
+$callC2cExtra   = $script:ccrCallsC2c | Where-Object { $_.ChapterName -eq 'Series' } | Select-Object -First 1
+Test-Assert ($totalsC2c.ConvertedSuccess -eq 1) "sanity check: the extra's own image still converted normally"
+Test-Assert ($null -ne $callC2cChapter -and $callC2cChapter.Status -eq 'Warning' -and $callC2cChapter.Detail -like '*Zip skipped: naming collision*') ("the real chapter's live CCR status names the naming collision (got Status='" + $(if ($callC2cChapter) { $callC2cChapter.Status } else { '<none>' }) + "', Detail='" + $(if ($callC2cChapter) { $callC2cChapter.Detail } else { '<none>' }) + "')")
+Test-Assert ($null -ne $callC2cExtra -and $callC2cExtra.Status -eq 'Success' -and $callC2cExtra.Detail -notlike '*Zip skipped*') ("the extra entry (never zippable by design) does NOT get a spurious override (got Status='" + $(if ($callC2cExtra) { $callC2cExtra.Status } else { '<none>' }) + "', Detail='" + $(if ($callC2cExtra) { $callC2cExtra.Detail } else { '<none>' }) + "')")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario C2b (2026-08-31 fix, found by a second same-day /code-review):
 #  same collision shape as C2, but with the colliding source's timestamp
 #  EXACTLY EQUAL to the pre-existing .jxl's, not newer. The comparison was

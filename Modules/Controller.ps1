@@ -404,6 +404,44 @@ function Get-MergedChapterStatus {
     return $mergedStatus, ($parts -join " | ")
 }
 
+function Get-ZipBlockedStatusOverride {
+    <#
+    .SYNOPSIS
+        Given a chapter's own conversion Status/Detail (from
+        Get-MergedChapterStatus) and a reason its zip was blocked for a
+        NON-engine-failure cause (naming collision, AVIF classification
+        failure, or the run being aborted), returns the Status/Detail
+        that should actually reach Complete-ChapterProgress - downgrades
+        a clean Success/Warning to Warning with the reason appended;
+        leaves an existing Error alone (already correctly severe, and
+        already the reason zipping was skipped, not this).
+
+        DOCUMENTED DUPLICATE (2026-09-09, see Docs/zip-blocked-status-
+        design.md's "Decided" section for why): an identical copy of this
+        function lives in ImageConversionPipeline.ps1 for mode 2/8's own
+        naming-collision case. Neither CleanConsoleRendering.ps1 (its own
+        header explicitly says it "never interprets -Detail's contents,"
+        so a why-interpreting function doesn't belong there) nor
+        Summary.ps1 (its domain is the final run summary, not live
+        per-chapter status) was a clean fit - keep this copy in sync with
+        ImageConversionPipeline.ps1's if either one ever changes.
+    .OUTPUTS
+        Two values: Status, Detail - same shape as
+        Get-MergedChapterStatus, ready to pass straight to
+        Complete-ChapterProgress.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Status,
+        [string]$Detail,
+        [Parameter(Mandatory)]
+        [string]$BlockedReason
+    )
+    if ($Status -eq 'Error') { return $Status, $Detail }
+    $newDetail = if ($Detail) { $Detail + " | Zip skipped: " + $BlockedReason } else { "Zip skipped: " + $BlockedReason }
+    return 'Warning', $newDetail
+}
+
 function Invoke-FullPipelineChapter {
     <#
     .SYNOPSIS
@@ -863,12 +901,20 @@ function Invoke-FullPipeline {
             # $chapterEntries further down to force IsZippable=$false for
             # any chapter affected by a naming collision (known up front,
             # series-wide); a classification failure adds to this same
-            # set from INSIDE the per-chapter loop instead, once that
-            # chapter's own avifs are actually classified - same
+            # structure from INSIDE the per-chapter loop instead, once
+            # that chapter's own avifs are actually classified - same
             # reasoning for both: a real, unconverted file that must not
             # be zipped, and this run has no safe way to fix it
             # automatically. Reset per series.
-            $failedClassificationDirs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            #
+            # Dictionary<dir, reason> (2026-09-09, zip-blocked-status
+            # fix), not a plain HashSet - both add-sites below already
+            # know exactly which of the two reasons applies; keeping the
+            # reason instead of just presence lets
+            # Get-ZipBlockedStatusOverride's -BlockedReason (below) show
+            # the real cause in the live CCR display instead of a generic
+            # one. `.Contains(...)` callers became `.ContainsKey(...)`.
+            $failedClassificationDirs = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
             $chapters = Get-SeriesChapters -SeriesPath $series.FullName -QualifyingExtensions $FolderQualifyingExtensions `
                 -ExcludeStagingDirs $FolderExcludeStagingDirs -ForceRezip $false
@@ -887,7 +933,7 @@ function Invoke-FullPipeline {
             # and ImageConversionPipeline.ps1's Get-LooseImageCandidates
             # docstring for the full "why" of this exclusion.
             $totals.InspectFailedCount += $imageCandidates.NamingCollisions.Count
-            foreach ($nc in $imageCandidates.NamingCollisions) { $null = $failedClassificationDirs.Add($nc.DirectoryName) }
+            foreach ($nc in $imageCandidates.NamingCollisions) { $failedClassificationDirs[$nc.DirectoryName] = "naming collision" }
 
             # AVIF CLASSIFICATION moved to per-chapter (2026-09-03 fix, real
             # bug, live-reported and quantified via two real user logs):
@@ -951,7 +997,7 @@ function Invoke-FullPipeline {
                 # anyway, since neither engine's merged status has any
                 # visibility into a failure that happened before either
                 # of them ran).
-                $isChapterZippable = -not $failedClassificationDirs.Contains($c.Dir.FullName)
+                $isChapterZippable = -not $failedClassificationDirs.ContainsKey($c.Dir.FullName)
                 $chapterEntries.Add(@{ Dir = $c.Dir; ZipOut = $c.ZipOut; IsZippable = $isChapterZippable })
             }
             $extraDirPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -1082,7 +1128,15 @@ function Invoke-FullPipeline {
                         foreach ($entry in $chAvifClassification.GetEnumerator()) {
                             if ($entry.Value -eq "Failed") {
                                 $chapterClassificationFailed = $true
-                                $null = $failedClassificationDirs.Add($chapterDir.FullName)
+                                # Indexer assignment, not .Add() (2026-09-09,
+                                # zip-blocked-status fix) - a chapter with
+                                # MORE than one failed AVIF would hit this
+                                # branch more than once for the same
+                                # $chapterDir.FullName key; .Add() throws on
+                                # a duplicate key, the indexer just
+                                # overwrites (same reason either time, so
+                                # nothing is lost).
+                                $failedClassificationDirs[$chapterDir.FullName] = "AVIF classification failure"
                             } elseif ($entry.Value -eq "Animated") {
                                 $null = $chKnownAnimatedPaths.Add($entry.Key)
                             } elseif ($entry.Value -eq "Static") {
@@ -1170,6 +1224,19 @@ function Invoke-FullPipeline {
                     $totals.InspectFailedCount       += $ar.InspectFailedCount
                 }
 
+                # $displayStatus/$displayDetail (2026-09-09, zip-blocked-
+                # status fix) - default to the engines' own merged outcome,
+                # overridden below in whichever elseif branch actually
+                # blocked the zip, so Complete-ChapterProgress shows the
+                # real reason instead of a clean Success/Warning that
+                # doesn't mention the zip never happened. Get-ZipBlockedStatusOverride
+                # itself leaves an existing 'Error' Status alone, so it's
+                # always safe to call even when this branch fired because
+                # $chapterOutcome.Status was already 'Error', not because
+                # of the abort.
+                $displayStatus = $chapterOutcome.Status
+                $displayDetail = $chapterOutcome.Detail
+
                 if ($chapterOutcome.Zipped) {
                     if ($chapterOutcome.ZipResult.Status -eq 'Success') {
                         $totals.ZipCreatedSuccess++
@@ -1194,7 +1261,8 @@ function Invoke-FullPipeline {
                     # didn't get zipped, and the run was aborted" from a
                     # genuine Error found on some chapter in a normal run.
                     $totals.ZipSkippedDueToError++
-                } elseif (-not $isZippableNow -and $failedClassificationDirs.Contains($chapterDir.FullName)) {
+                    $displayStatus, $displayDetail = Get-ZipBlockedStatusOverride -Status $chapterOutcome.Status -Detail $chapterOutcome.Detail -BlockedReason "run aborted"
+                } elseif (-not $isZippableNow -and $failedClassificationDirs.ContainsKey($chapterDir.FullName)) {
                     # 2026-08-31 fix: a chapter forced un-zippable because
                     # $failedClassificationDirs contains its directory
                     # (IsZippable was already $false, so the elseif above
@@ -1205,7 +1273,7 @@ function Invoke-FullPipeline {
                     # the field's own name, $failedClassificationDirs now
                     # collects TWO distinct reasons (an AVIF classification
                     # failure, or a Get-LooseImageCandidates naming
-                    # collision - see where each is added to this set,
+                    # collision - see where each is added to this dictionary,
                     # above) - both mean the same thing here: a real,
                     # unconverted file this chapter can't safely zip.
                     # Counted into the same ZipSkippedDueToError field, same
@@ -1213,12 +1281,13 @@ function Invoke-FullPipeline {
                     # reflects "this chapter should have zipped and didn't,"
                     # regardless of which of the two reasons caused it.
                     $totals.ZipSkippedDueToError++
+                    $displayStatus, $displayDetail = Get-ZipBlockedStatusOverride -Status $chapterOutcome.Status -Detail $chapterOutcome.Detail -BlockedReason $failedClassificationDirs[$chapterDir.FullName]
                 }
 
                 if ($fullCts.Token.IsCancellationRequested) { $totals.Aborted = $true }
 
                 if ($script:CleanConsoleOutputEnabled) {
-                    $null = Complete-ChapterProgress -SeriesName $series.Name -ChapterName $chapterName -Status $chapterOutcome.Status -Detail $chapterOutcome.Detail
+                    $null = Complete-ChapterProgress -SeriesName $series.Name -ChapterName $chapterName -Status $displayStatus -Detail $displayDetail
                 }
             }
         }

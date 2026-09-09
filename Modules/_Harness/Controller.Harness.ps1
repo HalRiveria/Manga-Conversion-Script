@@ -546,6 +546,20 @@ $null = $cancelPsC6.AddScript({
 }).AddArgument($markerC6)
 $cancelHandleC6 = $cancelPsC6.BeginInvoke()
 
+# CCR spy (2026-09-09, zip-blocked-status fix) - proves the live display
+# actually reflects the block, not just the run summary's own
+# ZipSkippedDueToError counter (already covered above). Same function-
+# swap technique as Scenario H2's Start-SeriesProgress spy.
+$script:ccrCallsC6 = New-Object System.Collections.Generic.List[hashtable]
+$realCompleteChapterProgressC6 = ${function:Complete-ChapterProgress}
+function Complete-ChapterProgress {
+    param([string]$SeriesName, [string]$ChapterName, [string]$Status, [string]$Detail = "")
+    $script:ccrCallsC6.Add(@{ Status = $Status; Detail = $Detail })
+    & $script:realCompleteChapterProgressC6Ref -SeriesName $SeriesName -ChapterName $ChapterName -Status $Status -Detail $Detail
+}
+$script:realCompleteChapterProgressC6Ref = $realCompleteChapterProgressC6
+$script:CleanConsoleOutputEnabled = $true
+
 try {
     $totalsC6 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-c6") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
 } finally {
@@ -554,11 +568,16 @@ try {
     $cancelRunspaceC6.Close()
     $cancelRunspaceC6.Dispose()
     Reset-AbortState
+    $script:CleanConsoleOutputEnabled = $false
+    ${function:Complete-ChapterProgress} = $realCompleteChapterProgressC6
 }
 
 Test-Assert ($totalsC6.Aborted -eq $true) "sanity check: the run genuinely registered as aborted"
 Test-Assert ($totalsC6.ZipCreatedSuccess -eq 0) "sanity check: the chapter was not actually zipped"
 Test-Assert ($totalsC6.ZipSkippedDueToError -eq 1) ("the abort-blocked zip is now counted, not invisible (got ZipSkippedDueToError=" + $totalsC6.ZipSkippedDueToError + ")")
+Test-Assert ($script:ccrCallsC6.Count -eq 1) ("Complete-ChapterProgress was called exactly once for the aborted chapter (got " + $script:ccrCallsC6.Count + ")")
+Test-Assert ($script:ccrCallsC6[0].Status -eq 'Warning') ("the live CCR status is downgraded to Warning, not left as a clean Success (got '" + $script:ccrCallsC6[0].Status + "')")
+Test-Assert ($script:ccrCallsC6[0].Detail -like '*Zip skipped: run aborted*') ("the live CCR detail names the real block reason (got '" + $script:ccrCallsC6[0].Detail + "')")
 Write-Host ""
 
 # ==============================================================================
@@ -1700,6 +1719,48 @@ Test-Assert ($totalsX.InspectFailedCount -eq 1) ("the naming collision was count
 Test-Assert (Test-Path -LiteralPath (Join-Path $chX "photo.png")) "the colliding source survives untouched on disk - not deleted"
 Test-Assert ($totalsX.ZipCreatedSuccess -eq 0) "the chapter was NOT zipped - the raw, unconverted collision file did not get swept into an archive"
 Test-Assert ($totalsX.ZipSkippedDueToError -eq 1) ("the naming-collision-blocked chapter is counted in ZipSkippedDueToError, same as the AVIF classification case (got " + $totalsX.ZipSkippedDueToError + ")")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario X2 (2026-09-09, zip-blocked-status fix): the live CCR display
+#  actually shows the real reason a chapter's zip was blocked, for both
+#  the naming-collision and AVIF-classification-failure causes - not just
+#  a clean, misleading Success/Warning the way it did before this fix.
+#  Two chapters, one series, one cause each, same fixture shapes as
+#  Scenario X (collision) and Scenario W (classification failure).
+# ==============================================================================
+Write-Host "=== Scenario X2: live CCR status names the real zip-block reason (naming collision vs AVIF classification failure) ===" -ForegroundColor Cyan
+$chX2a = New-Dir "scenario-x2\Series\Chapter 1"
+[System.IO.File]::WriteAllText((Join-Path $chX2a "photo.jxl"), "real jxl bytes from a since-deleted photo.jpg")
+Start-Sleep -Milliseconds 50
+New-FakeImageIn -DirPath $chX2a -Name "photo.png" | Out-Null
+
+$chX2b = New-Dir "scenario-x2\Series\Chapter 2"
+[System.IO.File]::WriteAllText((Join-Path $chX2b "corrupt.avif"), "FAIL_IDENTIFY")
+New-FakeAvifIn -DirPath $chX2b -Name "animated.avif" -Frames 5 | Out-Null
+
+$script:ccrCallsX2 = New-Object System.Collections.Generic.List[hashtable]
+$realCompleteChapterProgressX2 = ${function:Complete-ChapterProgress}
+function Complete-ChapterProgress {
+    param([string]$SeriesName, [string]$ChapterName, [string]$Status, [string]$Detail = "")
+    $script:ccrCallsX2.Add(@{ ChapterName = $ChapterName; Status = $Status; Detail = $Detail })
+    & $script:realCompleteChapterProgressX2Ref -SeriesName $SeriesName -ChapterName $ChapterName -Status $Status -Detail $Detail
+}
+$script:realCompleteChapterProgressX2Ref = $realCompleteChapterProgressX2
+$script:CleanConsoleOutputEnabled = $true
+
+try {
+    $totalsX2 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-x2") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+} finally {
+    $script:CleanConsoleOutputEnabled = $false
+    ${function:Complete-ChapterProgress} = $realCompleteChapterProgressX2
+}
+
+$callX2a = $script:ccrCallsX2 | Where-Object { $_.ChapterName -eq 'Chapter 1' } | Select-Object -First 1
+$callX2b = $script:ccrCallsX2 | Where-Object { $_.ChapterName -eq 'Chapter 2' } | Select-Object -First 1
+Test-Assert ($totalsX2.ZipSkippedDueToError -eq 2) ("sanity check: both chapters' zips were blocked (got ZipSkippedDueToError=" + $totalsX2.ZipSkippedDueToError + ")")
+Test-Assert ($null -ne $callX2a -and $callX2a.Status -eq 'Warning' -and $callX2a.Detail -like '*Zip skipped: naming collision*') ("Chapter 1's live CCR status names the naming collision specifically (got Status='" + $(if ($callX2a) { $callX2a.Status } else { '<none>' }) + "', Detail='" + $(if ($callX2a) { $callX2a.Detail } else { '<none>' }) + "')")
+Test-Assert ($null -ne $callX2b -and $callX2b.Status -eq 'Warning' -and $callX2b.Detail -like '*Zip skipped: AVIF classification failure*') ("Chapter 2's live CCR status names the AVIF classification failure specifically, distinguished from Chapter 1's reason (got Status='" + $(if ($callX2b) { $callX2b.Status } else { '<none>' }) + "', Detail='" + $(if ($callX2b) { $callX2b.Detail } else { '<none>' }) + "')")
 Write-Host ""
 
 # ==============================================================================

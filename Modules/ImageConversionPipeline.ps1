@@ -1592,6 +1592,43 @@ function Get-ChapterProgressStatus {
     return "Success", $null
 }
 
+function Get-ZipBlockedStatusOverride {
+    <#
+    .SYNOPSIS
+        Given a chapter's own conversion Status/Detail (from
+        Get-ChapterProgressStatus) and a reason its zip was blocked for a
+        NON-engine-failure cause, returns the Status/Detail that should
+        actually reach Complete-ChapterProgress - downgrades a clean
+        Success/Warning to Warning with the reason appended; leaves an
+        existing Error alone (already correctly severe, and already the
+        reason zipping was skipped, not this).
+
+        DOCUMENTED DUPLICATE (2026-09-09, see Docs/zip-blocked-status-
+        design.md's "Decided" section for why): an identical copy of this
+        function lives in Controller.ps1 for Full Pipeline's own three
+        block-reason cases. Neither CleanConsoleRendering.ps1 (its own
+        header explicitly says it "never interprets -Detail's contents,"
+        so a why-interpreting function doesn't belong there) nor
+        Summary.ps1 (its domain is the final run summary, not live
+        per-chapter status) was a clean fit - keep this copy in sync with
+        Controller.ps1's if either one ever changes.
+    .OUTPUTS
+        Two values: Status, Detail - same shape as
+        Get-ChapterProgressStatus, ready to pass straight to
+        Complete-ChapterProgress.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Status,
+        [string]$Detail,
+        [Parameter(Mandatory)]
+        [string]$BlockedReason
+    )
+    if ($Status -eq 'Error') { return $Status, $Detail }
+    $newDetail = if ($Detail) { $Detail + " | Zip skipped: " + $BlockedReason } else { "Zip skipped: " + $BlockedReason }
+    return 'Warning', $newDetail
+}
+
 function Invoke-LooseImageConversionPipeline {
     <#
     .SYNOPSIS
@@ -1819,13 +1856,13 @@ function Invoke-LooseImageConversionPipeline {
                 # a chapter holding an unresolvable naming collision must
                 # not be zipped this run - see the comment above where
                 # $namingCollisionDirs is built.
-                $chapterEntries.Add(@{ Dir = $c.Dir; ZipOut = $c.ZipOut; IsZippable = (-not $namingCollisionDirs.Contains($c.Dir.FullName)) })
+                $chapterEntries.Add(@{ Dir = $c.Dir; ZipOut = $c.ZipOut; IsZippable = (-not $namingCollisionDirs.Contains($c.Dir.FullName)); IsExtra = $false })
             }
             foreach ($extraDirPath in $imagesByDir.Keys) {
                 if ($chapterDirSet.Contains($extraDirPath)) { continue }
 
                 $extraDir = $imagesByDir[$extraDirPath][0].Directory
-                $chapterEntries.Add(@{ Dir = $extraDir; ZipOut = $null; IsZippable = $false })
+                $chapterEntries.Add(@{ Dir = $extraDir; ZipOut = $null; IsZippable = $false; IsExtra = $true })
                 Write-Log ("Series '" + $series.Name + "': '" + $extraDir.Name + "' has unconverted image(s) but wasn't found by chapter discovery (e.g. a stray .zip sitting alongside it, or images outside a normal chapter folder) - converting it anyway, but NOT treating it as zippable.") -Level Warn
             }
 
@@ -1947,6 +1984,25 @@ function Invoke-LooseImageConversionPipeline {
                         $zipDetailPart     = "Zip: " + $(if ($zipOutcome.Detail) { $zipOutcome.Detail } else { $zipOutcome.Status })
                         $chapterDetail     = $convertDetailPart + " | " + $zipDetailPart
                     }
+                }
+
+                # Zip-blocked status override (2026-09-09, see Docs/zip-
+                # blocked-status-design.md) - a real chapter (not an
+                # IsExtra=$true "extra" like the series root, which was
+                # never zippable by design and shouldn't get a spurious
+                # note) that's IsZippable=$false only ever got there for
+                # one reason at this point in the module: a naming
+                # collision (chapter.IsZippable is set from
+                # $namingCollisionDirs alone, above) - so $chapterStatus/
+                # $chapterDetail (computed from the conversion result
+                # only, with no knowledge of zip-blocking) would otherwise
+                # reach Complete-ChapterProgress unchanged even when the
+                # chapter's zip never happened. -not $chapter.IsZippable
+                # here is never also true from the ZipStepCallback branch
+                # above (that one requires IsZippable=$true), so this
+                # can't double-apply.
+                if ((-not $chapter.IsZippable) -and (-not $chapter.IsExtra)) {
+                    $chapterStatus, $chapterDetail = Get-ZipBlockedStatusOverride -Status $chapterStatus -Detail $chapterDetail -BlockedReason "naming collision"
                 }
 
                 if ($script:CleanConsoleOutputEnabled) {
