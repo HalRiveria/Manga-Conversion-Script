@@ -297,7 +297,17 @@ function Invoke-IccStripRetryOrFail {
         [Parameter(Mandatory)]
         [System.Collections.Queue]$Pending,
         [Parameter(Mandatory)]
-        [string]$MagickExe
+        [string]$MagickExe,
+        # $null default = unchanged behavior for Convert-ImageBatch's own
+        # call site (2026-09-09 addition, mode 2's ChapterDispatch.ps1
+        # migration) - Invoke-ChapterDispatch identifies a chapter by the
+        # exact ChapterKey value tagged onto each of its own jobs (see
+        # that module's own header), and has no other way to know a
+        # requeued retry job belongs to the same chapter as the job that
+        # requeued it. Only meaningful to a caller going through
+        # Invoke-ChapterDispatch; Convert-ImageBatch itself never sets
+        # ChapterKey on any of its own jobs, so this stays $null there.
+        $ChapterKey = $null
     )
 
     $strippedPng = [System.IO.Path]::Combine(
@@ -401,6 +411,7 @@ function Invoke-IccStripRetryOrFail {
             Proc       = $null
             TempPng    = $strippedPng
             IccRetried = $true
+            ChapterKey = $ChapterKey
         }
         $Pending.Enqueue($retryJob)
         # Deliberately does NOT delete $strippedPng here (a prior version
@@ -432,6 +443,15 @@ function Complete-ImageConversionJob {
         real differences were the drain copy skipping the -DoFullLogging
         stdout dump and the success log message (no byte count, "(abort
         drain)" wording instead), both captured via -IsAbortDrain.
+
+        DOCUMENTED DUPLICATE (2026-09-09, mode 2's ChapterDispatch.ps1
+        migration): the exit-code/ICC-retry-decision/delete-source
+        portion of this function (everything after its own try/finally)
+        is copied, not shared, into Complete-ImageDispatchJob - see that
+        function's own header for why (Invoke-ChapterDispatch owns
+        process disposal/-SharedBudget release generically now, this
+        function's own callers still don't). Keep both in sync if either
+        changes.
     .OUTPUTS
         $true if this job was an ICC mismatch that got re-enqueued onto
         $Pending as a retry (the caller should `continue` its loop
@@ -593,6 +613,140 @@ function Complete-ImageConversionJob {
     }
 
     return $false
+}
+
+function Complete-ImageDispatchJob {
+    <#
+    .SYNOPSIS
+        JobFinalize-shaped completion handler for a job dispatched via
+        Invoke-ChapterDispatch (mode 2's own migration onto
+        ChapterDispatch.ps1, 2026-09-09 - see
+        Docs\dispatch-redesign-design.md). Handles exit-code/output
+        verification (including the ICC-profile-mismatch retry via
+        Invoke-IccStripRetryOrFail) and (on success) source deletion,
+        mutating $ChapterResult (this chapter's own per-chapter
+        accumulator, built by Invoke-LooseImageConversionPipeline's own
+        JobBuilder) in place.
+
+        DOCUMENTED DUPLICATE, not a call-through, of
+        Complete-ImageConversionJob's own exit-code/ICC-retry-decision/
+        delete-source logic (everything after that function's own
+        try/finally) - see that function's own header for the cross-
+        reference. Genuinely different contract, not a lazy copy:
+        Complete-ImageConversionJob's caller (Convert-ImageBatch, still
+        used directly by Controller.ps1's Full Pipeline until step 4 of
+        the dispatch redesign migrates it too) owns process disposal and
+        -SharedBudget release itself; THIS function's caller
+        (Invoke-ChapterDispatch) already owns that generically for every
+        job on every exit path - duplicating it here would double-release
+        the same slot. No -IsAbortDrain distinction either -
+        Invoke-ChapterDispatch calls JobFinalize identically whether a
+        job finished during normal polling or during the abort/drain
+        window, so there's no separate wording variant to capture.
+    .OUTPUTS
+        @{ Success = [bool] } for a normal completion, or
+        @{ Requeued = $true } when Invoke-IccStripRetryOrFail enqueued a
+        retry job instead - Invoke-ChapterDispatch doesn't count a result
+        for THIS job in that case, matching Complete-ImageConversionJob's
+        own $true-return contract.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Job,
+        [Parameter(Mandatory)]
+        [hashtable]$ChapterResult,
+        [System.Collections.Generic.Queue[hashtable]]$PendingQueue,
+        [string]$MagickExe,
+        [bool]$DoFullLogging,
+        [string]$ItemNoun   = "image",
+        [string]$SourceNoun = "source image"
+    )
+
+    $stdout = if ($Job.StdoutTask) { $Job.StdoutTask.GetAwaiter().GetResult() } else { $Job.Proc.StandardOutput.ReadToEnd() }
+    $stderr = if ($Job.StderrTask) { $Job.StderrTask.GetAwaiter().GetResult() } else { $Job.Proc.StandardError.ReadToEnd() }
+    $code   = $Job.Proc.ExitCode
+
+    if ($DoFullLogging -and -not [string]::IsNullOrWhiteSpace($stdout)) {
+        Write-Log ("cjxl stdout for '" + $Job.SrcPath + "': " + $stdout.Trim())
+    }
+
+    $convOk = $false
+    try {
+        if ($code -ne 0) {
+            # -not $Job.IccRetried: see Complete-ImageConversionJob's own
+            # identical guard for why - a job that's ALREADY the ICC-strip
+            # retry hitting the same failure signature again must fall
+            # through to the normal failure path, not retry forever.
+            if ($code -eq 1 -and $stderr -imatch 'Getting pixel data failed' -and $MagickExe -and -not $Job.IccRetried) {
+                # Bridge through a real, plain System.Collections.Queue,
+                # NOT $PendingQueue directly (2026-09-09, real bug caught
+                # before this ever ran) - Invoke-IccStripRetryOrFail's own
+                # -Pending param is typed [System.Collections.Queue], and
+                # Queue[hashtable] does NOT derive from that non-generic
+                # type. PowerShell's own parameter binding silently
+                # CONVERTS a Queue[hashtable] argument into a brand-new,
+                # disconnected System.Collections.Queue instead of
+                # refusing the mismatch or passing the reference through -
+                # confirmed live: enqueuing into the converted copy left
+                # the caller's own original queue completely untouched, no
+                # error anywhere. Passed directly, the real retry job
+                # would silently vanish into that throwaway copy - the
+                # chapter's Outstanding count would never reach 0 (this
+                # job's own "Requeued" signal already stopped it from
+                # decrementing, expecting the retry to eventually finish
+                # instead), so neither this chapter nor the whole run
+                # would ever complete. Enqueuing into a real, dedicated
+                # System.Collections.Queue first, then re-enqueuing
+                # whatever landed there onto the REAL $PendingQueue
+                # afterward, sidesteps the coercion entirely - each
+                # dequeued item is already a real Hashtable reference
+                # (Invoke-IccStripRetryOrFail builds it as a literal
+                # @{...}), so Queue[hashtable].Enqueue() accepts it
+                # directly, no further conversion risk.
+                $iccRetryLanding = [System.Collections.Queue]::new()
+                if (Invoke-IccStripRetryOrFail -Job $Job -Pending $iccRetryLanding -MagickExe $MagickExe -ChapterKey $Job.ChapterKey) {
+                    foreach ($retryJob in $iccRetryLanding) { $PendingQueue.Enqueue($retryJob) }
+                    if ($Job.TempPng -and (Test-Path -LiteralPath $Job.TempPng)) { try { [System.IO.File]::Delete($Job.TempPng) } catch { } }
+                    return @{ Requeued = $true }
+                }
+            }
+            throw ("cjxl exited with code " + $code + ". Stderr: " + $stderr)
+        }
+        if (-not (Test-Path -LiteralPath $Job.JxlPath)) { throw ("Output .jxl was not created: '" + $Job.JxlPath + "'") }
+        $jxlSize = (Get-Item -LiteralPath $Job.JxlPath).Length
+        if ($jxlSize -eq 0) { throw ("Output .jxl is 0 bytes: '" + $Job.JxlPath + "'") }
+        Write-Log ("Conversion OK: '" + $Job.JxlPath + "' (" + $jxlSize + " bytes)")
+        $ChapterResult.ConvertedCount++
+        $convOk = $true
+    } catch {
+        Write-Log ("FAILED conversion of " + $ItemNoun + " '" + $Job.SrcPath + "': " + $_) -Level Error
+        $ChapterResult.FailedCount++
+        if (Test-Path -LiteralPath $Job.JxlPath) {
+            try { [System.IO.File]::Delete($Job.JxlPath) } catch { }
+        }
+    }
+
+    if ($Job.TempPng -and (Test-Path -LiteralPath $Job.TempPng)) {
+        try { [System.IO.File]::Delete($Job.TempPng) } catch { }
+    }
+
+    if ($convOk) {
+        try {
+            $removed = Remove-Source -ItemPath $Job.SrcPath
+            if ($removed) {
+                $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
+                Write-Log ("Deleted " + $SourceNoun + " (" + $deleteDesc + "): '" + $Job.SrcPath + "'")
+                $ChapterResult.DeletedCount++
+            } else {
+                Write-Log ($SourceNoun.Substring(0,1).ToUpperInvariant() + $SourceNoun.Substring(1) + " already gone before deletion (not counted as deleted): '" + $Job.SrcPath + "'") -Level Warn
+            }
+        } catch {
+            Write-Log ("FAILED to delete " + $SourceNoun + " '" + $Job.SrcPath + "': " + $_) -Level Error
+            $ChapterResult.DeleteFailedCount++
+        }
+    }
+
+    return @{ Success = $convOk }
 }
 
 function Test-WebPAnimated {
@@ -1648,12 +1802,20 @@ function Get-ZipBlockedStatusOverride {
 function Invoke-LooseImageConversionPipeline {
     <#
     .SYNOPSIS
-        Mode 2 end to end (and mode 2's conversion half of mode 8): walks
-        the library series by series (New-SeriesProvider), discovers each
-        series' chapters (Get-SeriesChapters), and converts each chapter's
-        loose images as its own batch - unconditional series/chapter
-        batching, not a mode-1-vs-mode-2 toggle (see this module's header
-        and CLAUDE.md's "Clean Console Output").
+        Mode 2 end to end (and mode 2's conversion half of mode 8).
+        Migrated 2026-09-09 onto ChapterDispatch.ps1's Invoke-ChapterDispatch
+        (step 3 of Docs\dispatch-redesign-design.md's 4-step migration
+        order, after mode 3) - idle concurrency now picks up the NEXT
+        chapter's jobs immediately instead of blocking on one chapter's
+        Convert-ImageBatch call finishing before the next chapter's images
+        are even enumerated. Walks the library the same two-tier way as
+        before (New-SeriesProvider lazy across series, Get-SeriesChapters
+        eager per series) via a custom -ChapterProvider closure (not
+        ChapterDispatch.ps1's own New-LibraryChapterProvider - see that
+        function's own header for why: this module's own naming-
+        collision/"extra chapter-equivalent entry" completeness logic is
+        genuinely per-engine domain knowledge, not something the generic
+        primitive should own).
 
         Get-SeriesChapters alone is NOT the full picture of what gets
         converted: it's a thin wrapper on the zip-domain
@@ -1662,10 +1824,47 @@ function Invoke-LooseImageConversionPipeline {
         converting". Any directory holding a needs-conversion image that
         those guards excluded (a stray .zip alongside fresh loose images,
         or images sitting directly in the series root) is folded in as an
-        extra chapter-equivalent entry BEFORE Start-SeriesProgress is
-        called, so the progress total already accounts for it and nothing
-        is ever silently skipped - see the in-line comment where
-        $chapterEntries is built.
+        extra chapter-equivalent entry - unchanged from before, still
+        handled inside the -ChapterProvider closure.
+
+        WHAT MOVED WHERE, mapping today's callbacks onto
+        Invoke-ChapterDispatch's seven scriptblocks: the -ChapterProvider
+        closure owns the series/chapter walk plus the naming-collision
+        scan (Get-LooseImageCandidates, once per series) and embeds each
+        chapter's own Images list, IsZippable, IsExtra, and ZipOut
+        directly on the yielded chapter item; JobBuilder is a near-verbatim
+        port of Convert-ImageBatch's OWN existing pre-dispatch pass
+        (never-converted-extension skip, WebP/AVIF animated
+        classification, within-batch output-path collision detection) -
+        unlike mode 3's migration, this one was ALREADY a clean pre-pass
+        in the original code, not something that needed restructuring;
+        JobStarter is a near-verbatim port of Convert-ImageBatch's own
+        per-job dispatch (WebP/AVIF/BMP/HEIC/HEIF pre-conversion to PNG
+        via magick when needed, then the real cjxl dispatch) - kept here,
+        NOT moved into JobBuilder, specifically so one chapter's earlier
+        jobs keep converting in the background while a later job's own
+        pre-conversion runs, the same interleaving the original code
+        already had; JobFinalize is Complete-ImageDispatchJob (see that
+        function's own header for why it's a documented duplicate of
+        Complete-ImageConversionJob, not a call-through, and for a real,
+        previously-latent PowerShell parameter-binding bug this migration
+        caught before it ever ran); JobAbortCleanup deletes a force-killed
+        job's own TempPng/JxlPath (both always safe to delete
+        unconditionally here, unlike the old code's SlotReleased-guarded
+        version - see AnimatedConversionPipeline.ps1's own identical
+        reasoning for why, applies unchanged here); ChapterCompleteCallback
+        resolves CCR, runs -ZipStepCallback and the zip-blocked-status
+        override, and merges that chapter's own accumulator into $totals.
+
+        A NEW per-chapter accumulator dictionary ($chapterResults, keyed
+        by the exact chapterInfo value each chapter provider yields -
+        matching ChapterDispatch.ps1's own chapter-identity contract)
+        replaces the old code's implicit "one chapter, one blocking
+        Convert-ImageBatch call" scoping - Invoke-ChapterDispatch now
+        interleaves multiple chapters' jobs concurrently, so per-chapter
+        results can no longer come from a single function call's own
+        return value. Same reasoning, same fix shape, as
+        AnimatedConversionPipeline.ps1's own migration.
     .PARAMETER PostChapterCallback
         Invoked once per chapter with @{ SeriesName; ChapterName; Dir;
         ChapterResult; ZipOut; IsZippable } - $ChapterResult is $null when
@@ -1739,7 +1938,8 @@ function Invoke-LooseImageConversionPipeline {
         [System.Collections.Generic.HashSet[string]]$FolderExcludeStagingDirs = $null,
         [scriptblock]$PostChapterCallback = $null,
         [scriptblock]$ZipStepCallback = $null,
-        [int]$AbortTimeoutSeconds = 60
+        [int]$AbortTimeoutSeconds = 60,
+        [int]$MaxQueueAhead = 3
     )
 
     $totals = @{
@@ -1760,11 +1960,24 @@ function Invoke-LooseImageConversionPipeline {
         Aborted             = $false
     }
 
+    # Per-chapter accumulator, keyed by the exact chapterInfo value each
+    # chapter provider yields (see this function's own header) - built by
+    # JobBuilder, mutated by JobStarter/JobFinalize, read and removed by
+    # ChapterCompleteCallback.
+    $chapterResults = [System.Collections.Generic.Dictionary[object,hashtable]]::new()
+
+    # Captured once, read by every closure below instead of each one
+    # reading $script:CleanConsoleOutputEnabled directly - see
+    # AnimatedConversionPipeline.ps1's own identical fix/comment for why
+    # ($script: resolves against a .GetNewClosure()'d scriptblock's own
+    # private scope, not the real one).
+    $cleanConsoleOutputEnabled = [bool]$script:CleanConsoleOutputEnabled
+
     # Registered for the whole pipeline call (one phase), not per-series/
     # per-chapter - matches Register-AbortCancellationSource's own "call
     # once per pipeline phase" contract. Without this, Test-AbortSignal
-    # would never actually cancel $looseCts, and Convert-ImageBatch's own
-    # CancelToken check would never fire on a real Ctrl+C - see this
+    # would never actually cancel $looseCts, and Invoke-ChapterDispatch's
+    # own CancelToken check would never fire on a real Ctrl+C - see this
     # module's header for how that was caught.
     #
     # Construction/registration moved INSIDE the try (2026-08-31 fix, same
@@ -1774,262 +1987,386 @@ function Invoke-LooseImageConversionPipeline {
     try {
         $looseCts = [System.Threading.CancellationTokenSource]::new()
         Register-AbortCancellationSource -Cts $looseCts
-        $seriesProvider = New-SeriesProvider -LibraryPath $Path
 
-        while ($true) {
-            if (Test-AbortSignal) { $totals.Aborted = $true; break }
+        # --- Chapter provider: same two-tier walk + naming-collision scan
+        #     + extra-dir fold-in as before, restructured as a lazy
+        #     "-> next chapter or $null" closure instead of a nested
+        #     foreach - see this function's own header for why this isn't
+        #     ChapterDispatch.ps1's New-LibraryChapterProvider. ---
+        $seriesProvider  = New-SeriesProvider -LibraryPath $Path
+        $chapterQueue    = [System.Collections.Generic.Queue[hashtable]]::new()
+        $seriesExhausted = $false
+        $chapterProvider = {
+            while ($chapterQueue.Count -eq 0 -and -not $seriesExhausted) {
+                # Checked here, not just via -AbortPollCallback (2026-09-09,
+                # real behavior gap caught by this module's own harness) -
+                # the old code's per-series while loop checked
+                # Test-AbortSignal at the very top, before fetching the
+                # next series at all; -AbortPollCallback alone only runs
+                # once per Invoke-ChapterDispatch pass (after pull-ahead
+                # may have already pulled up to -MaxQueueAhead chapters),
+                # so an abort already pending before this function is even
+                # called would otherwise still fetch and start processing
+                # the first series before ever being noticed.
+                if (Test-AbortSignal) { $seriesExhausted = $true; break }
 
-            $series = & $seriesProvider
-            if ($null -eq $series) { break }
-            $totals.SeriesCount++
+                $series = & $seriesProvider
+                if ($null -eq $series) { $seriesExhausted = $true; break }
+                $totals.SeriesCount++
 
-            $chapters = Get-SeriesChapters -SeriesPath $series.FullName -QualifyingExtensions $FolderQualifyingExtensions `
-                -ExcludeStagingDirs $FolderExcludeStagingDirs -ForceRezip $false
+                $chapters = Get-SeriesChapters -SeriesPath $series.FullName -QualifyingExtensions $FolderQualifyingExtensions `
+                    -ExcludeStagingDirs $FolderExcludeStagingDirs -ForceRezip $false
 
-            # Bounded to this one series, not the whole library - see this
-            # module's header and CLAUDE.md's pre-flight note. Computed
-            # BEFORE Start-SeriesProgress (not after, as an earlier version
-            # of this rework had it) - see the $chapterEntries merge below
-            # for why the real per-series total needs this first.
-            $seriesCandidates = Get-LooseImageCandidates -ScanPath $series.FullName -LooseImageExtensions $LooseImageExtensions -KnownZipPaths $KnownZipPaths -ExcludeStagingDirs $FolderExcludeStagingDirs
+                $seriesCandidates = Get-LooseImageCandidates -ScanPath $series.FullName -LooseImageExtensions $LooseImageExtensions -KnownZipPaths $KnownZipPaths -ExcludeStagingDirs $FolderExcludeStagingDirs
 
-            $staleResult = Remove-StaleLooseSources -StaleSources $seriesCandidates.StaleSources
-            $totals.StaleCleanedSuccess += $staleResult.Success
-            $totals.StaleCleanedFail    += $staleResult.Fail
+                $staleResult = Remove-StaleLooseSources -StaleSources $seriesCandidates.StaleSources
+                $totals.StaleCleanedSuccess += $staleResult.Success
+                $totals.StaleCleanedFail    += $staleResult.Fail
 
-            # NamingCollisions (2026-08-31 fix, from a same-day
-            # /code-review): counted into the same combined
-            # InspectFailedCount field the AVIF-classification-failure
-            # case already uses (both mean "a real file this run couldn't
-            # safely act on"), and its directory tracked so the chapter
-            # holding it isn't treated as zippable below - without this, a
-            # chapter whose only loose image was a naming collision had
-            # zero entries in $seriesCandidates.NeedsConversion, so
-            # Convert-ImageBatch was never dispatched for it and
-            # Get-ChapterProgressStatus mapped the resulting $null
-            # ChapterResult to a clean Success, letting the raw,
-            # unconverted collision file get zipped anyway.
-            $totals.InspectFailedCount += $seriesCandidates.NamingCollisions.Count
-            $namingCollisionDirs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            foreach ($nc in $seriesCandidates.NamingCollisions) { $null = $namingCollisionDirs.Add($nc.DirectoryName) }
+                $totals.InspectFailedCount += $seriesCandidates.NamingCollisions.Count
+                $namingCollisionDirs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                foreach ($nc in $seriesCandidates.NamingCollisions) { $null = $namingCollisionDirs.Add($nc.DirectoryName) }
 
-            # Get-SeriesChapters is a thin wrapper on the zip-domain
-            # Get-ZippableLeafDirs (see LeafDirectoryDiscovery.ps1) - its
-            # former-container guard (skip a dir with a stray .zip inside)
-            # and zip-staleness guard (skip a dir whose same-named .zip is
-            # already newer than every image in it) exist to decide "is
-            # this worth re-zipping", not "does this need converting". Using
-            # $chapters alone to decide what gets converted would silently
-            # drop real unconverted images sitting in a directory those
-            # guards happen to exclude (a leftover .zip alongside fresh
-            # loose images, or images sitting directly in the series root
-            # rather than a chapter subfolder) - a real regression against
-            # the old flat whole-library scan, caught by review rather than
-            # by the harness (see CHANGELOG.md). Fix: still use $chapters
-            # for the declared per-chapter progress slots, but fold in any
-            # OTHER directory that actually holds a needs-conversion image,
-            # so conversion coverage can never silently regress just
-            # because a directory doesn't currently look "zip-worthy".
-            #
-            # An EXTRA entry must NOT be treated as zippable: it carries
-            # IsZippable=$false / ZipOut=$null (a real chapter keeps
-            # $c.ZipOut) - a caller wiring -PostChapterCallback to
-            # ZipPipeline.ps1's Invoke-LooseFolderZip (mode 2, exactly as
-            # this function's own .PARAMETER text above describes) must
-            # check IsZippable first. Without this, an extra like the
-            # series root itself would get wrapper-zipped once every real
-            # chapter around it is already zipped and deleted - precisely
-            # the container-folder mess the former-container guard exists
-            # to prevent in the first place, reached through the back door
-            # (caught in review).
-            #
-            # $imagesByDir groups $seriesCandidates.NeedsConversion by
-            # directory ONCE and is reused below both to find extras and to
-            # look up each real chapter's own images - avoids both a
-            # redundant Group-Object over every chapter's images just to
-            # discard most of the groups, and the O(chapters x
-            # images-in-series) rescan a separate per-chapter Where-Object
-            # would otherwise do (also caught in review). -ExcludeStagingDirs
-            # is now passed straight into Get-LooseImageCandidates above, so
-            # $seriesCandidates.NeedsConversion already never contains a
-            # staging-dir image in the first place - no second staging check
-            # is needed here (a caught-in-review duplicate of
-            # Test-ZippableLeafDirCandidate's own staging-prefix test used
-            # to live in this loop).
-            $imagesByDir = [System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[System.IO.FileInfo]]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            foreach ($img in $seriesCandidates.NeedsConversion) {
-                if (-not $imagesByDir.ContainsKey($img.DirectoryName)) {
-                    $imagesByDir[$img.DirectoryName] = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-                }
-                $imagesByDir[$img.DirectoryName].Add($img)
-            }
-
-            $chapterDirSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            $chapterEntries = [System.Collections.Generic.List[hashtable]]::new()
-            foreach ($c in $chapters) {
-                $null = $chapterDirSet.Add($c.Dir.FullName)
-                # -not $namingCollisionDirs.Contains(...) (2026-08-31 fix):
-                # a chapter holding an unresolvable naming collision must
-                # not be zipped this run - see the comment above where
-                # $namingCollisionDirs is built.
-                $chapterEntries.Add(@{ Dir = $c.Dir; ZipOut = $c.ZipOut; IsZippable = (-not $namingCollisionDirs.Contains($c.Dir.FullName)); IsExtra = $false })
-            }
-            foreach ($extraDirPath in $imagesByDir.Keys) {
-                if ($chapterDirSet.Contains($extraDirPath)) { continue }
-
-                $extraDir = $imagesByDir[$extraDirPath][0].Directory
-                $chapterEntries.Add(@{ Dir = $extraDir; ZipOut = $null; IsZippable = $false; IsExtra = $true })
-                Write-Log ("Series '" + $series.Name + "': '" + $extraDir.Name + "' has unconverted image(s) but wasn't found by chapter discovery (e.g. a stray .zip sitting alongside it, or images outside a normal chapter folder) - converting it anyway, but NOT treating it as zippable.") -Level Warn
-            }
-
-            # Empty-series check moved BEFORE Start-SeriesProgress (2026-09-03
-            # fix, real bug, live-reported, same fix as Controller.ps1's
-            # Invoke-FullPipeline): a series with zero qualifying chapters
-            # (e.g. already fully converted and zipped - nothing left but
-            # the zips + an info file) used to still register a 0/0-chapter
-            # entry with CCR, which then sat on the live display forever,
-            # never completed (the loop below never runs, so
-            # Complete-ChapterProgress is never called for it either) -
-            # project owner's own call: a series with nothing to convert
-            # shouldn't show up on the console at all.
-            if ($chapterEntries.Count -eq 0) {
-                Write-Log ("Series '" + $series.Name + "': no qualifying chapters found.") -Level Info
-                continue
-            }
-
-            if ($script:CleanConsoleOutputEnabled) {
-                Start-SeriesProgress -SeriesName $series.Name -TotalChapters $chapterEntries.Count
-            }
-
-            Write-Log ("=== Series '" + $series.Name + "': " + $chapterEntries.Count + " chapter(s) ===")
-
-            foreach ($chapter in $chapterEntries) {
-                if (Test-AbortSignal) { $totals.Aborted = $true; break }
-
-                $chapterDir  = $chapter.Dir
-                $chapterName = $chapterDir.Name
-                $totals.ChapterCount++
-
-                if ($script:CleanConsoleOutputEnabled) {
-                    Start-ChapterProgress -SeriesName $series.Name -ChapterName $chapterName
+                $imagesByDir = [System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[System.IO.FileInfo]]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                foreach ($img in $seriesCandidates.NeedsConversion) {
+                    if (-not $imagesByDir.ContainsKey($img.DirectoryName)) {
+                        $imagesByDir[$img.DirectoryName] = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+                    }
+                    $imagesByDir[$img.DirectoryName].Add($img)
                 }
 
-                $chapterImages = @()
-                if ($imagesByDir.ContainsKey($chapterDir.FullName)) { $chapterImages = @($imagesByDir[$chapterDir.FullName]) }
-
-                $chapterResult = $null
-                if ($chapterImages.Count -gt 0) {
-                    Write-Log ("Processing chapter: '" + $chapterDir.FullName + "' (" + $chapterImages.Count + " image(s))")
-
-                    $localLastCompleted = $totals.LastCompletedPaths
-                    # $alreadyAbortedBox (a hashtable, not a plain scalar) is
-                    # how "was it already aborted last poll" survives across
-                    # invocations of this closure - .GetNewClosure() puts the
-                    # scriptblock in its OWN dynamic module, so a direct
-                    # $script:abortRequested read/write here would silently
-                    # read/mutate a frozen, disconnected copy, never
-                    # AbortPipeline.ps1's real one (live-reproduced: read the
-                    # real, current state through Test-AbortSignal's RETURN
-                    # VALUE - a genuine function call, not a $script: access -
-                    # and track the previous poll's result in a captured
-                    # reference-type object instead, same discipline as the
-                    # "closures mutating state" entry in CLAUDE.md's Lessons
-                    # learned).
-                    $alreadyAbortedBox = @{ Value = $false }
-                    $abortPoll = {
-                        param($InFlightPaths)
-                        $wasAbortedBefore = $alreadyAbortedBox.Value
-                        $isAbortedNow = Test-AbortSignal
-                        if ($isAbortedNow -and -not $wasAbortedBefore) {
-                            foreach ($p in $InFlightPaths) { $localLastCompleted.Add($p) }
-                        }
-                        $alreadyAbortedBox.Value = $isAbortedNow
-                    }.GetNewClosure()
-
-                    $chapterResult = Convert-ImageBatch -ImageFiles $chapterImages -CjxlExe $CjxlExe -MagickExe $MagickExe `
-                        -DoJpegLossless $JpegLossless -DoJpegQuality $JpegQuality -MaxCjxlProcs $MaxCjxlProcs `
-                        -DoFullLogging $FullLogging -CancelToken $looseCts.Token -ItemNoun "loose image" `
-                        -SourceNoun "loose source image" -AbortPollCallback $abortPoll `
-                        -AbortWaitMessage "[ABORT] Waiting for current loose-image jobs to finish (up to $AbortTimeoutSeconds s)..." `
-                        -AbortTimeoutSeconds $AbortTimeoutSeconds
-
-                    $totals.ConvertedSuccess    += $chapterResult.ConvertedCount
-                    $totals.ConvertedFail       += $chapterResult.FailedCount
-                    $totals.ConvertedSkipped    += $chapterResult.SkippedCount
-                    $totals.DeletedSuccess      += $chapterResult.DeletedCount
-                    $totals.DeletedFail         += $chapterResult.DeleteFailedCount
-                    $totals.ForceKilledCount    += $chapterResult.ForceKilledCount
-                    $totals.InspectFailedCount  += $chapterResult.InspectFailedCount
-                    foreach ($p in $chapterResult.SkippedPaths) { $totals.LastSkippedPaths.Add($p) }
-                    foreach ($p in $chapterResult.PendingPaths) { $totals.StillPendingPaths.Add($p) }
-                    if ($looseCts.Token.IsCancellationRequested) { $totals.Aborted = $true }
-                } else {
-                    Write-Log ("Chapter '" + $chapterDir.FullName + "': no unconverted images - skipping conversion.")
+                $chapterDirSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                $seriesChapterCount = 0
+                foreach ($c in $chapters) {
+                    $null = $chapterDirSet.Add($c.Dir.FullName)
+                    $chapterImages = @()
+                    if ($imagesByDir.ContainsKey($c.Dir.FullName)) { $chapterImages = @($imagesByDir[$c.Dir.FullName]) }
+                    $chapterQueue.Enqueue(@{
+                        SeriesName = $series.Name; ChapterName = $c.Dir.Name; Dir = $c.Dir; ZipOut = $c.ZipOut
+                        IsZippable = (-not $namingCollisionDirs.Contains($c.Dir.FullName)); IsExtra = $false
+                        Images = $chapterImages
+                    })
+                    $seriesChapterCount++
+                }
+                foreach ($extraDirPath in $imagesByDir.Keys) {
+                    if ($chapterDirSet.Contains($extraDirPath)) { continue }
+                    $extraDir = $imagesByDir[$extraDirPath][0].Directory
+                    $chapterQueue.Enqueue(@{
+                        SeriesName = $series.Name; ChapterName = $extraDir.Name; Dir = $extraDir; ZipOut = $null
+                        IsZippable = $false; IsExtra = $true
+                        Images = $imagesByDir[$extraDirPath]
+                    })
+                    $seriesChapterCount++
+                    Write-Log ("Series '" + $series.Name + "': '" + $extraDir.Name + "' has unconverted image(s) but wasn't found by chapter discovery (e.g. a stray .zip sitting alongside it, or images outside a normal chapter folder) - converting it anyway, but NOT treating it as zippable.") -Level Warn
                 }
 
-                # Computed unconditionally (not just when CCR is enabled) -
-                # -ZipStepCallback's own IsZippable/Error gate below needs
-                # $chapterStatus regardless of whether progress is being
-                # displayed. Only the actual Complete-ChapterProgress CALL
-                # stays gated on the toggle, same as everywhere else in
-                # this module.
-                $chapterStatus, $chapterDetail = Get-ChapterProgressStatus -ChapterResult $chapterResult
+                if ($seriesChapterCount -eq 0) {
+                    Write-Log ("Series '" + $series.Name + "': no qualifying chapters found.") -Level Info
+                    continue
+                }
 
-                # Mode 8's decided CCR-fold (Todo.md/Docs/menu-design.md,
-                # 2026-08-28): delay Complete-ChapterProgress until after
-                # the zip step returns, merge both outcomes into ONE
-                # Detail/Status - not a second CCR transition. Gated on
-                # IsZippable (an "extra" entry, e.g. the series root, is
-                # never zippable - same rule Controller.ps1's Full Pipeline
-                # zip step follows) AND $chapterStatus -ne 'Error' (don't
-                # zip a chapter conversion already failed) - both checks
-                # live HERE, in this module's own domain knowledge, not in
-                # the callback itself, which stays a dumb "just zip or
-                # don't" hook (mode-8-specific business logic like
-                # ZipWithUnconvertedAnimated belongs in the callback
-                # Controller.ps1 builds, not here).
-                if ($null -ne $ZipStepCallback -and $chapter.IsZippable -and $chapterStatus -ne 'Error') {
-                    $zipOutcome = & $ZipStepCallback @{ SeriesName = $series.Name; ChapterName = $chapterName; Dir = $chapterDir; ChapterResult = $chapterResult; ZipOut = $chapter.ZipOut }
-                    if ($null -ne $zipOutcome) {
-                        $zipSeverity = switch ($zipOutcome.Status) { 'Fail' { 2 }; 'Skipped' { 1 }; default { 0 } }
-                        $chapterRank = @{ Success = 0; Warning = 1; Error = 2 }
-                        if ($zipSeverity -gt $chapterRank[$chapterStatus]) {
-                            $chapterStatus = switch ($zipSeverity) { 2 { 'Error' }; 1 { 'Warning' }; default { 'Success' } }
-                        }
-                        $convertDetailPart = if ($chapterDetail) { "Convert: " + $chapterDetail } else { "Convert: OK" }
-                        $zipDetailPart     = "Zip: " + $(if ($zipOutcome.Detail) { $zipOutcome.Detail } else { $zipOutcome.Status })
-                        $chapterDetail     = $convertDetailPart + " | " + $zipDetailPart
+                if ($cleanConsoleOutputEnabled) {
+                    Start-SeriesProgress -SeriesName $series.Name -TotalChapters $seriesChapterCount
+                }
+                Write-Log ("=== Series '" + $series.Name + "': " + $seriesChapterCount + " chapter(s) ===")
+            }
+            if ($chapterQueue.Count -gt 0) { return $chapterQueue.Dequeue() }
+            return $null
+        }.GetNewClosure()
+
+        # --- JobBuilder: near-verbatim port of Convert-ImageBatch's own
+        #     existing pre-dispatch pass (see this function's own header -
+        #     unlike mode 3's migration, this one was already a clean
+        #     pre-pass, nothing to restructure). ---
+        $jobBuilder = {
+            param($chapterInfo)
+
+            $totals.ChapterCount++
+            $cr = @{
+                ConvertedCount = 0; FailedCount = 0; SkippedCount = 0; DeletedCount = 0; DeleteFailedCount = 0
+                InspectFailedCount = 0
+                SkippedPaths = [System.Collections.Generic.List[string]]::new()
+                TotalFiles = $chapterInfo.Images.Count
+            }
+            $chapterResults[$chapterInfo] = $cr
+
+            if ($cleanConsoleOutputEnabled) {
+                Start-ChapterProgress -SeriesName $chapterInfo.SeriesName -ChapterName $chapterInfo.ChapterName
+            }
+
+            if ($cr.TotalFiles -eq 0) {
+                Write-Log ("Chapter '" + $chapterInfo.Dir.FullName + "': no unconverted images - skipping conversion.")
+                return @()
+            }
+            Write-Log ("Processing chapter: '" + $chapterInfo.Dir.FullName + "' (" + $cr.TotalFiles + " image(s))")
+
+            $allJobs = [System.Collections.Generic.List[hashtable]]::new()
+            foreach ($img in $chapterInfo.Images) {
+                $srcPath = $img.FullName
+                if ((Get-NeverConvertedExtensions) -icontains [System.IO.Path]::GetExtension($srcPath)) {
+                    Write-Log ("SKIPPING '" + $srcPath + "': not converted by this project (see Get-NeverConvertedExtensions's own comment for why). File left untouched.") -Level Warn
+                    $cr.SkippedCount++
+                    $cr.SkippedPaths.Add($srcPath)
+                    continue
+                }
+                if ($MagickExe -and $srcPath -imatch '\.webp$') {
+                    $isAnimatedWebp = $false
+                    try {
+                        $isAnimatedWebp = Test-WebPAnimated -WebPPath $srcPath
+                    } catch {
+                        Write-Log ("FAILED to read '" + $srcPath + "' to check for WebP animation: " + $_) -Level Error
+                        $cr.FailedCount++
+                        continue
+                    }
+                    if ($isAnimatedWebp) {
+                        Write-Log ("SKIPPING animated WebP '" + $srcPath + "': Animation flag set in VP8X chunk - animated WebP cannot be converted to JXL (no multi-frame support). File left untouched.") -Level Warn
+                        $cr.SkippedCount++
+                        $cr.SkippedPaths.Add($srcPath)
+                        continue
+                    }
+                } elseif ($MagickExe -and $srcPath -imatch '\.avif$') {
+                    try {
+                        $isAnimatedAvif = Test-AvifAnimated -AvifPath $srcPath -MagickExe $MagickExe
+                    } catch {
+                        Write-Log ("Could not determine if AVIF '" + $srcPath + "' is animated - skipping: " + $_) -Level Warn
+                        $cr.InspectFailedCount++
+                        continue
+                    }
+                    if ($isAnimatedAvif) {
+                        Write-Log ("SKIPPING animated AVIF '" + $srcPath + "': has its own conversion pipeline (AnimatedConversionPipeline.ps1) - not converted here.") -Level Warn
+                        $cr.SkippedCount++
+                        $cr.SkippedPaths.Add($srcPath)
+                        continue
                     }
                 }
+                $allJobs.Add(@{
+                    SrcPath = $srcPath
+                    JxlPath = [System.IO.Path]::ChangeExtension($srcPath, ".jxl")
+                    Proc    = $null
+                    TempPng = $null
+                })
+            }
 
-                # Zip-blocked status override (2026-09-09, see Docs/zip-
-                # blocked-status-design.md) - a real chapter (not an
-                # IsExtra=$true "extra" like the series root, which was
-                # never zippable by design and shouldn't get a spurious
-                # note) that's IsZippable=$false only ever got there for
-                # one reason at this point in the module: a naming
-                # collision (chapter.IsZippable is set from
-                # $namingCollisionDirs alone, above) - so $chapterStatus/
-                # $chapterDetail (computed from the conversion result
-                # only, with no knowledge of zip-blocking) would otherwise
-                # reach Complete-ChapterProgress unchanged even when the
-                # chapter's zip never happened. -not $chapter.IsZippable
-                # here is never also true from the ZipStepCallback branch
-                # above (that one requires IsZippable=$true), so this
-                # can't double-apply.
-                if ((-not $chapter.IsZippable) -and (-not $chapter.IsExtra)) {
-                    $chapterStatus, $chapterDetail = Get-ZipBlockedStatusOverride -Status $chapterStatus -Detail $chapterDetail -BlockedReason "naming collision"
-                }
-
-                if ($script:CleanConsoleOutputEnabled) {
-                    $null = Complete-ChapterProgress -SeriesName $series.Name -ChapterName $chapterName -Status $chapterStatus -Detail $chapterDetail
-                }
-
-                if ($null -ne $PostChapterCallback) {
-                    & $PostChapterCallback @{ SeriesName = $series.Name; ChapterName = $chapterName; Dir = $chapterDir; ChapterResult = $chapterResult; ZipOut = $chapter.ZipOut; IsZippable = $chapter.IsZippable }
+            $jxlPathCounts = [System.Collections.Generic.Dictionary[string,int]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($j in $allJobs) {
+                if ($jxlPathCounts.ContainsKey($j.JxlPath)) { $jxlPathCounts[$j.JxlPath]++ } else { $jxlPathCounts[$j.JxlPath] = 1 }
+            }
+            $jobs = [System.Collections.Generic.List[hashtable]]::new()
+            foreach ($j in $allJobs) {
+                if ($jxlPathCounts[$j.JxlPath] -gt 1) {
+                    Write-Log ("SKIPPING '" + $j.SrcPath + "': output path '" + $j.JxlPath + "' collides with another source image of the same name (different extension). Resolve the name clash manually.") -Level Error
+                    $cr.FailedCount++
+                } else {
+                    $jobs.Add($j)
                 }
             }
+            return $jobs
+        }.GetNewClosure()
+
+        # --- JobStarter: near-verbatim port of Convert-ImageBatch's own
+        #     per-job dispatch - kept here rather than moved into
+        #     JobBuilder, so an earlier job in the same chapter keeps
+        #     converting in the background while a later job's own
+        #     pre-conversion runs (see this function's own header). Every
+        #     failure path here does its own domain-specific accounting
+        #     ($cr.FailedCount++) before throwing, matching the original
+        #     code's own behavior exactly - the generic
+        #     JobStarterFailedCount Invoke-ChapterDispatch also bumps on
+        #     the same throw is a harmless secondary diagnostic, not the
+        #     real count this function reports. ---
+        $jobStarter = {
+            param($job)
+            $cr = $chapterResults[$job.ChapterKey]
+            $tempPngLocal = $null
+            $magickProcLocal = $null
+            # Set right before the two pre-conversion failure throws below,
+            # each of which already does its own $cr.FailedCount++ and
+            # logging - tells the catch block not to double-count when one
+            # of THOSE throws propagates here, without any fragile
+            # exception-message matching.
+            $failureAlreadyAccounted = $false
+            try {
+                $psi = New-Object System.Diagnostics.ProcessStartInfo
+                $psi.FileName               = $CjxlExe
+                $psi.UseShellExecute        = $false
+                $psi.RedirectStandardOutput = $true
+                $psi.RedirectStandardError  = $true
+                $psi.CreateNoWindow         = $true
+
+                $isWebp = ($job.SrcPath -imatch '\.webp$')
+                $isAvif = ($job.SrcPath -imatch '\.avif$')
+                $isBmp  = ($job.SrcPath -imatch '\.bmp$')
+                $isHeic = ($job.SrcPath -imatch '\.heic$')
+                $isHeif = ($job.SrcPath -imatch '\.heif$')
+                if ($job.TempPng) {
+                    # Retry job (ICC-strip) - TempPng already points to a
+                    # complete, ready-to-use PNG. Checked BEFORE the
+                    # isWebp/isAvif branch below - see
+                    # Convert-ImageBatch's own identical comment for why.
+                    $cjxlSrc = $job.TempPng
+                } elseif ($isWebp -or $isAvif -or $isBmp -or $isHeic -or $isHeif) {
+                    $formatLabel = if ($isAvif) { "AVIF" } elseif ($isWebp) { "WebP" } elseif ($isBmp) { "BMP" } elseif ($isHeic) { "HEIC" } else { "HEIF" }
+                    if (-not $MagickExe) {
+                        Write-Log ("SKIPPING " + $formatLabel + " '" + $job.SrcPath + "': ImageMagick not found. Install ImageMagick or pass -MagickPath.") -Level Error
+                        $cr.FailedCount++
+                        $failureAlreadyAccounted = $true
+                        throw ("ImageMagick not found for " + $formatLabel + " pre-conversion")
+                    }
+
+                    $tempPng = [System.IO.Path]::Combine(
+                        [System.IO.Path]::GetDirectoryName($job.SrcPath),
+                        [System.IO.Path]::GetFileNameWithoutExtension($job.SrcPath) + "_tmp_" + $formatLabel.ToLowerInvariant() + "2png.png"
+                    )
+                    $tempPngLocal = $tempPng
+                    $magickPsi = New-Object System.Diagnostics.ProcessStartInfo
+                    $magickPsi.FileName               = $MagickExe
+                    $magickPsi.Arguments              = "`"" + $job.SrcPath + "[0]`" `"" + $tempPng + "`""
+                    $magickPsi.UseShellExecute        = $false
+                    $magickPsi.RedirectStandardOutput = $true
+                    $magickPsi.RedirectStandardError  = $true
+                    $magickPsi.CreateNoWindow         = $true
+                    $magickProc = [System.Diagnostics.Process]::Start($magickPsi)
+                    $magickProcLocal = $magickProc
+                    $magickStdoutTask = $magickProc.StandardOutput.ReadToEndAsync()
+                    $magickStderrTask = $magickProc.StandardError.ReadToEndAsync()
+                    $magickProc.WaitForExit()
+                    $null = $magickStdoutTask.GetAwaiter().GetResult()
+                    $null = $magickStderrTask.GetAwaiter().GetResult()
+                    $magickExitCode = $magickProc.ExitCode
+                    $magickProc.Dispose()
+                    $magickProcLocal = $null
+                    if ($magickExitCode -ne 0 -or -not (Test-Path -LiteralPath $tempPng)) {
+                        Write-Log ("FAILED " + $formatLabel + "->PNG pre-conversion for '" + $job.SrcPath + "': magick exited " + $magickExitCode) -Level Error
+                        $cr.FailedCount++
+                        $failureAlreadyAccounted = $true
+                        if (Test-Path -LiteralPath $tempPng) { try { [System.IO.File]::Delete($tempPng) } catch { } }
+                        throw ($formatLabel + "->PNG pre-conversion failed")
+                    }
+                    $job.TempPng = $tempPng
+                    $cjxlSrc     = $tempPng
+                } else {
+                    $job.TempPng = $null
+                    $cjxlSrc     = $job.SrcPath
+                }
+
+                $isJpeg = ($cjxlSrc -imatch '\.jpe?g$')
+                if ($isJpeg -and $JpegLossless) {
+                    $psi.Arguments = "`"" + $cjxlSrc + "`" `"" + $job.JxlPath + "`" --lossless_jpeg=1 --num_threads=1"
+                } elseif ($isJpeg) {
+                    $psi.Arguments = "`"" + $cjxlSrc + "`" `"" + $job.JxlPath + "`" --lossless_jpeg=0 --quality=$JpegQuality --num_threads=1"
+                } else {
+                    $psi.Arguments = "`"" + $cjxlSrc + "`" `"" + $job.JxlPath + "`" --lossless_jpeg=0 --quality=90 --num_threads=1"
+                }
+
+                Write-Log ("Converting loose image: '" + $job.SrcPath + "'")
+
+                $job.Proc       = [System.Diagnostics.Process]::Start($psi)
+                $job.StdoutTask = $job.Proc.StandardOutput.ReadToEndAsync()
+                $job.StderrTask = $job.Proc.StandardError.ReadToEndAsync()
+                return $job
+            } catch {
+                # Real Process.Start() failure for cjxl itself (a stale
+                # cached exe path, etc.) - matches Convert-ImageBatch's
+                # own catch block. The two pre-conversion failure paths
+                # above already did their own $cr.FailedCount++ and
+                # logging before throwing - $failureAlreadyAccounted skips
+                # double-counting for those, no exception-message matching
+                # needed.
+                if (-not $failureAlreadyAccounted) {
+                    Write-Log ("FAILED to start conversion process for '" + $job.SrcPath + "': " + $_) -Level Error
+                    $cr.FailedCount++
+                }
+                if ($magickProcLocal) { try { if (-not $magickProcLocal.HasExited) { $magickProcLocal.Kill() }; $magickProcLocal.Dispose() } catch { } }
+                if ($job.TempPng -and (Test-Path -LiteralPath $job.TempPng)) { try { [System.IO.File]::Delete($job.TempPng) } catch { } }
+                elseif ($tempPngLocal -and (Test-Path -LiteralPath $tempPngLocal)) { try { [System.IO.File]::Delete($tempPngLocal) } catch { } }
+                throw
+            }
+        }.GetNewClosure()
+
+        $jobPollCompleted = { param($job) return $job.Proc.HasExited }
+
+        $jobFinalize = {
+            param($job, $pendingQueue)
+            $cr = $chapterResults[$job.ChapterKey]
+            return Complete-ImageDispatchJob -Job $job -ChapterResult $cr -PendingQueue $pendingQueue -MagickExe $MagickExe -DoFullLogging $FullLogging -ItemNoun "loose image" -SourceNoun "loose source image"
+        }.GetNewClosure()
+
+        # Always safe to delete both paths unconditionally here - see
+        # AnimatedConversionPipeline.ps1's own identical JobAbortCleanup
+        # comment for why (Invoke-ChapterDispatch only ever calls this for
+        # a job confirmed never to have reached JobFinalize).
+        $jobAbortCleanup = {
+            param($job)
+            if ($job.TempPng) { try { [System.IO.File]::Delete($job.TempPng) } catch { } }
+            try { [System.IO.File]::Delete($job.JxlPath) } catch { }
         }
+
+        $chapterCompleteCallback = {
+            param($chapterInfo)
+            $cr = $chapterResults[$chapterInfo]
+            $chapterResultForCallback = if ($cr.TotalFiles -eq 0) { $null } else { $cr }
+
+            $totals.ConvertedSuccess   += $cr.ConvertedCount
+            $totals.ConvertedFail      += $cr.FailedCount
+            $totals.ConvertedSkipped   += $cr.SkippedCount
+            $totals.DeletedSuccess     += $cr.DeletedCount
+            $totals.DeletedFail        += $cr.DeleteFailedCount
+            $totals.InspectFailedCount += $cr.InspectFailedCount
+            foreach ($p in $cr.SkippedPaths) { $totals.LastSkippedPaths.Add($p) }
+
+            $chapterStatus, $chapterDetail = Get-ChapterProgressStatus -ChapterResult $chapterResultForCallback
+
+            if ($null -ne $ZipStepCallback -and $chapterInfo.IsZippable -and $chapterStatus -ne 'Error') {
+                $zipOutcome = & $ZipStepCallback @{ SeriesName = $chapterInfo.SeriesName; ChapterName = $chapterInfo.ChapterName; Dir = $chapterInfo.Dir; ChapterResult = $chapterResultForCallback; ZipOut = $chapterInfo.ZipOut }
+                if ($null -ne $zipOutcome) {
+                    $zipSeverity = switch ($zipOutcome.Status) { 'Fail' { 2 }; 'Skipped' { 1 }; default { 0 } }
+                    $chapterRank = @{ Success = 0; Warning = 1; Error = 2 }
+                    if ($zipSeverity -gt $chapterRank[$chapterStatus]) {
+                        $chapterStatus = switch ($zipSeverity) { 2 { 'Error' }; 1 { 'Warning' }; default { 'Success' } }
+                    }
+                    $convertDetailPart = if ($chapterDetail) { "Convert: " + $chapterDetail } else { "Convert: OK" }
+                    $zipDetailPart     = "Zip: " + $(if ($zipOutcome.Detail) { $zipOutcome.Detail } else { $zipOutcome.Status })
+                    $chapterDetail     = $convertDetailPart + " | " + $zipDetailPart
+                }
+            }
+
+            if ((-not $chapterInfo.IsZippable) -and (-not $chapterInfo.IsExtra)) {
+                $chapterStatus, $chapterDetail = Get-ZipBlockedStatusOverride -Status $chapterStatus -Detail $chapterDetail -BlockedReason "naming collision"
+            }
+
+            if ($cleanConsoleOutputEnabled) {
+                $null = Complete-ChapterProgress -SeriesName $chapterInfo.SeriesName -ChapterName $chapterInfo.ChapterName -Status $chapterStatus -Detail $chapterDetail
+            }
+            if ($null -ne $PostChapterCallback) {
+                & $PostChapterCallback @{ SeriesName = $chapterInfo.SeriesName; ChapterName = $chapterInfo.ChapterName; Dir = $chapterInfo.Dir; ChapterResult = $chapterResultForCallback; ZipOut = $chapterInfo.ZipOut; IsZippable = $chapterInfo.IsZippable }
+            }
+            $chapterResults.Remove($chapterInfo)
+        }.GetNewClosure()
+
+        # Test-AbortSignal must be called from SOMEWHERE regularly for a
+        # real abort to ever propagate into $looseCts - see
+        # AnimatedConversionPipeline.ps1's own identical comment for the
+        # full reasoning.
+        $abortMessagePrinted = $false
+        $abortPollCallback = {
+            param($runningJobs)
+            $aborted = Test-AbortSignal
+            if ($aborted -and -not $abortMessagePrinted) {
+                $abortMessagePrinted = $true
+                if ($runningJobs.Count -gt 0) {
+                    Write-GatedConsoleMessage -Text ("[ABORT] Waiting for current loose-image jobs to finish (up to " + $AbortTimeoutSeconds + "s)...") -Color Yellow -CleanConsoleOutputEnabled $cleanConsoleOutputEnabled
+                }
+            }
+        }.GetNewClosure()
+
+        $dispatchResult = Invoke-ChapterDispatch -ChapterProvider $chapterProvider -JobBuilder $jobBuilder `
+            -JobStarter $jobStarter -JobPollCompleted $jobPollCompleted -JobFinalize $jobFinalize `
+            -JobAbortCleanup $jobAbortCleanup -ChapterCompleteCallback $chapterCompleteCallback `
+            -MaxConcurrent $MaxCjxlProcs -AbortPollCallback $abortPollCallback -CancelToken $looseCts.Token `
+            -AbortTimeoutSeconds $AbortTimeoutSeconds -MaxQueueAhead $MaxQueueAhead
+
+        $totals.ForceKilledCount = $dispatchResult.ForceKilledCount
+        $totals.Aborted          = $dispatchResult.Aborted
     } finally {
         # $looseCts can be unset if construction/registration itself threw
         # (now inside the try above).

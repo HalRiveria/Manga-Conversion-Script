@@ -50,6 +50,11 @@ $modulesDir = Join-Path $PSScriptRoot ".."
 . (Join-Path $modulesDir "LeafDirectoryDiscovery.ps1")
 . (Join-Path $modulesDir "CleanConsoleRendering.ps1")
 . (Join-Path $modulesDir "Logging.ps1")
+# ChapterDispatch.ps1 (2026-09-09) - Invoke-LooseImageConversionPipeline's
+# own real dependency now, mode 2's migration onto it (dispatch redesign
+# step 3 of 4). Dot-sourced before ImageConversionPipeline.ps1 itself,
+# matching Conversion Script Main.ps1's own intended load order.
+. (Join-Path $modulesDir "ChapterDispatch.ps1")
 . (Join-Path $modulesDir "AnimatedConversionPipeline.ps1")
 . (Join-Path $modulesDir "ImageConversionPipeline.ps1")
 
@@ -435,6 +440,48 @@ Test-Assert (-not (Test-Path -LiteralPath (Join-Path $s1c1A "page1.jpg"))) "Seri
 Test-Assert (Test-Path -LiteralPath (Join-Path $s1c1A "page1.jxl")) "Series One/Chapter 1 page1.jxl created"
 Test-Assert (Test-Path -LiteralPath (Join-Path $s2c1A "page1.jxl")) "Series Two/Chapter 1 page1.jxl created"
 Test-Assert (-not $totalsA.Aborted) "not marked aborted"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario A2 (2026-09-09, mode 2's ChapterDispatch.ps1 migration): THE
+#  actual point of the migration, tested directly - an idle concurrency
+#  slot picks up the NEXT chapter's job while the CURRENT chapter still
+#  has work outstanding, instead of blocking on one chapter's conversion
+#  finishing before the next chapter's images are even dispatched.
+#  Chapter 1 gets a fast image + a slow image (fills both -MaxCjxlProcs
+#  slots); Chapter 2 gets one fast image. The instant Chapter 1's fast
+#  image finishes, Chapter 2's image must start - WHILE Chapter 1's slow
+#  image is still converting, not after. Write-Log swapped to a capturing
+#  version for this scenario only, same idiom as Scenarios AF/AG/AH.
+# ==============================================================================
+Write-Host "=== Scenario A2: an idle slot picks up the NEXT chapter's job while the current chapter still has work outstanding ===" -ForegroundColor Cyan
+$rootA2 = New-Dir "scenario-a2"
+$s1A2 = New-Dir "scenario-a2\Series\Chapter 1"
+$s2A2 = New-Dir "scenario-a2\Series\Chapter 2"
+New-FakeImage -DirPath $s1A2 -Name "fast.jpg" | Out-Null
+New-FakeImage -DirPath $s1A2 -Name "slow.jpg" -SleepMs 800 | Out-Null
+New-FakeImage -DirPath $s2A2 -Name "fast.jpg" | Out-Null
+
+$script:logMessagesA2 = [System.Collections.Generic.List[string]]::new()
+$realWriteLogFnA2 = ${function:Write-Log}
+function Write-Log {
+    param([string]$Message, [ValidateSet("Info", "Warn", "Error", "Summary")][string]$Level = "Info")
+    $script:logMessagesA2.Add($Message)
+    & $script:realWriteLogFnA2Ref -Message $Message -Level $Level
+}
+$script:realWriteLogFnA2Ref = $realWriteLogFnA2
+
+try {
+    $totalsA2 = Invoke-LooseImageConversionPipeline -Path $rootA2 -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
+} finally {
+    ${function:Write-Log} = $realWriteLogFnA2
+}
+
+$idxChapter2Start = ($script:logMessagesA2 | Select-String -Pattern "Converting loose image.*Chapter 2.*fast\.jpg").LineNumber
+$idxChapter1SlowDone = ($script:logMessagesA2 | Select-String -Pattern "Conversion OK.*Chapter 1.*slow\.jxl").LineNumber
+Test-Assert ($totalsA2.ConvertedSuccess -eq 3 -and $totalsA2.ConvertedFail -eq 0) ("sanity check: all 3 images converted (got ConvertedSuccess=" + $totalsA2.ConvertedSuccess + ")")
+Test-Assert ($null -ne $idxChapter2Start -and $null -ne $idxChapter1SlowDone -and $idxChapter2Start -lt $idxChapter1SlowDone) ("Chapter 2's image started converting BEFORE Chapter 1's slow image finished - real interleaving, not one-chapter-at-a-time (Chapter 2 start at message " + $idxChapter2Start + ", Chapter 1 slow-image finish at message " + $idxChapter1SlowDone + ")")
+Write-Host ""
 
 # ==============================================================================
 #  Scenario B: a chapter with a real conversion failure counts correctly and
@@ -793,8 +840,16 @@ Write-Host ""
 #  AbortCancellationSource spies to prove THIS pipeline's own CTS was the one
 #  actually registered/unregistered, and a deterministic Test-AbortSignal
 #  trigger (not a real wall-clock race) to flip the abort while a real fake-
-#  cjxl OS process is genuinely still running - proving both this session's
-#  registration fix AND the $abortPoll closure fix (LastCompletedPaths).
+#  cjxl OS process is genuinely still running - proving both the registration
+#  fix and that a real abort correctly reaches Invoke-ChapterDispatch's own
+#  CancelToken.
+#
+#  Call sequence changed with the 2026-09-09 ChapterDispatch.ps1 migration
+#  (no longer a simple series-loop/chapter-loop/AbortPollCallback chain -
+#  see this module's own header) - $testAbortSignalTriggerAt=4 still happens
+#  to land after the fake cjxl process is dispatched and sleeping, confirmed
+#  live (ConvertedSuccess=1 below - the in-flight job completes via the
+#  abort-drain wait, not a force-kill), so it wasn't changed.
 # ==============================================================================
 Write-Host "=== Scenario H: abort registration actually wired up ===" -ForegroundColor Cyan
 Reset-AbortState
@@ -802,13 +857,6 @@ $rootH = New-Dir "scenario-h"
 $chH1 = New-Dir "scenario-h\Series\Chapter 1"
 New-FakeImage -DirPath $chH1 -Name "page1.jpg" -SleepMs 300 | Out-Null
 
-# Call sequence for this exact scenario (single series, single chapter, single
-# image): call 1 = the series while-loop's top-of-loop Test-AbortSignal, call
-# 2 = the chapter foreach-loop's top-of-loop check, call 3 = Convert-
-# ImageBatch's first AbortPollCallback (before the job is even dispatched),
-# call 4 = its second AbortPollCallback - by then the fake cjxl process IS
-# dispatched and still sleeping, so $running is non-empty and the closure's
-# InFlightPaths actually has this image's path in it. Trigger there.
 $script:testAbortSignalTriggerAt = 4
 
 $totalsH = Invoke-LooseImageConversionPipeline -Path $rootH -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false -AbortTimeoutSeconds 5
@@ -818,7 +866,14 @@ Test-Assert ($script:unregisterCtsCalls.Count -eq 1) ("Unregister-AbortCancellat
 Test-Assert ([object]::ReferenceEquals($script:registerCtsCalls[0], $script:unregisterCtsCalls[0])) "the registered and unregistered CTS are the SAME object"
 Test-Assert ($script:unregisterCtsWasCancelled[0]) "that CTS's token actually got cancelled by the real abort (captured just before the module disposed it)"
 Test-Assert ($totalsH.Aborted) "pipeline reports Aborted"
-Test-Assert ($totalsH.LastCompletedPaths.Count -eq 1 -and $totalsH.LastCompletedPaths[0] -match "page1\.jpg") ("the in-flight image was recorded into LastCompletedPaths (got " + $totalsH.LastCompletedPaths.Count + " entr(y/ies)) - proves the closure fix, not just the registration fix")
+# LastCompletedPaths is always empty now (2026-09-09, a deliberate
+# simplification, not a regression - see this module's own header): its
+# old semantics were an "at the exact instant abort was detected"
+# snapshot scoped to one chapter's own blocking Convert-ImageBatch call,
+# which has no clean equivalent once dispatch spans the whole run and
+# chapters interleave. Confirmed via a repo-wide grep that nothing
+# outside this module and its own harness ever read it.
+Test-Assert ($totalsH.LastCompletedPaths.Count -eq 0) ("LastCompletedPaths is always empty in the migrated pipeline, by design (got " + $totalsH.LastCompletedPaths.Count + ")")
 Test-Assert ($totalsH.ConvertedSuccess -eq 1) "the in-flight job still completed successfully via the abort-drain wait, rather than being force-killed"
 Test-Assert ($script:abortCancellationSources.Count -eq 0) "registry is empty again after the call (finally block ran)"
 Reset-AbortState
