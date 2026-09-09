@@ -125,12 +125,15 @@
     to a temp PNG via magick, then hand that to cjxl" detour already
     built for WebP (the two now share one code path in the dispatch
     loop below, the WebP/AVIF-specific parts are only the pre-checks:
-    the byte-level VP8X animation-flag read for WebP, a real
-    Test-AvifAnimated call - a magick identify process spawn, NOT a
-    cheap byte read - for AVIF). Animated AVIF is left untouched here,
-    same as animated WebP - it has its own conversion pipeline
-    (AnimatedConversionPipeline.ps1). A real Test-AvifAnimated failure
-    (couldn't determine frame count) is its own outcome, NOT folded into
+    Test-WebPAnimated's own VP8X-chunk byte read for WebP - cheap, no
+    magick spawn - versus a real Test-AvifAnimated call for AVIF - a
+    magick identify process spawn, reading the container's animation
+    delay metadata on frame [0] only, not a cheap byte read). Animated
+    AVIF is left untouched here, same as animated WebP - it has its own
+    conversion pipeline (AnimatedConversionPipeline.ps1). A real
+    Test-AvifAnimated failure (magick itself failed, or returned
+    something that couldn't be parsed as a delay value) is its own
+    outcome, NOT folded into
     FailedCount or SkippedCount - see the new InspectFailedCount field,
     matching Convert-AnimatedBatch's own field of the same name for the
     identical failure mode (this project's own "give it its own field,

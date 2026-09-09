@@ -49,10 +49,11 @@
         2's benefit and has no equivalent need here.
 
     STATIC AVIF, decided explicitly: a real animation check
-    (Test-AvifAnimated, via `magick identify -format "%n"` - the frame
-    count) runs before each file is dispatched. A static AVIF (1 frame)
-    is left untouched entirely - not converted, not deleted, not
-    recorded as a failure. FLAGGED FOR FUTURE REVIEW, not decided or
+    (Test-AvifAnimated, via `magick identify -ping -format "%T"` on
+    frame [0] only - the animation delay, not a frame count) runs before
+    each file is dispatched. A static AVIF (delay 0) is left untouched
+    entirely - not converted, not deleted, not recorded as a failure.
+    FLAGGED FOR FUTURE REVIEW, not decided or
     built: whether static AVIF should eventually be converted to JXL
     instead of being left alone forever - the project owner wants to
     evaluate whether that's actually worth doing before any code gets
@@ -70,18 +71,18 @@
     for this pass - flagged in Todo.md as a real future exploration, not
     silently dropped.
 
-    NOT VERIFIED AGAINST A REAL AVIF FILE OR A REAL ImageMagick BINARY -
-    said honestly, not implied otherwise: `magick identify -format "%n"`
-    reporting the correct frame count for an animated AVIF is the
-    standard technique (same idea used elsewhere for animated GIF/WebP
-    inspection), but this module's harness uses a compiled fake
-    magick.exe stand-in (same technique as
-    ImageConversionPipeline.Harness.ps1's fake cjxl.exe) to test the
-    branching LOGIC (parse frame count, static vs. animated, convert vs.
-    skip) - it does not prove the real ImageMagick binary's actual AVIF
-    delegate behaves this way on a real animated/static AVIF file. Worth
-    a manual sanity check against a real file once this gets wired into
-    an actual run.
+    This module's own harness uses a compiled fake magick.exe stand-in
+    (same technique as ImageConversionPipeline.Harness.ps1's fake
+    cjxl.exe) to test the branching LOGIC (parse the delay value, static
+    vs. animated, convert vs. skip) against 3 independent fake-magick.exe
+    copies across this codebase (this module's own, plus
+    Controller.Harness.ps1's and ImageConversionPipeline.Harness.ps1's) -
+    Test-AvifAnimated's real classification method was additionally
+    validated live against 9 real-world AVIF files across 3 independent
+    encoders/pipelines (this project's own test library, link-u/
+    avif-sample-images, and AOMediaCodec/libavif's own official animated
+    conformance test files) before the 2026-09-09 rewrite was merged -
+    see CHANGELOG.md's matching entry.
 
     REAL DELETION SEMANTICS, ported deliberately from the disregarded
     JXL-approach script rather than the WebP script this module's own

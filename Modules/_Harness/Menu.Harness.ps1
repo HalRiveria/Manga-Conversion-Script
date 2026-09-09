@@ -647,44 +647,55 @@ Test-Assert ($null -eq $outputU) ("Show-CoverDeletionMenu's own call produced no
 Write-Host ""
 
 # ==============================================================================
-#  Scenario U3 (2026-09-09, "Approved new functionality" from Todo.md):
+#  Scenario U3 (2026-09-09, "Approved new functionality" from Todo.md;
+#  rewritten same day after a /code-review finding - see below):
 #  Show-CoverDeletionMenu's two new behaviors - (a) persisting
-#  $Settings.LastCoverDeletionPath via -SaveSettingsHandler immediately
-#  after item 1 OR item 5 resolves a real path, and (b) item 1 firing
-#  -AutoTrailingZeroHandler automatically with that same resolved path,
-#  no second prompt. All handlers here are fakes (same technique as
+#  $Settings.LastCoverDeletionPath immediately after item 1 OR item 5
+#  resolves a real path, and (b) item 1 firing -AutoTrailingZeroHandler
+#  automatically with that same resolved path, no second prompt.
+#  -RunHandler/-AutoTrailingZeroHandler stay fakes (same technique as
 #  Scenario U above) so this proves DISPATCH, not real scan/report
-#  behavior - that's Scenario S3's job.
+#  behavior - that's Scenario S3's job. Persistence itself is now tested
+#  against a REAL scratch settings.json (Scenario K/L/M's own pattern),
+#  not an injectable -SaveSettingsHandler - that param was removed after
+#  a /code-review finding caught its default implementation calling
+#  Export-ScriptSettings bare/unassigned/unsuppressed, reintroducing the
+#  exact 2026-09-03 output-stream-leak class this switch statement was
+#  fixed for. This scenario's own call is captured and asserted $null
+#  (matching Scenario U's own leak-regression check), which the OLD
+#  version of this scenario did NOT do (it piped to `| Out-Null`
+#  instead) - a real, confirmed test-coverage gap, not just the
+#  underlying bug.
 # ==============================================================================
 Write-Host "=== Scenario U3: persisted LastCoverDeletionPath + automatic post-scan trailing-zero report ===" -ForegroundColor Cyan
 $fakePathU3 = "C:\fake\resolved\path"
 $runHandlerU3 = { param($ProfilesPath, $PromptFunc, $DefaultPath) $script:defaultPathSeenU3 = $DefaultPath; @{ Ran = $true; Reason = $null; ResolvedPath = $fakePathU3 } }
 $autoTZHandlerU3 = { param($Path) $script:autoTZCallsU3.Add($Path); @{ Ran = $true } }
-$saveHandlerU3 = { param($Settings, $SettingsPath) $script:saveCallsU3.Add(@{ Path = $Settings.LastCoverDeletionPath; SettingsPath = $SettingsPath }) }
 $script:autoTZCallsU3 = New-Object System.Collections.Generic.List[string]
-$script:saveCallsU3 = New-Object System.Collections.Generic.List[hashtable]
-$settingsU3 = @{ LastCoverDeletionPath = "C:\old\remembered\path" }
+$settingsU3 = Get-DefaultScriptSettings
+$settingsU3.LastCoverDeletionPath = "C:\old\remembered\path"
+$settingsPathU3 = New-ScratchSettingsPath "scenario-u3"
 $promptU3 = New-ScriptedPrompt -Responses @('1', '0')
 
-Show-CoverDeletionMenu -ProfilesPath "unused" -PromptFunc $promptU3 -RunHandler $runHandlerU3 `
-    -AutoTrailingZeroHandler $autoTZHandlerU3 -Settings $settingsU3 -SettingsPath "C:\fake\settings.json" `
-    -SaveSettingsHandler $saveHandlerU3 | Out-Null
+$outputU3 = Show-CoverDeletionMenu -ProfilesPath "unused" -PromptFunc $promptU3 -RunHandler $runHandlerU3 `
+    -AutoTrailingZeroHandler $autoTZHandlerU3 -Settings $settingsU3 -SettingsPath $settingsPathU3
 
+Test-Assert ($null -eq $outputU3) "Show-CoverDeletionMenu's own call produced no output despite the real Export-ScriptSettings call this branch now makes"
 Test-Assert ($script:defaultPathSeenU3 -eq "C:\old\remembered\path") "the previously-remembered path was offered to -RunHandler as -DefaultPath"
 Test-Assert ($script:autoTZCallsU3.Count -eq 1 -and $script:autoTZCallsU3[0] -eq $fakePathU3) "the auto trailing-zero handler fired exactly once, with item 1's own resolved path"
-Test-Assert ($script:saveCallsU3.Count -eq 1 -and $script:saveCallsU3[0].Path -eq $fakePathU3 -and $script:saveCallsU3[0].SettingsPath -eq "C:\fake\settings.json") "the resolved path was saved immediately (not batched), to the real -SettingsPath"
 Test-Assert ($settingsU3.LastCoverDeletionPath -eq $fakePathU3) "`$Settings itself was mutated in place, not just a copy - same convention Show-OptionsMenuLevel already uses"
+$reloadedU3 = Import-ScriptSettings -Path $settingsPathU3
+Test-Assert ($reloadedU3.LastCoverDeletionPath -eq $fakePathU3) "the resolved path was saved immediately to REAL disk (not batched) - reloading the settings file confirms it, not just the in-memory hashtable"
 
 # No -Settings supplied at all (the original, still-default behavior for
 # every existing caller/test) - persistence is skipped entirely, but the
 # auto trailing-zero report still fires unconditionally, since that
 # doesn't depend on remembering anything.
 $script:autoTZCallsU3.Clear()
-$script:saveCallsU3.Clear()
 $promptU3b = New-ScriptedPrompt -Responses @('1', '0')
-Show-CoverDeletionMenu -ProfilesPath "unused" -PromptFunc $promptU3b -RunHandler $runHandlerU3 -AutoTrailingZeroHandler $autoTZHandlerU3 -SaveSettingsHandler $saveHandlerU3 | Out-Null
+$outputU3b = Show-CoverDeletionMenu -ProfilesPath "unused" -PromptFunc $promptU3b -RunHandler $runHandlerU3 -AutoTrailingZeroHandler $autoTZHandlerU3
+Test-Assert ($null -eq $outputU3b) "still no output leak with -Settings entirely omitted"
 Test-Assert ($script:autoTZCallsU3.Count -eq 1) "the auto trailing-zero report still fires with no -Settings at all"
-Test-Assert ($script:saveCallsU3.Count -eq 0) "nothing was saved with no -Settings supplied - matches original behavior exactly"
 Write-Host ""
 
 # ==============================================================================
