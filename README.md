@@ -63,6 +63,18 @@ folder layout below).
 - [cjxl](https://github.com/libjxl/libjxl) (JPEG XL encoder)
 - [ImageMagick](https://imagemagick.org/) (for WebP/ICC-profile pre-processing and animated AVIF handling)
 
+**Thread count vs. RAM (animated conversion):** the animated-AVIF-to-WebP
+step (`magick ... -coalesce`) decodes every frame of the source
+animation into memory to reassemble it - a real, large multi-frame AVIF
+can need a lot of RAM per file, and that scales with how many run
+concurrently. Live-measured on this project's own real animated test
+library: 12 concurrent animated conversions pushed system RAM usage from
+a ~20GB baseline up to ~60GB, transiently, for the duration of the run -
+not a leak, it releases back down the moment each conversion finishes.
+Worth keeping in mind when raising the animated-conversion thread count
+setting on a machine with less RAM to spare, or when the library being
+converted skews toward large/long animated files.
+
 ## Folder layout (local, not all tracked)
 
 ```
