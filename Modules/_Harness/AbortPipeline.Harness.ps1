@@ -725,6 +725,31 @@ Reset-HarnessScenarioState
 Write-Host ""
 
 # ==============================================================================
+#  Scenario V2 (2026-09-08 addition): Set-ConsoleQuickEditEnabled never
+#  throws regardless of whether this process has a real interactive
+#  console attached (a harness run typically doesn't - stdin is
+#  redirected/piped), and Reset-AbortState re-enables QuickEdit as its own
+#  defensive belt-and-suspenders reset, same as it already does for
+#  RunActive.
+# ==============================================================================
+Write-Host "=== Scenario V2: Set-ConsoleQuickEditEnabled degrades gracefully with no real console attached ===" -ForegroundColor Cyan
+$threwV2a = $false
+$resultV2a = $null
+try { $resultV2a = Set-ConsoleQuickEditEnabled -Enabled $false } catch { $threwV2a = $true }
+Test-Assert (-not $threwV2a) "disabling QuickEdit does not throw even without a real console"
+Test-Assert ($resultV2a -is [bool]) "returns a real boolean either way (`$true if it changed the mode, `$false if there was nothing to change)"
+
+$threwV2b = $false
+try { $null = Set-ConsoleQuickEditEnabled -Enabled $true } catch { $threwV2b = $true }
+Test-Assert (-not $threwV2b) "re-enabling QuickEdit does not throw either"
+
+$threwV2c = $false
+try { Reset-AbortState } catch { $threwV2c = $true }
+Test-Assert (-not $threwV2c) "Reset-AbortState's own defensive QuickEdit re-enable does not throw"
+Reset-HarnessScenarioState
+Write-Host ""
+
+# ==============================================================================
 #  Scenario W (2026-09-03 fix, real bug, live-reported and live-tested):
 #  Invoke-GracefulDrain's own wait-for-natural-completion loop must be
 #  skipped entirely when [ConsoleCtrl]::IsCloseEvent is true, going

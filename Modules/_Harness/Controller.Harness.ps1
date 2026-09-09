@@ -1502,6 +1502,41 @@ Test-Assert (@($script:eventOrderU2d)[0] -eq "WARN" -and @($script:eventOrderU2d
 Write-Host ""
 
 # ==============================================================================
+#  Scenario U2e (2026-09-08 addition): SetQuickEditHandler is called
+#  $false right before InvokeModeHandler and $true right after, even when
+#  InvokeModeHandler throws - same try/finally bracketing as
+#  SetRunActiveHandler, proving Console QuickEdit mode can never be left
+#  disabled by a crashed run.
+# ==============================================================================
+Write-Host "=== Scenario U2e: SetQuickEditHandler brackets InvokeModeHandler, even on a throw ===" -ForegroundColor Cyan
+$fakeSettingsU2e = @{ PermanentDelete = $false; CleanConsoleOutputEnabled = $false; FullLogging = $false; DisableSummaryFile = $false }
+$fakeGetModeU2e = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
+$script:quickEditCallsU2e = [System.Collections.Generic.List[bool]]::new()
+$fakeSetQuickEditU2e = { param($Enabled) $script:quickEditCallsU2e.Add($Enabled) }.GetNewClosure()
+$fakeInvokeModeU2e = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) throw "simulated crash mid-run" }
+$script:postRunCallsU2e = 0
+$fakePostRunU2e = { $script:postRunCallsU2e++; return 'Exit' }
+
+# Invoke-MainLoop's own try/finally around InvokeModeHandler has no catch
+# (a real InvokeModeHandler - Invoke-Mode - already catches everything
+# itself; this fake deliberately bypasses that to prove the finally still
+# runs) - so the throw propagates OUT of Invoke-MainLoop itself here,
+# same as it would for a real uncaught crash. Caught here just so this
+# scenario's own assertions can still run afterward.
+$threwU2e = $false
+try {
+    Invoke-MainLoop -TargetPath "C:\fake\lib" -Settings $fakeSettingsU2e -SettingsPath "C:\fake\settings.json" -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ScriptDir "C:\fake\scriptdir" `
+        -GetModeHandler $fakeGetModeU2e -InvokeModeHandler $fakeInvokeModeU2e -PostRunPromptHandler $fakePostRunU2e -SetQuickEditHandler $fakeSetQuickEditU2e
+} catch {
+    $threwU2e = $true
+}
+
+Test-Assert $threwU2e "sanity check: the simulated crash really did propagate out of Invoke-MainLoop (this fake bypasses Invoke-Mode's own catch)"
+Test-Assert ($script:quickEditCallsU2e.Count -eq 2) ("SetQuickEditHandler fired exactly twice, even though InvokeModeHandler threw (got " + $script:quickEditCallsU2e.Count + ")")
+Test-Assert ((@($script:quickEditCallsU2e)[0] -eq $false) -and (@($script:quickEditCallsU2e)[1] -eq $true)) ("QuickEdit was disabled ($false) before the run and re-enabled ($true) after, in that order (got " + ($script:quickEditCallsU2e -join ',') + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario U3 (2026-09-02 review fix): mode 5 (Cover Deletion)'s real work
 #  runs INSIDE $GetModeHandler (Get-SelectedMode -> Show-ModeMenu ->
 #  Show-CoverDeletionMenu), not inside $InvokeModeHandler like every other

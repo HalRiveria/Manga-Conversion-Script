@@ -204,6 +204,64 @@ public static class ConsoleCtrl
 }
 
 # ==============================================================================
+#  ConsoleQuickEdit - native Win32 console-mode toggle (P/Invoke)
+#
+#  Windows Console's QuickEdit mode (click-drag to select text) pauses ALL
+#  console output from this process for as long as a selection is held, and
+#  auto-copies the selection to the clipboard the moment the mouse button is
+#  released - a right-click with no NEW selection pending then pastes that
+#  clipboard content back in as simulated keystrokes. Both are real,
+#  live-reported problems for a run in progress (project owner's own
+#  report, 2026-09-08): an accidental highlight looks exactly like a hang,
+#  and an accidental right-click after one floods the eventual input prompt
+#  with garbage. Neither matters once a run has finished - highlighting to
+#  copy real output is genuinely useful then - so this is toggled off only
+#  around an actual run, not disabled permanently. See Set-ConsoleQuickEditEnabled.
+#
+#  ENABLE_EXTENDED_FLAGS must be set alongside ENABLE_QUICK_EDIT_MODE in the
+#  same SetConsoleMode call, or the QuickEdit bit is silently ignored - a
+#  documented Win32 quirk, not an oversight here.
+# ==============================================================================
+if (-not ([System.Management.Automation.PSTypeName]'ConsoleQuickEdit').Type) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class ConsoleQuickEdit
+{
+    private const int STD_INPUT_HANDLE = -10;
+    private const uint ENABLE_QUICK_EDIT_MODE = 0x0040;
+    private const uint ENABLE_EXTENDED_FLAGS  = 0x0080;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetStdHandle(int nStdHandle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+
+    // Returns false (not an error - callers must treat it as "nothing to
+    // do here") when stdin isn't a real interactive console, e.g. a
+    // redirected/piped invocation - this project's own harness tests and
+    // automated runs. Real callers only need this to work when a human is
+    // actually looking at a real console window.
+    public static bool SetEnabled(bool enabled)
+    {
+        IntPtr handle = GetStdHandle(STD_INPUT_HANDLE);
+        if (handle == IntPtr.Zero || handle == new IntPtr(-1)) { return false; }
+        uint mode;
+        if (!GetConsoleMode(handle, out mode)) { return false; }
+        if (enabled) { mode |= ENABLE_QUICK_EDIT_MODE; } else { mode &= ~ENABLE_QUICK_EDIT_MODE; }
+        mode |= ENABLE_EXTENDED_FLAGS;
+        return SetConsoleMode(handle, mode);
+    }
+}
+'@ -Language CSharp
+}
+
+# ==============================================================================
 #  Abort state
 # ==============================================================================
 $script:abortRequested = $false   # set once, by the first Test-AbortSignal call after abort
@@ -242,6 +300,25 @@ function Set-AbortHandlerRunActive {
     #>
     param([Parameter(Mandatory)][bool]$Active)
     [ConsoleCtrl]::RunActive = $Active
+}
+
+function Set-ConsoleQuickEditEnabled {
+    <#
+    .SYNOPSIS
+        Enables/disables Windows Console QuickEdit mode - see
+        [ConsoleQuickEdit]'s own header for what that actually does and
+        why it matters. Call with $false right before dispatching a run,
+        $true right after it returns (in a try/finally, so a crash
+        doesn't leave it stuck disabled) - Controller.ps1's Invoke-MainLoop
+        is the one real caller, same bracketing pattern as
+        Set-AbortHandlerRunActive.
+    .OUTPUTS
+        $true if the mode was actually changed, $false if this isn't a
+        real console (nothing to do) - callers should not treat $false as
+        an error.
+    #>
+    param([Parameter(Mandatory)][bool]$Enabled)
+    return [ConsoleQuickEdit]::SetEnabled($Enabled)
 }
 
 function Register-AbortCancellationSource {
@@ -313,6 +390,15 @@ function Reset-AbortState {
         to still be $true here - if it somehow were (a caller that forgot
         its own try/finally), the very NEXT Ctrl+C at the menu would be
         wrongly caught and blocked on a drain that will never happen.
+
+        Also re-enables Console QuickEdit mode (2026-09-08 addition) -
+        same defensive belt-and-suspenders reasoning as RunActive above,
+        alongside Set-ConsoleQuickEditEnabled's own try/finally at its
+        real call site: this runs once per loop iteration, BEFORE the
+        menu, so QuickEdit should never still be disabled here - if it
+        somehow were (a caller that forgot its own try/finally), the user
+        would be stuck unable to highlight/copy anything at the menu
+        until the whole script restarted.
     #>
     $script:abortRequested = $false
     $script:ctrlCloseAbort = $false
@@ -320,6 +406,7 @@ function Reset-AbortState {
     [ConsoleCtrl]::IsCloseEvent   = $false
     [ConsoleCtrl]::RunActive      = $false
     [ConsoleCtrl]::DrainComplete.Reset()
+    $null = [ConsoleQuickEdit]::SetEnabled($true)
 }
 
 function Test-AbortSignal {

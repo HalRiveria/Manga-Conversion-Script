@@ -1614,6 +1614,16 @@ function Invoke-MainLoop {
         (between calls) falls through to the OS's own default action
         instead of being caught and leaking into the next iteration's
         run (project owner's own explicit decision, 2026-08-31).
+    .PARAMETER SetQuickEditHandler
+        Injectable, defaults to the real AbortPipeline.ps1's
+        Set-ConsoleQuickEditEnabled. Called $false right before, $true
+        right after (try/finally) InvokeModeHandler, same bracketing as
+        SetRunActiveHandler - Windows Console QuickEdit mode (highlighting
+        text pauses all console output; a stray right-click afterward
+        pastes the clipboard back in as keystrokes) is a real hazard while
+        a run is actually dispatching work, but harmless - and useful, for
+        copying real output - once a run has finished (project owner's
+        own live report, 2026-09-08).
     .PARAMETER ScriptDir
         Where log files live - threaded through so a mid-session
         FullLogging/DisableSummaryFile re-sync (see below) can call
@@ -1662,6 +1672,7 @@ function Invoke-MainLoop {
         [scriptblock]$PostRunPromptHandler = ${function:Show-PostRunPrompt},
         [scriptblock]$ResetAbortHandler = ${function:Reset-AbortState},
         [scriptblock]$SetRunActiveHandler = ${function:Set-AbortHandlerRunActive},
+        [scriptblock]$SetQuickEditHandler = ${function:Set-ConsoleQuickEditEnabled},
         [scriptblock]$LogHandler = { param($m) Write-Log $m -Level Error },
         [scriptblock]$CompleteLogRunHandler = ${function:Complete-LogRun},
         [scriptblock]$StartLogRunHandler = ${function:Start-LogRun},
@@ -1804,11 +1815,13 @@ function Invoke-MainLoop {
         # nothing correct to reorder against for the 2nd+ run in a session.
         & $StartLogRunHandler
         & $SetRunActiveHandler -Active $true
+        & $SetQuickEditHandler -Enabled $false
         $runStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         try {
             $stats = & $InvokeModeHandler -Resolved $resolved -TargetPath $TargetPath -Settings $Settings -CjxlExe $CjxlExe -MagickExe $MagickExe `
                 -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile
         } finally {
+            & $SetQuickEditHandler -Enabled $true
             & $SetRunActiveHandler -Active $false
         }
         $runStopwatch.Stop()
