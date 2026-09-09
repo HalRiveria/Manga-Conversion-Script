@@ -77,6 +77,7 @@ function Get-ExpectedModuleFileNames {
     return @(
         "AbortPipeline.ps1"
         "AnimatedConversionPipeline.ps1"
+        "ChapterDispatch.ps1"
         "CleanConsoleRendering.ps1"
         "Config.ps1"
         "Controller.ps1"
@@ -220,6 +221,7 @@ try {
     . (Join-Path $modulesPath "ZipValidation.ps1")
     . (Join-Path $modulesPath "CleanConsoleRendering.ps1")
     . (Join-Path $modulesPath "LeafDirectoryDiscovery.ps1")
+    . (Join-Path $modulesPath "ChapterDispatch.ps1")
     . (Join-Path $modulesPath "ZipParallelProcessing.ps1")
     . (Join-Path $modulesPath "ZipPipeline.ps1")
     . (Join-Path $modulesPath "ImageConversionPipeline.ps1")

@@ -137,7 +137,7 @@ $chapter1 = "Chapter1"
 $feed1 = New-ManualChapterFeed -Chapters @(@{ ChapterInfo = $chapter1; Jobs = @($job1a, $job1b, $job1c) })
 $cb1 = New-DefaultCallbacks
 $completedChapters1 = [System.Collections.Generic.List[object]]::new()
-$chapterCompleteCallback1 = { param($chapterInfo) $completedChapters1.Add($chapterInfo) }
+$chapterCompleteCallback1 = { param($chapterInfo) $completedChapters1.Add($chapterInfo) }.GetNewClosure()
 $jobPollCompleted1 = {
     param($job)
     if (-not $job.Started) { return $false }
@@ -174,7 +174,7 @@ $feed2 = New-ManualChapterFeed -Chapters @(
     @{ ChapterInfo = "A"; Jobs = @($jobAFast, $jobASlow) },
     @{ ChapterInfo = "B"; Jobs = @($jobBFast) }
 )
-$jobStarter2 = { param($job) $job.Started = $true; $eventLog2.Add("start:" + $job.Id); return $job }
+$jobStarter2 = { param($job) $job.Started = $true; $eventLog2.Add("start:" + $job.Id); return $job }.GetNewClosure()
 $jobPollCompleted2 = {
     param($job)
     if (-not $job.Started) { return $false }
@@ -185,8 +185,8 @@ $jobPollCompleted2 = {
     $job.Done = $true
     return $true
 }
-$jobFinalize2 = { param($job, $pendingQueue) $eventLog2.Add("finalize:" + $job.Id); return @{ Success = $true } }
-$chapterCompleteCallback2 = { param($chapterInfo) $eventLog2.Add("chapterComplete:" + $chapterInfo) }
+$jobFinalize2 = { param($job, $pendingQueue) $eventLog2.Add("finalize:" + $job.Id); return @{ Success = $true } }.GetNewClosure()
+$chapterCompleteCallback2 = { param($chapterInfo) $eventLog2.Add("chapterComplete:" + $chapterInfo) }.GetNewClosure()
 $cts2 = [System.Threading.CancellationTokenSource]::new()
 $result2 = Invoke-ChapterDispatch -ChapterProvider $feed2.ChapterProvider -JobBuilder $feed2.JobBuilder `
     -JobStarter $jobStarter2 -JobPollCompleted $jobPollCompleted2 -JobFinalize $jobFinalize2 `
@@ -308,6 +308,23 @@ Write-Host ""
 #  This is the exact live-caught bug class from the real code (see this
 #  module's own header) - worth a dedicated scenario, not just trusting
 #  the generalization by inspection.
+#
+#  Made fully deterministic (2026-09-09, fixing a real flaky-test bug -
+#  an earlier version raced two independent wall clocks: an absolute
+#  "finish at" timestamp set once at test setup, against
+#  -AbortTimeoutSeconds measured from whenever cancellation actually got
+#  detected - the two weren't tightly coupled, so under real timing
+#  jitter the job sometimes finished too late to prove anything and was
+#  genuinely, correctly force-killed instead, an intermittent failure
+#  with no bug behind it). -AbortTimeoutSeconds 0 makes the timed drain
+#  while loop's own condition (Elapsed.TotalSeconds -lt 0) permanently
+#  false, so that loop runs ZERO iterations, guaranteed, regardless of
+#  timing - the ONLY code path left that can ever poll this job again is
+#  the mandatory final completion-check pass. JobPollCompleted counts its
+#  own calls and only reports done on the 3rd (1st: normal dispatch pass
+#  before cancellation; 2nd: the pass where -AbortPollCallback cancels,
+#  same pass's own poll step still runs; 3rd: the drain's mandatory final
+#  check) - a fixed call count, not a clock, so no race is possible.
 # ==============================================================================
 Write-Host "=== Scenario 5: a job finishing right at the abort-timeout boundary is finalized normally, not force-killed ===" -ForegroundColor Cyan
 $jobC5 = New-FakeJob -Id "C5"
@@ -316,26 +333,19 @@ $cts5 = [System.Threading.CancellationTokenSource]::new()
 $finalizedCount5 = 0
 $abortCleanupCount5 = 0
 $jobStarter5 = { param($job) $job.Started = $true; return $job }
-# Never reports done during the timed drain loop's own poll passes (250ms
-# each) - only flips true when asked AFTER the timeout has already
-# elapsed, simulating a job that finishes in the last few milliseconds
-# before force-kill. -AbortTimeoutSeconds 1 with a 250ms poll interval
-# gives ~4 passes before the deadline; sleeping past 1.1s here then
-# reporting done proves the MANDATORY final check (not just the timed
-# loop) is what catches it.
 $jobPollCompleted5 = {
     param($job)
     if (-not $job.Started) { return $false }
-    return ([System.DateTime]::UtcNow -ge $job.__finishAt)
+    $job.StartCount++
+    return ($job.StartCount -ge 3)
 }
-$jobC5.__finishAt = [System.DateTime]::UtcNow.AddSeconds(1.15)
 $jobFinalize5 = { param($job, $pendingQueue) $script:finalizedCount5++; return @{ Success = $true } }
 $jobAbortCleanup5 = { param($job) $script:abortCleanupCount5++ }
 $abortPollCallback5 = { param($runningJobs) if ($runningJobs.Count -gt 0 -and -not $cts5.Token.IsCancellationRequested) { $cts5.Cancel() } }
 $result5 = Invoke-ChapterDispatch -ChapterProvider $feed5.ChapterProvider -JobBuilder $feed5.JobBuilder `
     -JobStarter $jobStarter5 -JobPollCompleted $jobPollCompleted5 -JobFinalize $jobFinalize5 `
     -JobAbortCleanup $jobAbortCleanup5 -ChapterCompleteCallback { param($chapterInfo) } `
-    -MaxConcurrent 4 -AbortPollCallback $abortPollCallback5 -AbortTimeoutSeconds 1 -CancelToken $cts5.Token
+    -MaxConcurrent 4 -AbortPollCallback $abortPollCallback5 -AbortTimeoutSeconds 0 -CancelToken $cts5.Token
 
 Test-Assert ($script:finalizedCount5 -eq 1) ("the job that finished right at the timeout boundary was finalized normally (got finalize count=" + $script:finalizedCount5 + ")")
 Test-Assert ($script:abortCleanupCount5 -eq 0) ("it was NOT force-killed / JobAbortCleanup'd despite finishing after the timed drain loop's own deadline (got abort-cleanup count=" + $script:abortCleanupCount5 + ")")
@@ -362,7 +372,7 @@ $jobPollCompleted6 = { param($job) if (-not $job.Started) { return $false }; $jo
 $finalizedCount6 = 0
 $jobFinalize6 = { param($job, $pendingQueue) $script:finalizedCount6++; return @{ Success = $true } }
 $completed6 = [System.Collections.Generic.List[object]]::new()
-$chapterCompleteCallback6 = { param($chapterInfo) $completed6.Add($chapterInfo) }
+$chapterCompleteCallback6 = { param($chapterInfo) $completed6.Add($chapterInfo) }.GetNewClosure()
 $result6 = Invoke-ChapterDispatch -ChapterProvider $feed6.ChapterProvider -JobBuilder $feed6.JobBuilder `
     -JobStarter $jobStarter6 -JobPollCompleted $jobPollCompleted6 -JobFinalize $jobFinalize6 `
     -JobAbortCleanup { param($job) } -ChapterCompleteCallback $chapterCompleteCallback6 `
@@ -400,7 +410,7 @@ $jobFinalize7 = {
     return @{ Success = $true }
 }
 $completed7 = [System.Collections.Generic.List[object]]::new()
-$chapterCompleteCallback7 = { param($chapterInfo) $completed7.Add($chapterInfo) }
+$chapterCompleteCallback7 = { param($chapterInfo) $completed7.Add($chapterInfo) }.GetNewClosure()
 $result7 = Invoke-ChapterDispatch -ChapterProvider $feed7.ChapterProvider -JobBuilder $feed7.JobBuilder `
     -JobStarter $jobStarter7 -JobPollCompleted $jobPollCompleted7 -JobFinalize $jobFinalize7 `
     -JobAbortCleanup { param($job) } -ChapterCompleteCallback $chapterCompleteCallback7 `
@@ -436,14 +446,14 @@ $jobPollCompleted8 = {
     if (-not $job.Started) { return $false }
     $job.StartCount++
     return ($job.StartCount -ge $finishAfter8[$job.Id])
-}
+}.GetNewClosure()
 $jobFinalize8 = { param($job, $pendingQueue) return @{ Success = $true } }
 $completeCallCounts8 = @{}
 $chapterCompleteCallback8 = {
     param($chapterInfo)
     if (-not $completeCallCounts8.ContainsKey($chapterInfo)) { $completeCallCounts8[$chapterInfo] = 0 }
     $completeCallCounts8[$chapterInfo]++
-}
+}.GetNewClosure()
 $result8 = Invoke-ChapterDispatch -ChapterProvider $feed8.ChapterProvider -JobBuilder $feed8.JobBuilder `
     -JobStarter $jobStarter8 -JobPollCompleted $jobPollCompleted8 -JobFinalize $jobFinalize8 `
     -JobAbortCleanup { param($job) } -ChapterCompleteCallback $chapterCompleteCallback8 `

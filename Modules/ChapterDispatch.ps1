@@ -15,17 +15,56 @@
     Pure definitions only - no top-level side effects, safe to dot-source
     more than once or alongside other modules.
 
-    STANDALONE PRIMITIVE, NOT YET WIRED IN (2026-09-09): built and fully
-    harness-tested per the dispatch-redesign design doc's own migration
-    order (step 1 of 4 - "Build ChapterDispatch.ps1 standalone, fully
-    tested against fakes - no real caller touches it yet"). Nothing in
-    Controller.ps1/ImageConversionPipeline.ps1/AnimatedConversionPipeline.ps1
-    calls this yet, and Conversion Script Main.ps1 does not dot-source it
-    yet either. Intended load position once wired in: right after
-    LeafDirectoryDiscovery.ps1, before ZipParallelProcessing.ps1/
-    ZipPipeline.ps1/ImageConversionPipeline.ps1/
+    FIRST REAL CALLER (2026-09-09): mode 3's Invoke-LooseAnimatedConversionPipeline
+    (AnimatedConversionPipeline.ps1) - step 2 of the dispatch-redesign
+    design doc's 4-step migration order, after step 1 (this module,
+    built standalone). Controller.ps1/ImageConversionPipeline.ps1 don't
+    call this yet, and Conversion Script Main.ps1 does not dot-source it
+    at the top level yet either (each module that DOES call it dot-sources
+    it directly, matching AnimatedConversionPipeline.ps1's own updated
+    FORWARD REFERENCES). Intended load position once wired into the main
+    script directly: right after LeafDirectoryDiscovery.ps1, before
+    ZipParallelProcessing.ps1/ZipPipeline.ps1/ImageConversionPipeline.ps1/
     AnimatedConversionPipeline.ps1/Controller.ps1 - see that script's own
     dot-source order.
+
+    CALLING CONVENTION - READ BEFORE WRITING A NEW CALLER (2026-09-09,
+    real bug caught building mode 3's migration, before it ever ran):
+    every -JobBuilder/-JobStarter/-JobPollCompleted/-JobFinalize/
+    -JobAbortCleanup/-ChapterCompleteCallback/-ChapterProvider/
+    -AbortPollCallback scriptblock you pass in MUST be built with
+    .GetNewClosure() if it references ANY variable from its own
+    definition scope that isn't one of its own -param()s. Reason: this
+    module invokes every one of those scriptblocks via `& $callback`
+    from INSIDE Invoke-ChapterDispatch's own function body - and a plain
+    (non-closure) PowerShell scriptblock resolves a free variable
+    DYNAMICALLY, against whatever scope it's actually EXECUTING in at
+    that moment, not lexically against wherever it was originally
+    written. Confirmed live: a caller's own callback referencing
+    $chapterResults (its own per-chapter accumulator) silently read THIS
+    module's own internal $chapterResults variable instead - two
+    completely unrelated variables, same name, no error, wrong data -
+    because without .GetNewClosure() the callback's scope chain starts
+    from Invoke-ChapterDispatch's own local scope (where it's actually
+    invoked from), not AnimatedConversionPipeline.ps1's (where it was
+    written). This is a DIFFERENT failure mode than the closure gotcha
+    already documented in Docs\lessons-learned.md ("closures that lose
+    mutated state" - too LITTLE state capture without .GetNewClosure())
+    - this one is too MUCH ambient scope, in the wrong direction, also
+    without .GetNewClosure(). A callback that references NOTHING but its
+    own -param()s (this module's own JobAbortCleanup implementations
+    included) doesn't need .GetNewClosure() - there's no free variable to
+    collide on. One further wrinkle if you also do this: .GetNewClosure()
+    itself breaks a $script:-prefixed variable read/write from inside the
+    closure (it resolves against the closure's own private, isolated
+    scope, not the real script scope - a SEPARATE real bug, also caught
+    building mode 3's migration) - capture any $script: value you need
+    into a plain local variable BEFORE building the closure, and read
+    that local variable inside it instead of $script:X directly. See
+    AnimatedConversionPipeline.ps1's own Invoke-LooseAnimatedConversionPipeline
+    for a worked example of both fixes together (its own
+    $cleanConsoleOutputEnabled local capture, and .GetNewClosure() on
+    every callback that references an outer variable).
 
     FORWARD REFERENCES: Write-Log (Logging.ps1), [ConsoleCtrl]
     (AbortPipeline.ps1, a compiled type - visible from a runspace worker

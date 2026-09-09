@@ -116,7 +116,12 @@
         Start-ChapterProgress, Complete-ChapterProgress,
         Complete-AllActiveSeriesProgress (Modules\CleanConsoleRendering.ps1) -
         same set ImageConversionPipeline.ps1's PART 2 forward-references,
-        for the same reasons.
+        for the same reasons; Invoke-ChapterDispatch (Modules\ChapterDispatch.ps1,
+        2026-09-09 - see Invoke-LooseAnimatedConversionPipeline's own
+        header for the migration this module was the first real caller
+        of). NOT New-LibraryChapterProvider - that function's own header
+        explains why this module builds its own -ChapterProvider closure
+        instead.
 
 .NOTES
     Built from Backups\Old Scripts\Convert-AnimatedAvifToWebp.ps1 (the
@@ -251,6 +256,15 @@ function Complete-AnimatedConversionJob {
         real differences were the drain copy skipping the -DoFullLogging
         stdout dump and the success log message (no byte count, "(abort
         drain)" wording instead), both captured here via -IsAbortDrain.
+
+        DOCUMENTED DUPLICATE (2026-09-09, mode 3's ChapterDispatch.ps1
+        migration): the exit-code/File.Replace/delete-source portion of
+        this function (everything after its own try/finally) is copied,
+        not shared, into PART 2's Complete-AnimatedDispatchJob (see that
+        function's own header for why - Invoke-ChapterDispatch owns
+        process disposal/-SharedBudget release generically now, this
+        function's own callers still don't). Keep both in sync if either
+        changes.
     .PARAMETER IsAbortDrain
         $true from the straggler-drain loop; $false (default) from the
         main dispatch loop - see SYNOPSIS for what this changes.
@@ -967,39 +981,200 @@ function Get-ChapterAnimatedStatus {
     return "Success", $null
 }
 
+function Complete-AnimatedDispatchJob {
+    <#
+    .SYNOPSIS
+        JobFinalize-shaped completion handler for a job dispatched via
+        Invoke-ChapterDispatch (mode 3's own migration onto
+        ChapterDispatch.ps1, 2026-09-09 - see
+        Docs\dispatch-redesign-design.md). Handles exit-code/output
+        verification and (on success) source deletion, mutating
+        $ChapterResult (this chapter's own per-chapter accumulator, built
+        by Invoke-LooseAnimatedConversionPipeline's own JobBuilder) in
+        place.
+
+        DOCUMENTED DUPLICATE, not a call-through, of
+        Complete-AnimatedConversionJob's own exit-code/File.Replace/
+        delete-source logic (everything after that function's own
+        try/finally) - see that function's own header for the cross-
+        reference. Genuinely different contract, not a lazy copy:
+        Complete-AnimatedConversionJob's caller (Convert-AnimatedBatch,
+        still used directly by Controller.ps1's Full Pipeline until step
+        4 of the dispatch redesign migrates it too) owns process
+        disposal and -SharedBudget release itself; THIS function's
+        caller (Invoke-ChapterDispatch) already owns that generically for
+        every job on every exit path - duplicating it here would
+        double-release the same slot. No -IsAbortDrain distinction
+        either - Invoke-ChapterDispatch calls JobFinalize identically
+        whether a job finished during normal polling or during the
+        abort/drain window, so there's no separate wording variant to
+        capture.
+    .OUTPUTS
+        @{ Success = [bool] } - Invoke-ChapterDispatch only cares that
+        this is never @{ Requeued = $true } (mode 3 has no retry-requeue
+        mechanism, unlike the image engine's ICC-strip retry).
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Job,
+        [Parameter(Mandatory)]
+        [hashtable]$ChapterResult,
+        [bool]$DoFullLogging,
+        [bool]$DoAnimatedDeleteSource
+    )
+
+    $stdout = if ($Job.StdoutTask) { $Job.StdoutTask.GetAwaiter().GetResult() } else { $Job.Proc.StandardOutput.ReadToEnd() }
+    $stderr = if ($Job.StderrTask) { $Job.StderrTask.GetAwaiter().GetResult() } else { $Job.Proc.StandardError.ReadToEnd() }
+    $code   = $Job.Proc.ExitCode
+
+    if ($DoFullLogging -and -not [string]::IsNullOrWhiteSpace($stdout)) {
+        Write-Log ("magick stdout for '" + $Job.SrcPath + "': " + $stdout.Trim())
+    }
+
+    $convOk = $false
+    $webpReplaceBackup = $null
+    try {
+        if ($code -ne 0) { throw ("magick exited with code " + $code + ". Stderr: " + $stderr) }
+        $webpItem = Get-Item -LiteralPath $Job.MagickOutputPath -ErrorAction SilentlyContinue
+        if ($null -eq $webpItem) { throw ("Output .webp was not created: '" + $Job.MagickOutputPath + "'") }
+        $webpSize = $webpItem.Length
+        if ($webpSize -eq 0) { throw ("Output .webp is 0 bytes: '" + $Job.MagickOutputPath + "'") }
+        # File.Replace, atomic swap - see Complete-AnimatedConversionJob's
+        # own comment at its identical line for the full reasoning
+        # (Move-Item -Force confirmed non-atomic on an existing
+        # destination; a real, non-$null backup path is required on this
+        # machine's real PS 5.1/.NET Framework).
+        if ($Job.MagickOutputPath -ne $Job.WebpPath) {
+            $webpReplaceBackup = $Job.WebpPath + "_replace_backup.tmp"
+            [System.IO.File]::Replace($Job.MagickOutputPath, $Job.WebpPath, $webpReplaceBackup)
+            try { [System.IO.File]::Delete($webpReplaceBackup) } catch { }
+        }
+        Write-Log ("Conversion OK: '" + $Job.WebpPath + "' (" + $webpSize + " bytes)")
+        $ChapterResult.ConvertedCount++
+        $convOk = $true
+    } catch {
+        Write-Log ("FAILED conversion of animated AVIF '" + $Job.SrcPath + "': " + $_) -Level Error
+        $ChapterResult.FailedCount++
+        try { [System.IO.File]::Delete($Job.MagickOutputPath) } catch { }
+        if ($webpReplaceBackup) { try { [System.IO.File]::Delete($webpReplaceBackup) } catch { } }
+    }
+
+    if ($convOk -and $DoAnimatedDeleteSource) {
+        try {
+            $removed = Remove-Source -ItemPath $Job.SrcPath
+            if ($removed) {
+                $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
+                Write-Log ("Deleted source (" + $deleteDesc + "): '" + $Job.SrcPath + "'")
+                $ChapterResult.DeletedCount++
+            } else {
+                Write-Log ("Source already gone before deletion (not counted as deleted): '" + $Job.SrcPath + "'") -Level Warn
+            }
+        } catch {
+            Write-Log ("FAILED to delete source '" + $Job.SrcPath + "': " + $_) -Level Error
+            $ChapterResult.DeleteFailedCount++
+        }
+    }
+
+    return @{ Success = $convOk }
+}
+
 function Invoke-LooseAnimatedConversionPipeline {
     <#
     .SYNOPSIS
-        Mode 3 ("Animated Conversion") end to end: walks the library
-        series by series (New-SeriesProvider), discovers each series'
-        chapters (Get-SeriesChapters), and converts each chapter's loose
-        .avif files as its own batch via Convert-AnimatedBatch - same
-        two-tier walk, per-chapter batching, and CCR wiring as
-        Invoke-LooseImageConversionPipeline (ImageConversionPipeline.ps1),
-        mirrored deliberately. See this module's header for the two real
-        differences (no stale-source pass, no zip-domain fields) and why
-        this is safe to build independently of Controller.ps1.
+        Mode 3 ("Animated Conversion") end to end. Migrated 2026-09-09
+        onto ChapterDispatch.ps1's Invoke-ChapterDispatch (step 2 of
+        Docs\dispatch-redesign-design.md's 4-step migration order, mode 3
+        chosen first as the simpler of the two conversion engines) -
+        idle concurrency now picks up the NEXT chapter's jobs immediately
+        instead of blocking on one chapter's Convert-AnimatedBatch call
+        finishing before the next chapter's files are even enumerated.
+        Walks the library the same two-tier way as before
+        (New-SeriesProvider lazy across series, Get-SeriesChapters eager
+        per series) via a custom -ChapterProvider closure (not
+        ChapterDispatch.ps1's own New-LibraryChapterProvider - that
+        function doesn't know about this module's own "extra chapter-
+        equivalent entry" completeness fold-in below, which is genuinely
+        per-engine domain logic, not something the generic primitive
+        should own).
 
-        Same chapter-discovery completeness handling as
-        Invoke-LooseImageConversionPipeline: Get-SeriesChapters's
-        former-container/zip-staleness guards decide "is this worth
-        re-zipping", not "does this hold unconverted animated files" - a
-        directory those guards exclude but that actually has .avif files
-        needing conversion is folded in as an extra chapter-equivalent
-        entry before Start-SeriesProgress is called, so coverage can
-        never silently regress the way it once did for images (see that
-        module's own header for the real bug this already caught once
-        there).
+        Same chapter-discovery completeness handling as before:
+        Get-SeriesChapters's former-container/zip-staleness guards decide
+        "is this worth re-zipping", not "does this hold unconverted
+        animated files" - a directory those guards exclude but that
+        actually has .avif files needing conversion is folded in as an
+        extra chapter-equivalent entry, so coverage can never silently
+        regress the way it once did for images (see that module's own
+        header for the real bug this already caught once there).
+
+        WHAT MOVED WHERE, mapping today's callbacks onto
+        Invoke-ChapterDispatch's seven scriptblocks: the -ChapterProvider
+        closure below owns the series/chapter walk (same as before) and
+        embeds each chapter's own AnimatedFiles list directly on the
+        yielded chapter item; JobBuilder owns everything Convert-AnimatedBatch's
+        own dispatch loop used to decide BEFORE ever acquiring a
+        concurrency slot for a file (webp-already-exists skip, static-vs-
+        animated classification via Test-AvifAnimated, the temp-overwrite-
+        path decision) - moved here from mid-dispatch specifically so it
+        happens in one clean pre-pass per chapter, matching
+        Convert-ImageBatch's own already-more-mature pattern (see that
+        function's own header) rather than porting Convert-AnimatedBatch's
+        older "classify after acquiring a slot" shape as-is; JobStarter
+        just spawns magick.exe; JobPollCompleted also owns heartbeat
+        logging (the one place a still-running job's own "-HeartbeatIntervalSeconds
+        elapsed" check has a natural home in this callback shape);
+        JobFinalize is Complete-AnimatedDispatchJob (see that function's
+        own header for why it's a documented duplicate of
+        Complete-AnimatedConversionJob, not a call-through);
+        JobAbortCleanup deletes a force-killed job's own TempOverwritePath/
+        MagickOutputPath (both always safe to delete unconditionally here,
+        unlike the old code's SlotReleased-guarded version - this
+        callback is ONLY ever invoked for a job Invoke-ChapterDispatch
+        confirms never reached JobFinalize, so there's no "already
+        finalized earlier in this same pass" case to guard against, the
+        exact ambiguity SlotReleased existed to resolve in the old,
+        single-chapter-at-a-time code); ChapterCompleteCallback resolves
+        CCR/the per-chapter PostChapterCallback and merges that chapter's
+        own accumulator into $totals.
+
+        A NEW per-chapter accumulator dictionary ($chapterResults, keyed
+        by the exact chapterInfo value each chapter provider yields -
+        matching ChapterDispatch.ps1's own chapter-identity contract)
+        replaces the old code's implicit "one chapter, one blocking
+        Convert-AnimatedBatch call" scoping - Invoke-ChapterDispatch now
+        interleaves multiple chapters' jobs concurrently, so per-chapter
+        results can no longer come from a single function call's own
+        return value.
+
+        NO LONGER A PER-CHAPTER .GetNewClosure() SCRIPTBLOCK: the old
+        code built a fresh $abortPoll closure inside the per-chapter
+        foreach loop, once per chapter (flagged in Todo.md as
+        structurally similar to - though never confirmed as the actual
+        cause of - the still-unexplained intermittent "Test-AbortSignal
+        not recognized" crash in the sibling image-conversion module).
+        This migration's JobBuilder/JobStarter/JobPollCompleted/
+        JobFinalize/JobAbortCleanup/ChapterCompleteCallback/-AbortPollCallback
+        are each built exactly ONCE, before Invoke-ChapterDispatch is
+        ever called, not per chapter - there is no longer a closure
+        recreated on every chapter iteration in this code path at all.
     .PARAMETER PostChapterCallback
         Invoked once per chapter with @{ SeriesName; ChapterName; Dir;
         ChapterResult } - $ChapterResult is $null when the chapter had no
-        animated files to convert.
+        animated files to convert (unchanged contract).
     .OUTPUTS
         @{ ConvertedSuccess; ConvertedFail; ConvertedSkipped;
            StaticSkippedCount; InspectFailedCount; DeletedSuccess;
            DeletedFail; ForceKilledCount; LastCompletedPaths;
            LastSkippedPaths; LastStaticSkippedPaths; StillPendingPaths;
-           SeriesCount; ChapterCount; Aborted }
+           SeriesCount; ChapterCount; Aborted } - unchanged shape, but
+        LastCompletedPaths/StillPendingPaths are now always empty lists,
+        not populated (a deliberate simplification, not an oversight -
+        their old semantics were an "at the exact instant abort was
+        detected" snapshot scoped to ONE chapter's own blocking batch
+        call, which has no clean equivalent once dispatch spans the whole
+        run and multiple chapters interleave; confirmed via a repo-wide
+        grep that nothing outside this module and its own harness ever
+        reads either field). LastSkippedPaths/LastStaticSkippedPaths are
+        still fully populated - those were cheap to keep exact.
     #>
     param(
         [Parameter(Mandatory)]
@@ -1030,7 +1205,8 @@ function Invoke-LooseAnimatedConversionPipeline {
         [System.Collections.Generic.HashSet[string]]$FolderExcludeStagingDirs = $null,
         [scriptblock]$PostChapterCallback = $null,
         [int]$AbortTimeoutSeconds = 60,
-        [int]$HeartbeatIntervalSeconds = 30
+        [int]$HeartbeatIntervalSeconds = 30,
+        [int]$MaxQueueAhead = 3
     )
 
     $totals = @{
@@ -1051,6 +1227,20 @@ function Invoke-LooseAnimatedConversionPipeline {
         Aborted                = $false
     }
 
+    # Per-chapter accumulator, keyed by the exact chapterInfo value each
+    # chapter provider yields (see this function's own header) - built by
+    # JobBuilder, mutated by JobFinalize, read and removed by
+    # ChapterCompleteCallback.
+    $chapterResults = [System.Collections.Generic.Dictionary[object,hashtable]]::new()
+
+    # Captured once, read by every closure below instead of each one
+    # reading $script:CleanConsoleOutputEnabled directly (2026-09-09,
+    # real bug caught before this ever ran against a fake magick.exe -
+    # see this function's own header's "GENUINE, PREVIOUSLY-UNDOCUMENTED
+    # SCOPING HAZARD" note). Safe to snapshot once - nothing in this
+    # project mutates this mid-run, only between runs.
+    $cleanConsoleOutputEnabled = [bool]$script:CleanConsoleOutputEnabled
+
     # Registered for the whole pipeline call (one phase) - same contract
     # as Invoke-LooseImageConversionPipeline's own $looseCts, and the
     # same bug that registration omission caused there (Test-AbortSignal
@@ -1064,127 +1254,261 @@ function Invoke-LooseAnimatedConversionPipeline {
     try {
         $animatedCts = [System.Threading.CancellationTokenSource]::new()
         Register-AbortCancellationSource -Cts $animatedCts
-        $seriesProvider = New-SeriesProvider -LibraryPath $Path
 
-        while ($true) {
-            if (Test-AbortSignal) { $totals.Aborted = $true; break }
+        # --- Chapter provider: same two-tier walk + extra-dir fold-in as
+        #     before, restructured as a lazy "-> next chapter or $null"
+        #     closure instead of a nested foreach - see this function's
+        #     own header for why this isn't ChapterDispatch.ps1's
+        #     New-LibraryChapterProvider. ---
+        $seriesProvider  = New-SeriesProvider -LibraryPath $Path
+        $chapterQueue    = [System.Collections.Generic.Queue[hashtable]]::new()
+        $seriesExhausted = $false
+        $chapterProvider = {
+            while ($chapterQueue.Count -eq 0 -and -not $seriesExhausted) {
+                $series = & $seriesProvider
+                if ($null -eq $series) { $seriesExhausted = $true; break }
+                $totals.SeriesCount++
 
-            $series = & $seriesProvider
-            if ($null -eq $series) { break }
-            $totals.SeriesCount++
+                $chapters = Get-SeriesChapters -SeriesPath $series.FullName -QualifyingExtensions $FolderQualifyingExtensions `
+                    -ExcludeStagingDirs $FolderExcludeStagingDirs -ForceRezip $false
 
-            $chapters = Get-SeriesChapters -SeriesPath $series.FullName -QualifyingExtensions $FolderQualifyingExtensions `
-                -ExcludeStagingDirs $FolderExcludeStagingDirs -ForceRezip $false
+                $seriesFiles = Get-LooseAnimatedCandidates -ScanPath $series.FullName -AnimatedFileExtensions $AnimatedFileExtensions `
+                    -KnownZipPaths $KnownZipPaths -ExcludeStagingDirs $FolderExcludeStagingDirs
 
-            $seriesFiles = Get-LooseAnimatedCandidates -ScanPath $series.FullName -AnimatedFileExtensions $AnimatedFileExtensions `
-                -KnownZipPaths $KnownZipPaths -ExcludeStagingDirs $FolderExcludeStagingDirs
-
-            $filesByDir = [System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[System.IO.FileInfo]]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            foreach ($f in $seriesFiles) {
-                if (-not $filesByDir.ContainsKey($f.DirectoryName)) {
-                    $filesByDir[$f.DirectoryName] = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-                }
-                $filesByDir[$f.DirectoryName].Add($f)
-            }
-
-            $chapterDirSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            $chapterDirs = [System.Collections.Generic.List[System.IO.DirectoryInfo]]::new()
-            foreach ($c in $chapters) {
-                $null = $chapterDirSet.Add($c.Dir.FullName)
-                $chapterDirs.Add($c.Dir)
-            }
-            foreach ($extraDirPath in $filesByDir.Keys) {
-                if ($chapterDirSet.Contains($extraDirPath)) { continue }
-                $extraDir = $filesByDir[$extraDirPath][0].Directory
-                $chapterDirs.Add($extraDir)
-                Write-Log ("Series '" + $series.Name + "': '" + $extraDir.Name + "' has unconverted animated file(s) but wasn't found by chapter discovery (e.g. a stray .zip sitting alongside it, or files outside a normal chapter folder) - converting it anyway.") -Level Warn
-            }
-
-            # Empty-series check moved BEFORE Start-SeriesProgress (2026-09-08
-            # fix, real bug caught by a full-codebase review - same fix as
-            # ImageConversionPipeline.ps1/Controller.ps1 already got
-            # 2026-09-03, missed here at the time): a series with zero
-            # qualifying chapters (e.g. already fully converted) used to
-            # still register a 0/0-chapter entry with CCR, printing a
-            # frozen "0/0 chapters" line per empty series - project owner's
-            # own call: a series with nothing to convert shouldn't show up
-            # on the console at all.
-            if ($chapterDirs.Count -eq 0) {
-                Write-Log ("Series '" + $series.Name + "': no qualifying chapters found.") -Level Info
-                continue
-            }
-
-            if ($script:CleanConsoleOutputEnabled) {
-                Start-SeriesProgress -SeriesName $series.Name -TotalChapters $chapterDirs.Count
-            }
-
-            Write-Log ("=== Series '" + $series.Name + "': " + $chapterDirs.Count + " chapter(s) ===")
-
-            foreach ($chapterDir in $chapterDirs) {
-                if (Test-AbortSignal) { $totals.Aborted = $true; break }
-
-                $chapterName = $chapterDir.Name
-                $totals.ChapterCount++
-
-                if ($script:CleanConsoleOutputEnabled) {
-                    Start-ChapterProgress -SeriesName $series.Name -ChapterName $chapterName
+                $filesByDir = [System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[System.IO.FileInfo]]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                foreach ($f in $seriesFiles) {
+                    if (-not $filesByDir.ContainsKey($f.DirectoryName)) {
+                        $filesByDir[$f.DirectoryName] = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+                    }
+                    $filesByDir[$f.DirectoryName].Add($f)
                 }
 
-                $chapterFiles = @()
-                if ($filesByDir.ContainsKey($chapterDir.FullName)) { $chapterFiles = @($filesByDir[$chapterDir.FullName]) }
+                $chapterDirSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                $chapterDirs = [System.Collections.Generic.List[System.IO.DirectoryInfo]]::new()
+                foreach ($c in $chapters) {
+                    $null = $chapterDirSet.Add($c.Dir.FullName)
+                    $chapterDirs.Add($c.Dir)
+                }
+                foreach ($extraDirPath in $filesByDir.Keys) {
+                    if ($chapterDirSet.Contains($extraDirPath)) { continue }
+                    $extraDir = $filesByDir[$extraDirPath][0].Directory
+                    $chapterDirs.Add($extraDir)
+                    Write-Log ("Series '" + $series.Name + "': '" + $extraDir.Name + "' has unconverted animated file(s) but wasn't found by chapter discovery (e.g. a stray .zip sitting alongside it, or files outside a normal chapter folder) - converting it anyway.") -Level Warn
+                }
 
-                $chapterResult = $null
-                if ($chapterFiles.Count -gt 0) {
-                    Write-Log ("Processing chapter: '" + $chapterDir.FullName + "' (" + $chapterFiles.Count + " animated file(s))")
+                if ($chapterDirs.Count -eq 0) {
+                    Write-Log ("Series '" + $series.Name + "': no qualifying chapters found.") -Level Info
+                    continue
+                }
 
-                    $localLastCompleted = $totals.LastCompletedPaths
-                    # Same closure-safety discipline as
-                    # Invoke-LooseImageConversionPipeline's own
-                    # $abortPoll - see CLAUDE.md's Lessons learned.
-                    $alreadyAbortedBox = @{ Value = $false }
-                    $abortPoll = {
-                        param($InFlightPaths)
-                        $wasAbortedBefore = $alreadyAbortedBox.Value
-                        $isAbortedNow = Test-AbortSignal
-                        if ($isAbortedNow -and -not $wasAbortedBefore) {
-                            foreach ($p in $InFlightPaths) { $localLastCompleted.Add($p) }
-                        }
-                        $alreadyAbortedBox.Value = $isAbortedNow
-                    }.GetNewClosure()
+                if ($cleanConsoleOutputEnabled) {
+                    Start-SeriesProgress -SeriesName $series.Name -TotalChapters $chapterDirs.Count
+                }
+                Write-Log ("=== Series '" + $series.Name + "': " + $chapterDirs.Count + " chapter(s) ===")
 
-                    $chapterResult = Convert-AnimatedBatch -AnimatedFiles $chapterFiles -MagickExe $MagickExe `
-                        -DoAnimatedLossless $AnimatedLossless -AnimatedQuality $AnimatedQuality -AnimatedThreads $AnimatedThreads `
-                        -DoAnimatedOverwrite $AnimatedOverwrite -DoAnimatedDeleteSource $AnimatedDeleteSource `
-                        -DoFullLogging $FullLogging -CancelToken $animatedCts.Token -AbortPollCallback $abortPoll `
-                        -AbortWaitMessage "[ABORT] Waiting for current animated jobs to finish (up to $AbortTimeoutSeconds s)..." `
-                        -AbortTimeoutSeconds $AbortTimeoutSeconds -HeartbeatIntervalSeconds $HeartbeatIntervalSeconds
+                foreach ($chapterDir in $chapterDirs) {
+                    $chapterFiles = @()
+                    if ($filesByDir.ContainsKey($chapterDir.FullName)) { $chapterFiles = @($filesByDir[$chapterDir.FullName]) }
+                    $chapterQueue.Enqueue(@{ SeriesName = $series.Name; ChapterName = $chapterDir.Name; Dir = $chapterDir; AnimatedFiles = $chapterFiles })
+                }
+            }
+            if ($chapterQueue.Count -gt 0) { return $chapterQueue.Dequeue() }
+            return $null
+        }.GetNewClosure()
 
-                    $totals.ConvertedSuccess   += $chapterResult.ConvertedCount
-                    $totals.ConvertedFail      += $chapterResult.FailedCount
-                    $totals.ConvertedSkipped   += $chapterResult.SkippedCount
-                    $totals.StaticSkippedCount += $chapterResult.StaticSkippedCount
-                    $totals.InspectFailedCount += $chapterResult.InspectFailedCount
-                    $totals.DeletedSuccess     += $chapterResult.DeletedCount
-                    $totals.DeletedFail        += $chapterResult.DeleteFailedCount
-                    $totals.ForceKilledCount   += $chapterResult.ForceKilledCount
-                    foreach ($p in $chapterResult.SkippedPaths)       { $totals.LastSkippedPaths.Add($p) }
-                    foreach ($p in $chapterResult.StaticSkippedPaths) { $totals.LastStaticSkippedPaths.Add($p) }
-                    foreach ($p in $chapterResult.PendingPaths)       { $totals.StillPendingPaths.Add($p) }
-                    if ($animatedCts.Token.IsCancellationRequested) { $totals.Aborted = $true }
+        # --- JobBuilder: pre-dispatch classification pre-pass, once per
+        #     chapter (see this function's own header for why this moved
+        #     here from mid-dispatch). ---
+        $jobBuilder = {
+            param($chapterInfo)
+
+            $totals.ChapterCount++
+            $cr = @{
+                ConvertedCount = 0; FailedCount = 0; SkippedCount = 0; StaticSkippedCount = 0
+                InspectFailedCount = 0; DeletedCount = 0; DeleteFailedCount = 0
+                SkippedPaths = [System.Collections.Generic.List[string]]::new()
+                StaticSkippedPaths = [System.Collections.Generic.List[string]]::new()
+                TotalFiles = $chapterInfo.AnimatedFiles.Count
+            }
+            $chapterResults[$chapterInfo] = $cr
+
+            if ($cleanConsoleOutputEnabled) {
+                Start-ChapterProgress -SeriesName $chapterInfo.SeriesName -ChapterName $chapterInfo.ChapterName
+            }
+
+            if ($cr.TotalFiles -eq 0) {
+                Write-Log ("Chapter '" + $chapterInfo.Dir.FullName + "': no unconverted animated files - skipping conversion.")
+                return @()
+            }
+            Write-Log ("Processing chapter: '" + $chapterInfo.Dir.FullName + "' (" + $cr.TotalFiles + " animated file(s))")
+
+            $jobs = [System.Collections.Generic.List[hashtable]]::new()
+            foreach ($f in $chapterInfo.AnimatedFiles) {
+                $srcPath  = $f.FullName
+                $webpPath = [System.IO.Path]::ChangeExtension($srcPath, ".webp")
+
+                $webpPathExists = Test-Path -LiteralPath $webpPath
+                if ($webpPathExists -and -not $AnimatedOverwrite) {
+                    Write-Log ("SKIPPING '" + $srcPath + "': output '" + $webpPath + "' already exists (Overwrite is off).")
+                    $cr.SkippedCount++
+                    $cr.SkippedPaths.Add($srcPath)
+                    continue
+                }
+
+                try {
+                    $isAnimated = Test-AvifAnimated -AvifPath $srcPath -MagickExe $MagickExe
+                } catch {
+                    Write-Log ("Could not determine if '" + $srcPath + "' is animated - skipping: " + $_) -Level Warn
+                    $cr.InspectFailedCount++
+                    continue
+                }
+                if (-not $isAnimated) {
+                    Write-Log ("'" + $srcPath + "' is a static AVIF (not animated) - left unconverted.")
+                    $cr.StaticSkippedCount++
+                    $cr.StaticSkippedPaths.Add($srcPath)
+                    continue
+                }
+
+                # Same temp-overwrite-path decision as Convert-AnimatedBatch's
+                # own dispatch loop - see that function's own comment on
+                # $j.TempOverwritePath/$j.MagickOutputPath for the full
+                # "why a temp path" reasoning (magick must never write
+                # straight over a pre-existing good .webp).
+                $tempOverwritePath = if ($webpPathExists) {
+                    [System.IO.Path]::Combine([System.IO.Path]::GetDirectoryName($webpPath), [System.IO.Path]::GetFileNameWithoutExtension($webpPath) + "_tmp_overwrite.webp")
                 } else {
-                    Write-Log ("Chapter '" + $chapterDir.FullName + "': no unconverted animated files - skipping conversion.")
+                    $null
                 }
+                $magickOutputPath = if ($tempOverwritePath) { $tempOverwritePath } else { $webpPath }
 
-                if ($script:CleanConsoleOutputEnabled) {
-                    $chapterStatus, $chapterDetail = Get-ChapterAnimatedStatus -ChapterResult $chapterResult
-                    $null = Complete-ChapterProgress -SeriesName $series.Name -ChapterName $chapterName -Status $chapterStatus -Detail $chapterDetail
-                }
+                $jobs.Add(@{
+                    SrcPath = $srcPath; WebpPath = $webpPath
+                    TempOverwritePath = $tempOverwritePath; MagickOutputPath = $magickOutputPath
+                    Proc = $null; StartTime = $null; LastHeartbeat = $null
+                })
+            }
+            return $jobs
+        }.GetNewClosure()
 
-                if ($null -ne $PostChapterCallback) {
-                    & $PostChapterCallback @{ SeriesName = $series.Name; ChapterName = $chapterName; Dir = $chapterDir; ChapterResult = $chapterResult }
+        $jobStarter = {
+            param($job)
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $MagickExe
+            $qualityArg = if ($AnimatedLossless) { "-define webp:lossless=true" } else { "-quality " + $AnimatedQuality }
+            $psi.Arguments = "`"" + $job.SrcPath + "`" -coalesce -loop 0 " + $qualityArg + " `"" + $job.MagickOutputPath + "`""
+            $psi.UseShellExecute        = $false
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError  = $true
+            $psi.CreateNoWindow         = $true
+
+            Write-Log ("Converting animated: '" + $job.SrcPath + "'")
+
+            $job.Proc          = [System.Diagnostics.Process]::Start($psi)
+            $job.StdoutTask    = $job.Proc.StandardOutput.ReadToEndAsync()
+            $job.StderrTask    = $job.Proc.StandardError.ReadToEndAsync()
+            $job.StartTime     = [System.Diagnostics.Stopwatch]::StartNew()
+            $job.LastHeartbeat = [timespan]::Zero
+            return $job
+        }.GetNewClosure()
+
+        # Heartbeat logging lives here (2026-09-09 - see this function's
+        # own header for why this callback is its natural home): called
+        # every poll pass for every still-running job, the same place the
+        # old dispatch loop's own poll pass checked it.
+        $jobPollCompleted = {
+            param($job)
+            if ($job.Proc.HasExited) { return $true }
+            if ($HeartbeatIntervalSeconds -gt 0 -and
+                ($job.StartTime.Elapsed - $job.LastHeartbeat).TotalSeconds -ge $HeartbeatIntervalSeconds) {
+                $cr = $chapterResults[$job.ChapterKey]
+                $doneSoFar = $cr.ConvertedCount + $cr.FailedCount + $cr.SkippedCount + $cr.StaticSkippedCount + $cr.InspectFailedCount
+                Write-Log ("Still converting '" + $job.SrcPath + "' (" + [int]$job.StartTime.Elapsed.TotalSeconds + "s elapsed) - batch progress: " + $doneSoFar + "/" + $cr.TotalFiles + " done.")
+                $job.LastHeartbeat = $job.StartTime.Elapsed
+            }
+            return $false
+        }.GetNewClosure()
+
+        $jobFinalize = {
+            param($job, $pendingQueue)
+            $cr = $chapterResults[$job.ChapterKey]
+            return Complete-AnimatedDispatchJob -Job $job -ChapterResult $cr -DoFullLogging $FullLogging -DoAnimatedDeleteSource $AnimatedDeleteSource
+        }.GetNewClosure()
+
+        # Always safe to delete both paths unconditionally here (2026-09-09,
+        # see this function's own header) - Invoke-ChapterDispatch only
+        # ever calls JobAbortCleanup for a job it has confirmed never
+        # reached JobFinalize, unlike the old code's own force-kill block,
+        # which had to guard $j.MagickOutputPath's deletion with
+        # SlotReleased to avoid tearing down a DIFFERENT, already-finished
+        # job's real output (a stale-$running-list race - see
+        # Convert-AnimatedBatch's own comment on that guard). That
+        # ambiguity can't happen here; Invoke-ChapterDispatch's own
+        # SlotReleased-equivalent bookkeeping is entirely internal to it.
+        $jobAbortCleanup = {
+            param($job)
+            if ($job.TempOverwritePath) { try { [System.IO.File]::Delete($job.TempOverwritePath) } catch { } }
+            try { [System.IO.File]::Delete($job.MagickOutputPath) } catch { }
+        }
+
+        $chapterCompleteCallback = {
+            param($chapterInfo)
+            $cr = $chapterResults[$chapterInfo]
+            $chapterResultForCallback = if ($cr.TotalFiles -eq 0) { $null } else { $cr }
+
+            $totals.ConvertedSuccess   += $cr.ConvertedCount
+            $totals.ConvertedFail      += $cr.FailedCount
+            $totals.ConvertedSkipped   += $cr.SkippedCount
+            $totals.StaticSkippedCount += $cr.StaticSkippedCount
+            $totals.InspectFailedCount += $cr.InspectFailedCount
+            $totals.DeletedSuccess     += $cr.DeletedCount
+            $totals.DeletedFail        += $cr.DeleteFailedCount
+            foreach ($p in $cr.SkippedPaths)       { $totals.LastSkippedPaths.Add($p) }
+            foreach ($p in $cr.StaticSkippedPaths) { $totals.LastStaticSkippedPaths.Add($p) }
+
+            if ($cleanConsoleOutputEnabled) {
+                $chapterStatus, $chapterDetail = Get-ChapterAnimatedStatus -ChapterResult $chapterResultForCallback
+                $null = Complete-ChapterProgress -SeriesName $chapterInfo.SeriesName -ChapterName $chapterInfo.ChapterName -Status $chapterStatus -Detail $chapterDetail
+            }
+            if ($null -ne $PostChapterCallback) {
+                & $PostChapterCallback @{ SeriesName = $chapterInfo.SeriesName; ChapterName = $chapterInfo.ChapterName; Dir = $chapterInfo.Dir; ChapterResult = $chapterResultForCallback }
+            }
+            # Bounds memory across a long run - matches
+            # Invoke-ChapterDispatch's own per-chapter cleanup philosophy.
+            $chapterResults.Remove($chapterInfo)
+        }.GetNewClosure()
+
+        # Test-AbortSignal must be called from SOMEWHERE regularly for a
+        # real abort to ever propagate into $animatedCts - it's the one
+        # function that actually cancels every registered CTS (see
+        # AbortPipeline.ps1's own docstring); nothing does that
+        # automatically just because a CTS was registered. This
+        # -AbortPollCallback (called every poll pass, same as the old
+        # code's own $abortPoll) is now the ONLY place that happens in
+        # this whole function, replacing both the old per-chapter-loop
+        # top-of-loop checks (Invoke-ChapterDispatch's own pull-ahead
+        # already stops calling -ChapterProvider once -CancelToken trips,
+        # so a separate check there would be redundant) and prints the
+        # old code's own one-time "[ABORT] Waiting..." message.
+        $abortMessagePrinted = $false
+        $abortPollCallback = {
+            param($runningJobs)
+            $aborted = Test-AbortSignal
+            if ($aborted -and -not $abortMessagePrinted) {
+                $abortMessagePrinted = $true
+                if ($runningJobs.Count -gt 0) {
+                    Write-GatedConsoleMessage -Text ("[ABORT] Waiting for current animated jobs to finish (up to " + $AbortTimeoutSeconds + "s)...") -Color Yellow -CleanConsoleOutputEnabled $cleanConsoleOutputEnabled
                 }
             }
-        }
+        }.GetNewClosure()
+
+        $dispatchResult = Invoke-ChapterDispatch -ChapterProvider $chapterProvider -JobBuilder $jobBuilder `
+            -JobStarter $jobStarter -JobPollCompleted $jobPollCompleted -JobFinalize $jobFinalize `
+            -JobAbortCleanup $jobAbortCleanup -ChapterCompleteCallback $chapterCompleteCallback `
+            -MaxConcurrent $AnimatedThreads -AbortPollCallback $abortPollCallback -CancelToken $animatedCts.Token `
+            -AbortTimeoutSeconds $AbortTimeoutSeconds -MaxQueueAhead $MaxQueueAhead
+
+        $totals.ForceKilledCount = $dispatchResult.ForceKilledCount
+        $totals.Aborted          = $dispatchResult.Aborted
     } finally {
         # $animatedCts can be unset if construction/registration itself
         # threw (now inside the try above).

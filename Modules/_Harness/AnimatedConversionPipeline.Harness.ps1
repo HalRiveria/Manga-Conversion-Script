@@ -35,16 +35,20 @@
 $ErrorActionPreference = "Stop"
 
 $modulesDirAC = Join-Path $PSScriptRoot ".."
-. (Join-Path $modulesDirAC "AnimatedConversionPipeline.ps1")
-. (Join-Path $modulesDirAC "AbortPipeline.ps1")
-. (Join-Path $modulesDirAC "LeafDirectoryDiscovery.ps1")
-. (Join-Path $modulesDirAC "CleanConsoleRendering.ps1")
-
 $script:logCalls = New-Object System.Collections.Generic.List[string]
 function Write-Log {
     param([string]$Message, [string]$Level = "Info")
     $script:logCalls.Add($Level + ": " + $Message)
 }
+. (Join-Path $modulesDirAC "AbortPipeline.ps1")
+. (Join-Path $modulesDirAC "LeafDirectoryDiscovery.ps1")
+. (Join-Path $modulesDirAC "CleanConsoleRendering.ps1")
+# ChapterDispatch.ps1 (2026-09-09) - Invoke-LooseAnimatedConversionPipeline's
+# own real dependency now, PART 2's migration onto it. Dot-sourced before
+# AnimatedConversionPipeline.ps1 itself, matching Conversion Script Main.ps1's
+# own intended load order once this module is wired in for real.
+. (Join-Path $modulesDirAC "ChapterDispatch.ps1")
+. (Join-Path $modulesDirAC "AnimatedConversionPipeline.ps1")
 
 $script:removeSourceCalls = New-Object System.Collections.Generic.List[string]
 $script:PermanentDelete = $true
@@ -661,6 +665,33 @@ Test-Assert ($totalsN.DeletedSuccess -eq 4) ("4 sources deleted (got " + $totals
 Test-Assert (-not (Test-Path -LiteralPath (Join-Path $s1c1N "page1.avif"))) "Series One/Chapter 1 page1 source gone"
 Test-Assert (Test-Path -LiteralPath (Join-Path $s1c1N "page1.webp")) "Series One/Chapter 1 page1.webp created"
 Test-Assert (-not $totalsN.Aborted) "not marked aborted"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario N2 (2026-09-09, mode 3's ChapterDispatch.ps1 migration): THE
+#  actual point of the migration, tested directly - an idle concurrency
+#  slot picks up the NEXT chapter's job while the CURRENT chapter still
+#  has work outstanding, instead of blocking on one chapter's conversion
+#  finishing before the next chapter's files are even dispatched. Chapter
+#  1 gets a fast file + a slow file (fills both -AnimatedThreads slots);
+#  Chapter 2 gets one fast file. The instant Chapter 1's fast file
+#  finishes, Chapter 2's file must start - WHILE Chapter 1's slow file is
+#  still converting, not after.
+# ==============================================================================
+Write-Host "=== Scenario N2: an idle slot picks up the NEXT chapter's job while the current chapter still has work outstanding ===" -ForegroundColor Cyan
+$s1N2 = New-Dir "scenario-n2\Series\Chapter 1"
+$s2N2 = New-Dir "scenario-n2\Series\Chapter 2"
+[System.IO.File]::WriteAllText((Join-Path $s1N2 "fast.avif"), "FRAMES:5")
+[System.IO.File]::WriteAllText((Join-Path $s1N2 "slow.avif"), "FRAMES:5`nSLEEP_MS:800")
+[System.IO.File]::WriteAllText((Join-Path $s2N2 "fast.avif"), "FRAMES:5")
+
+$script:logCalls.Clear()
+$totalsN2 = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-n2") -MagickExe $fakeMagickExe -AnimatedThreads 2 -FullLogging $false
+
+$idxChapter2Start = ($script:logCalls | Select-String -Pattern "Converting animated.*Chapter 2.*fast\.avif").LineNumber
+$idxChapter1SlowDone = ($script:logCalls | Select-String -Pattern "Conversion OK.*Chapter 1.*slow\.webp").LineNumber
+Test-Assert ($totalsN2.ConvertedSuccess -eq 3 -and $totalsN2.ConvertedFail -eq 0) ("sanity check: all 3 files converted (got ConvertedSuccess=" + $totalsN2.ConvertedSuccess + ")")
+Test-Assert ($null -ne $idxChapter2Start -and $null -ne $idxChapter1SlowDone -and $idxChapter2Start -lt $idxChapter1SlowDone) ("Chapter 2's file started converting BEFORE Chapter 1's slow file finished - real interleaving, not one-chapter-at-a-time (Chapter 2 start at log line " + $idxChapter2Start + ", Chapter 1 slow-file finish at log line " + $idxChapter1SlowDone + ")")
 Write-Host ""
 
 # ==============================================================================
