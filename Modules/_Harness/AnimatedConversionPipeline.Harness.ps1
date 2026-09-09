@@ -151,8 +151,16 @@ function New-FakeAvifIn {
 
 # ------------------------------------------------------------------
 #  Fake magick.exe:
-#   - "identify -format "%n" <path>": reads FRAMES:<n> from the input's
-#     content (default 1 if absent); FAIL_IDENTIFY -> exit 1.
+#   - "identify -ping -format "%T" <path>[0]": reads FRAMES:<n> from the
+#     real fixture (the trailing "[0]" frame-selector is stripped first
+#     to find it) and writes back a simulated animation delay - "0" for
+#     FRAMES:1 (static), nonzero for FRAMES:N>1 (animated), written
+#     exactly once (2026-09-09: Test-AvifAnimated now addresses frame [0]
+#     only, so the format string is never repeated per-frame the way the
+#     old no-index "%n" call was). Also writes the raw args it received
+#     to "<path>.identify-args.txt" so a scenario can assert the real
+#     -ping/%T/[0] shape actually reached the process, not just that
+#     classification came out correct. FAIL_IDENTIFY -> exit 1.
 #   - otherwise (a real conversion call): FAIL_MAGICK -> exit 1;
 #     SLEEP_MS:<n> -> real Thread.Sleep(n) first; writes the exact
 #     argument string it received into the output file, so a scenario
@@ -166,7 +174,9 @@ using System.Threading;
 class Program {
     static int Main(string[] args) {
         if (args.Length > 0 && args[0] == "identify") {
-            string path = args[args.Length - 1];
+            string rawPath = args[args.Length - 1];
+            string path = Regex.Replace(rawPath, "\\[\\d+\\]$", "");
+            try { File.WriteAllText(path + ".identify-args.txt", string.Join(" ", args)); } catch { }
             string content = File.Exists(path) ? File.ReadAllText(path) : "";
             if (content.Contains("FAIL_IDENTIFY_HUGE_STDERR")) {
                 // Simulates a malformed AVIF producing a large stderr
@@ -187,13 +197,8 @@ class Program {
             }
             Match fm = Regex.Match(content, "FRAMES:(\\d+)");
             int frames = fm.Success ? int.Parse(fm.Groups[1].Value) : 1;
-            // Real magick's "identify -format ... <path>" runs the format
-            // string once PER FRAME with no separator unless the format
-            // string supplies one (2026-09-01 live-shakedown finding) -
-            // reproduce that here (one "<frames>\n" repetition per frame)
-            // so a regression back to a bare, separator-less "%n" would
-            // fail this scenario instead of only ever surfacing live.
-            for (int i = 0; i < frames; i++) { Console.Write(frames.ToString() + "\n"); }
+            int delay = frames > 1 ? 1000 : 0;
+            Console.Write(delay.ToString() + "\n");
             return 0;
         }
 
@@ -272,6 +277,27 @@ Test-Assert ((Test-AvifAnimated -AvifPath $animA.FullName -MagickExe $fakeMagick
 
 $staticA = New-FakeAvif -Name "static-a.avif" -Content "FRAMES:1"
 Test-Assert ((Test-AvifAnimated -AvifPath $staticA.FullName -MagickExe $fakeMagickExe) -eq $false) "a 1-frame AVIF is detected as static"
+
+# 2026-09-09 perf fix verification: proves the REAL command shape reached
+# the process (-ping, %T format, trailing "[0]" frame selector), not just
+# that classification came out correct - a regression back to the old
+# "%n", no-index, no-ping call would still pass the two assertions above
+# (the fake derives its answer from FRAMES:<n> either way) but would fail
+# this one.
+$argsFileA = $animA.FullName + ".identify-args.txt"
+Test-Assert (Test-Path -LiteralPath $argsFileA) "identify call left a captured-args marker behind"
+$capturedArgsA = Get-Content -LiteralPath $argsFileA -Raw
+Test-Assert ($capturedArgsA -match '-ping') "the real identify call passes -ping (skip pixel decode)"
+Test-Assert ($capturedArgsA -match '%T') "the real identify call reads %T (delay), not %n (frame count)"
+Test-Assert ($capturedArgsA -match [regex]::Escape($animA.FullName + "[0]")) "the real identify call addresses frame [0] only, not the whole sequence"
+
+# Bracket-in-filename safety (2026-09-09, live-verified against real
+# scanlation-group-style names before this fix shipped): appending "[0]"
+# must not misfire when the real filename/path already contains literal
+# "["/"]" - ImageMagick only treats a TRAILING bracket construct as a
+# frame selector, so an earlier bracket pair must be left alone.
+$bracketA = New-FakeAvif -Name "[Scanlation Group] Series\Chapter [Special]\page[01].avif" -Content "FRAMES:9"
+Test-Assert ((Test-AvifAnimated -AvifPath $bracketA.FullName -MagickExe $fakeMagickExe) -eq $true) "a real bracket-containing filename/path still classifies correctly"
 
 $failA = New-FakeAvif -Name "fail-identify-a.avif" -Content "FAIL_IDENTIFY"
 $threwA = $false

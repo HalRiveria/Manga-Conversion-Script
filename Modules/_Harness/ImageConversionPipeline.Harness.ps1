@@ -278,7 +278,12 @@ using System.Text.RegularExpressions;
 class Program {
     static int Main(string[] args) {
         if (args.Length > 0 && args[0] == "identify") {
-            string path = args[args.Length - 1];
+            // 2026-09-09: Test-AvifAnimated now addresses frame [0] only
+            // (a real perf fix - see AnimatedConversionPipeline.ps1's own
+            // header) - strip that trailing selector to find the real
+            // fixture file on disk.
+            string rawPath = args[args.Length - 1];
+            string path = Regex.Replace(rawPath, "\\[\\d+\\]$", "");
             // Logs each identify call's target path (gated on an env var so
             // unrelated scenarios pay nothing) - lets a test count how many
             // times an identify spawn actually happened, proving the
@@ -299,7 +304,12 @@ class Program {
             }
             Match fm = Regex.Match(content, "FRAMES:(\\d+)");
             int frames = fm.Success ? int.Parse(fm.Groups[1].Value) : 1;
-            Console.Write(frames.ToString());
+            // Test-AvifAnimated now reads a simulated animation delay
+            // (nonzero = animated, "0" = static), not a raw frame count -
+            // see AnimatedConversionPipeline.Harness.ps1's fake magick.exe
+            // for the same translation.
+            int delay = frames > 1 ? 1000 : 0;
+            Console.Write(delay.ToString());
             return 0;
         }
 

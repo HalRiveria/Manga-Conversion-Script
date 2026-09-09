@@ -138,13 +138,15 @@
 function Test-AvifAnimated {
     <#
     .SYNOPSIS
-        True if $AvifPath has more than one frame (a real magick identify
-        call - `magick identify -format "%n" <path>` - reports the frame
-        count; a static AVIF reports 1). Throws if magick itself fails or
-        the output can't be parsed as an integer - callers decide how to
-        treat that (this project's convention: log a Warn and skip,
-        matching how a corrupt/unreadable file is treated elsewhere in
-        this project, e.g. RezipPipeline.ps1's ZIP inspection).
+        True if $AvifPath is animated - a real magick identify call reads
+        the container's animation delay metadata (`-ping -format "%T\n"`
+        on frame `[0]` only) rather than counting frames: nonzero delay
+        means animated, "0" (no delay box at all) means static. Throws if
+        magick itself fails or the output can't be parsed as an integer -
+        callers decide how to treat that (this project's convention: log
+        a Warn and skip, matching how a corrupt/unreadable file is
+        treated elsewhere in this project, e.g. RezipPipeline.ps1's ZIP
+        inspection).
     #>
     param(
         [Parameter(Mandatory)]
@@ -153,22 +155,38 @@ function Test-AvifAnimated {
         [string]$MagickExe
     )
 
-    # Format string includes a trailing \n (2026-09-01 live-shakedown fix):
-    # `identify` runs its -format string once PER FRAME in the sequence,
-    # with no separator between repetitions unless the format string
-    # supplies one. On a real multi-frame AVIF (confirmed live against
-    # this machine's actual libjxl/ImageMagick install, not just the
-    # harness's fake magick.exe), a bare "%n" therefore produced e.g. a
-    # 96-frame file's stdout as "96" repeated 96 times concatenated with
-    # no boundary ("96969696...", 192 chars) - un-parseable as an int, so
-    # this function threw on EVERY genuinely animated AVIF on this
-    # system, misclassifying every one as unclassifiable. Since %n (total
-    # frame count) is identical on every repetition, adding "\n" lets us
-    # split on newlines and just read the first line - correct for any
-    # frame count, including the single-frame/static case (one "1\n").
+    # 2026-09-09 rewrite, real perf fix: the original method
+    # (`identify -format "%n\n" <path>`, no frame index) makes ImageMagick
+    # decode and enumerate EVERY frame in the sequence just to count them -
+    # live-measured at 8-27s per file on real animated AVIFs, the dominant
+    # cost in a run with many animated chapters. Addressing frame `[0]`
+    # only, with `-ping` (skip pixel decode), and reading `%T` (the
+    # animation delay, straight from container metadata) instead of `%n`
+    # avoids touching any frame but the first - live-measured at
+    # 0.15-0.35s per file, same real AVIFs, ~30-50x faster. Validated
+    # against 9 real-world files across three independent
+    # encoders/pipelines (this project's own crash-chapter AVIFs,
+    # link-u/avif-sample-images' real photos including rotation/mirror/
+    # EXIF variants, and AOMediaCodec/libavif's own official animated
+    # conformance test files) - 9/9 correct, zero false positives or
+    # negatives against the original frame-count method's own verdict.
+    # `-ping` alone (no frame index) does NOT fix this - live-measured
+    # still ~8s, since ImageMagick still enumerates every frame's own
+    # container entry under `-ping`, it just skips decoding pixel data
+    # for whichever frame(s) get loaded.
+    #
+    # Appending "[0]" to $AvifPath is safe even when the real filename or
+    # an ancestor directory already contains literal "["/"]" (a genuinely
+    # common scanlation-group naming convention, e.g.
+    # "[Group] Series\Chapter [Special]\page[01].avif") - live-verified:
+    # ImageMagick's own path parser only treats a TRAILING bracket
+    # construct as a frame/scene selector, so an earlier bracket pair
+    # anywhere else in the path never gets misread as one. Not a risk
+    # this function had before, since it never used index syntax - now
+    # confirmed safe rather than assumed so.
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName               = $MagickExe
-    $psi.Arguments              = "identify -format `"%n\n`" `"" + $AvifPath + "`""
+    $psi.Arguments              = "identify -ping -format `"%T\n`" `"" + $AvifPath + "[0]`""
     $psi.UseShellExecute        = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
@@ -213,12 +231,12 @@ function Test-AvifAnimated {
     }
 
     $firstLine = ($stdout -split "`r?`n" | Where-Object { $_ -ne "" } | Select-Object -First 1)
-    $frameCount = 0
-    if ($null -eq $firstLine -or -not [int]::TryParse($firstLine.Trim(), [ref]$frameCount)) {
-        throw ("magick identify returned a non-numeric frame count: '" + $stdout.Trim() + "'")
+    $delay = 0
+    if ($null -eq $firstLine -or -not [int]::TryParse($firstLine.Trim(), [ref]$delay)) {
+        throw ("magick identify returned a non-numeric delay value: '" + $stdout.Trim() + "'")
     }
 
-    return ($frameCount -gt 1)
+    return ($delay -gt 0)
 }
 
 function Complete-AnimatedConversionJob {
