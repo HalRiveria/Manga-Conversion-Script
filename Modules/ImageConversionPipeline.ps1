@@ -1561,7 +1561,7 @@ function Get-ChapterProgressStatus {
 function Invoke-LooseImageConversionPipeline {
     <#
     .SYNOPSIS
-        Mode 1 end to end (and mode 1's conversion half of mode 2): walks
+        Mode 2 end to end (and mode 2's conversion half of mode 8): walks
         the library series by series (New-SeriesProvider), discovers each
         series' chapters (Get-SeriesChapters), and converts each chapter's
         loose images as its own batch - unconditional series/chapter

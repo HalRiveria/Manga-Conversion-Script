@@ -353,7 +353,7 @@ $script:zipOnlyWorker = {
 function Invoke-ZipOnlyPipeline {
     <#
     .SYNOPSIS
-        Mode 3 end to end: discovers zippable leaf folders under $Path,
+        Mode 4 end to end: discovers zippable leaf folders under $Path,
         zips each one in parallel (via Invoke-ZipParallelProcessing), and
         optionally deletes each source folder after a successful zip.
     .PARAMETER QualifyingExtensions
