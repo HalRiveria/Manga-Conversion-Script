@@ -1167,7 +1167,13 @@ $script:fullPipelineEngineWorker = {
                 $srcPath  = $f.FullName
                 $webpPath = [System.IO.Path]::ChangeExtension($srcPath, ".webp")
 
-                $webpPathExists = Test-Path -LiteralPath $webpPath
+                # [System.IO.File]::Exists, not Test-Path (2026-09-10) -
+                # same reasoning as LeafDirectoryDiscovery.ps1's NOTES -
+                # this runs once per animated file, on the very first
+                # chapter either engine dispatches, right after both
+                # engines' own series-bundle discovery succeeds - a real
+                # candidate for the same runspace-race hang.
+                $webpPathExists = [System.IO.File]::Exists($webpPath)
                 if ($webpPathExists -and -not $DoAnimatedOverwrite) {
                     Write-Log ("SKIPPING '" + $srcPath + "': output '" + $webpPath + "' already exists (Overwrite is off).")
                     $cr.SkippedCount++

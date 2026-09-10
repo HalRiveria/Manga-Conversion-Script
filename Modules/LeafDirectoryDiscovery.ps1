@@ -325,7 +325,11 @@ function Get-ZippableLeafDirs {
         [bool]$ForceRezip = $false
     )
 
-    if (-not (Test-Path -LiteralPath $ScanPath -PathType Container)) {
+    # [System.IO.Directory]::Exists, not Test-Path (2026-09-10) - same
+    # reasoning as this function's own NOTES above. Called once per
+    # SERIES (via Get-SeriesChapters), by both racing engines, many times
+    # over a real run - not just once at startup.
+    if (-not [System.IO.Directory]::Exists($ScanPath)) {
         throw ("Get-ZippableLeafDirs: -ScanPath does not exist or is not a directory: '" + $ScanPath + "'")
     }
 
@@ -575,7 +579,12 @@ function New-SeriesProvider {
         [Parameter(Mandatory)]
         [string]$LibraryPath
     )
-    if (-not (Test-Path -LiteralPath $LibraryPath -PathType Container)) {
+    # [System.IO.Directory]::Exists, not Test-Path (2026-09-10) - same
+    # reasoning as Get-ZippableLeafDirs's own NOTES. Called once per
+    # runspace, very early in Full Pipeline's two engine workers (right
+    # after Add-Type, before anything else) - both racing runspaces make
+    # this call at close to the same moment.
+    if (-not [System.IO.Directory]::Exists($LibraryPath)) {
         throw ("New-SeriesProvider: -LibraryPath does not exist or is not a directory: '" + $LibraryPath + "'")
     }
 
