@@ -596,6 +596,7 @@ function Get-OrCreateFullPipelineChapterClassification {
     )
 
     $factory = {
+        if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] classification-factory ENTER " + $ChapterInfo.ChapterName) } # TEMP-TRACE
         $images       = $ChapterInfo.Images
         $animated     = $ChapterInfo.AnimatedFiles
         $staleSources = $ChapterInfo.StaleSources
@@ -610,7 +611,9 @@ function Get-OrCreateFullPipelineChapterClassification {
                 if (Test-AbortSignal) { break }
                 if ($img.Extension -ine ".avif" -or -not $chAnimatedPathSet.Contains($img.FullName) -or $chAvifClassification.ContainsKey($img.FullName)) { continue }
                 try {
+                    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] before Test-AvifAnimated " + $img.FullName) } # TEMP-TRACE
                     $isAnimated = Test-AvifAnimated -AvifPath $img.FullName -MagickExe $MagickExe
+                    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] after Test-AvifAnimated") } # TEMP-TRACE
                     $chAvifClassification[$img.FullName] = if ($isAnimated) { "Animated" } else { "Static" }
                 } catch {
                     Write-Log ("Could not determine if AVIF '" + $img.FullName + "' is animated - excluding it from BOTH engines this run: " + $_) -Level Error
@@ -668,12 +671,16 @@ function Get-OrCreateFullPipelineChapterClassification {
             $EventQueue.Enqueue(@{ Kind = 'ChapterStaleCleanup'; Success = $chStaleResult.Success; Fail = $chStaleResult.Fail })
         }
 
+        if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] classification-factory EXIT " + $ChapterInfo.ChapterName) } # TEMP-TRACE
         return @{ Images = $images; AnimatedFiles = $animated }
     }.GetNewClosure()
 
     $freshLazy = [System.Lazy[hashtable]]::new([Func[hashtable]]$factory, [System.Threading.LazyThreadSafetyMode]::ExecutionAndPublication)
     $lazy = $Cache.GetOrAdd($ChapterInfo, $freshLazy)
-    return $lazy.Value
+    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] before lazy.Value " + $ChapterInfo.ChapterName) } # TEMP-TRACE
+    $result = $lazy.Value
+    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] after lazy.Value") } # TEMP-TRACE
+    return $result
 }
 
 function Complete-MergedFullPipelineChapter {
@@ -907,10 +914,12 @@ $script:fullPipelineEngineWorker = {
             $series = & $seriesProvider
             if ($null -eq $series) { $seriesExhausted = $true; break }
 
+            if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId) engine=$EngineType] before Get-OrCreateFullPipelineSeriesBundle " + $series.Name) } # TEMP-TRACE
             $bundle = Get-OrCreateFullPipelineSeriesBundle -Cache $SeriesBundleCache -Series $series -MagickExe $MagickExe `
                 -LooseImageExtensions $LooseImageExtensions -AnimatedFileExtensions $AnimatedFileExtensions -KnownZipPaths $KnownZipPaths `
                 -FolderQualifyingExtensions $FolderQualifyingExtensions -FolderExcludeStagingDirs $FolderExcludeStagingDirs `
                 -EventQueue $EventQueue -ZipBlockReasons $ZipBlockReasons
+            if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId) engine=$EngineType] after Get-OrCreateFullPipelineSeriesBundle, chapters=" + $bundle.ChapterEntries.Count) } # TEMP-TRACE
 
             foreach ($entry in $bundle.ChapterEntries) { $chapterQueue.Enqueue($entry) }
         }
@@ -950,8 +959,10 @@ $script:fullPipelineEngineWorker = {
             # first - see Get-OrCreateFullPipelineChapterClassification's
             # own header for why this is a separate, per-chapter cache
             # rather than folded into Get-OrCreateFullPipelineSeriesBundle.
+            if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId) engine=image] before classification " + $chapterInfo.ChapterName) } # TEMP-TRACE
             $classified = Get-OrCreateFullPipelineChapterClassification -Cache $ChapterClassificationCache -ChapterInfo $chapterInfo `
                 -MagickExe $MagickExe -LooseImageExtensions $LooseImageExtensions -EventQueue $EventQueue -ZipBlockReasons $ZipBlockReasons
+            if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId) engine=image] after classification") } # TEMP-TRACE
 
             $cr = @{
                 ConvertedCount = 0; FailedCount = 0; SkippedCount = 0; DeletedCount = 0; DeleteFailedCount = 0
@@ -1033,7 +1044,27 @@ $script:fullPipelineEngineWorker = {
             $magickProcLocal = $null
             $failureAlreadyAccounted = $false
             try {
-                $psi = New-Object System.Diagnostics.ProcessStartInfo
+                # [System.Diagnostics.ProcessStartInfo]::new(), not
+                # New-Object (2026-09-10, real bug found live-catching a
+                # Controller.Harness.ps1 hang with NO subprocess alive at
+                # all - ruling out every prior "magick.exe/cjxl.exe itself
+                # hung" theory and pointing at pure PowerShell-side code
+                # instead). New-Object is a cmdlet like any other, and this
+                # is the FIRST cmdlet call of any kind in each engine's
+                # JobStarter - called for the very first time in each
+                # engine's own fresh worker runspace, on literally the very
+                # first job either engine ever dispatches, with both
+                # engines' first dispatch landing within milliseconds of
+                # each other (Invoke-ZipParallelProcessing starts both
+                # runspaces back to back). Same species as the
+                # cmdlet-first-invocation-in-a-fresh-runspace race already
+                # fixed for Test-Path/Get-ChildItem/Where-Object/
+                # Sort-Object/Select-Object/Join-Path/Get-Item (see
+                # LeafDirectoryDiscovery.ps1's functions' own NOTES) - never
+                # audited for New-Object specifically before now, despite it
+                # running on literally every single conversion job in both
+                # engines.
+                $psi = [System.Diagnostics.ProcessStartInfo]::new()
                 $psi.FileName               = $CjxlExe
                 $psi.UseShellExecute        = $false
                 $psi.RedirectStandardOutput = $true
@@ -1061,7 +1092,10 @@ $script:fullPipelineEngineWorker = {
                         [System.IO.Path]::GetFileNameWithoutExtension($job.SrcPath) + "_tmp_" + $formatLabel.ToLowerInvariant() + "2png.png"
                     )
                     $tempPngLocal = $tempPng
-                    $magickPsi = New-Object System.Diagnostics.ProcessStartInfo
+                    # [System.Diagnostics.ProcessStartInfo]::new(), not
+                    # New-Object - same fix, same reasoning, as this
+                    # JobStarter's own $psi above.
+                    $magickPsi = [System.Diagnostics.ProcessStartInfo]::new()
                     $magickPsi.FileName               = $MagickExe
                     $magickPsi.Arguments              = "`"" + $job.SrcPath + "[0]`" `"" + $tempPng + "`""
                     $magickPsi.UseShellExecute        = $false
@@ -1078,11 +1112,22 @@ $script:fullPipelineEngineWorker = {
                     $magickExitCode = $magickProc.ExitCode
                     $magickProc.Dispose()
                     $magickProcLocal = $null
-                    if ($magickExitCode -ne 0 -or -not (Test-Path -LiteralPath $tempPng)) {
+                    # [System.IO.File]::Exists, not Test-Path (2026-09-10,
+                    # /code-review high finding) - this whole JobStarter is
+                    # the hot per-file path for Full Pipeline's image
+                    # engine, called from inside a fresh worker runspace -
+                    # an unswept instance of the same
+                    # cmdlet-first-invocation-in-a-fresh-runspace race
+                    # LeafDirectoryDiscovery.ps1's functions were fixed for
+                    # (see those functions' own NOTES) - a sibling Test-Path
+                    # a few lines below this one (the animated engine's own
+                    # webp-exists check) was already converted for exactly
+                    # this reason; these four were missed at the time.
+                    if ($magickExitCode -ne 0 -or -not [System.IO.File]::Exists($tempPng)) {
                         Write-Log ("FAILED " + $formatLabel + "->PNG pre-conversion for '" + $job.SrcPath + "': magick exited " + $magickExitCode) -Level Error
                         $cr.FailedCount++
                         $failureAlreadyAccounted = $true
-                        if (Test-Path -LiteralPath $tempPng) { try { [System.IO.File]::Delete($tempPng) } catch { } }
+                        if ([System.IO.File]::Exists($tempPng)) { try { [System.IO.File]::Delete($tempPng) } catch { } }
                         throw ($formatLabel + "->PNG pre-conversion failed")
                     }
                     $job.TempPng = $tempPng
@@ -1113,8 +1158,8 @@ $script:fullPipelineEngineWorker = {
                     $cr.FailedCount++
                 }
                 if ($magickProcLocal) { try { if (-not $magickProcLocal.HasExited) { $magickProcLocal.Kill() }; $magickProcLocal.Dispose() } catch { } }
-                if ($job.TempPng -and (Test-Path -LiteralPath $job.TempPng)) { try { [System.IO.File]::Delete($job.TempPng) } catch { } }
-                elseif ($tempPngLocal -and (Test-Path -LiteralPath $tempPngLocal)) { try { [System.IO.File]::Delete($tempPngLocal) } catch { } }
+                if ($job.TempPng -and [System.IO.File]::Exists($job.TempPng)) { try { [System.IO.File]::Delete($job.TempPng) } catch { } }
+                elseif ($tempPngLocal -and [System.IO.File]::Exists($tempPngLocal)) { try { [System.IO.File]::Delete($tempPngLocal) } catch { } }
                 throw
             }
         }.GetNewClosure()
@@ -1143,8 +1188,10 @@ $script:fullPipelineEngineWorker = {
             param($chapterInfo)
             # Same per-chapter lazy classification as the image engine's
             # own JobBuilder above - see that one's own comment.
+            if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId) engine=animated] before classification " + $chapterInfo.ChapterName) } # TEMP-TRACE
             $classified = Get-OrCreateFullPipelineChapterClassification -Cache $ChapterClassificationCache -ChapterInfo $chapterInfo `
                 -MagickExe $MagickExe -LooseImageExtensions $LooseImageExtensions -EventQueue $EventQueue -ZipBlockReasons $ZipBlockReasons
+            if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId) engine=animated] after classification") } # TEMP-TRACE
 
             $cr = @{
                 ConvertedCount = 0; FailedCount = 0; SkippedCount = 0; StaticSkippedCount = 0
@@ -1203,7 +1250,11 @@ $script:fullPipelineEngineWorker = {
 
         $jobStarter = {
             param($job)
-            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            # [System.Diagnostics.ProcessStartInfo]::new(), not New-Object -
+            # same fix, same reasoning, as the image engine's own JobStarter
+            # above (this is the animated engine's own first-dispatch
+            # equivalent).
+            $psi = [System.Diagnostics.ProcessStartInfo]::new()
             $psi.FileName = $MagickExe
             $qualityArg = if ($DoAnimatedLossless) { "-define webp:lossless=true" } else { "-quality " + $AnimatedQuality }
             $psi.Arguments = "`"" + $job.SrcPath + "`" -coalesce -loop 0 " + $qualityArg + " `"" + $job.MagickOutputPath + "`""

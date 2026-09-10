@@ -111,8 +111,33 @@ $peakTrackerSource = @'
 static void PeakBump(int delta) {
     string dir = Environment.GetEnvironmentVariable("HARNESS_PEAK_DIR");
     if (dir == null) return;
-    using (var mtx = new System.Threading.Mutex(false, "ControllerHarnessPeakMutex")) {
-        mtx.WaitOne();
+    // WaitOne(timeoutMs) + AbandonedMutexException handling (2026-09-10,
+    // real bug found chasing a Controller.Harness.ps1 hang) - this used to
+    // be a bare WaitOne() with no timeout and no catch, unlike every other
+    // named-mutex use in this codebase (compare Logging.ps1's
+    // Invoke-MutexGuardedWrite). A prior fake_cjxl.exe/fake_magick.exe
+    // process that terminated abnormally while holding this mutex (a
+    // force-kill from this same harness's own abort-path scenarios, or a
+    // prior stress-test attempt getting killed on a timeout) leaves it
+    // abandoned - .NET's WaitOne() then throws AbandonedMutexException for
+    // the NEXT waiter, uncaught here, which crashes THIS process too
+    // before it ever reaches ReleaseMutex(), propagating the abandonment
+    // forward to whichever process waits next. A bare, timeout-less
+    // WaitOne() also means a genuinely stuck holder (any bug in this same
+    // critical section, or the abandonment cascade above) blocks every
+    // later waiter indefinitely, with no timeout anywhere upstream of this
+    // call either (see ChapterDispatch.ps1's own known gap) - exactly the
+    // "harness hangs with zero CPU, zero error" symptom this was found
+    // while chasing.
+    var mtx = new System.Threading.Mutex(false, "ControllerHarnessPeakMutex");
+    try {
+        bool acquired;
+        try {
+            acquired = mtx.WaitOne(10000);
+        } catch (System.Threading.AbandonedMutexException) {
+            acquired = true;
+        }
+        if (!acquired) { return; }
         try {
             string curPath = System.IO.Path.Combine(dir, "current.txt");
             string peakPath = System.IO.Path.Combine(dir, "peak.txt");
@@ -123,7 +148,7 @@ static void PeakBump(int delta) {
             int peak = System.IO.File.Exists(peakPath) ? int.Parse(System.IO.File.ReadAllText(peakPath)) : 0;
             if (cur > peak) System.IO.File.WriteAllText(peakPath, cur.ToString());
         } finally { mtx.ReleaseMutex(); }
-    }
+    } finally { mtx.Dispose(); }
 }
 '@
 
@@ -192,9 +217,19 @@ class Program {
             // to Convert-AnimatedBatch instead of it re-checking).
             string identifyLog = Environment.GetEnvironmentVariable("HARNESS_IDENTIFY_LOG");
             if (identifyLog != null) {
+                // WaitOne(timeoutMs) + AbandonedMutexException handling -
+                // same fix, same reasoning, as PeakBump's own identical
+                // pattern above (see that function's own comment).
                 using (var mtx = new System.Threading.Mutex(false, "ControllerHarnessIdentifyLogMutex")) {
-                    mtx.WaitOne();
-                    try { File.AppendAllText(identifyLog, path + Environment.NewLine); } finally { mtx.ReleaseMutex(); }
+                    bool acquired;
+                    try {
+                        acquired = mtx.WaitOne(10000);
+                    } catch (System.Threading.AbandonedMutexException) {
+                        acquired = true;
+                    }
+                    if (acquired) {
+                        try { File.AppendAllText(identifyLog, path + Environment.NewLine); } finally { mtx.ReleaseMutex(); }
+                    }
                 }
             }
             string content = File.Exists(path) ? File.ReadAllText(path) : "";

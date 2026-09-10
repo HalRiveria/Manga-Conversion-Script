@@ -297,9 +297,23 @@ class Program {
             // BEFORE it ever spawns magick for AVIF classification).
             string identifyLog = Environment.GetEnvironmentVariable("HARNESS_IDENTIFY_LOG");
             if (identifyLog != null) {
+                // WaitOne(timeoutMs) + AbandonedMutexException handling
+                // (2026-09-10, same fix as Controller.Harness.ps1's own
+                // identical mutex patterns - see that file's own comment
+                // for the full reasoning: a bare, timeout-less WaitOne()
+                // with no AbandonedMutexException catch can cascade a
+                // single killed/crashed fake process into every later
+                // waiter hanging or crashing too).
                 using (var mtx = new System.Threading.Mutex(false, "ICPHarnessIdentifyLogMutex")) {
-                    mtx.WaitOne();
-                    try { File.AppendAllText(identifyLog, path + Environment.NewLine); } finally { mtx.ReleaseMutex(); }
+                    bool acquired;
+                    try {
+                        acquired = mtx.WaitOne(10000);
+                    } catch (System.Threading.AbandonedMutexException) {
+                        acquired = true;
+                    }
+                    if (acquired) {
+                        try { File.AppendAllText(identifyLog, path + Environment.NewLine); } finally { mtx.ReleaseMutex(); }
+                    }
                 }
             }
             string content = File.Exists(path) ? File.ReadAllText(path) : "";

@@ -315,7 +315,16 @@ function Invoke-IccStripRetryOrFail {
         [System.IO.Path]::GetFileNameWithoutExtension($Job.SrcPath) + "_tmp_iccstrip.png"
     )
     Write-Log ("ICC profile mismatch on '" + $Job.SrcPath + "' - stripping profile and retrying.") -Level Warn
-    $stripPsi = New-Object System.Diagnostics.ProcessStartInfo
+    # [System.Diagnostics.ProcessStartInfo]::new(), not New-Object
+    # (2026-09-10, real bug found live-catching a Controller.Harness.ps1
+    # hang with NO subprocess alive at all - see Controller.ps1's own
+    # matching JobStarter comment for the full reasoning). This function is
+    # called from Complete-ImageDispatchJob, Full Pipeline's own image-
+    # engine JobFinalize, running inside that engine's fresh worker
+    # runspace - the same first-cmdlet-call-in-a-fresh-runspace race
+    # already fixed for Test-Path/Get-ChildItem/etc., never audited for
+    # New-Object before now.
+    $stripPsi = [System.Diagnostics.ProcessStartInfo]::new()
     $stripPsi.FileName               = $MagickExe
     # -strip ONLY - no -colorspace Gray (2026-08-31, project owner's own
     # explicit decision: color data must never be force-converted, full
@@ -380,7 +389,18 @@ function Invoke-IccStripRetryOrFail {
     try {
         $stripStdoutTask = $stripProc.StandardOutput.ReadToEndAsync()
         $stripStderrTask = $stripProc.StandardError.ReadToEndAsync()
-        $stripProc.WaitForExit()
+        # WaitForExit(timeoutMs), not WaitForExit() (2026-09-10, /code-review
+        # high finding, same fix as Test-AvifAnimated's identical change -
+        # see that function's own comment for the full reasoning). A strip
+        # of one already-downloaded image is a sub-second operation in
+        # practice; 60s is generous headroom while still guaranteeing this
+        # worker's own dispatch loop can't freeze forever on a stuck magick.
+        if (-not $stripProc.WaitForExit(60000)) {
+            try { $stripProc.Kill() } catch { }
+            try { $stripProc.WaitForExit(5000) } catch { }
+            Write-Log ("ICC-strip retry process for '" + $Job.SrcPath + "' did not exit within 60s - killed, counting as conversion failure.") -Level Error
+            return $false
+        }
         $null = $stripStdoutTask.GetAwaiter().GetResult()
         $null = $stripStderrTask.GetAwaiter().GetResult()
         $stripExitCode = $stripProc.ExitCode
@@ -388,7 +408,7 @@ function Invoke-IccStripRetryOrFail {
         $stripProc.Dispose()
     }
 
-    if ($stripExitCode -eq 0 -and (Test-Path -LiteralPath $strippedPng)) {
+    if ($stripExitCode -eq 0 -and [System.IO.File]::Exists($strippedPng)) {
         # Clean up any partial/corrupt .jxl the ORIGINAL failed attempt
         # may have already written to this same path (2026-08-31 fix,
         # PLAUSIBLE finding from a same-day /code-review) - the retry
@@ -400,7 +420,7 @@ function Invoke-IccStripRetryOrFail {
         # nothing in this file's own contract guarantees that, and this
         # matches the same defensive cleanup every other failure path
         # here already does before writing again.
-        if (Test-Path -LiteralPath $Job.JxlPath) { try { [System.IO.File]::Delete($Job.JxlPath) } catch { } }
+        if ([System.IO.File]::Exists($Job.JxlPath)) { try { [System.IO.File]::Delete($Job.JxlPath) } catch { } }
         # Cancel/abort may be in progress - the dispatch loop won't run
         # again in that case, so this retry will simply be picked up by
         # the stragglers drain below (or left for the next run). Enqueue
@@ -425,7 +445,7 @@ function Invoke-IccStripRetryOrFail {
     }
 
     Write-Log ("ICC strip failed for '" + $Job.SrcPath + "': magick exited " + $stripExitCode + " - counting as conversion failure.") -Level Error
-    if (Test-Path -LiteralPath $strippedPng) { try { [System.IO.File]::Delete($strippedPng) } catch { } }
+    if ([System.IO.File]::Exists($strippedPng)) { try { [System.IO.File]::Delete($strippedPng) } catch { } }
     return $false
 }
 
@@ -699,14 +719,22 @@ function Complete-ImageDispatchJob {
                 $iccRetryLanding = [System.Collections.Queue]::new()
                 if (Invoke-IccStripRetryOrFail -Job $Job -Pending $iccRetryLanding -MagickExe $MagickExe -ChapterKey $Job.ChapterKey) {
                     foreach ($retryJob in $iccRetryLanding) { $PendingQueue.Enqueue($retryJob) }
-                    if ($Job.TempPng -and (Test-Path -LiteralPath $Job.TempPng)) { try { [System.IO.File]::Delete($Job.TempPng) } catch { } }
+                    # [System.IO.File]::Exists, not Test-Path (2026-09-10,
+                    # /code-review high finding) - this whole function is
+                    # JobFinalize for Full Pipeline's image engine, called
+                    # from inside a fresh worker runspace on the hot path for
+                    # every converted file - an unswept instance of the same
+                    # cmdlet-first-invocation-in-a-fresh-runspace race
+                    # LeafDirectoryDiscovery.ps1's functions were fixed for
+                    # (see those functions' own NOTES).
+                    if ($Job.TempPng -and [System.IO.File]::Exists($Job.TempPng)) { try { [System.IO.File]::Delete($Job.TempPng) } catch { } }
                     return @{ Requeued = $true }
                 }
             }
             throw ("cjxl exited with code " + $code + ". Stderr: " + $stderr)
         }
-        if (-not (Test-Path -LiteralPath $Job.JxlPath)) { throw ("Output .jxl was not created: '" + $Job.JxlPath + "'") }
-        $jxlSize = (Get-Item -LiteralPath $Job.JxlPath).Length
+        if (-not [System.IO.File]::Exists($Job.JxlPath)) { throw ("Output .jxl was not created: '" + $Job.JxlPath + "'") }
+        $jxlSize = [System.IO.FileInfo]::new($Job.JxlPath).Length
         if ($jxlSize -eq 0) { throw ("Output .jxl is 0 bytes: '" + $Job.JxlPath + "'") }
         Write-Log ("Conversion OK: '" + $Job.JxlPath + "' (" + $jxlSize + " bytes)")
         $ChapterResult.ConvertedCount++
@@ -714,12 +742,12 @@ function Complete-ImageDispatchJob {
     } catch {
         Write-Log ("FAILED conversion of " + $ItemNoun + " '" + $Job.SrcPath + "': " + $_) -Level Error
         $ChapterResult.FailedCount++
-        if (Test-Path -LiteralPath $Job.JxlPath) {
+        if ([System.IO.File]::Exists($Job.JxlPath)) {
             try { [System.IO.File]::Delete($Job.JxlPath) } catch { }
         }
     }
 
-    if ($Job.TempPng -and (Test-Path -LiteralPath $Job.TempPng)) {
+    if ($Job.TempPng -and [System.IO.File]::Exists($Job.TempPng)) {
         try { [System.IO.File]::Delete($Job.TempPng) } catch { }
     }
 
@@ -1027,7 +1055,11 @@ function Convert-ImageBatch {
             # set as soon as the path is computed, before Start() ever runs.
             $tempPngLocal = $null
             try {
-            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            # [System.Diagnostics.ProcessStartInfo]::new(), not New-Object -
+            # same fix, same reasoning, as Controller.ps1's own matching
+            # JobStarter comment (this module's mode-2 counterpart of the
+            # same closure shape, also worker-runspace code).
+            $psi = [System.Diagnostics.ProcessStartInfo]::new()
             $psi.FileName               = $CjxlExe
             $psi.UseShellExecute        = $false
             $psi.RedirectStandardOutput = $true
@@ -1094,7 +1126,9 @@ function Convert-ImageBatch {
                     [System.IO.Path]::GetFileNameWithoutExtension($j.SrcPath) + "_tmp_" + $formatLabel.ToLowerInvariant() + "2png.png"
                 )
                 $tempPngLocal = $tempPng
-                $magickPsi = New-Object System.Diagnostics.ProcessStartInfo
+                # [System.Diagnostics.ProcessStartInfo]::new(), not
+                # New-Object - same fix as this closure's own $psi above.
+                $magickPsi = [System.Diagnostics.ProcessStartInfo]::new()
                 $magickPsi.FileName               = $MagickExe
                 $magickPsi.Arguments              = "`"" + $j.SrcPath + "[0]`" `"" + $tempPng + "`""
                 $magickPsi.UseShellExecute        = $false
@@ -2168,7 +2202,12 @@ function Invoke-LooseImageConversionPipeline {
             # exception-message matching.
             $failureAlreadyAccounted = $false
             try {
-                $psi = New-Object System.Diagnostics.ProcessStartInfo
+                # [System.Diagnostics.ProcessStartInfo]::new(), not
+                # New-Object - same fix as Convert-ImageBatch's own copy of
+                # this closure above (this is Complete-ImageConversionJob's
+                # sibling JobStarter, Convert-ImageBatch's own dispatch
+                # loop).
+                $psi = [System.Diagnostics.ProcessStartInfo]::new()
                 $psi.FileName               = $CjxlExe
                 $psi.UseShellExecute        = $false
                 $psi.RedirectStandardOutput = $true
@@ -2200,7 +2239,9 @@ function Invoke-LooseImageConversionPipeline {
                         [System.IO.Path]::GetFileNameWithoutExtension($job.SrcPath) + "_tmp_" + $formatLabel.ToLowerInvariant() + "2png.png"
                     )
                     $tempPngLocal = $tempPng
-                    $magickPsi = New-Object System.Diagnostics.ProcessStartInfo
+                    # [System.Diagnostics.ProcessStartInfo]::new(), not
+                    # New-Object - same fix as this closure's own $psi above.
+                    $magickPsi = [System.Diagnostics.ProcessStartInfo]::new()
                     $magickPsi.FileName               = $MagickExe
                     $magickPsi.Arguments              = "`"" + $job.SrcPath + "[0]`" `"" + $tempPng + "`""
                     $magickPsi.UseShellExecute        = $false

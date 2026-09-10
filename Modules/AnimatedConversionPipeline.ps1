@@ -160,6 +160,7 @@ function Test-AvifAnimated {
         [Parameter(Mandatory)]
         [string]$MagickExe
     )
+    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated ENTER " + $AvifPath) } # TEMP-TRACE
 
     # 2026-09-09 rewrite, real perf fix: the original method
     # (`identify -format "%n\n" <path>`, no frame index) makes ImageMagick
@@ -190,7 +191,16 @@ function Test-AvifAnimated {
     # anywhere else in the path never gets misread as one. Not a risk
     # this function had before, since it never used index syntax - now
     # confirmed safe rather than assumed so.
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    # [System.Diagnostics.ProcessStartInfo]::new(), not New-Object
+    # (2026-09-10, real bug found live-catching a Controller.Harness.ps1
+    # hang with NO subprocess alive at all - see Controller.ps1's own
+    # matching JobStarter comment for the full reasoning). This function is
+    # called from inside Get-OrCreateFullPipelineChapterClassification's
+    # Lazy<T> factory, itself reached from JobBuilder in a fresh worker
+    # runspace - the same first-cmdlet-call-in-a-fresh-runspace race
+    # already fixed for Test-Path/Get-ChildItem/etc., never audited for
+    # New-Object before now.
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName               = $MagickExe
     $psi.Arguments              = "identify -ping -format `"%T\n`" `"" + $AvifPath + "[0]`""
     $psi.UseShellExecute        = $false
@@ -216,11 +226,38 @@ function Test-AvifAnimated {
     # by draining both streams asynchronously (so neither pipe can fill
     # up unread) before WaitForExit(), the standard .NET-recommended
     # pattern for this exact problem.
+    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated before Process.Start " + $AvifPath) } # TEMP-TRACE
     $proc = [System.Diagnostics.Process]::Start($psi)
+    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated after Process.Start, pid=" + $proc.Id) } # TEMP-TRACE
     try {
         $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
         $stderrTask = $proc.StandardError.ReadToEndAsync()
-        $proc.WaitForExit()
+        # WaitForExit(timeoutMs), not WaitForExit() (2026-09-10, real bug
+        # found by /code-review high - this call used to have no timeout at
+        # all, and runs inline in JobBuilder's own per-chapter classification
+        # Lazy<T> factory (Controller.ps1's
+        # Get-OrCreateFullPipelineChapterClassification), which BOTH Full
+        # Pipeline engines share (LazyThreadSafetyMode::ExecutionAndPublication
+        # serializes every caller of .Value on the same cached Lazy). A
+        # genuinely stuck magick.exe here didn't just stall the calling
+        # engine's own dispatch loop (JobBuilder runs synchronously before
+        # ChapterDispatch.ps1's own poll-for-finished pass, so nothing
+        # already running gets polled/finalized either) - it froze the
+        # OTHER engine too, the instant its own JobBuilder reached the same
+        # shared chapter and blocked on the same Lazy.Value, with zero
+        # error and zero CPU. 30s is far beyond this call's own measured
+        # 0.15-0.35s real-world cost (see this function's own 2026-09-09
+        # rewrite comment above) even under heavy contention from both
+        # engines launching subprocesses at once - a real timeout here
+        # surfaces through the exact same "couldn't classify this AVIF"
+        # error path every caller already handles (skip/Warn, exclude from
+        # both engines in Full Pipeline's case via
+        # Add-FullPipelineZipBlockReason), not a new failure mode.
+        if (-not $proc.WaitForExit(30000)) {
+            try { $proc.Kill() } catch { }
+            try { $proc.WaitForExit(5000) } catch { }
+            throw "magick identify did not exit within 30s - killed"
+        }
         $stdout = $stdoutTask.GetAwaiter().GetResult()
         $stderr = $stderrTask.GetAwaiter().GetResult()
         $code = $proc.ExitCode
@@ -321,7 +358,12 @@ function Complete-AnimatedConversionJob {
         if ($code -ne 0) { throw ("magick exited with code " + $code + ". Stderr: " + $stderr) }
         # Get-Item -ErrorAction SilentlyContinue instead of a separate
         # Test-Path + Get-Item pair (2026-08-31 efficiency fix) - one stat
-        # instead of two, for every completed job.
+        # instead of two, for every completed job. Left on Get-Item, unlike
+        # Complete-AnimatedDispatchJob's own copy of this same check (below,
+        # 2026-09-10) - this function only ever runs main-thread or inside
+        # a single worker runspace (mode 3/Convert-AnimatedBatch), never
+        # racing a SECOND fresh runspace's own first cmdlet call the way
+        # Full Pipeline's two-engine dispatch does.
         $webpItem = Get-Item -LiteralPath $Job.MagickOutputPath -ErrorAction SilentlyContinue
         if ($null -eq $webpItem) { throw ("Output .webp was not created: '" + $Job.MagickOutputPath + "'") }
         $webpSize = $webpItem.Length
@@ -619,7 +661,10 @@ function Convert-AnimatedBatch {
             }
             $j.MagickOutputPath = if ($j.TempOverwritePath) { $j.TempOverwritePath } else { $j.WebpPath }
 
-            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            # [System.Diagnostics.ProcessStartInfo]::new(), not New-Object -
+            # same fix as Controller.ps1's own matching JobStarter comment
+            # (this module's mode-3 counterpart of the same closure shape).
+            $psi = [System.Diagnostics.ProcessStartInfo]::new()
             $psi.FileName = $MagickExe
             $qualityArg = if ($DoAnimatedLossless) { "-define webp:lossless=true" } else { "-quality " + $AnimatedQuality }
             $psi.Arguments = "`"" + $j.SrcPath + "`" -coalesce -loop 0 " + $qualityArg + " `"" + $j.MagickOutputPath + "`""
@@ -1036,9 +1081,18 @@ function Complete-AnimatedDispatchJob {
     $webpReplaceBackup = $null
     try {
         if ($code -ne 0) { throw ("magick exited with code " + $code + ". Stderr: " + $stderr) }
-        $webpItem = Get-Item -LiteralPath $Job.MagickOutputPath -ErrorAction SilentlyContinue
-        if ($null -eq $webpItem) { throw ("Output .webp was not created: '" + $Job.MagickOutputPath + "'") }
-        $webpSize = $webpItem.Length
+        # [System.IO.FileInfo]::new, not Get-Item (2026-09-10, /code-review
+        # high finding) - this is JobFinalize for Full Pipeline's animated
+        # engine, called from inside a fresh worker runspace on the hot path
+        # for every converted file - an unswept instance of the same
+        # cmdlet-first-invocation-in-a-fresh-runspace race
+        # LeafDirectoryDiscovery.ps1's functions were fixed for (see those
+        # functions' own NOTES). Complete-AnimatedConversionJob's own copy
+        # of this check (this function's own sibling, above) stays on
+        # Get-Item - it never runs inside a runspace racing a SECOND fresh
+        # runspace's own first cmdlet call the way this one does.
+        if (-not [System.IO.File]::Exists($Job.MagickOutputPath)) { throw ("Output .webp was not created: '" + $Job.MagickOutputPath + "'") }
+        $webpSize = [System.IO.FileInfo]::new($Job.MagickOutputPath).Length
         if ($webpSize -eq 0) { throw ("Output .webp is 0 bytes: '" + $Job.MagickOutputPath + "'") }
         # File.Replace, atomic swap - see Complete-AnimatedConversionJob's
         # own comment at its identical line for the full reasoning
@@ -1393,7 +1447,11 @@ function Invoke-LooseAnimatedConversionPipeline {
 
         $jobStarter = {
             param($job)
-            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            # [System.Diagnostics.ProcessStartInfo]::new(), not New-Object -
+            # same fix as Convert-AnimatedBatch's own copy of this closure
+            # above (this is Complete-AnimatedConversionJob's sibling
+            # JobStarter, mode 3's own ChapterDispatch-migrated dispatch).
+            $psi = [System.Diagnostics.ProcessStartInfo]::new()
             $psi.FileName = $MagickExe
             $qualityArg = if ($AnimatedLossless) { "-define webp:lossless=true" } else { "-quality " + $AnimatedQuality }
             $psi.Arguments = "`"" + $job.SrcPath + "`" -coalesce -loop 0 " + $qualityArg + " `"" + $job.MagickOutputPath + "`""

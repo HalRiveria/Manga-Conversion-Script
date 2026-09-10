@@ -195,14 +195,21 @@ function Move-ToRecycleBin {
     $resolvedItemPath = Resolve-ItemPathOrNull -ItemPath $ItemPath
     if ($null -eq $resolvedItemPath) { return $false }
     $ItemPath = $resolvedItemPath
-    if (-not (Test-Path -LiteralPath $ItemPath)) { return $false }
+    # [System.IO.File]::Exists/[System.IO.Directory]::Exists, not Test-Path
+    # (2026-09-10, /code-review high finding) - this runs on the hot
+    # per-file deletion path both Full Pipeline engine worker runspaces
+    # call after every successful conversion, an unswept instance of the
+    # same cmdlet-first-invocation-in-a-fresh-runspace race
+    # LeafDirectoryDiscovery.ps1's functions were fixed for (see those
+    # functions' own NOTES) - this module was never part of that sweep.
+    if (-not ([System.IO.File]::Exists($ItemPath) -or [System.IO.Directory]::Exists($ItemPath))) { return $false }
 
     return Invoke-DeleteTreatingVanishedAsFalse -Action {
-        # -Force: without it, Get-Item can't see a Hidden/System item even
-        # though the Test-Path guard above can, so it throws "Could not
-        # find item" for something that's sitting right there (a cloud-sync
-        # artifact, desktop.ini, anything previously marked hidden).
-        $attr = (Get-Item -LiteralPath $ItemPath -Force).Attributes
+        # [System.IO.File]::GetAttributes, not Get-Item -Force (same fix as
+        # above) - works on both files and directories despite the "File"
+        # in the name, and reads raw attributes directly so it sees a
+        # Hidden/System item without needing -Force at all.
+        $attr = [System.IO.File]::GetAttributes($ItemPath)
         if ($attr -band [System.IO.FileAttributes]::Directory) {
             # Verified live (Harness Scenario L) against a real NTFS directory
             # junction: the Shell-based Recycle Bin operation this VB API goes
@@ -250,13 +257,14 @@ function Remove-ItemPermanently {
     $resolvedItemPath = Resolve-ItemPathOrNull -ItemPath $ItemPath
     if ($null -eq $resolvedItemPath) { return $false }
     $ItemPath = $resolvedItemPath
-    if (-not (Test-Path -LiteralPath $ItemPath)) { return $false }
+    # [System.IO.File]::Exists/[System.IO.Directory]::Exists, not Test-Path -
+    # see Move-ToRecycleBin's own matching comment above for why.
+    if (-not ([System.IO.File]::Exists($ItemPath) -or [System.IO.Directory]::Exists($ItemPath))) { return $false }
 
     return Invoke-DeleteTreatingVanishedAsFalse -Action {
-        # -Force: see Move-ToRecycleBin's own comment above - Get-Item
-        # without it can't see a Hidden/System item and throws instead of
-        # reading its Attributes.
-        $attr           = (Get-Item -LiteralPath $ItemPath -Force).Attributes
+        # [System.IO.File]::GetAttributes, not Get-Item -Force - see
+        # Move-ToRecycleBin's own matching comment above for why.
+        $attr           = [System.IO.File]::GetAttributes($ItemPath)
         $isDirectory    = [bool]($attr -band [System.IO.FileAttributes]::Directory)
         $isReparsePoint = [bool]($attr -band [System.IO.FileAttributes]::ReparsePoint)
 
