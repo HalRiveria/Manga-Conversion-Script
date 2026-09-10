@@ -221,12 +221,8 @@ function Show-ModeMenu {
 function Get-SelectedMode {
     <#
     .SYNOPSIS
-        Top-level entry point. When $Settings.EnableModePrompt is
-        $false, skips the interactive prompt entirely and returns the
-        same default the old main script used (old mode 1 - loose image
-        conversion only, no zip, no animated - which is today's
-        "ImageConversion"/"2"). Otherwise runs Show-ModeMenu. Logs the
-        resolved mode exactly once either way.
+        Top-level entry point. Runs Show-ModeMenu and logs the resolved
+        mode exactly once.
     #>
     param(
         [Parameter(Mandatory)]
@@ -235,12 +231,6 @@ function Get-SelectedMode {
         [string]$SettingsPath,
         [scriptblock]$PromptFunc = { param($Message) Read-Host $Message }
     )
-
-    if (-not $Settings.EnableModePrompt) {
-        $resolved = Resolve-ModeSelection -Choice '2'
-        Write-Log ("Mode (prompt disabled): " + $resolved.Mode)
-        return $resolved
-    }
 
     $resolved = Show-ModeMenu -Settings $Settings -SettingsPath $SettingsPath -PromptFunc $PromptFunc
     Write-Log ("Mode selected: " + $resolved.Mode)

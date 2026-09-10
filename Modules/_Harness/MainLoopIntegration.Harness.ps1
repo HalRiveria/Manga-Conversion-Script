@@ -133,7 +133,6 @@ function New-ThrowingPromptAfter {
 }
 
 $fakeSettings = @{
-    EnableModePrompt          = $true
     PermanentDelete           = $false
     CleanConsoleOutputEnabled = $false
     FullLogging               = $false

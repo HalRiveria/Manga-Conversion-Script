@@ -201,25 +201,10 @@ Test-Assert ($resultF.Mode -eq 'ZipFolders') "after backing out of Options, '4' 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario G: Get-SelectedMode - EnableModePrompt=$false skips the
-#  interactive prompt entirely (PromptFunc is never called) and logs once
+#  Scenario H: Get-SelectedMode delegates to Show-ModeMenu and logs the
+#  actual selection
 # ==============================================================================
-Write-Host "=== Scenario G: Get-SelectedMode with EnableModePrompt=`$false ===" -ForegroundColor Cyan
-$settingsG = Get-DefaultScriptSettings
-$settingsG.EnableModePrompt = $false
-$pathG = New-ScratchSettingsPath "scenario-g"
-$script:logCalls.Clear()
-$promptG = New-ScriptedPrompt -Responses @()   # any call at all should throw
-$resultG = Get-SelectedMode -Settings $settingsG -SettingsPath $pathG -PromptFunc $promptG
-Test-Assert ($resultG.Mode -eq 'ImageConversion') "disabled-prompt default matches the old main script's default (loose image conversion only)"
-Test-Assert (@($script:logCalls | Where-Object { $_ -like "*Mode (prompt disabled)*ImageConversion*" }).Count -eq 1) "logged the disabled-prompt default exactly once"
-Write-Host ""
-
-# ==============================================================================
-#  Scenario H: Get-SelectedMode - EnableModePrompt=$true delegates to
-#  Show-ModeMenu and logs the actual selection
-# ==============================================================================
-Write-Host "=== Scenario H: Get-SelectedMode with EnableModePrompt=`$true ===" -ForegroundColor Cyan
+Write-Host "=== Scenario H: Get-SelectedMode delegates to Show-ModeMenu ===" -ForegroundColor Cyan
 $settingsH = Get-DefaultScriptSettings
 $pathH = New-ScratchSettingsPath "scenario-h"
 $script:logCalls.Clear()

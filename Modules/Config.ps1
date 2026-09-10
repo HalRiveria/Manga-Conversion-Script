@@ -135,7 +135,6 @@ function Get-DefaultScriptSettings {
         JpegLossless                     = $false
         JpegQuality                      = 90
         PermanentDelete                  = $false
-        EnableModePrompt                 = $true
         AnimatedThreads                  = 8
         AnimatedQuality                  = 90
         AnimatedLossless                 = $false
