@@ -146,12 +146,20 @@ Test-Assert $threwH "Test-ZipArchive throws when the ZIP path doesn't exist"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario I: -ZipPath is Mandatory
+#  Scenario I: -ZipPath is Mandatory. Checked via parameter METADATA
+#  (Get-Command), not by actually calling Test-ZipArchive with -ZipPath
+#  omitted (2026-09-09 fix, a real bug caught live in a sibling harness -
+#  DependencyDetection.Harness.ps1's own former Scenario G): PowerShell
+#  only THROWS on a missing Mandatory parameter when it can't prompt for
+#  one - with a real interactive console attached, it instead blocks the
+#  whole process waiting on stdin forever, zero CPU/disk activity.
+#  Matches ZipParallelProcessing.Harness.ps1's own Scenario E, which
+#  already documented and avoided this exact host-dependent hang.
 # ==============================================================================
 Write-Host "=== Scenario I: -ZipPath is Mandatory ===" -ForegroundColor Cyan
-$threwI = $false
-try { Test-ZipArchive } catch { $threwI = $true }
-Test-Assert $threwI "Test-ZipArchive without -ZipPath throws (Mandatory parameter)"
+$attrI = (Get-Command Test-ZipArchive).Parameters['ZipPath'].Attributes |
+    Where-Object { $_ -is [System.Management.Automation.ParameterAttribute] } | Select-Object -First 1
+Test-Assert ([bool]$attrI.Mandatory) "-ZipPath is Mandatory on Test-ZipArchive"
 Write-Host ""
 
 # ==============================================================================

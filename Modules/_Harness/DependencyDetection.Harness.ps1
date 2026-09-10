@@ -166,12 +166,26 @@ Test-Assert ($null -ne $resultF) "PATH lookup still succeeds with no -Candidates
 Write-Host ""
 
 # ==============================================================================
-#  Scenario G: -ExeName is Mandatory - omitting it fails loudly.
+#  Scenario G: -ExeName is Mandatory - omitting it must fail loudly, not
+#  hang. Checked via parameter METADATA (Get-Command), not by actually
+#  invoking Find-Exe with -ExeName omitted (2026-09-09 fix, a real bug
+#  caught live: PowerShell only THROWS on a missing Mandatory parameter
+#  when it can't prompt for one - when a real interactive console IS
+#  attached, it instead blocks the whole process waiting on stdin for a
+#  human to type a value, forever, with zero CPU/disk activity - the
+#  exact same species of host-dependent hang
+#  ZipParallelProcessing.Harness.ps1's own Scenario E already documented
+#  and avoided elsewhere in this codebase, see that scenario's own
+#  comment for the fuller explanation. This one didn't follow that same
+#  pattern and hung a real `.\Tools\Run-Harness.ps1 -All` run under an
+#  interactive-console invocation context before this fix. Checking
+#  parameter metadata is host-independent - it can never hang, in any
+#  invocation context.
 # ==============================================================================
 Write-Host "=== Scenario G: -ExeName is Mandatory ===" -ForegroundColor Cyan
-$threwG = $false
-try { Find-Exe -UserPath "C:\whatever.exe" } catch { $threwG = $true }
-Test-Assert $threwG "Find-Exe without -ExeName throws (Mandatory parameter)"
+$paramsG = (Get-Command Find-Exe).Parameters
+$attrG = $paramsG['ExeName'].Attributes | Where-Object { $_ -is [System.Management.Automation.ParameterAttribute] } | Select-Object -First 1
+Test-Assert ([bool]$attrG.Mandatory) "-ExeName is Mandatory on Find-Exe"
 Write-Host ""
 
 # ==============================================================================

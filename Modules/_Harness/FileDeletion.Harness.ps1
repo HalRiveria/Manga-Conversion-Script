@@ -207,22 +207,29 @@ Initialize-FileDeletion -PermanentDelete $false   # restore the default for any 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario J: -ItemPath is Mandatory on all three functions - calling
-#  without it fails loudly (parameter binding error) instead of silently
-#  no-op'ing, catching a caller bug early.
+#  Scenario J: -ItemPath is Mandatory on all three functions. Checked via
+#  parameter METADATA (Get-Command), not by actually calling each function
+#  with -ItemPath omitted (2026-09-09 fix, a real bug caught live in a
+#  sibling harness - DependencyDetection.Harness.ps1's own former Scenario
+#  G): PowerShell only THROWS on a missing Mandatory parameter when it
+#  can't prompt for one - when a real interactive console IS attached, it
+#  instead blocks the whole process waiting on stdin for a human to type a
+#  value, forever, with zero CPU/disk activity. Matches
+#  ZipParallelProcessing.Harness.ps1's own Scenario E, which already
+#  documented and avoided this exact host-dependent hang - checking
+#  parameter metadata is host-independent, it can never hang in any
+#  invocation context.
 # ==============================================================================
 Write-Host "=== Scenario J: -ItemPath is Mandatory ===" -ForegroundColor Cyan
-$threwMoveJ = $false
-try { Move-ToRecycleBin } catch { $threwMoveJ = $true }
-Test-Assert $threwMoveJ "Move-ToRecycleBin without -ItemPath throws (Mandatory parameter)"
-
-$threwPermJ = $false
-try { Remove-ItemPermanently } catch { $threwPermJ = $true }
-Test-Assert $threwPermJ "Remove-ItemPermanently without -ItemPath throws (Mandatory parameter)"
-
-$threwSourceJ = $false
-try { Remove-Source } catch { $threwSourceJ = $true }
-Test-Assert $threwSourceJ "Remove-Source without -ItemPath throws (Mandatory parameter)"
+function Test-ItemPathIsMandatoryJ {
+    param([string]$FunctionName)
+    $attr = (Get-Command $FunctionName).Parameters['ItemPath'].Attributes |
+        Where-Object { $_ -is [System.Management.Automation.ParameterAttribute] } | Select-Object -First 1
+    return [bool]$attr.Mandatory
+}
+Test-Assert (Test-ItemPathIsMandatoryJ 'Move-ToRecycleBin') "-ItemPath is Mandatory on Move-ToRecycleBin"
+Test-Assert (Test-ItemPathIsMandatoryJ 'Remove-ItemPermanently') "-ItemPath is Mandatory on Remove-ItemPermanently"
+Test-Assert (Test-ItemPathIsMandatoryJ 'Remove-Source') "-ItemPath is Mandatory on Remove-Source"
 Write-Host ""
 
 # ==============================================================================
