@@ -668,6 +668,68 @@ if (-not $icaclsOkV) {
 Write-Host ""
 
 # ==============================================================================
+#  Scenario W: Get-FilesRecursiveSafe (2026-09-10, added with no dedicated
+#  coverage of its own during the Full Pipeline hang fix - caught by
+#  /code-review medium, real gap given this function's own resilience
+#  claims are exactly the kind of thing this project's history shows
+#  needs a real test, not just reasoning). Two parts: basic recursive
+#  discovery (multiple levels, confirms it isn't accidentally
+#  single-level), and the same real icacls permission-denial pattern
+#  Scenario V above uses - proves content on both sides of an
+#  inaccessible directory is still found, the exact resilience property
+#  a code-review pass also caught a real regression in (an earlier
+#  version `continue`'d past a directory's own subdirectory walk after
+#  its file walk failed, silently dropping that whole subtree - fixed
+#  before this scenario was even written, but this scenario is what
+#  should catch a REGRESSION of that fix later).
+# ==============================================================================
+Write-Host "=== Scenario W: Get-FilesRecursiveSafe - basic recursive discovery ===" -ForegroundColor Cyan
+$libraryW = Join-Path $scratchDir "scenario-w"
+$subW1 = Join-Path $libraryW "sub1"
+$subW2 = Join-Path (Join-Path $libraryW "sub1") "sub2"
+New-Item -ItemType Directory -Path $subW2 -Force | Out-Null
+"x" | Out-File -LiteralPath (Join-Path $libraryW "root.txt") -Encoding ASCII
+"x" | Out-File -LiteralPath (Join-Path $subW1 "level1.txt") -Encoding ASCII
+"x" | Out-File -LiteralPath (Join-Path $subW2 "level2.txt") -Encoding ASCII
+
+$foundW = Get-FilesRecursiveSafe -ScanPath $libraryW
+$foundNamesW = @($foundW | ForEach-Object { $_.Name })
+Test-Assert ($foundW.Count -eq 3) ("all 3 files across all levels were found (got " + $foundW.Count + ")")
+Test-Assert ($foundNamesW -contains "root.txt" -and $foundNamesW -contains "level1.txt" -and $foundNamesW -contains "level2.txt") "files at every depth (root, 1 level down, 2 levels down) were all found"
+Write-Host ""
+
+Write-Host "=== Scenario W2: Get-FilesRecursiveSafe survives a real permission-denied directory ===" -ForegroundColor Cyan
+$libraryW2 = Join-Path $scratchDir "scenario-w2"
+$deniedW2  = Join-Path $libraryW2 "denied-sub"
+$beforeW2  = Join-Path $libraryW2 "a-allowed-before"
+$afterW2   = Join-Path $libraryW2 "z-allowed-after"
+New-Item -ItemType Directory -Path $deniedW2 -Force | Out-Null
+New-Item -ItemType Directory -Path $beforeW2 -Force | Out-Null
+New-Item -ItemType Directory -Path $afterW2 -Force | Out-Null
+"x" | Out-File -LiteralPath (Join-Path $deniedW2 "hidden.txt") -Encoding ASCII
+"x" | Out-File -LiteralPath (Join-Path $beforeW2 "before.txt") -Encoding ASCII
+"x" | Out-File -LiteralPath (Join-Path $afterW2 "after.txt") -Encoding ASCII
+
+$userW2 = "$env:USERDOMAIN\$env:USERNAME"
+$icaclsOutW2 = icacls $deniedW2 /deny "${userW2}:(RX)" 2>&1
+$icaclsOkW2 = ($LASTEXITCODE -eq 0)
+
+if (-not $icaclsOkW2) {
+    Write-Host "  [SKIP] icacls could not deny access in this environment - skipping Scenario W2's real-permission assertions" -ForegroundColor Yellow
+} else {
+    try {
+        $foundW2 = Get-FilesRecursiveSafe -ScanPath $libraryW2
+        $foundNamesW2 = @($foundW2 | ForEach-Object { $_.Name })
+        Test-Assert ($foundNamesW2 -contains "before.txt") "the file BEFORE the denied folder was still found"
+        Test-Assert ($foundNamesW2 -contains "after.txt") "the exact bug this closes: the file AFTER the denied folder was ALSO found, not silently abandoned"
+        Test-Assert ($foundNamesW2 -notcontains "hidden.txt") "the file INSIDE the denied folder was correctly NOT found (real access denial, not a mock)"
+    } finally {
+        icacls $deniedW2 /remove:d $userW2 2>&1 | Out-Null
+    }
+}
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

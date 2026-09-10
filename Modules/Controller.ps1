@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Controller - Full Pipeline's (mode 1) per-chapter engine: for each
     chapter, runs image conversion and animated conversion CONCURRENTLY
@@ -553,8 +553,7 @@ function Get-OrCreateFullPipelineSeriesBundle {
 
     $freshLazy = [System.Lazy[hashtable]]::new([Func[hashtable]]$factory, [System.Threading.LazyThreadSafetyMode]::ExecutionAndPublication)
     $lazy = $Cache.GetOrAdd($Series.FullName, $freshLazy)
-    $result = $lazy.Value
-    return $result
+    return $lazy.Value
 }
 
 function Get-OrCreateFullPipelineChapterClassification {

@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     LeafDirectoryDiscovery - Get-ZippableLeafDirs (the shared leaf-folder
     scan used by mode 2 loose+zip and mode 3 zip-only), plus
@@ -236,13 +236,20 @@ function Get-FilesRecursiveSafe {
     while ($dirStack.Count -gt 0) {
         $currentDir = $dirStack.Pop()
 
+        # Both enumerations attempted independently - a file-listing
+        # failure must NOT skip the subdirectory walk for this same
+        # directory (real bug, caught in review: an earlier version
+        # `continue`'d out of the loop after the file catch, silently
+        # abandoning this directory's whole subtree instead of just its
+        # own files - diverged from Get-ChildItem -Recurse -File
+        # -ErrorAction SilentlyContinue's own per-item resilience, which
+        # this function is meant to match exactly).
         try {
             foreach ($f in [System.IO.Directory]::EnumerateFiles($currentDir)) {
                 $results.Add([System.IO.FileInfo]::new($f))
             }
         } catch {
-            Write-Log ("Could not enumerate files in '" + $currentDir + "' during recursive file scan - skipping it, continuing with the rest of the tree: " + $_) -Level Warn
-            continue
+            Write-Log ("Could not enumerate files in '" + $currentDir + "' during recursive file scan - skipping its files, still exploring its subdirectories: " + $_) -Level Warn
         }
 
         try {
@@ -304,7 +311,10 @@ function Get-ZippableLeafDirs {
         isn't used instead - a permission error anywhere in the tree kills
         a flat enumerator's MoveNext() for good) rather than reintroducing
         that already-fixed bug, just collecting into a list instead of
-        yielding one candidate per call.
+        yielding one candidate per call. Get-FilesRecursiveSafe (below)
+        is a THIRD sibling of this same stack-based-walk shape, one level
+        up in this file - collecting every FILE instead of qualifying
+        leaf directories - added the same day for the same reason.
     #>
     param(
         [Parameter(Mandatory)]
