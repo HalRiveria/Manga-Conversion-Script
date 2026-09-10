@@ -1693,6 +1693,9 @@ function Get-ChapterProgressStatus {
     # the zip gate proceed with an unconverted file in the chapter. Same
     # underlying issue as AnimatedConversionPipeline.ps1's own
     # Get-ChapterAnimatedStatus, fixed there the same day (2026-08-31).
+    # This condition + parts-building block is a deliberate duplicate of
+    # that function's own copy (same four fields, same Error-tier severity
+    # ordering) - keep both in sync.
     if ($ChapterResult.FailedCount -gt 0 -or $ChapterResult.ForceKilledCount -gt 0 -or $ChapterResult.DeleteFailedCount -gt 0 -or $ChapterResult.InspectFailedCount -gt 0) {
         $parts = [System.Collections.Generic.List[string]]::new()
         if ($ChapterResult.FailedCount -gt 0)        { $parts.Add($ChapterResult.FailedCount.ToString() + " failed") }

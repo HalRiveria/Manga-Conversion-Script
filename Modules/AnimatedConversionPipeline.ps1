@@ -945,6 +945,9 @@ function Get-ChapterAnimatedStatus {
     # passes the zip gate (Controller.ps1's Invoke-FullPipelineChapter only
     # blocks on 'Error') - left as Warning, that raw file would get zipped
     # into the archive and its source folder deleted anyway. 2026-08-31 fix.
+    # This condition + parts-building block is a deliberate duplicate of
+    # ImageConversionPipeline.ps1's Get-ChapterProgressStatus (same four
+    # fields, same Error-tier severity ordering) - keep both in sync.
     if ($ChapterResult.FailedCount -gt 0 -or $ChapterResult.ForceKilledCount -gt 0 -or $ChapterResult.DeleteFailedCount -gt 0 -or $ChapterResult.InspectFailedCount -gt 0) {
         $parts = [System.Collections.Generic.List[string]]::new()
         if ($ChapterResult.FailedCount -gt 0)        { $parts.Add($ChapterResult.FailedCount.ToString() + " failed") }
