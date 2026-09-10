@@ -484,3 +484,32 @@ function Get-SeriesChapters {
     # caution - same discipline as everywhere else in this project.
     return ,$result
 }
+
+function Get-LeafDirectoryDiscoverySharedFunctionNames {
+    <#
+    .SYNOPSIS
+        The function names a caller must add to its own -SharedFunctionNames
+        list (Invoke-ZipParallelProcessing) to safely call New-SeriesProvider/
+        Get-SeriesChapters from inside a runspace worker - single source of
+        truth for this group (see Logging.ps1's Get-LoggingSharedFunctionNames
+        for why this exists). First real consumer (2026-09-09): Full
+        Pipeline's dispatch-redesign migration (step 4) - each of its two
+        concurrent engine workers walks the library itself, inside its own
+        runspace, unlike every other caller of these two functions today
+        (all main-thread-only). Includes Get-ZippableLeafDirs and
+        Test-ZippableLeafDirCandidate too, not just the two public entry
+        points - a fresh runspace's InitialSessionState only knows about
+        function DEFINITIONS explicitly added to it, so a propagated
+        function that calls another user-defined function by name (as
+        Get-SeriesChapters calls Get-ZippableLeafDirs, which in turn calls
+        Test-ZippableLeafDirCandidate) needs that callee's own name listed
+        too, not just the entry point - same convention every other group
+        in this codebase follows, verified against
+        Modules\_Harness\Lint.Harness.ps1's own Rule 5, which walks this
+        exact call graph via AST rather than by hand.
+        New-ZippableLeafDirProvider is NOT included - nothing in this
+        group's own call graph (New-SeriesProvider/Get-SeriesChapters/
+        Get-ZippableLeafDirs/Test-ZippableLeafDirCandidate) calls it.
+    #>
+    return @('New-SeriesProvider', 'Get-SeriesChapters', 'Get-ZippableLeafDirs', 'Test-ZippableLeafDirCandidate')
+}

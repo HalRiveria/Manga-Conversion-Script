@@ -46,6 +46,10 @@ $modulesDir = Join-Path $PSScriptRoot ".."
 . (Join-Path $modulesDir "AbortPipeline.ps1")
 . (Join-Path $modulesDir "CleanConsoleRendering.ps1")
 . (Join-Path $modulesDir "ZipParallelProcessing.ps1")
+# ChapterDispatch.ps1 (2026-09-09, dispatch redesign step 4) - Full
+# Pipeline's own two engines now each run Invoke-ChapterDispatch, not
+# Convert-ImageBatch/Convert-AnimatedBatch's own solo dispatch loops.
+. (Join-Path $modulesDir "ChapterDispatch.ps1")
 . (Join-Path $modulesDir "ImageConversionPipeline.ps1")
 . (Join-Path $modulesDir "AnimatedConversionPipeline.ps1")
 . (Join-Path $modulesDir "Summary.ps1")
@@ -197,6 +201,18 @@ class Program {
                 Console.Error.WriteLine("simulated identify failure");
                 return 1;
             }
+            // IDENTIFY_SLEEP_MS (2026-09-09, dispatch-redesign migration,
+            // Scenario Z4) - a separate marker from SLEEP_MS (which only
+            // ever delayed the CONVERSION path, never identify) - lets a
+            // test force one chapter's own classification to take
+            // measurably longer than another chapter's whole conversion,
+            // to prove ordering via real Write-Log line order instead of
+            // in-process spying (Test-AvifAnimated now runs inside a
+            // worker runspace, not the main thread - see Controller.ps1's
+            // own header - so a harness-side function redefinition can no
+            // longer safely reach back into this scope's own state).
+            Match sleepM = Regex.Match(content, "IDENTIFY_SLEEP_MS:(\\d+)");
+            if (sleepM.Success) { Thread.Sleep(int.Parse(sleepM.Groups[1].Value)); }
             Match fm = Regex.Match(content, "FRAMES:(\\d+)");
             int frames = fm.Success ? int.Parse(fm.Groups[1].Value) : 1;
             // Test-AvifAnimated now reads a simulated animation delay
@@ -338,89 +354,34 @@ Test-Assert ($totalsC3.StaleImageCleanedSuccess -eq 0) "the AVIF was NOT deleted
 Write-Host ""
 
 # ==============================================================================
-#  Scenario C4 (2026-08-31 fix): calls Invoke-FullPipelineChapter DIRECTLY
-#  (not through Invoke-FullPipeline, which has its own EARLIER per-chapter
-#  abort check that would just skip the chapter entirely, never reaching
-#  this function). The image job runs for real (SLEEP_MS:200, a genuine OS
-#  process) while a background runspace cancels the SAME $ctsC4 object
-#  once the fake-cjxl process's own ".started" marker file appears (2026-08-31
-#  correction: originally a flat 50ms Start-Sleep, which was a real timing
-#  race - a cold/loaded machine's RunspacePool/ISS setup is not reliably
-#  under 50ms, so the cancel could land before the job even dispatched or
-#  miss its 200ms window entirely; polling for the job's own start signal
-#  makes the ordering deterministic instead of guessed) - the job still
-#  dispatches and completes normally (Cts wasn't cancelled when it
-#  started, and a running process has no cancellation check of its own),
-#  so -ResultHandler fires for real and the merged
-#  status reads a clean Success. The zip gate is reached with the run
-#  already aborted - the exact "engine says Success, but the run is
-#  already aborted" case: before the fix, the zip gate had no
-#  Cts-awareness at all and zipped anyway, producing a misleadingly
-#  "successful", permanently-archived, potentially half-converted chapter.
+#  Scenario C4 (2026-08-31 fix, rewritten 2026-09-09 for the dispatch-
+#  redesign migration - see Controller.ps1's own "DISPATCH-REDESIGN STEP 4"
+#  header): used to call Invoke-FullPipelineChapter directly, dispatching a
+#  real cjxl process and racing a background runspace to cancel its own Cts
+#  mid-flight. That whole dispatch-and-race mechanism no longer exists at
+#  this level - Complete-MergedFullPipelineChapter (the function that
+#  replaced Invoke-FullPipelineChapter) takes already-resolved
+#  ImageResult/AnimatedResult directly, it doesn't dispatch anything itself
+#  (dispatch now lives in Invoke-ChapterDispatch, already covered by its
+#  own 33/33-assertion harness). The real behavior this scenario protects
+#  - "an engine's own result reads Success, but zipping must still be
+#  blocked because the run's Cts was cancelled" - is still exactly this
+#  function's own concern, and is now directly, deterministically testable
+#  with no race needed at all: build a clean ImageResult by hand, cancel
+#  the Cts BEFORE calling, assert no zip happens.
 # ==============================================================================
-Write-Host "=== Scenario C4: a Cts cancelled mid-flight still blocks zipping even though the engine reports Success ===" -ForegroundColor Cyan
+Write-Host "=== Scenario C4: a cancelled Cts still blocks zipping even though the engine result reads Success ===" -ForegroundColor Cyan
 $chC4 = New-Dir "scenario-c4\Series\Chapter 1"
-$imgC4 = New-FakeImageIn -DirPath $chC4 -Name "page1.jpg" -SleepMs 200
-$budgetC4 = [System.Threading.SemaphoreSlim]::new(2, 2)
 $ctsC4 = [System.Threading.CancellationTokenSource]::new()
+$ctsC4.Cancel()
 
-$markerC4 = [System.IO.Path]::ChangeExtension($imgC4, ".jxl") + ".started"
-$cancelRunspaceC4 = [runspacefactory]::CreateRunspace()
-$cancelRunspaceC4.Open()
-$cancelPsC4 = [PowerShell]::Create()
-$cancelPsC4.Runspace = $cancelRunspaceC4
-$null = $cancelPsC4.AddScript({
-    param($Cts, $MarkerPath)
-    # Poll for the fake-cjxl process's own started-marker instead of a flat
-    # Start-Sleep - a fixed guess would either cancel before the job even
-    # dispatches (on a slow/cold machine) or blow past its 200ms sleep
-    # entirely, making the scenario flaky rather than a reliable proof.
-    $deadline = [DateTime]::UtcNow.AddSeconds(10)
-    while (-not (Test-Path -LiteralPath $MarkerPath) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 5 }
-    $Cts.Cancel()
-}).AddArgument($ctsC4).AddArgument($markerC4)
-$cancelHandleC4 = $cancelPsC4.BeginInvoke()
-
-$resultC4 = Invoke-FullPipelineChapter -ChapterDir $chC4 -ChapterImageFiles @((Get-Item -LiteralPath $imgC4)) -IsZippable $true -ZipOut (Join-Path $scratchDir "scenario-c4.zip") `
-    -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullLogging $false -PermanentDelete $true -SharedBudget $budgetC4 -Cts $ctsC4
-
-$cancelPsC4.EndInvoke($cancelHandleC4)
-$cancelPsC4.Dispose()
-$cancelRunspaceC4.Close()
-$cancelRunspaceC4.Dispose()
-$budgetC4.Dispose()
+$resultC4 = Complete-MergedFullPipelineChapter -ChapterDir $chC4 -ZipOut (Join-Path $scratchDir "scenario-c4.zip") `
+    -IsZippable $true -ImageResult @{ ConvertedCount = 1; FailedCount = 0 } -Cts $ctsC4
 $ctsC4.Dispose()
 
 Test-Assert ($resultC4.Status -ne 'Error') ("sanity check: the engine itself reported a clean status, not an Error - proves the zip block below is really about the cancelled Cts, not a conversion failure (got " + $resultC4.Status + ")")
-Test-Assert ($resultC4.Zipped -eq $false) "zipping was blocked because the Cts was cancelled mid-flight, even though the engine reported a clean status"
+Test-Assert ($resultC4.Zipped -eq $false) "zipping was blocked because the Cts was cancelled, even though the engine result reads clean"
 Test-Assert (-not (Test-Path -LiteralPath (Join-Path $scratchDir "scenario-c4.zip"))) "no zip file was actually created"
-Write-Host ""
-
-# ==============================================================================
-#  Scenario C4b (2026-08-31 fix): a Cts already cancelled BEFORE dispatch
-#  even begins is a third, legitimate reason a result stays $null - not
-#  the two causes ("crashed" or "force-stopped past the drain timeout")
-#  the original code's own comment named. Invoke-ZipParallelProcessing's
-#  dispatch loop never starts a job once cancellation is already
-#  signaled, so -ResultHandler is never invoked at all for this chapter's
-#  job - a real, graceful outcome, not a crash. No timing/race needed
-#  here (unlike C4) - the Cts is cancelled synchronously before the call.
-# ==============================================================================
-Write-Host "=== Scenario C4b: a Cts already cancelled before dispatch is not logged/counted as a crash ===" -ForegroundColor Cyan
-$chC4b = New-Dir "scenario-c4b\Series\Chapter 1"
-$imgC4b = New-FakeImageIn -DirPath $chC4b -Name "page1.jpg"
-$budgetC4b = [System.Threading.SemaphoreSlim]::new(2, 2)
-$ctsC4b = [System.Threading.CancellationTokenSource]::new()
-$ctsC4b.Cancel()   # already cancelled BEFORE Invoke-FullPipelineChapter is ever called
-
-$resultC4b = Invoke-FullPipelineChapter -ChapterDir $chC4b -ChapterImageFiles @((Get-Item -LiteralPath $imgC4b)) -IsZippable $true -ZipOut (Join-Path $scratchDir "scenario-c4b.zip") `
-    -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullLogging $false -PermanentDelete $true -SharedBudget $budgetC4b -Cts $ctsC4b
-
-$budgetC4b.Dispose()
-$ctsC4b.Dispose()
-
-Test-Assert ($null -eq $resultC4b.ImageResult -or $resultC4b.ImageResult.FailedCount -ne 1) "a pre-cancelled dispatch does NOT synthesize a false FailedCount=1 - the null result is recognized as a graceful abort, not a crash"
-Test-Assert (Test-Path -LiteralPath (Join-Path $chC4b "page1.jpg")) "the source file is left untouched - never actually dispatched, so nothing to have converted or deleted"
 Write-Host ""
 
 # ==============================================================================
@@ -430,11 +391,12 @@ Write-Host ""
 #  vanished before deletion - a real TOCTOU gap between the zip finishing
 #  and this call. This used to be discarded, reporting a successful
 #  delete anyway. Remove-Source shadowed to return $false unconditionally.
+#  Calls Complete-MergedFullPipelineChapter directly (2026-09-09 rewrite -
+#  see Scenario C4's own comment above for why).
 # ==============================================================================
 Write-Host "=== Scenario C4c: a chapter folder already gone before deletion is not miscounted as deleted ===" -ForegroundColor Cyan
 $chC4c = New-Dir "scenario-c4c\Series\Chapter 1"
-$imgC4c = New-FakeImageIn -DirPath $chC4c -Name "page1.jpg"
-$budgetC4c = [System.Threading.SemaphoreSlim]::new(2, 2)
+New-FakeImageIn -DirPath $chC4c -Name "page1.jpg" | Out-Null
 $ctsC4c = [System.Threading.CancellationTokenSource]::new()
 
 $realRemoveSourceC4c = ${function:Remove-Source}
@@ -444,72 +406,25 @@ function Remove-Source {
 }
 
 try {
-    $resultC4c = Invoke-FullPipelineChapter -ChapterDir $chC4c -ChapterImageFiles @((Get-Item -LiteralPath $imgC4c)) -IsZippable $true -ZipOut (Join-Path $scratchDir "scenario-c4c.zip") `
-        -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullLogging $false -PermanentDelete $true -SharedBudget $budgetC4c -Cts $ctsC4c
+    # ConvertedCount = 0 (2026-09-09 fix, this rewrite's own first draft
+    # had it wrong): this test's own ImageResult is entirely hand-built,
+    # not produced by a real dispatch - claiming ConvertedCount=1 makes
+    # Complete-MergedFullPipelineChapter require a real .jxl zip entry
+    # (Test-ZipArchive's own -RequireJxlEntry), but the only file this
+    # scenario actually created on disk is page1.jpg (never really
+    # converted). 0 avoids that requirement while the real thing under
+    # test - the folder-already-gone delete path - stays exercised
+    # identically either way.
+    $resultC4c = Complete-MergedFullPipelineChapter -ChapterDir $chC4c -ZipOut (Join-Path $scratchDir "scenario-c4c.zip") `
+        -IsZippable $true -ImageResult @{ ConvertedCount = 0; FailedCount = 0 } -Cts $ctsC4c
 } finally {
     ${function:Remove-Source} = $realRemoveSourceC4c
-    $budgetC4c.Dispose()
     $ctsC4c.Dispose()
 }
 
 Test-Assert ($resultC4c.ZipResult.Status -eq 'Success') "sanity check: the zip itself still succeeded"
 Test-Assert ($resultC4c.ZipResult.FolderDeleted -eq $false) "FolderDeleted is `$false, not miscounted as a real delete, when Remove-Source reports the folder already gone"
 Test-Assert ($resultC4c.ZipResult.FolderDeleteFailed -eq $false) "FolderDeleteFailed is also `$false - an already-gone folder is neither a success nor a real failure"
-Write-Host ""
-
-# ==============================================================================
-#  Scenario C5 (2026-08-31 fix): $resultHandler's else branch used to
-#  treat ANY non-Image object as the animated result - Invoke-ZipParallelProcessing
-#  passes every object a worker's runspace emits to -ResultHandler, not
-#  just its own explicit return value, so a stray unsuppressed object
-#  anywhere in the real worker's call chain would silently overwrite
-#  $resultBox.Animated with $null. Temporarily swaps the REAL
-#  $script:fullPipelineChapterWorker for a fake that emits a stray string
-#  BEFORE its real return value, for an image-only chapter (no animated
-#  job dispatched at all) - proves the stray object is correctly ignored
-#  (Animated stays $null, its untouched starting value) rather than being
-#  mistaken for a real Animated result.
-# ==============================================================================
-Write-Host "=== Scenario C5: a stray object from the worker's own output is ignored, not mistaken for the Animated result ===" -ForegroundColor Cyan
-$chC5 = New-Dir "scenario-c5\Series\Chapter 1"
-$imgC5 = New-FakeImageIn -DirPath $chC5 -Name "page1.jpg"
-$budgetC5 = [System.Threading.SemaphoreSlim]::new(2, 2)
-$ctsC5 = [System.Threading.CancellationTokenSource]::new()
-
-$realWorkerC5 = $script:fullPipelineChapterWorker
-$script:fullPipelineChapterWorker = {
-    param(
-        [string]$EngineType, [System.IO.FileInfo[]]$Files, [string]$CjxlExe, [string]$MagickExe,
-        [bool]$DoJpegLossless, [int]$DoJpegQuality, [bool]$DoAnimatedLossless, [int]$AnimatedQuality,
-        [bool]$DoAnimatedOverwrite, [bool]$DoAnimatedDeleteSource, [bool]$DoFullLogging,
-        [string]$LogFile, [string]$LogErrorFile, [string]$LogWarnFile, [bool]$DoPermanentDelete,
-        [bool]$CleanConsoleOutputEnabled, [System.Threading.SemaphoreSlim]$SharedBudget,
-        [System.Threading.Mutex]$LogMutex, [System.Collections.Concurrent.ConcurrentQueue[object]]$ConsoleQueue,
-        [System.Threading.CancellationToken]$CancelToken
-    )
-    # A stray, unsuppressed object - simulating an accidental cmdlet
-    # output somewhere in a real worker's call chain - emitted BEFORE the
-    # real, expected return value. Invoke-ZipParallelProcessing's own
-    # dispatch loop passes BOTH to -ResultHandler, one at a time. Carries
-    # its own non-null, recognizable .Result so a wrongly-attributed
-    # write is distinguishable from AnimatedResult's correct, untouched
-    # $null starting value - a stray value that itself evaluated to $null
-    # would make "corrupted" and "correctly untouched" look identical.
-    @{ EngineType = 'SomethingElse'; Result = 'STRAY-NOT-A-REAL-RESULT' }
-    return @{ EngineType = $EngineType; Result = @{ ConvertedCount = 1; FailedCount = 0 } }
-}
-
-try {
-    $resultC5 = Invoke-FullPipelineChapter -ChapterDir $chC5 -ChapterImageFiles @((Get-Item -LiteralPath $imgC5)) -IsZippable $false `
-        -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullLogging $false -PermanentDelete $true -SharedBudget $budgetC5 -Cts $ctsC5
-} finally {
-    $script:fullPipelineChapterWorker = $realWorkerC5
-    $budgetC5.Dispose()
-    $ctsC5.Dispose()
-}
-
-Test-Assert ($null -ne $resultC5.ImageResult -and $resultC5.ImageResult.ConvertedCount -eq 1) "the real Image result still came through correctly despite the stray object sharing its runspace's output"
-Test-Assert ($null -eq $resultC5.AnimatedResult) "the stray object did NOT get mistaken for the Animated result - AnimatedResult stays `$null (no animated job was even dispatched), not the stray object's own 'STRAY-NOT-A-REAL-RESULT' value"
 Write-Host ""
 
 # ==============================================================================
@@ -1126,32 +1041,29 @@ Test-Assert ($fatalMsgsR.Count -eq 1 -and $fatalMsgsR[0] -match "unrecognized mo
 Write-Host ""
 
 # ==============================================================================
-#  Scenario S: back to the REAL Invoke-FullPipeline (not Invoke-Mode) -
-#  Convert-ImageBatch's new InspectFailedCount field (a real
-#  Test-AvifAnimated failure) is summed into Invoke-FullPipeline's own
-#  totals (2026-08-28), same as the pre-existing animated-engine field.
-#
-#  NOTE ON SCOPE: Invoke-FullPipeline's own -LooseImageExtensions default
-#  deliberately still does NOT include .avif (unlike
-#  ImageConversionPipeline.ps1's own default, which now does) - adding it
-#  would make BOTH engines independently discover and dispatch the SAME
-#  .avif file at once (Get-LooseImageCandidates AND
-#  Get-LooseAnimatedCandidates both defaulting to .avif), a real race
-#  between two concurrently-running engines that could delete a file out
-#  from under the other mid-identify. That's a genuine, pre-existing gap
-#  (Full Pipeline never routed static AVIF to the image engine before
-#  this session either) surfaced while verifying THIS change, not solved
-#  by it - flagged in Todo.md, not fixed here. This scenario isolates
-#  Invoke-FullPipeline's own accumulation line by explicitly routing the
-#  AVIF only to the image engine (-AnimatedFileExtensions @()) - a test
-#  construction, not a claim that's a supported real configuration.
+#  Scenario S (rewritten 2026-09-09 for the dispatch-redesign migration):
+#  a Test-AvifAnimated failure is summed into Invoke-FullPipeline's own
+#  InspectFailedCount. The OLD version of this scenario deliberately
+#  disabled animated-candidate discovery (-AnimatedFileExtensions @()) to
+#  isolate "Convert-ImageBatch's own solo classification path" from the
+#  cross-engine one - that whole distinction no longer exists in the new
+#  architecture: Full Pipeline never calls Convert-ImageBatch directly
+#  any more (see this module's own header), and AVIF classification is
+#  now ALWAYS the single, shared, per-chapter
+#  Get-OrCreateFullPipelineChapterClassification path regardless of which
+#  engine's JobBuilder reaches a contested file first - there's no
+#  separate "image engine's own path" left to isolate. Its own OLD "NOTE
+#  ON SCOPE" comment (claiming Invoke-FullPipeline's own
+#  -LooseImageExtensions default excludes .avif) was already stale before
+#  this migration too - Get-LooseImageExtensions() (that default's real
+#  source) includes .avif, confirmed live. Real defaults, no override -
+#  matches how Invoke-FullPipeline is actually called in production.
 # ==============================================================================
-Write-Host "=== Scenario S: Invoke-FullPipeline sums the image engine's InspectFailedCount too ===" -ForegroundColor Cyan
+Write-Host "=== Scenario S: Invoke-FullPipeline sums a classification failure into InspectFailedCount ===" -ForegroundColor Cyan
 $chS = New-Dir "scenario-s\Series\Chapter 1"
 [System.IO.File]::WriteAllText((Join-Path $chS "corrupt.avif"), "FAIL_IDENTIFY")
 
-$totalsS = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-s") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true `
-    -LooseImageExtensions @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif") -AnimatedFileExtensions @()
+$totalsS = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-s") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
 
 Test-Assert ($totalsS.InspectFailedCount -eq 1) ("the image engine's inspect-failure was summed into Invoke-FullPipeline's own totals (got " + $totalsS.InspectFailedCount + ")")
 Write-Host ""
@@ -1826,13 +1738,18 @@ New-FakeImageIn -DirPath $chX4 -Name "photo.png" | Out-Null
 New-FakeImageIn -DirPath $chX4 -Name "page2.jpg" | Out-Null
 
 $realGetSeriesChaptersX4 = ${function:Get-SeriesChapters}
+# 2026-09-09 rewrite (dispatch-redesign migration) - see Scenario Z5's own
+# comment above for why the old script-scope-variable shadow technique no
+# longer works safely (Get-SeriesChapters now runs inside a worker
+# runspace, not the main thread).
+$excludedPathX4 = (Get-Item -LiteralPath $chX4).FullName
+Invoke-Expression @"
 function Get-SeriesChapters {
-    param([string]$SeriesPath, [string[]]$QualifyingExtensions, [string[]]$ExcludeStagingDirs, [bool]$ForceRezip)
-    $real = & $script:realGetSeriesChaptersX4Ref -SeriesPath $SeriesPath -QualifyingExtensions $QualifyingExtensions -ExcludeStagingDirs $ExcludeStagingDirs -ForceRezip $ForceRezip
-    return @($real | Where-Object { $_.Dir.FullName -ne $script:chX4Ref })
+    param([string]`$SeriesPath, [string[]]`$QualifyingExtensions, [string[]]`$ExcludeStagingDirs, [bool]`$ForceRezip)
+    `$result = Get-ZippableLeafDirs -ScanPath `$SeriesPath -QualifyingExtensions `$QualifyingExtensions -ExcludeStagingDirs `$ExcludeStagingDirs -ForceRezip `$ForceRezip
+    return @(`$result | Where-Object { `$_.Dir.FullName -ne '$excludedPathX4' })
 }
-$script:realGetSeriesChaptersX4Ref = $realGetSeriesChaptersX4
-$script:chX4Ref = (Get-Item -LiteralPath $chX4).FullName
+"@
 
 $script:ccrCallsX4 = New-Object System.Collections.Generic.List[hashtable]
 $realCompleteChapterProgressX4 = ${function:Complete-ChapterProgress}
@@ -1955,22 +1872,39 @@ Test-Assert ($capturedZ2.FullLogging -eq $true) ("the handler received the froze
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Z3 (2026-09-02, recurring-bug-pattern coverage): the REAL
-#  $script:fullPipelineChapterWorker scriptblock's own defaults, invoked
+#  Scenario Z3 (2026-09-02, recurring-bug-pattern coverage; rewritten
+#  2026-09-09 for the dispatch-redesign migration - see Controller.ps1's
+#  own "DISPATCH-REDESIGN STEP 4" header): the REAL
+#  $script:fullPipelineEngineWorker scriptblock's own defaults, invoked
 #  directly - distinct from Convert-ImageBatch/Convert-AnimatedBatch's OWN
 #  defaults (already proven safe by ImageConversionPipeline.Harness.ps1's
 #  own Scenario AI). This worker forwards -DoJpegQuality/-AnimatedQuality/
 #  -DoAnimatedDeleteSource to those functions EXPLICITLY, so an omitted
 #  key here overrides whatever safe default they have, regardless of it.
-#  Two real divergences of this exact shape were found in this seam on
-#  2026-09-02 (a same-day full-codebase review found -DoJpegQuality/
-#  -AnimatedQuality; a same-day cross-module-seam review then found
-#  -DoAnimatedDeleteSource) and neither had a test proving the WORKER's
-#  own fallback - as opposed to the downstream function's - was safe.
-#  This closes that for all three at once, directly, rather than only
-#  ever proving it indirectly through Invoke-FullPipelineChapter (which
-#  always sets every key explicitly and so could never have caught this).
+#  The worker's OWN signature changed with this migration (it now takes
+#  -Path, a whole library root it walks itself via its own
+#  -ChapterProvider, instead of a pre-built -Files list) - this scenario
+#  builds the full set of shared objects a real Invoke-FullPipeline call
+#  would build (New-FullPipelineTestSharedObjects, a small helper added
+#  for this rewrite, reused by Scenario Z4 below too) and invokes the
+#  worker directly against a real scratch library, same idea as before
+#  just through the new calling shape.
 # ==============================================================================
+function New-FullPipelineTestSharedObjects {
+    <# Bundles the shared objects a real Invoke-FullPipeline call builds
+       once and passes into both engine workers - factored out so more
+       than one scenario invoking $script:fullPipelineEngineWorker
+       directly doesn't have to hand-build all six separately. #>
+    return @{
+        SeriesBundleCache          = [System.Collections.Concurrent.ConcurrentDictionary[string, System.Lazy[hashtable]]]::new()
+        ChapterClassificationCache = [System.Collections.Concurrent.ConcurrentDictionary[object, System.Lazy[hashtable]]]::new()
+        ZipBlockReasons            = [System.Collections.Concurrent.ConcurrentDictionary[object,string]]::new()
+        AnnouncedChapters          = [System.Collections.Concurrent.ConcurrentDictionary[object,byte]]::new()
+        EventQueue                 = [System.Collections.Concurrent.ConcurrentQueue[hashtable]]::new()
+        SharedBudget               = [System.Threading.SemaphoreSlim]::new(4, 4)
+    }
+}
+
 Write-Host "=== Scenario Z3: the worker scriptblock's own DoJpegQuality/AnimatedQuality/DoAnimatedDeleteSource defaults are safe when omitted ===" -ForegroundColor Cyan
 
 $chZ3 = New-Dir "scenario-z3\Series\Chapter 1"
@@ -1978,91 +1912,87 @@ $imgZ3 = Join-Path $chZ3 "page1.jpg"
 [System.IO.File]::WriteAllText($imgZ3, "ARGS_MARKER")
 $avifZ3 = Join-Path $chZ3 "anim1.avif"
 [System.IO.File]::WriteAllText($avifZ3, "FRAMES:2")
+$rootZ3 = Join-Path $scratchDir "scenario-z3"
 
-$budgetZ3 = [System.Threading.SemaphoreSlim]::new(4, 4)
-$imageResultZ3 = & $script:fullPipelineChapterWorker -EngineType 'Image' -Files @(Get-Item -LiteralPath $imgZ3) `
-    -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -DoFullLogging $false -CancelToken ([System.Threading.CancellationToken]::None) `
-    -SharedBudget $budgetZ3 -DoPermanentDelete $true
+$sharedZ3 = New-FullPipelineTestSharedObjects
+$imageResultZ3 = & $script:fullPipelineEngineWorker -EngineType 'Image' -Path $rootZ3 `
+    -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -DoFullLogging $false -DoPermanentDelete $true `
+    -LooseImageExtensions (Get-LooseImageExtensions) -AnimatedFileExtensions @(".avif") -KnownZipPaths @() `
+    -FolderQualifyingExtensions ((Get-LooseImageExtensions) + @(".jxl")) -AbortTimeoutSeconds 60 -MaxQueueAhead 3 `
+    -SeriesBundleCache $sharedZ3.SeriesBundleCache -ChapterClassificationCache $sharedZ3.ChapterClassificationCache `
+    -ZipBlockReasons $sharedZ3.ZipBlockReasons -AnnouncedChapters $sharedZ3.AnnouncedChapters -EventQueue $sharedZ3.EventQueue `
+    -SharedBudget $sharedZ3.SharedBudget -CancelToken ([System.Threading.CancellationToken]::None)
 $expectedJxlZ3 = Join-Path $chZ3 "page1.jxl"
 $argsTextZ3 = Get-Content -LiteralPath $expectedJxlZ3 -Raw
-Test-Assert ($imageResultZ3.Result.ConvertedCount -eq 1) "sanity check: the worker's own Image-engine call succeeded"
+Test-Assert ($imageResultZ3.EngineType -eq 'Image' -and $imageResultZ3.Aborted -eq $false) "sanity check: the worker's own Image-engine call completed normally"
 Test-Assert ($argsTextZ3 -match "--quality=90(\s|$)") ("the worker's own -DoJpegQuality default is 90 when omitted, not 0 (got: '" + $argsTextZ3.Trim() + "')")
 
-$animatedResultZ3 = & $script:fullPipelineChapterWorker -EngineType 'Animated' -Files @(Get-Item -LiteralPath $avifZ3) `
-    -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -DoFullLogging $false -CancelToken ([System.Threading.CancellationToken]::None) `
-    -SharedBudget $budgetZ3 -DoPermanentDelete $true
+$sharedZ3b = New-FullPipelineTestSharedObjects
+$animatedResultZ3 = & $script:fullPipelineEngineWorker -EngineType 'Animated' -Path $rootZ3 `
+    -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -DoFullLogging $false -DoPermanentDelete $true `
+    -LooseImageExtensions (Get-LooseImageExtensions) -AnimatedFileExtensions @(".avif") -KnownZipPaths @() `
+    -FolderQualifyingExtensions ((Get-LooseImageExtensions) + @(".jxl")) -AbortTimeoutSeconds 60 -MaxQueueAhead 3 `
+    -SeriesBundleCache $sharedZ3b.SeriesBundleCache -ChapterClassificationCache $sharedZ3b.ChapterClassificationCache `
+    -ZipBlockReasons $sharedZ3b.ZipBlockReasons -AnnouncedChapters $sharedZ3b.AnnouncedChapters -EventQueue $sharedZ3b.EventQueue `
+    -SharedBudget $sharedZ3b.SharedBudget -CancelToken ([System.Threading.CancellationToken]::None)
 $expectedWebpZ3 = Join-Path $chZ3 "anim1.webp"
 $animArgsTextZ3 = Get-Content -LiteralPath $expectedWebpZ3 -Raw
-Test-Assert ($animatedResultZ3.Result.ConvertedCount -eq 1) "sanity check: the worker's own Animated-engine call succeeded"
+Test-Assert ($animatedResultZ3.EngineType -eq 'Animated' -and $animatedResultZ3.Aborted -eq $false) "sanity check: the worker's own Animated-engine call completed normally"
 Test-Assert ($animArgsTextZ3 -match "-quality 90(\s|$)") ("the worker's own -AnimatedQuality default is 90 when omitted, not 0 (got: '" + $animArgsTextZ3.Trim() + "')")
 Test-Assert (-not (Test-Path -LiteralPath $avifZ3)) "the worker's own -DoAnimatedDeleteSource default is `$true when omitted - the source .avif was deleted, not left behind to double up with its own .webp in the eventual zip"
-$budgetZ3.Dispose()
+$sharedZ3.SharedBudget.Dispose()
+$sharedZ3b.SharedBudget.Dispose()
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Z4 (2026-09-03 fix, real bug, live-reported and quantified via
-#  two real user logs): AVIF classification must happen PER-CHAPTER, not as
-#  one series-wide pre-pass before any chapter starts. Before this fix, a
-#  series-wide pass classified EVERY avif across the WHOLE series (via
-#  Test-AvifAnimated) before the "=== Series ===" log line, let alone any
-#  chapter's own dispatch - a 100+-chapter series with a few hundred avifs
-#  meant tens of minutes of silence before the first chapter even started.
+#  Scenario Z4 (2026-09-03 fix, real bug; rewritten 2026-09-09 for the
+#  dispatch-redesign migration - see Controller.ps1's own "DISPATCH-
+#  REDESIGN STEP 4" header): AVIF classification must happen lazily, per
+#  CHAPTER (Get-OrCreateFullPipelineChapterClassification), not eagerly
+#  for a whole series before its first chapter can dispatch - a real
+#  regression this migration's own first draft reintroduced (folding
+#  classification into the per-SERIES bundle factory instead) and this
+#  scenario itself caught, live, before it shipped - see
+#  Get-OrCreateFullPipelineSeriesBundle's own header comment for the full
+#  story.
 #
-#  Builds a 2-chapter series: Chapter 1 has a plain image (no avif at all);
-#  Chapter 2 has one avif. Spies on BOTH Start-ChapterProgress and
-#  Test-AvifAnimated (real pass-through wrappers, same technique used
-#  elsewhere in this file) into ONE shared ordered timeline - NOT Write-Log,
-#  which is also called from inside the worker runspaces Invoke-FullPipeline
-#  dispatches, where a locally-redefined function referencing this scope's
-#  own $script: state isn't available (a runspace doesn't share the parent
-#  scope - see CLAUDE.md); Start-ChapterProgress and Test-AvifAnimated are
-#  both only ever called from the main thread, in Controller.ps1's own
-#  per-chapter loop, so spying on them is safe. The distinguishing signal:
-#  in the OLD series-wide-pre-pass code, classifying chapter 2's avif would
-#  happen BEFORE chapter 1's own Start-ChapterProgress call (classification
-#  ran before the per-chapter loop even started, chapter 1 included). In the
-#  per-chapter code, it can only happen once the loop actually REACHES
-#  chapter 2's own iteration - necessarily after chapter 1's call. This is a
-#  deterministic ORDERING assertion, not a timing one - no SLEEP_MS/
-#  Stopwatch flakiness risk. Requires Clean Console Output on, since
-#  Start-ChapterProgress is only called when that toggle is enabled.
+#  The OLD proof technique (spying on Test-AvifAnimated/Start-ChapterProgress
+#  via function redefinition) no longer works safely: both now run inside
+#  a worker RUNSPACE (either engine's own), not the main thread - a
+#  locally-redefined function referencing this scope's own $script: state
+#  isn't reachable from inside a fresh runspace (see Controller.ps1's own
+#  header). Proof moved to the REAL log file instead: chapter 2's own avif
+#  carries an IDENTIFY_SLEEP_MS marker (the fake magick.exe's own identify
+#  branch, extended for this rewrite) forcing its classification to take
+#  measurably longer than chapter 1's own (avif-free) conversion - if
+#  classification were still one series-wide pre-pass, chapter 1's own
+#  "Processing chapter" log line couldn't appear until AFTER that delay;
+#  under the real per-chapter-lazy code, chapter 1 dispatches and logs
+#  immediately, regardless of chapter 2's own pending delay. -FullLogging
+#  $true so every Info line (not just Warn/Error) actually reaches the log
+#  file this assertion reads.
 # ==============================================================================
 Write-Host "=== Scenario Z4: AVIF classification happens per-chapter, not as one series-wide pre-pass ===" -ForegroundColor Cyan
 $chZ4a = New-Dir "scenario-z4\Series\01 - Chapter 1"
 $chZ4b = New-Dir "scenario-z4\Series\02 - Chapter 2"
 New-FakeImageIn -DirPath $chZ4a -Name "page1.jpg" | Out-Null
-$avifZ4 = New-FakeAvifIn -DirPath $chZ4b -Name "anim1.avif" -Frames 4
+$avifZ4 = Join-Path $chZ4b "anim1.avif"
+[System.IO.File]::WriteAllText($avifZ4, "FRAMES:4`nIDENTIFY_SLEEP_MS:600")
 
-$script:eventOrderZ4 = New-Object System.Collections.Generic.List[string]
-$realStartChapterProgressZ4 = ${function:Start-ChapterProgress}
-function Start-ChapterProgress {
-    param([string]$SeriesName, [string]$ChapterName)
-    $script:eventOrderZ4.Add("CHAPTER:" + $ChapterName)
-    & $script:realStartChapterProgressZ4Ref -SeriesName $SeriesName -ChapterName $ChapterName
-}
-$script:realStartChapterProgressZ4Ref = $realStartChapterProgressZ4
-$realTestAvifAnimatedZ4 = ${function:Test-AvifAnimated}
-function Test-AvifAnimated {
-    param([string]$AvifPath, [string]$MagickExe)
-    $script:eventOrderZ4.Add("CLASSIFY:" + $AvifPath)
-    & $script:realTestAvifAnimatedZ4Ref -AvifPath $AvifPath -MagickExe $MagickExe
-}
-$script:realTestAvifAnimatedZ4Ref = $realTestAvifAnimatedZ4
-
-$script:CleanConsoleOutputEnabled = $true
+Initialize-LogPaths -TargetPath (Join-Path $scratchDir "scenario-z4") -FullLogging $true -ScriptDir $scratchDir
+$logFileZ4 = $script:logFile
 try {
-    $totalsZ4 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-z4") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+    $totalsZ4 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-z4") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $true -LogFile $logFileZ4 -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
 } finally {
-    $script:CleanConsoleOutputEnabled = $false
-    ${function:Start-ChapterProgress} = $realStartChapterProgressZ4
-    ${function:Test-AvifAnimated} = $realTestAvifAnimatedZ4
+    Initialize-LogPaths -TargetPath $scratchDir -FullLogging $false -ScriptDir $scratchDir
 }
 
-$chapter1IndexZ4 = $script:eventOrderZ4.FindIndex({ param($e) $e -eq "CHAPTER:01 - Chapter 1" })
-$classifyIndexZ4 = $script:eventOrderZ4.FindIndex({ param($e) $e -eq ("CLASSIFY:" + $avifZ4) })
-Test-Assert ($chapter1IndexZ4 -ge 0) "sanity check: chapter 1's own Start-ChapterProgress call was found in the event timeline"
-Test-Assert ($classifyIndexZ4 -ge 0) "sanity check: chapter 2's avif was actually classified during this run"
-Test-Assert ($chapter1IndexZ4 -lt $classifyIndexZ4) ("chapter 1's own dispatch started BEFORE chapter 2's avif was classified (chapter1 index=" + $chapter1IndexZ4 + ", classify index=" + $classifyIndexZ4 + ") - proves classification is per-chapter, not a series-wide pre-pass")
+$logLinesZ4 = @(Get-Content -LiteralPath $logFileZ4)
+$chapter1LineZ4  = ($logLinesZ4 | Select-String -Pattern "Processing chapter \(image engine\).*01 - Chapter 1").LineNumber
+$chapter2LineZ4  = ($logLinesZ4 | Select-String -Pattern "Processing chapter \(animated engine\).*02 - Chapter 2").LineNumber
+Test-Assert ($null -ne $chapter1LineZ4) "sanity check: chapter 1's own 'Processing chapter (image engine)' line was found in the real log"
+Test-Assert ($null -ne $chapter2LineZ4) "sanity check: chapter 2's own 'Processing chapter (animated engine)' line was found in the real log (i.e. classification did resolve it as Animated)"
+Test-Assert ($chapter1LineZ4 -lt $chapter2LineZ4) ("chapter 1 dispatched (line " + $chapter1LineZ4 + ") well before chapter 2's own 600ms-delayed classification resolved (line " + $chapter2LineZ4 + ") - proves classification is lazy per-chapter, not a series-wide pre-pass blocking chapter 1")
 Test-Assert ($totalsZ4.ConvertedImageSuccess -eq 1 -and $totalsZ4.ConvertedAnimatedSuccess -eq 1) "sanity check: both chapters still converted correctly end to end"
 Write-Host ""
 
@@ -2094,13 +2024,27 @@ Start-Sleep -Milliseconds 50
 [System.IO.File]::WriteAllText((Join-Path $chZ5StaleOnly "old.jxl"), "already converted on a prior run")
 
 $realGetSeriesChaptersZ5 = ${function:Get-SeriesChapters}
+# 2026-09-09 rewrite (dispatch-redesign migration) - the OLD shadow body
+# called the real function via a captured `$script:...Ref` script-scope
+# variable, which no longer works: Get-SeriesChapters now runs inside a
+# worker RUNSPACE (Get-OrCreateFullPipelineSeriesBundle's own factory), and
+# -SharedFunctionNames propagation only carries a function's own raw
+# SOURCE TEXT into that runspace, not this scope's variables - a captured
+# `$script:realGetSeriesChaptersZ5Ref` would resolve to $null there. Fixed
+# by generating the shadow's own source text with the excluded path baked
+# in as a literal string constant (Invoke-Expression), and calling
+# Get-ZippableLeafDirs directly (what Get-SeriesChapters itself is a thin
+# wrapper around - see that function's own header) instead of trying to
+# reach back to "the real function" at all - both are self-contained, no
+# external variable reference needed either way.
+$excludedPathZ5 = (Get-Item -LiteralPath $chZ5StaleOnly).FullName
+Invoke-Expression @"
 function Get-SeriesChapters {
-    param([string]$SeriesPath, [string[]]$QualifyingExtensions, [string[]]$ExcludeStagingDirs, [bool]$ForceRezip)
-    $real = & $script:realGetSeriesChaptersZ5Ref -SeriesPath $SeriesPath -QualifyingExtensions $QualifyingExtensions -ExcludeStagingDirs $ExcludeStagingDirs -ForceRezip $ForceRezip
-    return @($real | Where-Object { $_.Dir.FullName -ne $script:chZ5StaleOnlyRef })
+    param([string]`$SeriesPath, [string[]]`$QualifyingExtensions, [string[]]`$ExcludeStagingDirs, [bool]`$ForceRezip)
+    `$result = Get-ZippableLeafDirs -ScanPath `$SeriesPath -QualifyingExtensions `$QualifyingExtensions -ExcludeStagingDirs `$ExcludeStagingDirs -ForceRezip `$ForceRezip
+    return @(`$result | Where-Object { `$_.Dir.FullName -ne '$excludedPathZ5' })
 }
-$script:realGetSeriesChaptersZ5Ref = $realGetSeriesChaptersZ5
-$script:chZ5StaleOnlyRef = (Get-Item -LiteralPath $chZ5StaleOnly).FullName
+"@
 
 try {
     $totalsZ5 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-z5") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
@@ -2113,41 +2057,73 @@ Test-Assert ($totalsZ5.StaleImageCleanedSuccess -eq 1) ("chapter 2's stale lefto
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Z6 (2026-09-04 fix, real bug): an abort raised mid per-chapter
-#  AVIF classification must (a) stop classifying further contested files in
-#  THAT chapter immediately, not spawn every remaining ~10-17s magick
-#  identify first, and (b) stop that chapter's own Remove-StaleLooseSources
-#  deletion from running at all - not just be picked up by the NEXT
-#  chapter's own top-of-loop check. Test-AvifAnimated shadowed so the
-#  FIRST classification call raises the abort - a second contested AVIF in
-#  the SAME chapter must never be classified.
+#  Scenario Z6 (2026-09-04 fix, real bug; rewritten 2026-09-09 for the
+#  dispatch-redesign migration - see Scenario Z4's own comment above for
+#  why): an abort raised mid per-chapter AVIF classification must (a) stop
+#  classifying further contested files in THAT chapter immediately, not
+#  spawn every remaining ~10-17s magick identify first, and (b) stop that
+#  chapter's own Remove-StaleLooseSources deletion from running at all.
+#
+#  The OLD proof (shadowing Test-AvifAnimated to set the abort flag on its
+#  own first call) no longer works safely here either - classification now
+#  runs inside Get-OrCreateFullPipelineChapterClassification, itself
+#  called from inside a worker runspace, where a shadow function closing
+#  over this scope's own script-scope variable isn't reachable (same
+#  reasoning as Z4). [ConsoleCtrl] itself IS a real, process-wide static
+#  type (not runspace-local) - safe to flip from any thread - so this
+#  rewrite uses a background runspace that polls HARNESS_IDENTIFY_LOG
+#  (the fake magick.exe's own real identify-call log, already used
+#  elsewhere in this file) for its FIRST line to appear, then sets
+#  [ConsoleCtrl]::AbortRequested directly - no shadow function needed at
+#  all.
 # ==============================================================================
 Write-Host "=== Scenario Z6: abort mid-AVIF-classification stops further classification AND this chapter's own stale cleanup ===" -ForegroundColor Cyan
 $chZ6 = New-Dir "scenario-z6\Series\Chapter 1"
-New-FakeAvifIn -DirPath $chZ6 -Name "animated1.avif" -Frames 5 | Out-Null
+# animated1's own identify call carries a real, deliberate delay AFTER its
+# log write (see the fake magick.exe's own identify branch) - gives the
+# background abort-setter runspace below a real window to react between
+# animated1's own classification finishing and animated2's own starting;
+# without it, both fake identify calls are near-instant and can race
+# through before the poller (itself polling a log file, not an in-process
+# synchronous hook - see this scenario's own comment above) ever gets to
+# flip the abort flag.
+[System.IO.File]::WriteAllText((Join-Path $chZ6 "animated1.avif"), "FRAMES:5`nIDENTIFY_SLEEP_MS:250")
 New-FakeAvifIn -DirPath $chZ6 -Name "animated2.avif" -Frames 5 | Out-Null
 New-FakeImageIn -DirPath $chZ6 -Name "stale.jpg" | Out-Null
 Start-Sleep -Milliseconds 50
 [System.IO.File]::WriteAllText((Join-Path $chZ6 "stale.jxl"), "already converted on a prior run")
 
-$script:classifyCallsZ6 = 0
-$realTestAvifAnimatedZ6 = ${function:Test-AvifAnimated}
-function Test-AvifAnimated {
-    param([string]$AvifPath, [string]$MagickExe)
-    $script:classifyCallsZ6++
+$identifyLogZ6 = Join-Path $scratchDir "z6-identify.log"
+if (Test-Path -LiteralPath $identifyLogZ6) { Remove-Item -LiteralPath $identifyLogZ6 -Force }
+$env:HARNESS_IDENTIFY_LOG = $identifyLogZ6
+
+$abortRunspaceZ6 = [runspacefactory]::CreateRunspace()
+$abortRunspaceZ6.Open()
+$abortPsZ6 = [PowerShell]::Create()
+$abortPsZ6.Runspace = $abortRunspaceZ6
+$null = $abortPsZ6.AddScript({
+    param($LogPath)
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    while ((-not (Test-Path -LiteralPath $LogPath) -or (Get-Content -LiteralPath $LogPath).Count -lt 1) -and [DateTime]::UtcNow -lt $deadline) {
+        Start-Sleep -Milliseconds 5
+    }
     [ConsoleCtrl]::AbortRequested = $true
-    & $script:realTestAvifAnimatedZ6Ref -AvifPath $AvifPath -MagickExe $MagickExe
-}
-$script:realTestAvifAnimatedZ6Ref = $realTestAvifAnimatedZ6
+}).AddArgument($identifyLogZ6)
+$abortHandleZ6 = $abortPsZ6.BeginInvoke()
 
 try {
     $totalsZ6 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-z6") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
 } finally {
-    ${function:Test-AvifAnimated} = $realTestAvifAnimatedZ6
+    $abortPsZ6.EndInvoke($abortHandleZ6)
+    $abortPsZ6.Dispose()
+    $abortRunspaceZ6.Close()
+    $abortRunspaceZ6.Dispose()
+    $env:HARNESS_IDENTIFY_LOG = $null
     Reset-AbortState
 }
 
-Test-Assert ($script:classifyCallsZ6 -eq 1) ("classification stopped after the first call once abort was raised, not both (got " + $script:classifyCallsZ6 + ")")
+$classifyCallsZ6 = @(Get-Content -LiteralPath $identifyLogZ6 -ErrorAction SilentlyContinue).Count
+Test-Assert ($classifyCallsZ6 -eq 1) ("classification stopped after the first call once abort was raised, not both (got " + $classifyCallsZ6 + ")")
 Test-Assert ($totalsZ6.Aborted -eq $true) "the run's own totals record the abort"
 Test-Assert ($totalsZ6.StaleImageCleanedSuccess -eq 0 -and $totalsZ6.StaleImageCleanedFail -eq 0) ("this chapter's own stale cleanup did NOT run after the abort (got Success=" + $totalsZ6.StaleImageCleanedSuccess + ", Fail=" + $totalsZ6.StaleImageCleanedFail + ")")
 Test-Assert (Test-Path -LiteralPath (Join-Path $chZ6 "stale.jpg")) "the stale source file is still there - it was never touched"
