@@ -596,7 +596,7 @@ function Get-OrCreateFullPipelineChapterClassification {
     )
 
     $factory = {
-        if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] classification-factory ENTER " + $ChapterInfo.ChapterName) } # TEMP-TRACE
+        if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] classification-factory ENTER " + $ChapterInfo.ChapterName) } # TEMP-TRACE
         $images       = $ChapterInfo.Images
         $animated     = $ChapterInfo.AnimatedFiles
         $staleSources = $ChapterInfo.StaleSources
@@ -611,9 +611,9 @@ function Get-OrCreateFullPipelineChapterClassification {
                 if (Test-AbortSignal) { break }
                 if ($img.Extension -ine ".avif" -or -not $chAnimatedPathSet.Contains($img.FullName) -or $chAvifClassification.ContainsKey($img.FullName)) { continue }
                 try {
-                    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] before Test-AvifAnimated " + $img.FullName) } # TEMP-TRACE
+                    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] before Test-AvifAnimated " + $img.FullName) } # TEMP-TRACE
                     $isAnimated = Test-AvifAnimated -AvifPath $img.FullName -MagickExe $MagickExe
-                    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] after Test-AvifAnimated") } # TEMP-TRACE
+                    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] after Test-AvifAnimated") } # TEMP-TRACE
                     $chAvifClassification[$img.FullName] = if ($isAnimated) { "Animated" } else { "Static" }
                 } catch {
                     Write-Log ("Could not determine if AVIF '" + $img.FullName + "' is animated - excluding it from BOTH engines this run: " + $_) -Level Error
@@ -671,15 +671,15 @@ function Get-OrCreateFullPipelineChapterClassification {
             $EventQueue.Enqueue(@{ Kind = 'ChapterStaleCleanup'; Success = $chStaleResult.Success; Fail = $chStaleResult.Fail })
         }
 
-        if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] classification-factory EXIT " + $ChapterInfo.ChapterName) } # TEMP-TRACE
+        if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] classification-factory EXIT " + $ChapterInfo.ChapterName) } # TEMP-TRACE
         return @{ Images = $images; AnimatedFiles = $animated }
     }.GetNewClosure()
 
     $freshLazy = [System.Lazy[hashtable]]::new([Func[hashtable]]$factory, [System.Threading.LazyThreadSafetyMode]::ExecutionAndPublication)
     $lazy = $Cache.GetOrAdd($ChapterInfo, $freshLazy)
-    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] before lazy.Value " + $ChapterInfo.ChapterName) } # TEMP-TRACE
+    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] before lazy.Value " + $ChapterInfo.ChapterName) } # TEMP-TRACE
     $result = $lazy.Value
-    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] after lazy.Value") } # TEMP-TRACE
+    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] after lazy.Value") } # TEMP-TRACE
     return $result
 }
 
@@ -889,7 +889,7 @@ $script:fullPipelineEngineWorker = {
     # Same fresh-runspace bootstrap as every other Invoke-ZipParallelProcessing
     # worker in this codebase - see the old $script:fullPipelineChapterWorker's
     # own identical comments for why each of these is needed.
-    Add-Type -AssemblyName "Microsoft.VisualBasic"
+    $null = [System.Reflection.Assembly]::LoadWithPartialName("Microsoft.VisualBasic")
     $script:logMutex                  = $LogMutex
     $script:workerConsoleQueue        = $ConsoleQueue
     $script:FullLogging               = $DoFullLogging
@@ -914,12 +914,12 @@ $script:fullPipelineEngineWorker = {
             $series = & $seriesProvider
             if ($null -eq $series) { $seriesExhausted = $true; break }
 
-            if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId) engine=$EngineType] before Get-OrCreateFullPipelineSeriesBundle " + $series.Name) } # TEMP-TRACE
+            if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId) engine=$EngineType] before Get-OrCreateFullPipelineSeriesBundle " + $series.Name) } # TEMP-TRACE
             $bundle = Get-OrCreateFullPipelineSeriesBundle -Cache $SeriesBundleCache -Series $series -MagickExe $MagickExe `
                 -LooseImageExtensions $LooseImageExtensions -AnimatedFileExtensions $AnimatedFileExtensions -KnownZipPaths $KnownZipPaths `
                 -FolderQualifyingExtensions $FolderQualifyingExtensions -FolderExcludeStagingDirs $FolderExcludeStagingDirs `
                 -EventQueue $EventQueue -ZipBlockReasons $ZipBlockReasons
-            if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId) engine=$EngineType] after Get-OrCreateFullPipelineSeriesBundle, chapters=" + $bundle.ChapterEntries.Count) } # TEMP-TRACE
+            if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId) engine=$EngineType] after Get-OrCreateFullPipelineSeriesBundle, chapters=" + $bundle.ChapterEntries.Count) } # TEMP-TRACE
 
             foreach ($entry in $bundle.ChapterEntries) { $chapterQueue.Enqueue($entry) }
         }
@@ -959,10 +959,10 @@ $script:fullPipelineEngineWorker = {
             # first - see Get-OrCreateFullPipelineChapterClassification's
             # own header for why this is a separate, per-chapter cache
             # rather than folded into Get-OrCreateFullPipelineSeriesBundle.
-            if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId) engine=image] before classification " + $chapterInfo.ChapterName) } # TEMP-TRACE
+            if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId) engine=image] before classification " + $chapterInfo.ChapterName) } # TEMP-TRACE
             $classified = Get-OrCreateFullPipelineChapterClassification -Cache $ChapterClassificationCache -ChapterInfo $chapterInfo `
                 -MagickExe $MagickExe -LooseImageExtensions $LooseImageExtensions -EventQueue $EventQueue -ZipBlockReasons $ZipBlockReasons
-            if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId) engine=image] after classification") } # TEMP-TRACE
+            if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId) engine=image] after classification") } # TEMP-TRACE
 
             $cr = @{
                 ConvertedCount = 0; FailedCount = 0; SkippedCount = 0; DeletedCount = 0; DeleteFailedCount = 0
@@ -1106,7 +1106,32 @@ $script:fullPipelineEngineWorker = {
                     $magickProcLocal = $magickProc
                     $magickStdoutTask = $magickProc.StandardOutput.ReadToEndAsync()
                     $magickStderrTask = $magickProc.StandardError.ReadToEndAsync()
-                    $magickProc.WaitForExit()
+                    # Raw OS handle wait, not WaitForExit (same race as
+                    # Test-AvifAnimated — see
+                    # full-pipeline-hang-investigation.md). This is the
+                    # image engine's own inline magick pre-conversion for
+                    # WebP/AVIF/BMP/HEIC/HEIF, running inside a fresh
+                    # worker runspace.
+                    $preConvWaitHandle = [System.Threading.ManualResetEvent]::new($false)
+                    $preConvOrigHandle = $preConvWaitHandle.SafeWaitHandle
+                    $preConvWaitHandle.SafeWaitHandle = (
+                        [Microsoft.Win32.SafeHandles.SafeWaitHandle]::new(
+                            $magickProc.Handle, $false
+                        )
+                    )
+                    try {
+                        $preConvExited = $preConvWaitHandle.WaitOne(120000)
+                    } finally {
+                        $preConvWaitHandle.SafeWaitHandle = $preConvOrigHandle
+                        $preConvWaitHandle.Dispose()
+                    }
+                    if (-not $preConvExited) {
+                        try { $magickProc.Kill() } catch { }
+                        [System.Threading.Thread]::Sleep(200)
+                        $magickProc.Dispose()
+                        $magickProcLocal = $null
+                        throw ("magick pre-conversion did not exit within 120s - killed")
+                    }
                     $null = $magickStdoutTask.GetAwaiter().GetResult()
                     $null = $magickStderrTask.GetAwaiter().GetResult()
                     $magickExitCode = $magickProc.ExitCode
@@ -1188,10 +1213,10 @@ $script:fullPipelineEngineWorker = {
             param($chapterInfo)
             # Same per-chapter lazy classification as the image engine's
             # own JobBuilder above - see that one's own comment.
-            if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId) engine=animated] before classification " + $chapterInfo.ChapterName) } # TEMP-TRACE
+            if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId) engine=animated] before classification " + $chapterInfo.ChapterName) } # TEMP-TRACE
             $classified = Get-OrCreateFullPipelineChapterClassification -Cache $ChapterClassificationCache -ChapterInfo $chapterInfo `
                 -MagickExe $MagickExe -LooseImageExtensions $LooseImageExtensions -EventQueue $EventQueue -ZipBlockReasons $ZipBlockReasons
-            if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId) engine=animated] after classification") } # TEMP-TRACE
+            if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId) engine=animated] after classification") } # TEMP-TRACE
 
             $cr = @{
                 ConvertedCount = 0; FailedCount = 0; SkippedCount = 0; StaticSkippedCount = 0

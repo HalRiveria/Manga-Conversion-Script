@@ -216,17 +216,17 @@ function Move-ToRecycleBin {
             # through recycles the junction/link itself, not the target it
             # points at - unlike System.IO.Directory.Delete's recursive=$true
             # footgun below, this one doesn't need a reparse-point special case.
-            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory(
+            $null = [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory(
                 $ItemPath,
                 [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs,
                 [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin
-            ) | Out-Null
+            )
         } else {
-            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(
+            $null = [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(
                 $ItemPath,
                 [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs,
                 [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin
-            ) | Out-Null
+            )
         }
     }
 }

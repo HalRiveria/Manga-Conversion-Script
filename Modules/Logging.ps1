@@ -476,7 +476,7 @@ function Format-LogLine {
         a bug) build independently.
     #>
     param([string]$Message, [string]$Level)
-    return (Get-Date -Format "yyyy-MM-dd HHmmss") + " [" + $Level + "] " + $Message
+    return ([System.DateTime]::Now.ToString("yyyy-MM-dd HHmmss")) + " [" + $Level + "] " + $Message
 }
 
 function Write-LogLineToHost {
@@ -515,7 +515,7 @@ function Write-LogLineToFile {
     #>
     param([string]$FilePath, [string]$Line)
     if ([string]::IsNullOrEmpty($FilePath)) { return }
-    Invoke-MutexGuardedWrite { $Line | Out-File -FilePath $FilePath -Append -Encoding UTF8 }
+    Invoke-MutexGuardedWrite { [System.IO.File]::AppendAllText($FilePath, $Line + [System.Environment]::NewLine, [System.Text.Encoding]::UTF8) }
 }
 
 function Write-Log {

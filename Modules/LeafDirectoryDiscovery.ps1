@@ -472,7 +472,7 @@ function New-ZippableLeafDirProvider {
         [bool]$ForceRezip = $false
     )
 
-    if (-not (Test-Path -LiteralPath $ScanPath -PathType Container)) {
+    if (-not [System.IO.Directory]::Exists($ScanPath)) {
         throw ("New-ZippableLeafDirProvider: -ScanPath does not exist or is not a directory: '" + $ScanPath + "'")
     }
 

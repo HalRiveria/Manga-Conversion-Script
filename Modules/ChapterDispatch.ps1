@@ -314,7 +314,7 @@ function Invoke-ChapterDispatch {
             } catch {
                 Write-Log ("ChapterDispatch: JobStarter failed to start a job: " + $_) -Level Error
                 $dispatchResult.JobStarterFailedCount++
-                if ($isSharedBudget) { $MaxConcurrent.Release() | Out-Null }
+                if ($isSharedBudget) { $null = $MaxConcurrent.Release() }
                 $key = $job.ChapterKey
                 if ($chapterStates.ContainsKey($key)) {
                     $state = $chapterStates[$key]
@@ -339,7 +339,7 @@ function Invoke-ChapterDispatch {
                 # Complete-ImageConversionJob, which did this inline -
                 # see this module's own header).
                 try { if ($job.Proc) { $job.Proc.Dispose() } } catch { }
-                if ($isSharedBudget) { $MaxConcurrent.Release() | Out-Null }
+                if ($isSharedBudget) { $null = $MaxConcurrent.Release() }
                 $job.SlotReleased = $true
                 if (-not ($result -and $result.Requeued)) {
                     $key = $job.ChapterKey
@@ -360,7 +360,7 @@ function Invoke-ChapterDispatch {
         }
         $running = $stillRunning
 
-        Start-Sleep -Milliseconds 50
+        [System.Threading.Thread]::Sleep(50)
     }
     } catch {
         foreach ($job in $running) {
@@ -368,7 +368,7 @@ function Invoke-ChapterDispatch {
             try { if ($job.Proc) { $job.Proc.WaitForExit(5000) } } catch { }
             if (-not $job.SlotReleased) {
                 try { & $JobAbortCleanup $job } catch { }
-                if ($isSharedBudget) { try { $MaxConcurrent.Release() | Out-Null } catch { } }
+                if ($isSharedBudget) { try { $null = $MaxConcurrent.Release() } catch { } }
             }
             try { if ($job.Proc) { $job.Proc.Dispose() } } catch { }
         }
@@ -390,7 +390,7 @@ function Invoke-ChapterDispatch {
                     if (& $JobPollCompleted $job) {
                         $result = & $JobFinalize $job $pending
                         try { if ($job.Proc) { $job.Proc.Dispose() } } catch { }
-                        if ($isSharedBudget) { $MaxConcurrent.Release() | Out-Null }
+                        if ($isSharedBudget) { $null = $MaxConcurrent.Release() }
                         $job.SlotReleased = $true
                         if (-not ($result -and $result.Requeued)) {
                             $key = $job.ChapterKey
@@ -410,7 +410,7 @@ function Invoke-ChapterDispatch {
                     }
                 }
                 $running = $stillWaiting
-                if ($running.Count -gt 0) { Start-Sleep -Milliseconds 250 }
+                if ($running.Count -gt 0) { [System.Threading.Thread]::Sleep(250) }
             }
 
             # Mandatory final completion-check pass (see this module's own
@@ -423,7 +423,7 @@ function Invoke-ChapterDispatch {
                     if (& $JobPollCompleted $job) {
                         $result = & $JobFinalize $job $pending
                         try { if ($job.Proc) { $job.Proc.Dispose() } } catch { }
-                        if ($isSharedBudget) { $MaxConcurrent.Release() | Out-Null }
+                        if ($isSharedBudget) { $null = $MaxConcurrent.Release() }
                         $job.SlotReleased = $true
                         if (-not ($result -and $result.Requeued)) {
                             $key = $job.ChapterKey
@@ -453,7 +453,7 @@ function Invoke-ChapterDispatch {
                     try { if ($job.Proc) { $job.Proc.WaitForExit(5000) } } catch { }
                     try { & $JobAbortCleanup $job } catch { }
                     try { if ($job.Proc) { $job.Proc.Dispose() } } catch { }
-                    if ($isSharedBudget) { try { $MaxConcurrent.Release() | Out-Null } catch { } }
+                    if ($isSharedBudget) { try { $null = $MaxConcurrent.Release() } catch { } }
                     $job.SlotReleased = $true
                 }
             }
@@ -463,7 +463,7 @@ function Invoke-ChapterDispatch {
                 try { if ($job.Proc) { $job.Proc.WaitForExit(5000) } } catch { }
                 if (-not $job.SlotReleased) {
                     try { & $JobAbortCleanup $job } catch { }
-                    if ($isSharedBudget) { try { $MaxConcurrent.Release() | Out-Null } catch { } }
+                    if ($isSharedBudget) { try { $null = $MaxConcurrent.Release() } catch { } }
                 }
                 try { if ($job.Proc) { $job.Proc.Dispose() } } catch { }
             }

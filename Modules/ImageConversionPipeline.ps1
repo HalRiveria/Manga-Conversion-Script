@@ -386,34 +386,34 @@ function Invoke-IccStripRetryOrFail {
         Write-Log ("Could not start ICC-strip retry process for '" + $Job.SrcPath + "': " + $_) -Level Error
         return $false
     }
+    # Raw OS handle wait for exit detection (round 6 fix).
+    # DOCUMENTED DUPLICATE: Test-AvifAnimated in
+    # AnimatedConversionPipeline.ps1 uses the identical pattern and has
+    # the full reasoning — keep both in sync.
     try {
         $stripStdoutTask = $stripProc.StandardOutput.ReadToEndAsync()
         $stripStderrTask = $stripProc.StandardError.ReadToEndAsync()
-        # Manual HasExited poll loop, NOT WaitForExit(int) (2026-09-10,
-        # round 5 correction - see Test-AvifAnimated's own identical
-        # comment in AnimatedConversionPipeline.ps1 for the full story:
-        # WaitForExit(int) itself was live-caught genuinely never
-        # returning - confirmed via a 6-minute unattended wait, well past
-        # its own timeout, with the real magick.exe process already long
-        # exited - not a stuck subprocess, a .NET-level bug in the
-        # timeout overload when called alongside in-flight
-        # ReadToEndAsync() tasks from a PowerShell 5.1 runspace). A strip
-        # of one already-downloaded image is a sub-second operation in
-        # practice; 60s is generous headroom while still guaranteeing this
-        # worker's own dispatch loop can't freeze forever on a stuck magick.
-        $waitDeadline = [System.Diagnostics.Stopwatch]::StartNew()
-        while (-not $stripProc.HasExited -and $waitDeadline.Elapsed.TotalSeconds -lt 60) {
-            Start-Sleep -Milliseconds 50
+        $stripWaitHandle = [System.Threading.ManualResetEvent]::new($false)
+        $stripOrigHandle = $stripWaitHandle.SafeWaitHandle
+        $stripWaitHandle.SafeWaitHandle = (
+            [Microsoft.Win32.SafeHandles.SafeWaitHandle]::new(
+                $stripProc.Handle, $false
+            )
+        )
+        try {
+            $stripExited = $stripWaitHandle.WaitOne(60000)
+        } finally {
+            $stripWaitHandle.SafeWaitHandle = $stripOrigHandle
+            $stripWaitHandle.Dispose()
         }
-        if (-not $stripProc.HasExited) {
+
+        if (-not $stripExited) {
             try { $stripProc.Kill() } catch { }
-            $killDeadline = [System.Diagnostics.Stopwatch]::StartNew()
-            while (-not $stripProc.HasExited -and $killDeadline.Elapsed.TotalSeconds -lt 5) {
-                Start-Sleep -Milliseconds 50
-            }
+            [System.Threading.Thread]::Sleep(200)
             Write-Log ("ICC-strip retry process for '" + $Job.SrcPath + "' did not exit within 60s - killed, counting as conversion failure.") -Level Error
             return $false
         }
+
         $null = $stripStdoutTask.GetAwaiter().GetResult()
         $null = $stripStderrTask.GetAwaiter().GetResult()
         $stripExitCode = $stripProc.ExitCode
@@ -573,14 +573,21 @@ function Complete-ImageConversionJob {
                     # every webp/avif source that ever hit an ICC-strip
                     # retry left its first attempt's own pre-conversion PNG
                     # orphaned on disk.
-                    if ($Job.TempPng -and (Test-Path -LiteralPath $Job.TempPng)) { try { [System.IO.File]::Delete($Job.TempPng) } catch { } }
+                    if ($Job.TempPng -and [System.IO.File]::Exists($Job.TempPng)) { try { [System.IO.File]::Delete($Job.TempPng) } catch { } }
                     return $true
                 }
             }
             throw ("cjxl exited with code " + $code + ". Stderr: " + $stderr)
         }
-        if (-not (Test-Path -LiteralPath $Job.JxlPath)) { throw ("Output .jxl was not created: '" + $Job.JxlPath + "'") }
-        $jxlSize = (Get-Item -LiteralPath $Job.JxlPath).Length
+        # [System.IO.File]::Exists / [System.IO.FileInfo]::new, not
+        # Test-Path / Get-Item (same cmdlet-first-invocation-in-a-fresh-
+        # runspace race as Test-AvifAnimated's Where-Object — this function
+        # runs as Full Pipeline's image engine JobFinalize, inside a fresh
+        # worker runspace racing the animated engine's own first cmdlet
+        # call). Complete-AnimatedDispatchJob's own copy already uses raw
+        # .NET (see its comment at its own matching line).
+        if (-not [System.IO.File]::Exists($Job.JxlPath)) { throw ("Output .jxl was not created: '" + $Job.JxlPath + "'") }
+        $jxlSize = [System.IO.FileInfo]::new($Job.JxlPath).Length
         if ($jxlSize -eq 0) { throw ("Output .jxl is 0 bytes: '" + $Job.JxlPath + "'") }
         if ($IsAbortDrain) {
             Write-Log ("Conversion OK (abort drain): '" + $Job.JxlPath + "'")
@@ -603,13 +610,13 @@ function Complete-ImageConversionJob {
         # Without this, a corrupt non-zero-byte .jxl left behind gets picked
         # up as a StaleSources match on the NEXT run and the real source
         # gets permanently deleted, leaving only the garbage output.
-        if (Test-Path -LiteralPath $Job.JxlPath) {
+        if ([System.IO.File]::Exists($Job.JxlPath)) {
             try { [System.IO.File]::Delete($Job.JxlPath) } catch { }
         }
     }
 
     # Clean up the temporary PNG used for WebP/ICC-strip pre-conversion
-    if ($Job.TempPng -and (Test-Path -LiteralPath $Job.TempPng)) {
+    if ($Job.TempPng -and [System.IO.File]::Exists($Job.TempPng)) {
         try { [System.IO.File]::Delete($Job.TempPng) } catch { }
     }
 
@@ -809,7 +816,10 @@ function Test-WebPAnimated {
         [string]$WebPPath
     )
 
-    $bytes = New-Object byte[] 24
+    # [byte[]]::new, not New-Object (cmdlet-first-invocation race in a
+    # fresh runspace — called from Controller.ps1's image-engine
+    # $jobBuilder, inside a worker runspace racing the animated engine).
+    $bytes = [byte[]]::new(24)
     $bytesRead = 0
     $stream = [System.IO.File]::OpenRead($WebPPath)
     try { $bytesRead = $stream.Read($bytes, 0, 24) } finally { $stream.Dispose() }
@@ -1036,7 +1046,8 @@ function Convert-ImageBatch {
     while (($pending.Count -gt 0 -or $running.Count -gt 0) -and (-not $CancelToken.IsCancellationRequested)) {
 
         if ($AbortPollCallback) {
-            $inFlight = @($running | ForEach-Object { $_.SrcPath })
+            $inFlight = [System.Collections.Generic.List[string]]::new()
+            foreach ($r in $running) { $inFlight.Add($r.SrcPath) }
             & $AbortPollCallback $inFlight
         }
 
@@ -1166,10 +1177,10 @@ function Convert-ImageBatch {
                 $magickExitCode = $magickProc.ExitCode
                 $magickProc.Dispose()
                 $magickProcLocal = $null
-                if ($magickExitCode -ne 0 -or -not (Test-Path -LiteralPath $tempPng)) {
+                if ($magickExitCode -ne 0 -or -not ([System.IO.File]::Exists($tempPng))) {
                     Write-Log ("FAILED " + $formatLabel + "->PNG pre-conversion for '" + $j.SrcPath + "': magick exited " + $magickExitCode) -Level Error
                     $batchResult.FailedCount++
-                    if (Test-Path -LiteralPath $tempPng) { try { [System.IO.File]::Delete($tempPng) } catch { } }
+                    if ([System.IO.File]::Exists($tempPng)) { try { [System.IO.File]::Delete($tempPng) } catch { } }
                     continue
                 }
                 $j.TempPng = $tempPng
@@ -1231,8 +1242,8 @@ function Convert-ImageBatch {
                 # fallback for a throw landing before that assignment ever
                 # happens, so a temp PNG magick already wrote isn't
                 # orphaned just because the crash landed one line early.
-                if ($j.TempPng -and (Test-Path -LiteralPath $j.TempPng)) { try { [System.IO.File]::Delete($j.TempPng) } catch { } }
-                elseif ($tempPngLocal -and (Test-Path -LiteralPath $tempPngLocal)) { try { [System.IO.File]::Delete($tempPngLocal) } catch { } }
+                if ($j.TempPng -and ([System.IO.File]::Exists($j.TempPng))) { try { [System.IO.File]::Delete($j.TempPng) } catch { } }
+                elseif ($tempPngLocal -and ([System.IO.File]::Exists($tempPngLocal))) { try { [System.IO.File]::Delete($tempPngLocal) } catch { } }
             }
         }
 
@@ -1260,7 +1271,7 @@ function Convert-ImageBatch {
         # ($pending.Count -gt 0 -or $running.Count -gt 0) already
         # guarantees there's work left every time execution reaches this
         # point.
-        Start-Sleep -Milliseconds 50
+        [System.Threading.Thread]::Sleep(50)
     }
     } catch {
         # Force-cleanup mirrors the force-kill block below (own try/catch
@@ -1297,10 +1308,10 @@ function Convert-ImageBatch {
         foreach ($j in $running) {
             try { if ($j.Proc -and -not $j.Proc.HasExited) { $j.Proc.Kill() } } catch { }
             try { if ($j.Proc) { $j.Proc.WaitForExit(5000) } } catch { }
-            if ($j.TempPng -and (Test-Path -LiteralPath $j.TempPng)) {
+            if ($j.TempPng -and ([System.IO.File]::Exists($j.TempPng))) {
                 try { [System.IO.File]::Delete($j.TempPng) } catch { }
             }
-            if ((-not $j.SlotReleased) -and (Test-Path -LiteralPath $j.JxlPath)) {
+            if ((-not $j.SlotReleased) -and ([System.IO.File]::Exists($j.JxlPath))) {
                 try { [System.IO.File]::Delete($j.JxlPath) } catch { }
             }
             try { if ($j.Proc) { $j.Proc.Dispose() } } catch { }
@@ -1367,7 +1378,7 @@ function Convert-ImageBatch {
                     }
                 }
                 $running = $stillWaiting
-                if ($running.Count -gt 0) { Start-Sleep -Milliseconds 250 }
+                if ($running.Count -gt 0) { [System.Threading.Thread]::Sleep(250) }
             }
 
             # One final completion-check pass before declaring anything
@@ -1406,11 +1417,11 @@ function Convert-ImageBatch {
                 foreach ($j in $running) {
                     try { if (-not $j.Proc.HasExited) { $j.Proc.Kill() } } catch { }
                     try { $j.Proc.WaitForExit(5000) } catch { }
-                    if ($j.TempPng -and (Test-Path -LiteralPath $j.TempPng)) {
+                    if ($j.TempPng -and ([System.IO.File]::Exists($j.TempPng))) {
                         try { [System.IO.File]::Delete($j.TempPng) } catch { }
                     }
                     # Clean up any partial/corrupt .jxl left behind by the killed process
-                    if (Test-Path -LiteralPath $j.JxlPath) {
+                    if ([System.IO.File]::Exists($j.JxlPath)) {
                         try { [System.IO.File]::Delete($j.JxlPath) } catch { }
                     }
                     $j.Proc.Dispose()
@@ -1430,10 +1441,10 @@ function Convert-ImageBatch {
             foreach ($j in $running) {
                 try { if ($j.Proc -and -not $j.Proc.HasExited) { $j.Proc.Kill() } } catch { }
                 try { if ($j.Proc) { $j.Proc.WaitForExit(5000) } } catch { }
-                if ($j.TempPng -and (Test-Path -LiteralPath $j.TempPng)) {
+                if ($j.TempPng -and ([System.IO.File]::Exists($j.TempPng))) {
                     try { [System.IO.File]::Delete($j.TempPng) } catch { }
                 }
-                if ((-not $j.SlotReleased) -and (Test-Path -LiteralPath $j.JxlPath)) {
+                if ((-not $j.SlotReleased) -and ([System.IO.File]::Exists($j.JxlPath))) {
                     try { [System.IO.File]::Delete($j.JxlPath) } catch { }
                 }
                 try { if ($j.Proc) { $j.Proc.Dispose() } } catch { }
@@ -1456,7 +1467,7 @@ function Convert-ImageBatch {
     # reported as pending, retried fresh on the next run).
     foreach ($j in $pending.ToArray()) {
         $batchResult.PendingPaths.Add($j.SrcPath)
-        if ($j.TempPng -and (Test-Path -LiteralPath $j.TempPng)) { try { [System.IO.File]::Delete($j.TempPng) } catch { } }
+        if ($j.TempPng -and ([System.IO.File]::Exists($j.TempPng))) { try { [System.IO.File]::Delete($j.TempPng) } catch { } }
     }
 
     return $batchResult
@@ -1629,12 +1640,8 @@ function Get-LooseImageCandidates {
     $namingCollisions = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
     foreach ($img in $allCandidates) {
         $jxlCounterpart = [System.IO.Path]::ChangeExtension($img.FullName, ".jxl")
-        # Get-Item -ErrorAction SilentlyContinue instead of a separate
-        # Test-Path + Get-Item pair (2026-08-31 efficiency fix) - one stat
-        # instead of two, for every candidate with an existing .jxl
-        # counterpart.
-        $jxlItem = Get-Item -LiteralPath $jxlCounterpart -ErrorAction SilentlyContinue
-        if ($null -ne $jxlItem) {
+        $jxlItem = [System.IO.FileInfo]::new($jxlCounterpart)
+        if ($jxlItem.Exists) {
             if ($jxlItem.Length -eq 0) {
                 Write-Log ("Existing .jxl counterpart for '" + $img.FullName + "' is 0 bytes - treating as incomplete and re-converting source.") -Level Warn
                 $needsConversion.Add($img)
@@ -2271,11 +2278,11 @@ function Invoke-LooseImageConversionPipeline {
                     $magickExitCode = $magickProc.ExitCode
                     $magickProc.Dispose()
                     $magickProcLocal = $null
-                    if ($magickExitCode -ne 0 -or -not (Test-Path -LiteralPath $tempPng)) {
+                    if ($magickExitCode -ne 0 -or -not ([System.IO.File]::Exists($tempPng))) {
                         Write-Log ("FAILED " + $formatLabel + "->PNG pre-conversion for '" + $job.SrcPath + "': magick exited " + $magickExitCode) -Level Error
                         $cr.FailedCount++
                         $failureAlreadyAccounted = $true
-                        if (Test-Path -LiteralPath $tempPng) { try { [System.IO.File]::Delete($tempPng) } catch { } }
+                        if ([System.IO.File]::Exists($tempPng)) { try { [System.IO.File]::Delete($tempPng) } catch { } }
                         throw ($formatLabel + "->PNG pre-conversion failed")
                     }
                     $job.TempPng = $tempPng
@@ -2313,8 +2320,8 @@ function Invoke-LooseImageConversionPipeline {
                     $cr.FailedCount++
                 }
                 if ($magickProcLocal) { try { if (-not $magickProcLocal.HasExited) { $magickProcLocal.Kill() }; $magickProcLocal.Dispose() } catch { } }
-                if ($job.TempPng -and (Test-Path -LiteralPath $job.TempPng)) { try { [System.IO.File]::Delete($job.TempPng) } catch { } }
-                elseif ($tempPngLocal -and (Test-Path -LiteralPath $tempPngLocal)) { try { [System.IO.File]::Delete($tempPngLocal) } catch { } }
+                if ($job.TempPng -and ([System.IO.File]::Exists($job.TempPng))) { try { [System.IO.File]::Delete($job.TempPng) } catch { } }
+                elseif ($tempPngLocal -and ([System.IO.File]::Exists($tempPngLocal))) { try { [System.IO.File]::Delete($tempPngLocal) } catch { } }
                 throw
             }
         }.GetNewClosure()

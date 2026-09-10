@@ -160,7 +160,7 @@ function Test-AvifAnimated {
         [Parameter(Mandatory)]
         [string]$MagickExe
     )
-    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated ENTER " + $AvifPath) } # TEMP-TRACE
+    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated ENTER " + $AvifPath) } # TEMP-TRACE
 
     # 2026-09-09 rewrite, real perf fix: the original method
     # (`identify -format "%n\n" <path>`, no frame index) makes ImageMagick
@@ -208,78 +208,54 @@ function Test-AvifAnimated {
     $psi.RedirectStandardError  = $true
     $psi.CreateNoWindow         = $true
 
-    # ReadToEndAsync (2026-08-31 fix, from a same-day /code-review) - both
-    # streams redirected, both read synchronously to completion BEFORE
-    # WaitForExit(), used to risk the classic Process redirect deadlock:
-    # magick identify on a malformed/corrupt AVIF (a real, expected input
-    # here, since this function exists specifically to classify
-    # ambiguous files) can write enough to stderr to fill the OS pipe
-    # buffer before closing stdout - the child then blocks writing to a
-    # full, unread stderr pipe while this synchronous ReadToEnd() blocks
-    # waiting for stdout to close, a true deadlock hanging the entire
-    # calling thread (this function runs inline in the main dispatch
-    # loop's slot-filling loop, so a hang here stalls the whole batch).
-    # Every OTHER completion path in this project's two conversion
-    # pipelines only reads output after HasExited is already observed
-    # true, so the child's pipes can't still be filling - this was the
-    # one place reading while the process could still be running. Fixed
-    # by draining both streams asynchronously (so neither pipe can fill
-    # up unread) before WaitForExit(), the standard .NET-recommended
-    # pattern for this exact problem.
-    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated before Process.Start " + $AvifPath) } # TEMP-TRACE
+    # Raw OS handle wait for exit detection, ReadToEndAsync kept for pipe
+    # draining (round 6 fix). Both HasExited and WaitForExit(int) were
+    # confirmed to hang indefinitely under concurrent first-use from two
+    # fresh PS 5.1 runspaces — see full-pipeline-hang-investigation.md.
+    # This approach wraps the native process handle in a WaitHandle and
+    # calls WaitOne (a direct kernel WaitForSingleObject), bypassing all
+    # of Process's .NET-level exit-tracking state. ReadToEndAsync is kept:
+    # removing it reintroduces the proven pipe-buffer deadlock (a corrupt
+    # AVIF can fill stderr, and the child blocks writing to a full pipe it
+    # can't drain if nothing reads from it during execution).
+    # DOCUMENTED DUPLICATE: Invoke-IccStripRetryOrFail in
+    # ImageConversionPipeline.ps1 uses the identical raw-handle-wait
+    # pattern — keep both in sync.
+    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated before Process.Start " + $AvifPath) } # TEMP-TRACE
     $proc = [System.Diagnostics.Process]::Start($psi)
-    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $(Get-Date -Format 'HH:mm:ss.fff') tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated after Process.Start, pid=" + $proc.Id) } # TEMP-TRACE
+    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated after Process.Start, pid=" + $proc.Id) } # TEMP-TRACE
     try {
+        if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated before ReadToEndAsync") } # TEMP-TRACE
         $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
         $stderrTask = $proc.StandardError.ReadToEndAsync()
-        # Manual HasExited poll loop, NOT WaitForExit(int) (2026-09-10,
-        # round 5 - WaitForExit(int) was tried first, and was itself the
-        # bug: live-caught multiple times with a full process snapshot
-        # confirming magick.exe had ALREADY exited, then confirmed via a
-        # 6-minute unattended wait that WaitForExit(30000) genuinely never
-        # returns - not slow, not buffered output, a real indefinite hang
-        # inside .NET's own timeout-overload of Process.WaitForExit(int)
-        # when called alongside two in-flight ReadToEndAsync() tasks from
-        # a PowerShell 5.1 runspace. Polling .HasExited directly sidesteps
-        # that .NET-level bug entirely, using the exact same mechanism
-        # ChapterDispatch.ps1's own JobPollCompleted already relies on for
-        # every other process in this codebase. Runs inline in JobBuilder's
-        # own per-chapter classification Lazy<T> factory (Controller.ps1's
-        # Get-OrCreateFullPipelineChapterClassification), which BOTH Full
-        # Pipeline engines share (LazyThreadSafetyMode::ExecutionAndPublication
-        # serializes every caller of .Value on the same cached Lazy) - a
-        # genuinely stuck (or, as it turned out, WaitForExit-poisoned)
-        # magick.exe here didn't just stall the calling engine's own
-        # dispatch loop, it froze the OTHER engine too the instant its own
-        # JobBuilder reached the same shared chapter, with zero error and
-        # zero CPU - exactly the symptom chased across this file's own
-        # 2026-09-10 investigation. 30s is far beyond this call's own
-        # measured 0.15-0.35s real-world cost (see this function's own
-        # 2026-09-09 rewrite comment above) even under heavy contention -
-        # a real timeout here surfaces through the exact same "couldn't
-        # classify this AVIF" error path every caller already handles
-        # (skip/Warn, exclude from both engines in Full Pipeline's case via
-        # Add-FullPipelineZipBlockReason), not a new failure mode.
-        $waitDeadline = [System.Diagnostics.Stopwatch]::StartNew()
-        while (-not $proc.HasExited -and $waitDeadline.Elapsed.TotalSeconds -lt 30) {
-            Start-Sleep -Milliseconds 50
+        if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated before handle-wait") } # TEMP-TRACE
+        $procWaitHandle = [System.Threading.ManualResetEvent]::new($false)
+        $origSafeHandle = $procWaitHandle.SafeWaitHandle
+        $procWaitHandle.SafeWaitHandle = (
+            [Microsoft.Win32.SafeHandles.SafeWaitHandle]::new(
+                $proc.Handle, $false
+            )
+        )
+        try {
+            $exited = $procWaitHandle.WaitOne(30000)
+        } finally {
+            $procWaitHandle.SafeWaitHandle = $origSafeHandle
+            $procWaitHandle.Dispose()
         }
-        if (-not $proc.HasExited) {
+        if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated handle-wait returned, exited=$exited") } # TEMP-TRACE
+
+        if (-not $exited) {
             try { $proc.Kill() } catch { }
-            $killDeadline = [System.Diagnostics.Stopwatch]::StartNew()
-            while (-not $proc.HasExited -and $killDeadline.Elapsed.TotalSeconds -lt 5) {
-                Start-Sleep -Milliseconds 50
-            }
+            [System.Threading.Thread]::Sleep(200)
             throw "magick identify did not exit within 30s - killed"
         }
+
+        if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated before GetResult") } # TEMP-TRACE
         $stdout = $stdoutTask.GetAwaiter().GetResult()
         $stderr = $stderrTask.GetAwaiter().GetResult()
         $code = $proc.ExitCode
+        if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated done, exitCode=$code") } # TEMP-TRACE
     } finally {
-        # try/finally (2026-08-31 fix): Dispose() used to only run after
-        # every read/wait call above succeeded - a throw from any of them
-        # (e.g. an I/O error reading a redirected stream) skipped it
-        # entirely, leaking the process handle.
         $proc.Dispose()
     }
 
@@ -287,7 +263,15 @@ function Test-AvifAnimated {
         throw ("magick identify exited " + $code + ". Stderr: " + $stderr.Trim())
     }
 
-    $firstLine = ($stdout -split "`r?`n" | Where-Object { $_ -ne "" } | Select-Object -First 1)
+    # Raw .NET, not Where-Object | Select-Object (cmdlets race on first
+    # invocation across fresh concurrent runspaces — same bug class as
+    # Test-Path/Get-ChildItem, already fixed everywhere else in this
+    # concurrent-runspace code path).
+    $firstLine = $null
+    foreach ($line in $stdout.Split([char[]]@("`r", "`n"), [System.StringSplitOptions]::RemoveEmptyEntries)) {
+        $firstLine = $line
+        break
+    }
     $delay = 0
     if ($null -eq $firstLine -or -not [int]::TryParse($firstLine.Trim(), [ref]$delay)) {
         throw ("magick identify returned a non-numeric delay value: '" + $stdout.Trim() + "'")
@@ -378,8 +362,8 @@ function Complete-AnimatedConversionJob {
         # a single worker runspace (mode 3/Convert-AnimatedBatch), never
         # racing a SECOND fresh runspace's own first cmdlet call the way
         # Full Pipeline's two-engine dispatch does.
-        $webpItem = Get-Item -LiteralPath $Job.MagickOutputPath -ErrorAction SilentlyContinue
-        if ($null -eq $webpItem) { throw ("Output .webp was not created: '" + $Job.MagickOutputPath + "'") }
+        $webpItem = [System.IO.FileInfo]::new($Job.MagickOutputPath)
+        if (-not $webpItem.Exists) { throw ("Output .webp was not created: '" + $Job.MagickOutputPath + "'") }
         $webpSize = $webpItem.Length
         if ($webpSize -eq 0) { throw ("Output .webp is 0 bytes: '" + $Job.MagickOutputPath + "'") }
         # Move the verified-good temp file into place (2026-08-31 fix) -
@@ -565,7 +549,9 @@ function Convert-AnimatedBatch {
     while (($pending.Count -gt 0 -or $running.Count -gt 0) -and (-not $CancelToken.IsCancellationRequested)) {
 
         if ($AbortPollCallback) {
-            $inFlight = @($running | ForEach-Object { $_.SrcPath })
+            $inFlightList = [System.Collections.Generic.List[string]]::new()
+            foreach ($r in $running) { $inFlightList.Add($r.SrcPath) }
+            $inFlight = @($inFlightList)
             & $AbortPollCallback $inFlight
         }
 
@@ -586,7 +572,7 @@ function Convert-AnimatedBatch {
             # Computed once, reused below for WebpExistedBeforeJob
             # (2026-08-31 efficiency fix) - this same path was being
             # stat'd twice per dispatched job.
-            $webpPathExists = Test-Path -LiteralPath $j.WebpPath
+            $webpPathExists = [System.IO.File]::Exists($j.WebpPath)
             if ($webpPathExists -and -not $DoAnimatedOverwrite) {
                 Write-Log ("SKIPPING '" + $j.SrcPath + "': output '" + $j.WebpPath + "' already exists (Overwrite is off).")
                 $batchResult.SkippedCount++
@@ -735,7 +721,7 @@ function Convert-AnimatedBatch {
         # fix (ImageConversionPipeline.ps1) for the full reasoning: the
         # outer while's own condition already guarantees there's work left
         # whenever execution reaches this point.
-        Start-Sleep -Milliseconds 50
+        [System.Threading.Thread]::Sleep(50)
     }
     } catch {
         # Force-cleanup mirrors the force-kill block below (own try/catch
@@ -827,7 +813,7 @@ function Convert-AnimatedBatch {
                     }
                 }
                 $running = $stillWaiting
-                if ($running.Count -gt 0) { Start-Sleep -Milliseconds 250 }
+                if ($running.Count -gt 0) { [System.Threading.Thread]::Sleep(250) }
             }
 
             # One final completion-check pass before declaring anything
@@ -1416,7 +1402,7 @@ function Invoke-LooseAnimatedConversionPipeline {
                 $srcPath  = $f.FullName
                 $webpPath = [System.IO.Path]::ChangeExtension($srcPath, ".webp")
 
-                $webpPathExists = Test-Path -LiteralPath $webpPath
+                $webpPathExists = [System.IO.File]::Exists($webpPath)
                 if ($webpPathExists -and -not $AnimatedOverwrite) {
                     Write-Log ("SKIPPING '" + $srcPath + "': output '" + $webpPath + "' already exists (Overwrite is off).")
                     $cr.SkippedCount++
