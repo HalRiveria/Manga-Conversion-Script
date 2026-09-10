@@ -869,36 +869,6 @@ ${function:Test-AbortSignal}                   = $originalTestAbortSignal
 Write-Host ""
 
 # ==============================================================================
-#  Scenario V: -SharedBudget (Controller.ps1's Full Pipeline concurrency
-#  design, 2026-08-28) - a SemaphoreSlim with FEWER slots than
-#  -AnimatedThreads actually constrains dispatch to the semaphore's count
-#  (proven by observing it get fully exhausted mid-run via
-#  -AbortPollCallback, not just inferred from final totals), and every
-#  slot is released again (no leak) once the batch completes. Same
-#  technique as ImageConversionPipeline.Harness.ps1's own Scenario P.
-# ==============================================================================
-Write-Host "=== Scenario V: -SharedBudget gates dispatch and never leaks ===" -ForegroundColor Cyan
-$filesV = 1..5 | ForEach-Object { New-FakeAvif -Name ("scenario-v\budget" + $_ + ".avif") -Content "FRAMES:6`nSLEEP_MS:150" }
-$budgetV = [System.Threading.SemaphoreSlim]::new(2, 2)
-$script:budgetSnapshotsV = [System.Collections.Generic.List[int]]::new()
-$pollV = { param($inFlight) $script:budgetSnapshotsV.Add($budgetV.CurrentCount) }
-
-$resultV = Convert-AnimatedBatch -AnimatedFiles $filesV -MagickExe $fakeMagickExe -AnimatedThreads 5 -DoFullLogging $false `
-    -CancelToken ([System.Threading.CancellationToken]::None) -SharedBudget $budgetV -AbortPollCallback $pollV
-
-Test-Assert ($resultV.ConvertedCount -eq 5 -and $resultV.FailedCount -eq 0) "all 5 converted correctly through the shared budget"
-Test-Assert (($script:budgetSnapshotsV | Where-Object { $_ -eq 0 }).Count -gt 0) "the 2-slot budget was actually driven to 0 at some point - proves dispatch was really gated to 2 concurrent, not just passed through unused (AnimatedThreads=5 would have let all 5 start at once otherwise)"
-Test-Assert ($budgetV.CurrentCount -eq 2) "the budget is back to its full initial count after the call - no leaked slots"
-# 2026-08-31 fix: same busy-spin bug and same proof technique as
-# ImageConversionPipeline.Harness.ps1's Scenario P - AnimatedThreads=5 with
-# a 2-slot SharedBudget is exactly the shape that spun at ~100% CPU before
-# this fix (the old sleep-gate never saw running.Count reach
-# AnimatedThreads, since the budget was the real ceiling).
-Test-Assert ($script:budgetSnapshotsV.Count -lt 100) ("the dispatch loop slept between passes instead of busy-spinning (got " + $script:budgetSnapshotsV.Count + " passes for ~450ms of simulated work)")
-$budgetV.Dispose()
-Write-Host ""
-
-# ==============================================================================
 #  Scenario W (2026-08-31 fix): $animatedCts's construction and
 #  Register-AbortCancellationSource call were moved INSIDE the function's
 #  try block (same species as ZipParallelProcessing.ps1's mutex-leak fix
@@ -942,13 +912,9 @@ Write-Host ""
 #  can be STALE if Complete-AnimatedConversionJob throws partway through
 #  the poll loop's per-pass foreach - it may still list a job that ALREADY
 #  completed successfully earlier in the SAME pass (source deleted, real
-#  .webp on disk) alongside the job that throws. A same-budget scenario
-#  can't show the SharedBudget half of this (SemaphoreSlim self-caps at
-#  max once every acquired slot is legitimately released), but a SHARED
-#  budget with real headroom (simulating the image engine holding some
-#  slots, the actual Full Pipeline shape) can.
+#  .webp on disk) alongside the job that throws.
 # ==============================================================================
-Write-Host "=== Scenario X: a same-pass throw does not double-release an EARLIER job's slot or delete its already-converted output ===" -ForegroundColor Cyan
+Write-Host "=== Scenario X: a same-pass throw does not delete an EARLIER job's already-converted output ===" -ForegroundColor Cyan
 $chX = New-Dir "scenario-x\Series\Chapter 1"
 # Both jobs get a small, MATCHING SLEEP_MS (2026-08-31 tuning) - each AVIF
 # job spawns its own `identify` classification call SEQUENTIALLY before
@@ -973,13 +939,6 @@ $expectedWebpX = Join-Path $chX "jobA_x.webp"
 $fileX2Path = Join-Path $chX "jobB_x.avif"
 [System.IO.File]::WriteAllText($fileX2Path, "FRAMES:5`nSLEEP_MS:20`nSTDOUT_MARKER")
 $fileX2 = Get-Item -LiteralPath $fileX2Path
-$budgetX = [System.Threading.SemaphoreSlim]::new(4, 4)
-# Pre-acquire 2 slots to stand in for the image engine's own real,
-# still-in-use share of the budget - the exact condition under which the
-# bug's damage (refunding slots that were never this batch's to release)
-# is actually observable.
-$budgetX.Wait(0) | Out-Null
-$budgetX.Wait(0) | Out-Null
 
 $realWriteLogFnX = ${function:Write-Log}
 function Write-Log {
@@ -992,7 +951,7 @@ $script:realWriteLogFnX = $realWriteLogFnX
 $threwX = $false
 try {
     $null = Convert-AnimatedBatch -AnimatedFiles @($fileX1, $fileX2) -MagickExe $fakeMagickExe -AnimatedThreads 5 -DoFullLogging $true `
-        -CancelToken ([System.Threading.CancellationToken]::None) -SharedBudget $budgetX
+        -CancelToken ([System.Threading.CancellationToken]::None)
 } catch {
     $threwX = $true
 } finally {
@@ -1000,9 +959,7 @@ try {
 }
 
 Test-Assert $threwX "the injected Write-Log failure propagated out of Convert-AnimatedBatch"
-Test-Assert ($budgetX.CurrentCount -eq 2) ("only this batch's own 2 acquired slots were released, not the 2 pre-acquired ones standing in for the OTHER engine (got CurrentCount=" + $budgetX.CurrentCount + ", would be 4 if both jobs were double-released)")
 Test-Assert (Test-Path -LiteralPath $expectedWebpX) "jobA's already-converted .webp survived - the outer catch's force-cleanup must not touch a job that already completed successfully earlier in the same poll pass"
-$budgetX.Dispose()
 Write-Host ""
 
 # ==============================================================================
@@ -1110,8 +1067,6 @@ $fileAAPath = Join-Path $chAA "neverfinishes_aa.avif"
 [System.IO.File]::WriteAllText($fileAAPath, "FRAMES:5`nSLEEP_MS:30000")
 $fileAA = Get-Item -LiteralPath $fileAAPath
 $expectedWebpAA = Join-Path $chAA "neverfinishes_aa.webp"
-$budgetAA = [System.Threading.SemaphoreSlim]::new(3, 3)
-$budgetAA.Wait(0) | Out-Null   # one slot pre-acquired to stand in for another engine
 $ctsAA = [System.Threading.CancellationTokenSource]::new()
 $pollAA = { param($inFlight) if ($inFlight.Count -gt 0) { $ctsAA.Cancel() } }
 
@@ -1126,7 +1081,7 @@ $script:realWriteLogFnAA = $realWriteLogFnAA
 $threwAA = $false
 try {
     $null = Convert-AnimatedBatch -AnimatedFiles @($fileAA) -MagickExe $fakeMagickExe -AnimatedThreads 5 -DoFullLogging $false `
-        -CancelToken $ctsAA.Token -SharedBudget $budgetAA -AbortPollCallback $pollAA -AbortTimeoutSeconds 1
+        -CancelToken $ctsAA.Token -AbortPollCallback $pollAA -AbortTimeoutSeconds 1
 } catch {
     $threwAA = $true
 } finally {
@@ -1135,9 +1090,7 @@ try {
 }
 
 Test-Assert $threwAA "the injected failure propagated out of Convert-AnimatedBatch during the straggler-drain, not silently swallowed"
-Test-Assert ($budgetAA.CurrentCount -eq 2) ("the never-finished job's slot was still released exactly once by the new catch (got CurrentCount=" + $budgetAA.CurrentCount + ", would stay 1 if the catch never ran and leaked it)")
 Test-Assert (-not (Test-Path -LiteralPath $expectedWebpAA)) "no .webp was ever created for a job that was force-killed mid-sleep (sanity check - fake magick only writes output AFTER its SLEEP_MS completes)"
-$budgetAA.Dispose()
 Write-Host ""
 
 # ==============================================================================

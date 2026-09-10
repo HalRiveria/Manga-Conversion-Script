@@ -68,10 +68,9 @@
         guessed at.
       - $deleteFolders (reference: hardcoded $true, mode 4's "delete
         extracted staging folders after a successful re-zip" flag) became
-        a real setting, DeleteExtractedFoldersAfterRezip, default $true
-        (unchanged behavior) - the reference file's own comment flagged
-        this as worth promoting to a real toggle once a config module
-        existed.
+        a real setting, DeleteExtractedFoldersAfterRezip - removed
+        2026-09-09 along with RezipPipeline.ps1 itself (mode 9, the only
+        thing that ever read it).
       - CjxlPath/MagickPath are persisted here even though they're
         currently CLI params resolved fresh (via Find-Exe) every run -
         letting a caller cache a successful auto-detection avoids
@@ -137,7 +136,6 @@ function Get-DefaultScriptSettings {
         JpegQuality                      = 90
         PermanentDelete                  = $false
         EnableModePrompt                 = $true
-        DeleteExtractedFoldersAfterRezip = $true
         AnimatedThreads                  = 8
         AnimatedQuality                  = 90
         AnimatedLossless                 = $false

@@ -474,19 +474,15 @@ function Complete-ImageConversionJob {
         [bool]$DoFullLogging,
         [string]$ItemNoun   = "image",
         [string]$SourceNoun = "source image",
-        [System.Threading.SemaphoreSlim]$SharedBudget,
         [bool]$IsAbortDrain = $false
     )
 
     # try/finally (2026-08-31 fix, caught by a same-day /code-review 4th
-    # pass): this is the one place a RUNNING job's process handle and
-    # SharedBudget slot get released - unlike every other resource-release
-    # path in this file, it wasn't guarded. A throw from ReadToEnd/ExitCode
-    # (unlikely on an already-exited process, but not impossible) used to
-    # skip Dispose() AND Release() entirely and propagate straight out of
-    # Convert-ImageBatch - a permanently leaked SemaphoreSlim slot for the
-    # rest of the run under Controller.ps1's Full Pipeline, where the
-    # budget is shared with the animated engine.
+    # pass): this is the one place a RUNNING job's process handle gets
+    # disposed - unlike every other resource-release path in this file, it
+    # wasn't guarded. A throw from ReadToEnd/ExitCode (unlikely on an
+    # already-exited process, but not impossible) used to skip Dispose()
+    # entirely and propagate straight out of Convert-ImageBatch.
     try {
         # Await the tasks started right after Process::Start (2026-09-04
         # fix) rather than a synchronous ReadToEnd() here - by the time
@@ -501,11 +497,6 @@ function Complete-ImageConversionJob {
         $code   = $Job.Proc.ExitCode
     } finally {
         $Job.Proc.Dispose()
-        # This job is leaving the caller's running list for good in every
-        # path below (including the ICC-retry re-enqueue - the RETRY job
-        # acquires its own fresh slot later when it's actually dispatched) -
-        # release its slot exactly once, here, regardless of outcome.
-        if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
         # SlotReleased marker (2026-08-31 fix, caught by verifying this same
         # day's /code-review 4th pass): Convert-ImageBatch's own dispatch-
         # loop try/catch (see that function's header comment) does its own
@@ -515,11 +506,11 @@ function Complete-ImageConversionJob {
         # throws (e.g. a Write-Log below failing on a locked log file)
         # partway through that pass, the outer catch sees the STALE
         # $running list, which still includes every job THIS finally
-        # already released earlier in the same pass - without this marker,
-        # the outer catch would release their slots a second time,
-        # permanently inflating the shared budget's ceiling for the rest
-        # of the run (the same leak species fix 3 set out to prevent,
-        # running in the opposite direction).
+        # already finished processing earlier in the same pass - without
+        # this marker, the outer catch would delete that job's real,
+        # already-converted .jxl output as if it belonged to a genuinely
+        # still-running, force-killed job (see the outer catch's own
+        # SlotReleased-guarded deletion, below in Convert-ImageBatch).
         $Job.SlotReleased = $true
     }
 
@@ -633,16 +624,18 @@ function Complete-ImageDispatchJob {
         delete-source logic (everything after that function's own
         try/finally) - see that function's own header for the cross-
         reference. Genuinely different contract, not a lazy copy:
-        Complete-ImageConversionJob's caller (Convert-ImageBatch, still
-        used directly by Controller.ps1's Full Pipeline until step 4 of
-        the dispatch redesign migrates it too) owns process disposal and
-        -SharedBudget release itself; THIS function's caller
-        (Invoke-ChapterDispatch) already owns that generically for every
-        job on every exit path - duplicating it here would double-release
-        the same slot. No -IsAbortDrain distinction either -
-        Invoke-ChapterDispatch calls JobFinalize identically whether a
-        job finished during normal polling or during the abort/drain
-        window, so there's no separate wording variant to capture.
+        Complete-ImageConversionJob's caller (Convert-ImageBatch, no
+        remaining real caller of its own since RezipPipeline.ps1 was
+        removed 2026-09-09 - see CHANGELOG.md) owns process disposal
+        itself; THIS
+        function's caller (Invoke-ChapterDispatch) already owns process
+        disposal AND its own -MaxConcurrent SemaphoreSlim release
+        generically for every job on every exit path - duplicating either
+        here would double-release the same slot. No -IsAbortDrain
+        distinction either - Invoke-ChapterDispatch calls JobFinalize
+        identically whether a job finished during normal polling or during
+        the abort/drain window, so there's no separate wording variant to
+        capture.
     .OUTPUTS
         @{ Success = [bool] } for a normal completion, or
         @{ Requeued = $true } when Invoke-IccStripRetryOrFail enqueued a
@@ -837,7 +830,6 @@ function Convert-ImageBatch {
         [string]$AbortWaitMessage       = $null,
         [scriptblock]$AbortPollCallback = $null,
         [int]$AbortTimeoutSeconds       = 60,
-        [System.Threading.SemaphoreSlim]$SharedBudget = $null,
         [System.Collections.Generic.HashSet[string]]$KnownStaticPaths = $null
     )
 
@@ -993,14 +985,12 @@ function Convert-ImageBatch {
     # try/catch around the whole dispatch loop (2026-08-31 fix, caught by a
     # same-day /code-review 4th pass): every OTHER exit from this loop
     # (normal completion, or cancellation via the straggler-drain/force-kill
-    # block below) already releases every running job's process handle and
-    # SharedBudget slot. An unexpected throw from inside the loop itself
-    # (-AbortPollCallback, Write-Log on a locked log file, a rethrow from
+    # block below) already disposes every running job's process handle. An
+    # unexpected throw from inside the loop itself (-AbortPollCallback,
+    # Write-Log on a locked log file, a rethrow from
     # Complete-ImageConversionJob) had no such guarantee - it propagated
     # straight out of Convert-ImageBatch with $running jobs' handles
-    # undisposed and their budget slots unreleased. Under Controller.ps1's
-    # Full Pipeline that budget is shared with the animated engine, so a
-    # leak here permanently shrinks the ceiling for the rest of the run.
+    # undisposed.
     try {
     while (($pending.Count -gt 0 -or $running.Count -gt 0) -and (-not $CancelToken.IsCancellationRequested)) {
 
@@ -1009,21 +999,9 @@ function Convert-ImageBatch {
             & $AbortPollCallback $inFlight
         }
 
-        # Fill up to MaxCjxlProcs slots - or, when -SharedBudget is
-        # supplied (Controller.ps1's Full Pipeline engine only), up to
-        # however many slots the shared SemaphoreSlim currently has free,
-        # ignoring $MaxCjxlProcs entirely (the shared budget IS the real
-        # ceiling in that mode). Wait(0) is a non-blocking try-acquire -
-        # it either grabs a slot and returns true, or returns false
-        # immediately without consuming one - so this loop never stalls
-        # waiting on a slot the OTHER engine's runspace is holding; it
-        # just stops dispatching for this pass and the outer while-loop's
-        # normal poll/sleep cycle tries again next time around. EVERY
-        # early `continue` below (a job that never reaches
-        # Process.Start/$running.Add) MUST release a slot it just
-        # acquired here first - see each one.
+        # Fill up to MaxCjxlProcs slots.
         while ($pending.Count -gt 0 -and (-not $CancelToken.IsCancellationRequested) -and `
-               $(if ($SharedBudget) { $SharedBudget.Wait(0) } else { $running.Count -lt $MaxCjxlProcs })) {
+               $running.Count -lt $MaxCjxlProcs) {
             $j   = $pending.Dequeue()
             # Everything from here through $running.Add($j) below is wrapped
             # in one try/catch (2026-08-31 fix) - a raw .NET exception from
@@ -1108,7 +1086,6 @@ function Convert-ImageBatch {
                 if (-not $MagickExe) {
                     Write-Log ("SKIPPING " + $formatLabel + " '" + $j.SrcPath + "': ImageMagick not found. Install ImageMagick or pass -MagickPath.") -Level Error
                     $batchResult.FailedCount++
-                    if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
                     continue
                 }
 
@@ -1146,7 +1123,6 @@ function Convert-ImageBatch {
                     Write-Log ("FAILED " + $formatLabel + "->PNG pre-conversion for '" + $j.SrcPath + "': magick exited " + $magickExitCode) -Level Error
                     $batchResult.FailedCount++
                     if (Test-Path -LiteralPath $tempPng) { try { [System.IO.File]::Delete($tempPng) } catch { } }
-                    if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
                     continue
                 }
                 $j.TempPng = $tempPng
@@ -1210,7 +1186,6 @@ function Convert-ImageBatch {
                 # orphaned just because the crash landed one line early.
                 if ($j.TempPng -and (Test-Path -LiteralPath $j.TempPng)) { try { [System.IO.File]::Delete($j.TempPng) } catch { } }
                 elseif ($tempPngLocal -and (Test-Path -LiteralPath $tempPngLocal)) { try { [System.IO.File]::Delete($tempPngLocal) } catch { } }
-                if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
             }
         }
 
@@ -1225,7 +1200,7 @@ function Convert-ImageBatch {
                 # Complete-ImageConversionJob via Invoke-IccStripRetryOrFail,
                 # which re-enqueues a retry job onto $pending rather than
                 # counting it failed; a $true return means that happened here.
-                if (Complete-ImageConversionJob -Job $j -BatchResult $batchResult -Pending $pending -MagickExe $MagickExe -DoFullLogging $DoFullLogging -ItemNoun $ItemNoun -SourceNoun $SourceNoun -SharedBudget $SharedBudget) {
+                if (Complete-ImageConversionJob -Job $j -BatchResult $batchResult -Pending $pending -MagickExe $MagickExe -DoFullLogging $DoFullLogging -ItemNoun $ItemNoun -SourceNoun $SourceNoun) {
                     continue
                 }
             } else {
@@ -1237,14 +1212,7 @@ function Convert-ImageBatch {
         # Always sleep briefly here - the outer while's own condition
         # ($pending.Count -gt 0 -or $running.Count -gt 0) already
         # guarantees there's work left every time execution reaches this
-        # point, so a conditional check for "is dispatch actually blocked"
-        # was redundant in the plain $MaxCjxlProcs case and outright wrong
-        # for -SharedBudget: with a shared budget smaller than
-        # $MaxCjxlProcs (the normal Full Pipeline case - Controller.ps1
-        # passes -MaxCjxlProcs $Files.Count), $running.Count never reaches
-        # $MaxCjxlProcs, so the old condition was false on every pass and
-        # this loop busy-spun at ~100% CPU polling Wait(0)/HasExited
-        # instead of sleeping between polls.
+        # point.
         Start-Sleep -Milliseconds 50
     }
     } catch {
@@ -1259,26 +1227,26 @@ function Convert-ImageBatch {
         # keeping only the garbage output) - best effort, since we're
         # already unwinding from an unexpected failure and must not let a
         # cleanup error mask or replace the real one.
-        # $j.SlotReleased guards the Release() call AND the .jxl deletion
-        # (2026-08-31 fix, corrected after a third verification pass found
-        # a real DATA-LOSS bug in the second pass's own fix: this $running
-        # list is STALE - the poll loop only reassigns it after its whole
-        # foreach pass completes - so it can still list a job that ALREADY
-        # completed successfully earlier in the SAME pass, source deleted
-        # and all. SlotReleased is set in Complete-ImageConversionJob's own
-        # finally block, true for exactly those already-finished jobs
-        # (success OR failure, doesn't matter which - either way their
-        # OWN cleanup already ran and this block must leave their .jxl
-        # alone) and false for the genuinely-still-running jobs this
-        # force-kill path exists for. Verified live: without this guard, a
-        # job that converted successfully and had its source already
-        # deleted lost its .jxl too the moment a LATER job in the same
-        # poll pass threw - the image was gone entirely, not just its
-        # source. TempPng cleanup is intentionally NOT guarded by this
-        # flag - Complete-ImageConversionJob's own TempPng cleanup runs
-        # AFTER its SlotReleased-setting finally, so a job marked
-        # SlotReleased via an early throw (the unguarded "cjxl stdout for"
-        # Write-Log call) can still have a real, undeleted TempPng.
+        # $j.SlotReleased guards the .jxl deletion below (2026-08-31 fix,
+        # corrected after a third verification pass found a real DATA-LOSS
+        # bug in the second pass's own fix: this $running list is STALE -
+        # the poll loop only reassigns it after its whole foreach pass
+        # completes - so it can still list a job that ALREADY completed
+        # successfully earlier in the SAME pass, source deleted and all.
+        # SlotReleased is set in Complete-ImageConversionJob's own finally
+        # block, true for exactly those already-finished jobs (success OR
+        # failure, doesn't matter which - either way their OWN cleanup
+        # already ran and this block must leave their .jxl alone) and
+        # false for the genuinely-still-running jobs this force-kill path
+        # exists for. Verified live: without this guard, a job that
+        # converted successfully and had its source already deleted lost
+        # its .jxl too the moment a LATER job in the same poll pass threw -
+        # the image was gone entirely, not just its source. TempPng
+        # cleanup is intentionally NOT guarded by this flag -
+        # Complete-ImageConversionJob's own TempPng cleanup runs AFTER its
+        # SlotReleased-setting finally, so a job marked SlotReleased via an
+        # early throw (the unguarded "cjxl stdout for" Write-Log call) can
+        # still have a real, undeleted TempPng.
         foreach ($j in $running) {
             try { if ($j.Proc -and -not $j.Proc.HasExited) { $j.Proc.Kill() } } catch { }
             try { if ($j.Proc) { $j.Proc.WaitForExit(5000) } } catch { }
@@ -1289,7 +1257,6 @@ function Convert-ImageBatch {
                 try { [System.IO.File]::Delete($j.JxlPath) } catch { }
             }
             try { if ($j.Proc) { $j.Proc.Dispose() } } catch { }
-            if ($SharedBudget -and -not $j.SlotReleased) { try { $SharedBudget.Release() | Out-Null } catch { } }
         }
         throw
     }
@@ -1321,8 +1288,8 @@ function Convert-ImageBatch {
         # covers the MAIN loop - an unexpected throw here (the same
         # unguarded Write-Log calls inside Complete-ImageConversionJob are
         # the realistic trigger) had no equivalent guard, leaking every
-        # remaining drain-list job's process handle and SharedBudget slot.
-        # Mirrors that catch's own cleanup exactly, including the
+        # remaining drain-list job's process handle. Mirrors that catch's
+        # own cleanup exactly, including the
         # SlotReleased-guarded .jxl deletion (the identical stale-list/
         # data-loss shape applies here too - the drain's own polling loop
         # only reassigns $running after its whole foreach pass completes).
@@ -1345,7 +1312,7 @@ function Convert-ImageBatch {
                 $stillWaiting = [System.Collections.Generic.List[hashtable]]::new()
                 foreach ($j in $running) {
                     if ($j.Proc.HasExited) {
-                        if (Complete-ImageConversionJob -Job $j -BatchResult $batchResult -Pending $pending -MagickExe $MagickExe -DoFullLogging $DoFullLogging -ItemNoun $ItemNoun -SourceNoun $SourceNoun -SharedBudget $SharedBudget -IsAbortDrain $true) {
+                        if (Complete-ImageConversionJob -Job $j -BatchResult $batchResult -Pending $pending -MagickExe $MagickExe -DoFullLogging $DoFullLogging -ItemNoun $ItemNoun -SourceNoun $SourceNoun -IsAbortDrain $true) {
                             continue
                         }
                     } else {
@@ -1374,7 +1341,7 @@ function Convert-ImageBatch {
                 $stillWaiting = [System.Collections.Generic.List[hashtable]]::new()
                 foreach ($j in $running) {
                     if ($j.Proc.HasExited) {
-                        if (Complete-ImageConversionJob -Job $j -BatchResult $batchResult -Pending $pending -MagickExe $MagickExe -DoFullLogging $DoFullLogging -ItemNoun $ItemNoun -SourceNoun $SourceNoun -SharedBudget $SharedBudget -IsAbortDrain $true) {
+                        if (Complete-ImageConversionJob -Job $j -BatchResult $batchResult -Pending $pending -MagickExe $MagickExe -DoFullLogging $DoFullLogging -ItemNoun $ItemNoun -SourceNoun $SourceNoun -IsAbortDrain $true) {
                             continue
                         }
                     } else {
@@ -1400,20 +1367,15 @@ function Convert-ImageBatch {
                         try { [System.IO.File]::Delete($j.JxlPath) } catch { }
                     }
                     $j.Proc.Dispose()
-                    if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
                     # $j.SlotReleased = $true (2026-08-31 fix, caught by
                     # verifying a same-day /code-review pass): without
                     # this, a throw partway through THIS SAME loop (e.g.
-                    # Process.Dispose() itself throwing, or Release()
-                    # hitting SemaphoreFullException) would drop straight
-                    # into the outer catch below, which re-iterates this
-                    # same $running list - any job THIS loop already
-                    # released, with no marker to say so, would get its
-                    # slot released a second time. Remote trigger (this
-                    # loop's own calls rarely throw) and small blast
-                    # radius (we're already unwinding an aborting run),
-                    # but it's exactly the invariant SlotReleased exists
-                    # to hold, so worth closing even without a live repro.
+                    # Process.Dispose() itself throwing) would drop
+                    # straight into the outer catch below, which
+                    # re-iterates this same $running list - any job THIS
+                    # loop already finished processing, with no marker to
+                    # say so, could have its real output deleted a second
+                    # time as if it were still-running debris.
                     $j.SlotReleased = $true
                 }
             }
@@ -1428,7 +1390,6 @@ function Convert-ImageBatch {
                     try { [System.IO.File]::Delete($j.JxlPath) } catch { }
                 }
                 try { if ($j.Proc) { $j.Proc.Dispose() } } catch { }
-                if ($SharedBudget -and -not $j.SlotReleased) { try { $SharedBudget.Release() | Out-Null } catch { } }
             }
             throw
         }

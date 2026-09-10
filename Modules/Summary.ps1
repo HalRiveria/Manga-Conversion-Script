@@ -21,20 +21,12 @@
     so those can eventually call it too (all three call sites used the
     exact same one-liner in the reference) - not wired up yet.
 
-    ALSO NOT included here, moved out on purpose while building (not in
-    the reference extraction): the "resume state file retained" log line.
-    The reference file included it directly in the SUMMARY block, but
-    it's actually ResumeState.ps1's domain (it's reporting on resume-state
-    file retention, not on run statistics) - per this project's standing
-    "domain logic lives in its domain's module" rule. Left for
-    ResumeState.ps1 to own once that module is built, not duplicated here.
-
     REGATED onto Menu.ps1's mode-flags shape, not the reference's four
     independent $runZipPhase/$runLooseConv/$runLooseZip/$runZipOnly
     booleans - Get-SummaryLines takes one -ModeFlags hashtable matching
     Resolve-ModeSelection's real output (RunImageConversion/
-    RunAnimatedConversion/RunZip/RunZipOnly/RunConvertZipped), so a
-    caller can pass Get-SelectedMode's actual return value straight in.
+    RunAnimatedConversion/RunZip/RunZipOnly), so a caller can pass
+    Get-SelectedMode's actual return value straight in.
     A new Loose Animated Converted/Deleted row-group was added (gated on
     RunAnimatedConversion) since AnimatedConversionPipeline.ps1 has no
     reference-extraction equivalent to draw from - same "designed ahead
@@ -74,11 +66,6 @@ function New-StatsTracker {
         objects).
     #>
     return @{
-        ZipExtracted           = @{ Success = 0; Fail = 0 }
-        ImgConverted           = @{ Success = 0; Fail = 0; Skipped = 0 }
-        ImgDeleted             = @{ Success = 0; Fail = 0 }
-        ZipCreated             = @{ Success = 0; Fail = 0 }
-        FolderDeleted          = @{ Success = 0; Fail = 0 }
         LooseImgConverted      = @{ Success = 0; Fail = 0; Skipped = 0 }
         LooseImgDeleted        = @{ Success = 0; Fail = 0 }
         LooseStaleCleaned      = @{ Success = 0; Fail = 0 }
@@ -115,8 +102,8 @@ function Get-SummaryLines {
         just meant unused ones were always a wall of zeros.
     .PARAMETER ModeFlags
         A hashtable shaped like Resolve-ModeSelection's output (Menu.ps1)
-        - RunImageConversion/RunAnimatedConversion/RunZip/RunZipOnly/
-        RunConvertZipped. Pass Get-SelectedMode's real return value.
+        - RunImageConversion/RunAnimatedConversion/RunZip/RunZipOnly.
+        Pass Get-SelectedMode's real return value.
     .PARAMETER ElapsedString
         Pre-formatted (e.g. via Format-ElapsedTime) - this function
         doesn't touch the Stopwatch itself, matching this module not
@@ -133,14 +120,6 @@ function Get-SummaryLines {
 
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add("=== SUMMARY ===")
-
-    if ($ModeFlags.RunConvertZipped) {
-        $lines.Add("ZIPs Extracted      : Success = " + $Stats.ZipExtracted.Success  + "  |  Failed = " + $Stats.ZipExtracted.Fail)
-        $lines.Add("Img -> JXL Conv.    : Success = " + $Stats.ImgConverted.Success  + "  |  Failed = " + $Stats.ImgConverted.Fail + "  |  Skipped (animated) = " + $Stats.ImgConverted.Skipped)
-        $lines.Add("Img Deleted         : Success = " + $Stats.ImgDeleted.Success    + "  |  Failed = " + $Stats.ImgDeleted.Fail)
-        $lines.Add("ZIPs Created        : Success = " + $Stats.ZipCreated.Success    + "  |  Failed = " + $Stats.ZipCreated.Fail)
-        $lines.Add("Folders Deleted     : Success = " + $Stats.FolderDeleted.Success + "  |  Failed = " + $Stats.FolderDeleted.Fail)
-    }
 
     if ($ModeFlags.RunImageConversion) {
         $lines.Add("Loose Img Conv.     : Success = " + $Stats.LooseImgConverted.Success + "  |  Failed = " + $Stats.LooseImgConverted.Fail + "  |  Skipped (animated) = " + $Stats.LooseImgConverted.Skipped)

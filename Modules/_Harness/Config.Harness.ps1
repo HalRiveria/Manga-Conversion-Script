@@ -50,7 +50,7 @@ $defA1 = Get-DefaultScriptSettings
 $defA2 = Get-DefaultScriptSettings
 $defA1.JpegQuality = 12345
 Test-Assert ($defA2.JpegQuality -eq 90) "mutating one returned hashtable does not affect a second call's result"
-Test-Assert ($defA2.ContainsKey('ZipParallelThreads') -and $defA2.ContainsKey('DeleteExtractedFoldersAfterRezip')) "schema includes ZipParallelThreads and DeleteExtractedFoldersAfterRezip"
+Test-Assert ($defA2.ContainsKey('ZipParallelThreads')) "schema includes ZipParallelThreads"
 Test-Assert (
     $defA2.ContainsKey('AnimatedThreads') -and $defA2.ContainsKey('AnimatedQuality') -and
     $defA2.ContainsKey('AnimatedLossless') -and $defA2.ContainsKey('AnimatedOverwrite') -and

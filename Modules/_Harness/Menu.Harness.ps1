@@ -129,7 +129,7 @@ Write-Host ""
 # ==============================================================================
 Write-Host "=== Scenario B: Resolve-ModeSelection valid codes ===" -ForegroundColor Cyan
 $b1 = Resolve-ModeSelection -Choice '1'
-Test-Assert ($b1.Mode -eq 'FullPipeline' -and $b1.RunImageConversion -and $b1.RunAnimatedConversion -and $b1.RunZip -and -not $b1.RunZipOnly -and -not $b1.RunConvertZipped) "'1' -> FullPipeline: image+animated+zip, no zip-only, no convert-zipped"
+Test-Assert ($b1.Mode -eq 'FullPipeline' -and $b1.RunImageConversion -and $b1.RunAnimatedConversion -and $b1.RunZip -and -not $b1.RunZipOnly) "'1' -> FullPipeline: image+animated+zip, no zip-only"
 
 $b2 = Resolve-ModeSelection -Choice '2'
 Test-Assert ($b2.Mode -eq 'ImageConversion' -and $b2.RunImageConversion -and -not $b2.RunAnimatedConversion -and -not $b2.RunZip) "'2' -> ImageConversion: image only, no animated, no zip"

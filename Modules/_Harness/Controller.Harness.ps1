@@ -3,20 +3,21 @@
     Standalone test harness for Modules\Controller.ps1.
 
 .DESCRIPTION
-    Integration-style, like ZipPipeline.Harness.ps1/RezipPipeline.Harness.ps1/
+    Integration-style, like ZipPipeline.Harness.ps1/
     ImageConversionPipeline.Harness.ps1 - dot-sources the REAL Logging.ps1/
     FileDeletion.ps1/ZipCreation.ps1/ZipValidation.ps1/LeafDirectoryDiscovery.ps1/
     AbortPipeline.ps1/CleanConsoleRendering.ps1/ZipParallelProcessing.ps1/
-    ImageConversionPipeline.ps1/AnimatedConversionPipeline.ps1/Summary.ps1
-    (the last one for Invoke-Mode's New-StatsTracker output shape - NOT
-    ZipPipeline.ps1/RezipPipeline.ps1, since every Invoke-Mode scenario
-    below injects a fake -ZipFoldersHandler/-ConvertZippedHandler rather
-    than exercising the real ones; Controller.ps1 also calls
+    ImageConversionPipeline.ps1/AnimatedConversionPipeline.ps1/
+    ChapterDispatch.ps1/Summary.ps1 (the last one for Invoke-Mode's
+    New-StatsTracker output shape - NOT ZipPipeline.ps1, since every
+    Invoke-Mode scenario below injects a fake -ZipFoldersHandler rather
+    than exercising the real one; Controller.ps1 also calls
     Compress-FolderToZip/Test-ZipArchive directly for Full Pipeline's
     own zip step, not Invoke-LooseFolderZip, see Controller.ps1's own
     header for why),
     since Controller.ps1 is a top-tier orchestrator whose real value is in
-    proving the two-runspace-per-chapter dispatch, the shared process
+    proving the two-concurrent-engine dispatch (each running its own
+    Invoke-ChapterDispatch across the whole library), the shared process
     budget, the merged CCR status, and the zip-blocking policy actually
     work end to end - not in mocking that machinery away.
 
@@ -731,8 +732,8 @@ Write-Host ""
 #  scenario injects fake handlers rather than exercising the real
 #  pipelines - proving dispatch/translation/error-catch logic, not
 #  re-testing pipelines already covered by their own harnesses. Never
-#  needs real cjxl/magick or a ZipPipeline.ps1/RezipPipeline.ps1 dot-
-#  source - see Controller.ps1's own header.
+#  needs real cjxl/magick or a ZipPipeline.ps1 dot-source - see
+#  Controller.ps1's own header.
 # ==============================================================================
 
 function New-FakeErrorRecord {
@@ -750,7 +751,7 @@ function New-FakeErrorRecord {
 $fakeSettings = @{
     JpegLossless = $false; JpegQuality = 77; MaxCjxlProcs = 6; FullLogging = $false
     AnimatedLossless = $false; AnimatedQuality = 88; AnimatedThreads = 3; AnimatedOverwrite = $false; AnimatedDeleteSource = $true
-    ZipParallelThreads = 2; PermanentDelete = $true; DeleteExtractedFoldersAfterRezip = $true
+    ZipParallelThreads = 2; PermanentDelete = $true
     CleanConsoleOutputEnabled = $false
     # Deliberately distinct from MaxCjxlProcs (2026-09-03 addition, real
     # bug fix, see CHANGELOG.md) - Scenario N below asserts THIS value,
@@ -800,15 +801,6 @@ Test-Assert ($statsL.ZipOnlyFolderDeleted.Success -eq 4) "ZipFolders: ZipOnlyFol
 Test-Assert ($statsL.Aborted -eq $true -and $statsL.ForceKilledCount -eq 3) "ZipFolders: Aborted/ForceKilledCount (from ForceStoppedCount) mapped onto Stats"
 Write-Host ""
 
-Write-Host "=== Scenario M: Invoke-Mode / ConvertZipped - result mapping ===" -ForegroundColor Cyan
-$fakeRezipHandlerM = { param($Path, $MaxParallel, $DeleteFolders, $FullLogging, $LogFile, $LogErrorFile, $LogWarnFile, $PermanentDelete, $CjxlExe, $MagickExe, $MaxCjxlProcs, $JpegLossless, $JpegQuality)
-    return @{ CandidateCount = 2; ZipExtractedSuccess = 2; ZipExtractedFail = 0; ImgConvertedSuccess = 6; ImgConvertedFail = 0; ImgConvertedSkipped = 1; ImgDeletedSuccess = 6; ImgDeletedFail = 0; ZipCreatedSuccess = 2; ZipCreatedFail = 0; FolderDeletedSuccess = 2; FolderDeletedFail = 0; Skipped = 0; ForceStoppedCount = 0 }
-}
-$statsM = Invoke-Mode -Resolved @{ Mode = 'ConvertZipped' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ConvertZippedHandler $fakeRezipHandlerM
-Test-Assert ($statsM.ZipExtracted.Success -eq 2 -and $statsM.ImgConverted.Success -eq 6 -and $statsM.ImgConverted.Skipped -eq 1) "ConvertZipped: ZipExtracted/ImgConverted mapped correctly"
-Test-Assert ($statsM.ZipCreated.Success -eq 2 -and $statsM.FolderDeleted.Success -eq 2) "ConvertZipped: ZipCreated/FolderDeleted mapped correctly"
-Write-Host ""
-
 Write-Host "=== Scenario N: Invoke-Mode / FullPipeline - all three stat groups populated at once ===" -ForegroundColor Cyan
 $capturedN = @{ FullPipelineMaxConcurrentProcs = $null }
 $fakeFullHandlerN = { param($Path, $CjxlExe, $MagickExe, $JpegLossless, $JpegQuality, $AnimatedLossless, $AnimatedQuality, $AnimatedOverwrite, $AnimatedDeleteSource, $FullPipelineMaxConcurrentProcs, $FullLogging, $LogFile, $LogErrorFile, $LogWarnFile, $PermanentDelete)
@@ -833,16 +825,16 @@ Test-Assert ($capturedN.FullPipelineMaxConcurrentProcs -eq 9) ("FullPipeline: Se
 Write-Host ""
 
 # ==============================================================================
-#  Scenario N2 (2026-08-31 fix): Invoke-Mode's ZipFolders/ConvertZipped/
-#  FullPipeline branches used to pass $Settings.FullLogging/PermanentDelete
+#  Scenario N2 (2026-08-31 fix): Invoke-Mode's ZipFolders/FullPipeline
+#  branches used to pass $Settings.FullLogging/PermanentDelete
 #  UNCAST into the real handlers' own [Parameter(Mandatory)][bool] params -
 #  the same crash-on-$null-key species already fixed today at other call
 #  sites (Invoke-MainLoop's re-sync, the bootstrap script). The earlier
-#  fake handlers above (L/M/N) use untyped params, so they'd silently
+#  fake handlers above (L/N) use untyped params, so they'd silently
 #  accept a $null and never catch this - these fakes instead declare
 #  Mandatory [bool] params matching the REAL ZipPipeline.ps1/
-#  RezipPipeline.ps1/Controller.ps1 function signatures exactly, so a
-#  missing $Settings key would genuinely throw if passed uncast.
+#  Controller.ps1 function signatures exactly, so a missing $Settings key
+#  would genuinely throw if passed uncast.
 #
 #  NOTE: Invoke-Mode's own outer try/catch (see the end of this function)
 #  already swallows ANY exception from a handler call via
@@ -854,20 +846,14 @@ Write-Host ""
 #  real stats) instead of silently falling into the fatal-handler path
 #  and returning $null.
 # ==============================================================================
-Write-Host "=== Scenario N2: Invoke-Mode completes normally despite a `$Settings missing FullLogging/PermanentDelete (ZipFolders/ConvertZipped/FullPipeline) ===" -ForegroundColor Cyan
-$fakeSettingsN2 = @{ ZipParallelThreads = 2; DeleteExtractedFoldersAfterRezip = $false; MaxCjxlProcs = 2; JpegLossless = $false; JpegQuality = 90; AnimatedLossless = $false; AnimatedQuality = 90; AnimatedThreads = 2; AnimatedOverwrite = $false; AnimatedDeleteSource = $true }
+Write-Host "=== Scenario N2: Invoke-Mode completes normally despite a `$Settings missing FullLogging/PermanentDelete (ZipFolders/FullPipeline) ===" -ForegroundColor Cyan
+$fakeSettingsN2 = @{ ZipParallelThreads = 2; MaxCjxlProcs = 2; JpegLossless = $false; JpegQuality = 90; AnimatedLossless = $false; AnimatedQuality = 90; AnimatedThreads = 2; AnimatedOverwrite = $false; AnimatedDeleteSource = $true }
 
 $fakeZipHandlerN2 = { param([string]$Path, [int]$MaxParallel, [bool]$DeleteFolders, [Parameter(Mandatory)][bool]$FullLogging, [string]$LogFile, [string]$LogErrorFile, [string]$LogWarnFile, [Parameter(Mandatory)][bool]$PermanentDelete)
     return @{ CandidateCount = 3; ZippedSuccess = 3; ZippedFail = 0; FolderDeletedSuccess = 3; FolderDeletedFail = 0; ForceStoppedCount = 0 }
 }
 $statsN2Zip = Invoke-Mode -Resolved @{ Mode = 'ZipFolders' } -TargetPath "C:\fake\lib" -Settings $fakeSettingsN2 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ZipFoldersHandler $fakeZipHandlerN2
 Test-Assert ($null -ne $statsN2Zip -and $statsN2Zip.ZipOnlyZipped.Success -eq 3) "ZipFolders completes normally (not swallowed into the fatal-handler `$null path) despite `$Settings missing FullLogging/PermanentDelete"
-
-$fakeRezipHandlerN2 = { param([string]$Path, [int]$MaxParallel, [bool]$DeleteFolders, [Parameter(Mandatory)][bool]$FullLogging, [string]$LogFile, [string]$LogErrorFile, [string]$LogWarnFile, [Parameter(Mandatory)][bool]$PermanentDelete, [string]$CjxlExe, [string]$MagickExe, [int]$MaxCjxlProcs, [bool]$JpegLossless, [int]$JpegQuality)
-    return @{ CandidateCount = 1; ZipExtractedSuccess = 1; ZipExtractedFail = 0; ImgConvertedSuccess = 3; ImgConvertedFail = 0; ImgConvertedSkipped = 0; ImgDeletedSuccess = 3; ImgDeletedFail = 0; ZipCreatedSuccess = 1; ZipCreatedFail = 0; FolderDeletedSuccess = 1; FolderDeletedFail = 0; Skipped = 0; ForceStoppedCount = 0 }
-}
-$statsN2Rezip = Invoke-Mode -Resolved @{ Mode = 'ConvertZipped' } -TargetPath "C:\fake\lib" -Settings $fakeSettingsN2 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ConvertZippedHandler $fakeRezipHandlerN2
-Test-Assert ($null -ne $statsN2Rezip -and $statsN2Rezip.ImgConverted.Success -eq 3) "ConvertZipped completes normally (not swallowed into the fatal-handler `$null path) despite `$Settings missing FullLogging/PermanentDelete"
 
 $fakeFullHandlerN2 = { param([string]$Path, [string]$CjxlExe, [string]$MagickExe, [bool]$JpegLossless, [int]$JpegQuality, [bool]$AnimatedLossless, [int]$AnimatedQuality, [bool]$AnimatedOverwrite, [bool]$AnimatedDeleteSource, [int]$FullPipelineMaxConcurrentProcs, [Parameter(Mandatory)][bool]$FullLogging, [string]$LogFile, [string]$LogErrorFile, [string]$LogWarnFile, [Parameter(Mandatory)][bool]$PermanentDelete)
     return @{
@@ -1076,7 +1062,7 @@ Write-Host ""
 # ==============================================================================
 Write-Host "=== Scenario T: Invoke-MainLoop runs until Show-PostRunPrompt returns Exit ===" -ForegroundColor Cyan
 $getModeCallsT = 0
-$fakeGetModeT = { param($Settings, $SettingsPath) $script:getModeCallsT++; return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
+$fakeGetModeT = { param($Settings, $SettingsPath) $script:getModeCallsT++; return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false } }
 $invokeModeCallsT = 0
 $fakeInvokeModeT = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile)
     $script:invokeModeCallsT++
@@ -1124,7 +1110,7 @@ $null = Test-AbortSignal
 Test-Assert ($script:abortRequested -eq $true) "sanity check: an abort is genuinely in progress before the loop runs"
 
 $pollsT2 = [System.Collections.Generic.List[bool]]::new()
-$fakeGetModeT2 = { param($Settings, $SettingsPath) $script:pollsT2.Add($script:abortRequested); return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
+$fakeGetModeT2 = { param($Settings, $SettingsPath) $script:pollsT2.Add($script:abortRequested); return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false } }
 $fakeInvokeModeT2 = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) return New-StatsTracker }
 $callsT2 = 0
 $fakePostRunT2 = { $script:callsT2++; if ($script:callsT2 -ge 1) { return 'Exit' }; return 'ReturnToMenu' }
@@ -1157,7 +1143,7 @@ Write-Host "=== Scenario T3: a `$Settings hashtable missing CleanConsoleOutputEn
 # requirement this scenario isn't testing; omitting it would make this
 # scenario throw for the wrong reason.
 $fakeSettingsT3 = @{ FullLogging = $false }
-$fakeGetModeT3 = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
+$fakeGetModeT3 = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false } }
 $fakeInvokeModeT3 = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) return New-StatsTracker }
 $script:callsT3 = 0
 $fakePostRunT3 = { $script:callsT3++; return 'Exit' }
@@ -1229,7 +1215,7 @@ Write-Host ""
 # ==============================================================================
 Write-Host "=== Scenario T5: Invoke-MainLoop's own Write-SummaryReport call does not crash on a `$Settings missing FullLogging ===" -ForegroundColor Cyan
 $fakeSettingsT5 = @{}
-$fakeGetModeT5 = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
+$fakeGetModeT5 = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false } }
 $fakeInvokeModeT5 = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) return New-StatsTracker }
 $script:callsT5 = 0
 $fakePostRunT5 = { $script:callsT5++; return 'Exit' }
@@ -1250,7 +1236,7 @@ Write-Host ""
 #  NOT stop the loop by itself - only Show-PostRunPrompt's own Exit does.
 # ==============================================================================
 Write-Host "=== Scenario U: Invoke-MainLoop handles a `$null Invoke-Mode result without crashing the loop ===" -ForegroundColor Cyan
-$fakeGetModeU = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
+$fakeGetModeU = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false } }
 $fakeInvokeModeU = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) return $null }
 $script:postRunCallsU = 0
 $fakePostRunU = { $script:postRunCallsU++; return 'Exit' }
@@ -1273,7 +1259,7 @@ Write-Host "=== Scenario U2: options-menu toggles re-apply every loop iteration,
 $fakeSettingsU2 = @{ PermanentDelete = $true; CleanConsoleOutputEnabled = $false; FullLogging = $false }
 $script:permDeleteSeenU2 = [System.Collections.Generic.List[bool]]::new()
 $script:ccrSeenU2        = [System.Collections.Generic.List[bool]]::new()
-$fakeGetModeU2 = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
+$fakeGetModeU2 = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false } }
 $fakeInvokeModeU2 = {
     param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile)
     # Record what the module-level state actually is AT THE TIME this
@@ -1322,7 +1308,7 @@ $fakeInitLogPathsU2b = {
 $fakeInitLogMutexU2b   = { $script:initLogMutexCallsU2b++ }
 $fakeCompleteLogRunU2b = { $script:completeLogRunCallsU2b++ }
 $fakeStartLogRunU2b    = { $script:startLogRunCallsU2b++ }
-$fakeGetModeU2b = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
+$fakeGetModeU2b = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false } }
 $script:logFilesSeenU2b = [System.Collections.Generic.List[string]]::new()
 $fakeInvokeModeU2b = {
     param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile)
@@ -1379,7 +1365,7 @@ Initialize-LogPaths -TargetPath $scratchDirU2c -FullLogging $false -ScriptDir $s
 Initialize-LogMutex
 $mutexBeforeU2c = $script:logMutex
 
-$fakeGetModeU2c = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
+$fakeGetModeU2c = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false } }
 $fakeInvokeModeU2c = {
     param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile)
     $Settings.FullLogging = $true
@@ -1423,7 +1409,7 @@ function Write-Log {
 $script:realWriteLogU2dRef = $realWriteLogU2d
 
 $fakeSettingsU2d = @{ PermanentDelete = $false; CleanConsoleOutputEnabled = $false; FullLogging = $false; DisableSummaryFile = $false }
-$fakeGetModeU2d = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
+$fakeGetModeU2d = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false } }
 $fakeInvokeModeU2d = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) return $null }
 $fakeStartLogRunU2d    = { }
 $fakeCompleteLogRunU2d = { $script:eventOrderU2d.Add("COMPLETE") }
@@ -1451,7 +1437,7 @@ Write-Host ""
 # ==============================================================================
 Write-Host "=== Scenario U2e: SetQuickEditHandler brackets InvokeModeHandler, even on a throw ===" -ForegroundColor Cyan
 $fakeSettingsU2e = @{ PermanentDelete = $false; CleanConsoleOutputEnabled = $false; FullLogging = $false; DisableSummaryFile = $false }
-$fakeGetModeU2e = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
+$fakeGetModeU2e = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false } }
 $script:quickEditCallsU2e = [System.Collections.Generic.List[bool]]::new()
 $fakeSetQuickEditU2e = { param($Enabled) $script:quickEditCallsU2e.Add($Enabled) }.GetNewClosure()
 $fakeInvokeModeU2e = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) throw "simulated crash mid-run" }

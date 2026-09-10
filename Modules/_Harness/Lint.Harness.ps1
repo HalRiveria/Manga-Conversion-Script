@@ -36,11 +36,7 @@ $script:LintKnownExceptions = @(
     @{ File  = 'Controller.ps1'
        Rule  = 'shared-function-names'
        Names = @('Write-GatedConsoleMessage')
-       Why   = 'Controller.ps1 never passes -AbortWaitMessage to Convert-ImageBatch/Convert-AnimatedBatch, so their internal call to Write-GatedConsoleMessage is unreachable here - and propagating it would be actively unsafe (CleanConsoleRendering.ps1 state is never initialized inside this worker runspace) if that ever changed without a real fix. See CLAUDE.md Known-gaps history / CHANGELOG.md 2026-08-29.' }
-    @{ File  = 'RezipPipeline.ps1'
-       Rule  = 'shared-function-names'
-       Names = @('Write-GatedConsoleMessage')
-       Why   = 'Same reason as Controller.ps1''s own exception above - RezipPipeline.ps1 no longer passes -AbortWaitMessage to its worker-side Convert-ImageBatch call (fixed 2026-08-29, see CHANGELOG.md), so this call is unreachable, and propagating it would carry the same runspace-state-unsafe risk.' }
+       Why   = 'Neither of Controller.ps1''s two engine-worker closures ever passes -AbortWaitMessage into anything that calls Write-GatedConsoleMessage internally (they route every CCR-adjacent moment through the main-thread event-queue drain instead, see the DISPATCH-REDESIGN STEP 4 header) - propagating it would be actively unsafe (CleanConsoleRendering.ps1 state is never initialized inside a worker runspace) if that ever changed without a real fix. See CLAUDE.md Known-gaps history / CHANGELOG.md 2026-08-29.' }
 )
 
 $script:passCount = 0

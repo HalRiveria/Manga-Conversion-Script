@@ -142,9 +142,9 @@
     pattern as Show-CoverDeletionMenu's -RunHandler/-AddHandler,
     Menu.ps1) - the harness proves dispatch/translation/error-catch
     logic with fakes, never needing real cjxl/magick or a real
-    ZipPipeline.ps1/RezipPipeline.ps1 dot-source, since every scenario
-    overrides its handler explicitly (the real-function defaults only
-    matter for an actual caller that doesn't override them).
+    ZipPipeline.ps1 dot-source, since every scenario overrides its handler
+    explicitly (the real-function defaults only matter for an actual
+    caller that doesn't override them).
 
     Mode 8 (ImageConversionZip) - real, built 2026-08-28 (Phase 2 of the
     build plan): dispatches to Invoke-LooseImageConversionPipeline with a
@@ -220,8 +220,9 @@
         (2026-09-09 change, dispatch redesign step 4) - Full Pipeline
         builds its own image-engine JobBuilder/JobStarter/JobFinalize now
         (see "DISPATCH-REDESIGN STEP 4" below) instead of calling that
-        function directly; RezipPipeline.ps1 is Convert-ImageBatch's only
-        remaining real caller.
+        function directly; Convert-ImageBatch has no remaining real caller
+        (RezipPipeline.ps1, its last one, was removed 2026-09-09) other
+        than its own harness.
       - Get-AnimatedConversionSharedFunctionNames, Get-LooseAnimatedCandidates,
         Get-ChapterAnimatedStatus, Test-AvifAnimated, Complete-AnimatedDispatchJob,
         Invoke-LooseAnimatedConversionPipeline (AnimatedConversionPipeline.ps1) -
@@ -273,8 +274,6 @@
       - Invoke-ZipOnlyPipeline (ZipPipeline.ps1) - ONLY if a real caller
         of Invoke-Mode doesn't override -ZipFoldersHandler; not dot-
         sourced by this module's own harness, see above
-      - Invoke-RezipPipeline (RezipPipeline.ps1) - same caveat, for
-        -ConvertZippedHandler
       - Invoke-LooseFolderZip (ZipPipeline.ps1) - same caveat, for
         -ZipFolderHandler (mode 8's real zip step, built 2026-08-28)
       - New-StatsTracker, Format-ElapsedTime, Get-SummaryLines,
@@ -284,7 +283,7 @@
         only (2026-08-28), same caveat as the Invoke-Mode handlers above:
         only matters for a real caller that doesn't override
         -GetModeHandler/-PostRunPromptHandler
-    Same dot-source ordering rule as ZipPipeline.ps1/RezipPipeline.ps1:
+    Same dot-source ordering rule as ZipPipeline.ps1:
     Logging.ps1/FileDeletion.ps1 BEFORE ZipParallelProcessing.ps1, since
     -SharedFunctionNames captures whichever definition is CURRENTLY
     active in the caller's scope at call time.
@@ -1632,14 +1631,12 @@ function Invoke-Mode {
     .PARAMETER ImageConversionHandler
     .PARAMETER AnimatedConversionHandler
     .PARAMETER ZipFoldersHandler
-    .PARAMETER ConvertZippedHandler
     .PARAMETER FullPipelineHandler
         Each real pipeline entry point, injectable for testing with
         fakes - default to the real function. A harness scenario that
         overrides every handler it exercises never needs the default to
         resolve at all, so it never needs Invoke-Mode's own harness to
-        dot-source ZipPipeline.ps1/RezipPipeline.ps1 - see this module's
-        header.
+        dot-source ZipPipeline.ps1 - see this module's header.
     .PARAMETER ZipFolderHandler
         Mode 8's real zip step (2026-08-28, Phase 2) - defaults to
         Invoke-LooseFolderZip (ZipPipeline.ps1), same injectable/caveat-
@@ -1678,7 +1675,6 @@ function Invoke-Mode {
         [scriptblock]$ImageConversionHandler = ${function:Invoke-LooseImageConversionPipeline},
         [scriptblock]$AnimatedConversionHandler = ${function:Invoke-LooseAnimatedConversionPipeline},
         [scriptblock]$ZipFoldersHandler = ${function:Invoke-ZipOnlyPipeline},
-        [scriptblock]$ConvertZippedHandler = ${function:Invoke-RezipPipeline},
         [scriptblock]$FullPipelineHandler = ${function:Invoke-FullPipeline},
         [scriptblock]$ZipFolderHandler = ${function:Invoke-LooseFolderZip},
         [scriptblock]$LogHandler = { param($m) Write-Log $m -Level Error }
@@ -1700,8 +1696,8 @@ function Invoke-Mode {
             'ImageConversion' {
                 # [bool](...) cast (2026-08-31 fix, from a same-day
                 # /code-review re-review) - same reasoning as the
-                # ZipFolders/ConvertZipped/FullPipeline cases below,
-                # missed here in the original pass: FullLogging is
+                # ZipFolders/FullPipeline cases below, missed here in the
+                # original pass: FullLogging is
                 # [Parameter(Mandatory)][bool] on
                 # Invoke-LooseImageConversionPipeline.
                 #
@@ -1783,25 +1779,6 @@ function Invoke-Mode {
                 # $r.ForceStoppedCount maps onto Stats' ForceKilledCount name.
                 $stats.Aborted           = $r.Aborted
                 $stats.ForceKilledCount  = $r.ForceStoppedCount
-            }
-            'ConvertZipped' {
-                # Deliberately NOT given the Aborted/ForceKilledCount mapping
-                # its 'ZipFolders'/'ImageConversionZip' siblings got
-                # 2026-09-03 - RezipPipeline.ps1 (this mode's handler) has no
-                # Aborted field at all (same gap ZipPipeline.ps1 had until
-                # today), and mode 9 is hidden from the live menu (deprecated/
-                # minimal-effort direction, see RezipPipeline.ps1's own
-                # header) - not worth adding a new field to a deprioritized,
-                # unreachable-from-the-menu pipeline.
-                # [bool](...) casts - same reasoning as the ZipFolders case above.
-                $r = & $ConvertZippedHandler -Path $TargetPath -MaxParallel $Settings.ZipParallelThreads -DeleteFolders ([bool]$Settings.DeleteExtractedFoldersAfterRezip) `
-                    -FullLogging $script:FullLogging -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete ([bool]$Settings.PermanentDelete) `
-                    -CjxlExe $CjxlExe -MagickExe $MagickExe -MaxCjxlProcs $Settings.MaxCjxlProcs -JpegLossless ([bool]$Settings.JpegLossless) -JpegQuality $Settings.JpegQuality
-                $stats.ZipExtracted.Success  = $r.ZipExtractedSuccess;  $stats.ZipExtracted.Fail  = $r.ZipExtractedFail
-                $stats.ImgConverted.Success  = $r.ImgConvertedSuccess; $stats.ImgConverted.Fail  = $r.ImgConvertedFail; $stats.ImgConverted.Skipped = $r.ImgConvertedSkipped
-                $stats.ImgDeleted.Success    = $r.ImgDeletedSuccess;   $stats.ImgDeleted.Fail    = $r.ImgDeletedFail
-                $stats.ZipCreated.Success    = $r.ZipCreatedSuccess;   $stats.ZipCreated.Fail    = $r.ZipCreatedFail
-                $stats.FolderDeleted.Success = $r.FolderDeletedSuccess; $stats.FolderDeleted.Fail = $r.FolderDeletedFail
             }
             'FullPipeline' {
                 # [bool](...) casts - same reasoning as the ZipFolders case above.

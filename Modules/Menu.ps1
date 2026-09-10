@@ -41,13 +41,14 @@
     this was built (full history in CHANGELOG.md) - see Todo.md's "Menu
     (main prompt + options submenu)" section for the authoritative,
     up-to-date rendered draft this module implements:
-      - Mode codes are 1, 2, 3, 4, 5, 8, 9 (NOT contiguous - 6/7 are
+      - Mode codes are 1, 2, 3, 4, 5, 8 (NOT contiguous - 6/7/9 are
         deliberately unused/reserved for a future mode without
-        renumbering everything already shipped). "0" enters the options
-        menu rather than selecting a mode. "5" (Cover Deletion) is a
-        submenu, same shape as "0" - it does NOT resolve via
-        Resolve-ModeSelection, it opens Show-CoverDeletionMenu and then
-        re-shows the main prompt afterward.
+        renumbering everything already shipped; 9 was "Convert Zipped"/
+        rezip, removed entirely 2026-09-09 - see CHANGELOG.md). "0"
+        enters the options menu rather than selecting a mode. "5" (Cover
+        Deletion) is a submenu, same shape as "0" - it does NOT resolve
+        via Resolve-ModeSelection, it opens Show-CoverDeletionMenu and
+        then re-shows the main prompt afterward.
       - Old mode 2 ("loose conversion + zip") was deliberately dropped as
         its own mode - Full Pipeline (1) covers "convert everything and
         zip"; if only image conversion + zip is wanted, that's mode 8,
@@ -55,9 +56,6 @@
         folder on the new ZipWithUnconvertedAnimated setting, since mode
         8 runs no animated-conversion pass of its own and shouldn't
         silently ship unconverted .avif content inside a ZIP.
-      - Mode 9 ("Convert Zipped") is explicitly marked deprecated/
-        image-only on the menu text itself, not just in a comment -
-        confirmed decision, not an oversight.
       - Full Pipeline (1) is a flag-resolution concern only here - THIS
         MODULE does not implement the per-chapter "convert both types,
         then zip, non-blocking across chapters" execution behavior
@@ -91,16 +89,6 @@ function Get-ModeMenuLines {
         "  4 - Zip Folders              (no conversion; zips folders that are already ready)"
         "  5 - Cover Deletion           (submenu - unwanted-image profile scan/add)"
         "  8 - Image Conversion + Zip   (convert loose images, then zip)"
-        # "9 - Convert Zipped" hidden from the live menu (2026-09-02,
-        # project owner's own decision) - the underlying code
-        # (Resolve-ModeSelection's '9' case below, RezipPipeline.ps1,
-        # Invoke-Mode's ConvertZipped case) is all still intact in case
-        # it's reimplemented later; deprecated/minimal-effort code being
-        # reachable from the live menu was judged more likely to cause a
-        # real issue than to be worth keeping available. Don't just
-        # delete this line if re-enabling later - uncomment it and its
-        # matching Resolve-ModeSelection case together.
-        # "  9 - Convert Zipped           [DEPRECATED - image files only, does not convert animated content]"
         "  0 - Options                  (view/change settings - saved for future runs)"
         ""
         "  Ctrl+C aborts the current run at any point (finishes in-flight work, then stops cleanly)."
@@ -113,27 +101,20 @@ function Resolve-ModeSelection {
         Maps a validated mode-menu choice ("1"/"2"/"3"/"4"/"8") to the
         flags a caller acts on. Returns $null for anything else (including
         "0", which Show-ModeMenu handles itself as "enter Options", not a
-        mode, and "9" - Convert Zipped/rezip is hidden from the live menu,
-        see this function's own commented-out '9' case below).
+        mode).
     .OUTPUTS
         @{ Mode = <string>; RunImageConversion = <bool>;
            RunAnimatedConversion = <bool>; RunZip = <bool>;
-           RunZipOnly = <bool>; RunConvertZipped = <bool> } or $null.
+           RunZipOnly = <bool> } or $null.
     #>
     param([string]$Choice)
 
     switch ($Choice) {
-        '1' { return @{ Mode = 'FullPipeline';        RunImageConversion = $true;  RunAnimatedConversion = $true;  RunZip = $true;  RunZipOnly = $false; RunConvertZipped = $false } }
-        '2' { return @{ Mode = 'ImageConversion';      RunImageConversion = $true;  RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
-        '3' { return @{ Mode = 'AnimatedConversion';   RunImageConversion = $false; RunAnimatedConversion = $true;  RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false } }
-        '4' { return @{ Mode = 'ZipFolders';           RunImageConversion = $false; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $true;  RunConvertZipped = $false } }
-        '8' { return @{ Mode = 'ImageConversionZip';   RunImageConversion = $true;  RunAnimatedConversion = $false; RunZip = $true;  RunZipOnly = $false; RunConvertZipped = $false } }
-        # '9' (Convert Zipped / rezip) hidden from the live menu, same
-        # 2026-09-02 decision as its now-commented Get-ModeMenuLines entry
-        # above - falls through to default ($null -> "Invalid selection.")
-        # if somehow still typed. Uncomment together with that line to
-        # re-enable.
-        # '9' { return @{ Mode = 'ConvertZipped';        RunImageConversion = $false; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $true  } }
+        '1' { return @{ Mode = 'FullPipeline';        RunImageConversion = $true;  RunAnimatedConversion = $true;  RunZip = $true;  RunZipOnly = $false } }
+        '2' { return @{ Mode = 'ImageConversion';      RunImageConversion = $true;  RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false } }
+        '3' { return @{ Mode = 'AnimatedConversion';   RunImageConversion = $false; RunAnimatedConversion = $true;  RunZip = $false; RunZipOnly = $false } }
+        '4' { return @{ Mode = 'ZipFolders';           RunImageConversion = $false; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $true  } }
+        '8' { return @{ Mode = 'ImageConversionZip';   RunImageConversion = $true;  RunAnimatedConversion = $false; RunZip = $true;  RunZipOnly = $false } }
         default { return $null }
     }
 }
@@ -289,7 +270,7 @@ function Get-OptionsMenuSchema {
             @{ Key = '5'; Label = 'Delete Original';  Type = 'Bool'; SettingsKey = 'AnimatedDeleteSource'; Description = 'delete the source .avif after a successful conversion' }
         ) }
         @{ Key = '3'; Label = 'Zip Settings'; Type = 'Submenu'; Items = @(
-            @{ Key = '1'; Label = 'Zip Pipeline Threads';               Type = 'Int';  SettingsKey = 'ZipParallelThreads';         Min = 1; Max = [int]::MaxValue; Description = 'parallel ZIP workers (shared by Zip Folders and Convert Zipped)' }
+            @{ Key = '1'; Label = 'Zip Pipeline Threads';               Type = 'Int';  SettingsKey = 'ZipParallelThreads';         Min = 1; Max = [int]::MaxValue; Description = 'parallel ZIP workers for Zip Folders' }
             @{ Key = '2'; Label = 'Zip with Unconverted Animated Files'; Type = 'Bool'; SettingsKey = 'ZipWithUnconvertedAnimated'; Description = 'off (default) = Image Conversion + Zip skips a folder with unconverted .avif files; on = zips anyway' }
         ) }
         @{ Key = '4'; Label = 'Logging'; Type = 'Submenu'; Items = @(

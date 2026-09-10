@@ -22,11 +22,6 @@
     Zip") - see Controller.ps1's Invoke-Mode, the real -ZipFolderHandler
     caller.
 
-    NOT YET DECIDED (explicitly flagged, not acted on): whether
-    RezipPipeline (mode 4) should call into this module instead of
-    duplicating zip creation/validation inline. See RezipPipeline's own
-    reference file and CLAUDE.md.
-
     FORWARD REFERENCES (not defined in this module - callers must
     dot-source the owning module(s) first):
       - Write-Log, Get-LoggingSharedFunctionNames (Logging.ps1)

@@ -8,8 +8,8 @@ Claude as a development/debugging partner.
 **Status: the rewrite is done and live.** `Conversion Script Main.ps1` is
 the real, actively-edited script - no longer frozen. It bootstraps (finds
 `Modules\`, loads settings, resolves `cjxl`/`magick`) and hands off to
-`Controller.ps1`'s `Invoke-MainLoop`. All 19 modules are built, tested, and
-wired in (22/22 harnesses - see `.\Tools\Run-Harness.ps1 -All` for the
+`Controller.ps1`'s `Invoke-MainLoop`. All 18 modules are built, tested, and
+wired in (21/21 harnesses - see `.\Tools\Run-Harness.ps1 -All` for the
 current assertion count, it drifts as coverage grows). The old monolithic
 script moved to `Modules\_Reference\Conversion Script Main - Old.ps1`, kept
 frozen as a reference copy. See `CLAUDE.md` for full working context if
@@ -20,9 +20,9 @@ for the live tracker, and `CHANGELOG.md` for full version history.
 
 | File | What it does |
 |---|---|
-| `Conversion Script Main.ps1` | The live script - bootstrap (module discovery, settings, dependency resolution) plus one call into `Controller.ps1`'s `Invoke-MainLoop`. Interactive mode menu: Full Pipeline, Image Conversion, Animated Conversion, Zip Folders, Cover Deletion, Image Conversion + Zip, plus a hidden legacy Convert Zipped mode. |
+| `Conversion Script Main.ps1` | The live script - bootstrap (module discovery, settings, dependency resolution) plus one call into `Controller.ps1`'s `Invoke-MainLoop`. Interactive mode menu: Full Pipeline, Image Conversion, Animated Conversion, Zip Folders, Cover Deletion, Image Conversion + Zip. |
 
-`Modules\` holds all 19 standalone modules - each a self-contained `.ps1`
+`Modules\` holds all 18 standalone modules - each a self-contained `.ps1`
 (pure function definitions, no top-level side effects) with its own test
 harness in `Modules\_Harness\`. Full detail on every module - real design
 decisions made, bugs found and fixed, forward references - lives in
@@ -37,20 +37,19 @@ decisions made, bugs found and fixed, forward references - lives in
 | `Modules\ZipCreation.ps1` | `Compress-FolderToZip` - creates a ZIP from a folder, clearing any pre-existing same-name ZIP first. |
 | `Modules\ZipValidation.ps1` | `Test-ZipArchive` - post-creation sanity check (entry count, optional required `.jxl` presence). |
 | `Modules\LeafDirectoryDiscovery.ps1` | `Get-ZippableLeafDirs`/`New-ZippableLeafDirProvider` (incremental leaf-folder scan) plus `New-SeriesProvider`/`Get-SeriesChapters` (two-tier series/chapter discovery for Clean Console Output). |
-| `Modules\ZipParallelProcessing.ps1` | `Invoke-ZipParallelProcessing` - the shared runspace-pool dispatcher used by `ZipPipeline.ps1`, `RezipPipeline.ps1`, and `Controller.ps1`. |
+| `Modules\ZipParallelProcessing.ps1` | `Invoke-ZipParallelProcessing` - the shared runspace-pool dispatcher used by `ZipPipeline.ps1` and `Controller.ps1`. |
 | `Modules\CleanConsoleRendering.ps1` | The Clean Console Output renderer - live per-series/chapter progress display replacing per-file console spam (log files unaffected). |
 | `Modules\ZipPipeline.ps1` | `Invoke-ZipOnlyPipeline` (mode "Zip Folders") and `Invoke-LooseFolderZip` (mode "Image Conversion + Zip"'s zip step) - zip-domain orchestration. |
 | `Modules\ImageConversionPipeline.ps1` | `Convert-ImageBatch` (shared batch conversion engine) and `Invoke-LooseImageConversionPipeline` (mode "Image Conversion" end to end, Clean Console Output-integrated). |
 | `Modules\Config.ps1` | Settings schema + `Import-/Export-ScriptSettings` at `%LOCALAPPDATA%\ConversionScript\settings.json`, with per-key validation and corrupt-file recovery. |
 | `Modules\Menu.ps1` | `Get-SelectedMode`/`Show-ModeMenu` (mode-selection prompt, including the Cover Deletion submenu) and `Show-OptionsMenuLevel` (data-driven options-menu renderer). |
 | `Modules\Summary.ps1` | The clean-run summary report - `New-StatsTracker`, `Format-ElapsedTime`, `Get-SummaryLines`/`Write-SummaryReport`. |
-| `Modules\ResumeState.ps1` | Tracks which ZIPs the rezip pipeline has already completed, so a re-run can skip them. |
-| `Modules\RezipPipeline.ps1` | `Invoke-RezipPipeline` - the hidden legacy "Convert Zipped" mode, deprecated/minimal-effort. |
+| `Modules\ChapterDispatch.ps1` | `Invoke-ChapterDispatch` - the generalized process-dispatch/abort/drain primitive all three real conversion entry points (modes 1, 2, 3) now run on, letting idle concurrency pick up the next chapter's work instead of blocking. |
 | `Modules\AnimatedConversionPipeline.ps1` | `Convert-AnimatedBatch` (AVIF→WebP batch conversion engine) plus `Invoke-LooseAnimatedConversionPipeline` (mode "Animated Conversion" end to end). |
 | `Modules\UnwantedImage.ps1` | Detects/deletes known unwanted images by size+dimensions+hash match, a trailing-zero-filename audit, and profile persistence (`Add-UnwantedImageProfileFromFile`). |
-| `Modules\Controller.ps1` | Full Pipeline's per-chapter engine (image + animated conversion concurrently, sharing one process budget, zips only when both succeed) plus the real top-level dispatcher (`Invoke-Mode`/`Invoke-MainLoop`). Not one of the original 18 - added 2026-08-28. |
+| `Modules\Controller.ps1` | Full Pipeline's two-engine dispatch (image + animated conversion each running their own chapter walk concurrently, sharing one process budget, zips only when both succeed) plus the real top-level dispatcher (`Invoke-Mode`/`Invoke-MainLoop`). |
 | `Modules\_Harness\*.Harness.ps1` | Standalone test harness per module - dot-sources the real module from `..\`. |
-| `Modules\_Reference\*.reference.ps1` | The extraction each module was built FROM - historical build input, not pending work (16 of 19 modules have one; `ZipParallelProcessing`, `CleanConsoleRendering`, and `Controller.ps1` legitimately don't). |
+| `Modules\_Reference\*.reference.ps1` | The extraction each module was built FROM - historical build input, not pending work (14 of 18 modules have one; `ZipParallelProcessing`, `CleanConsoleRendering`, `Controller.ps1`, and `ChapterDispatch.ps1` legitimately don't). |
 
 Earlier working scripts, including the standalone `Zip_Files-claude-parallel.ps1`
 that the staleness-check and former-container-guard logic were ported from,
@@ -87,7 +86,7 @@ Conversion Script/
 ├── Todo.md                <- live tracker: open items, not-yet-built ideas
 ├── Docs/                  <- extracted reference material (lessons learned, repo guard, backups, module loading, Clean Console Output, menu/full-pipeline design)
 ├── Conversion Script Main.ps1   <- the live script: bootstrap + Invoke-MainLoop
-├── Modules/               <- all 19 built modules live here
+├── Modules/               <- all 18 built modules live here
 │   ├── Logging.ps1
 │   ├── FileDeletion.ps1
 │   ├── AbortPipeline.ps1
@@ -102,8 +101,7 @@ Conversion Script/
 │   ├── Config.ps1
 │   ├── Menu.ps1
 │   ├── Summary.ps1
-│   ├── ResumeState.ps1
-│   ├── RezipPipeline.ps1
+│   ├── ChapterDispatch.ps1
 │   ├── AnimatedConversionPipeline.ps1
 │   ├── UnwantedImage.ps1
 │   ├── Controller.ps1

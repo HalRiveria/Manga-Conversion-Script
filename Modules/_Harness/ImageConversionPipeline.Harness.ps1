@@ -1058,41 +1058,6 @@ Test-Assert (Test-Path -LiteralPath $staleSrcO) "the staging dir's stale source 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario P: -SharedBudget (Controller.ps1's Full Pipeline concurrency
-#  design, 2026-08-28) - a SemaphoreSlim with FEWER slots than
-#  -MaxCjxlProcs actually constrains dispatch to the semaphore's count
-#  (proven by observing it get fully exhausted - CurrentCount reaching 0 -
-#  mid-run via -AbortPollCallback, not just inferred from final totals,
-#  which would look identical whether gating worked or not), and every
-#  slot is released again (no leak) once the batch completes.
-# ==============================================================================
-Write-Host "=== Scenario P: -SharedBudget gates dispatch and never leaks ===" -ForegroundColor Cyan
-$chP = New-Dir "scenario-p\Series\Chapter 1"
-$filesP = 1..5 | ForEach-Object { Get-Item -LiteralPath (New-FakeImage -DirPath $chP -Name ("budget" + $_ + ".jpg") -SleepMs 150) }
-$budgetP = [System.Threading.SemaphoreSlim]::new(2, 2)
-$script:budgetSnapshotsP = [System.Collections.Generic.List[int]]::new()
-$pollP = { param($inFlight) $script:budgetSnapshotsP.Add($budgetP.CurrentCount) }
-
-$resultP = Convert-ImageBatch -ImageFiles $filesP -CjxlExe $fakeCjxlExe -MaxCjxlProcs 5 -DoFullLogging $false `
-    -CancelToken ([System.Threading.CancellationToken]::None) -SharedBudget $budgetP -AbortPollCallback $pollP
-
-Test-Assert ($resultP.ConvertedCount -eq 5 -and $resultP.FailedCount -eq 0) "all 5 converted correctly through the shared budget"
-Test-Assert (($script:budgetSnapshotsP | Where-Object { $_ -eq 0 }).Count -gt 0) "the 2-slot budget was actually driven to 0 at some point - proves dispatch was really gated to 2 concurrent, not just passed through unused (MaxCjxlProcs=5 would have let all 5 start at once otherwise)"
-Test-Assert ($budgetP.CurrentCount -eq 2) "the budget is back to its full initial count after the call - no leaked slots"
-# 2026-08-31 fix: -AbortPollCallback fires once per outer dispatch-loop
-# pass, so its call count is a direct proxy for how many passes the loop
-# actually made. -MaxCjxlProcs 5 with a 2-slot SharedBudget is exactly the
-# shape that busy-spun before this fix (the old sleep-gate never saw
-# running.Count reach MaxCjxlProcs, since the budget - not MaxCjxlProcs -
-# was the real ceiling) - a prior version made tens of thousands of passes
-# in the same wall-clock window; a real 50ms sleep between passes bounds
-# this to roughly (total wall time / 50ms), generously under 100 even with
-# scheduler jitter.
-Test-Assert ($script:budgetSnapshotsP.Count -lt 100) ("the dispatch loop slept between passes instead of busy-spinning (got " + $script:budgetSnapshotsP.Count + " passes for ~450ms of simulated work)")
-$budgetP.Dispose()
-Write-Host ""
-
-# ==============================================================================
 #  Scenario Q: static AVIF converts through the WebP-style temp-PNG detour,
 #  2026-08-28 (Todo.md's decided static-AVIF-always-converts change).
 # ==============================================================================
@@ -1512,15 +1477,12 @@ Write-Host ""
 #  an unexpected throw from INSIDE the dispatch loop (here, -AbortPollCallback
 #  throwing on its second pass, once a job is genuinely in flight) used to
 #  propagate straight out of Convert-ImageBatch with the still-running job's
-#  process handle undisposed and its SharedBudget slot unreleased - a
-#  permanent leak under Controller.ps1's Full Pipeline, where the budget is
-#  shared with the animated engine. The dispatch loop's own try/catch now
-#  force-kills/disposes/releases anything left in $running before rethrowing.
+#  process handle undisposed. The dispatch loop's own try/catch now
+#  force-kills/disposes anything left in $running before rethrowing.
 # ==============================================================================
-Write-Host "=== Scenario AB: an unexpected throw mid-dispatch still releases the running job's process and budget slot ===" -ForegroundColor Cyan
+Write-Host "=== Scenario AB: an unexpected throw mid-dispatch still releases the running job's process handle ===" -ForegroundColor Cyan
 $chAB = New-Dir "scenario-ab\Series\Chapter 1"
 $fileAB = Get-Item -LiteralPath (New-FakeImage -DirPath $chAB -Name "page1.jpg" -SleepMs 300)
-$budgetAB = [System.Threading.SemaphoreSlim]::new(1, 1)
 $script:pollCountAB = 0
 $pollAB = {
     param($inFlight)
@@ -1531,14 +1493,12 @@ $pollAB = {
 $threwAB = $false
 try {
     $null = Convert-ImageBatch -ImageFiles @($fileAB) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 5 -DoFullLogging $false `
-        -CancelToken ([System.Threading.CancellationToken]::None) -SharedBudget $budgetAB -AbortPollCallback $pollAB
+        -CancelToken ([System.Threading.CancellationToken]::None) -AbortPollCallback $pollAB
 } catch {
     $threwAB = $true
 }
 
 Test-Assert $threwAB "the injected failure propagated out of Convert-ImageBatch, not silently swallowed"
-Test-Assert ($budgetAB.CurrentCount -eq 1) ("the running job's SharedBudget slot was released despite the throw (got CurrentCount=" + $budgetAB.CurrentCount + ")")
-$budgetAB.Dispose()
 Write-Host ""
 
 # ==============================================================================
@@ -1713,26 +1673,18 @@ Write-Host ""
 #  loop catch's own bulk cleanup (fix 3) iterates a $running list that can
 #  be STALE if Complete-ImageConversionJob throws partway through the poll
 #  loop's per-pass foreach - it may still list jobs that function's own
-#  finally already released. A same-budget scenario can't show the bug
-#  (SemaphoreSlim self-caps at max once every acquired slot is legitimately
-#  released), but a SHARED budget with real headroom (simulating the
-#  animated engine holding some slots, the actual Full Pipeline shape) can:
-#  a double-release there doesn't hit the ceiling, it erroneously refunds
-#  slots that belong to jobs OUTSIDE this batch entirely.
+#  finally already finished processing, including a job that already
+#  converted successfully. Without the SlotReleased guard, the outer
+#  catch's force-cleanup would delete that job's real, already-converted
+#  .jxl output as if it belonged to a genuinely still-running, force-killed
+#  job - a real data-loss bug.
 # ==============================================================================
-Write-Host "=== Scenario AF: a same-pass throw does not double-release an EARLIER job's already-released shared-budget slot, or delete its already-converted output ===" -ForegroundColor Cyan
+Write-Host "=== Scenario AF: a same-pass throw does not delete an EARLIER job's already-converted output ===" -ForegroundColor Cyan
 $chAF = New-Dir "scenario-af\Series\Chapter 1"
 $fileAF1 = Get-Item -LiteralPath (New-FakeImage -DirPath $chAF -Name "jobA_af.jpg")
 $expectedJxlAF = Join-Path $chAF "jobA_af.jxl"
 $fileAF2 = Get-Item -LiteralPath (New-FakeImage -DirPath $chAF -Name "jobB_af.jpg" -SleepMs 0)
 [System.IO.File]::WriteAllText($fileAF2.FullName, "STDOUT_MARKER")
-$budgetAF = [System.Threading.SemaphoreSlim]::new(4, 4)
-# Pre-acquire 2 slots to stand in for the animated engine's own real,
-# still-in-use share of the budget - the exact condition under which the
-# bug's damage (refunding slots that were never this batch's to release)
-# is actually observable.
-$budgetAF.Wait(0) | Out-Null
-$budgetAF.Wait(0) | Out-Null
 
 $realWriteLogFnAF = ${function:Write-Log}
 function Write-Log {
@@ -1745,7 +1697,7 @@ $script:realWriteLogFnAF = $realWriteLogFnAF
 $threwAF = $false
 try {
     $null = Convert-ImageBatch -ImageFiles @($fileAF1, $fileAF2) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 5 -DoFullLogging $true `
-        -CancelToken ([System.Threading.CancellationToken]::None) -SharedBudget $budgetAF
+        -CancelToken ([System.Threading.CancellationToken]::None)
 } catch {
     $threwAF = $true
 } finally {
@@ -1753,9 +1705,7 @@ try {
 }
 
 Test-Assert $threwAF "the injected Write-Log failure propagated out of Convert-ImageBatch"
-Test-Assert ($budgetAF.CurrentCount -eq 2) ("only this batch's own 2 acquired slots were released, not the 2 pre-acquired ones standing in for the OTHER engine (got CurrentCount=" + $budgetAF.CurrentCount + ", would be 4 if both jobs were double-released)")
 Test-Assert (Test-Path -LiteralPath $expectedJxlAF) "jobA's already-converted .jxl survived - the outer catch's force-cleanup must not touch a job that already completed successfully earlier in the same poll pass (a real data-loss bug found and fixed by a third verification pass: the SAME stale-$running condition that causes the double-release also let the outer catch delete a completed job's real output)"
-$budgetAF.Dispose()
 Write-Host ""
 
 # ==============================================================================
@@ -1817,8 +1767,6 @@ Write-Host "=== Scenario AH: an unexpected throw during the straggler-drain's fo
 $chAH = New-Dir "scenario-ah\Series\Chapter 1"
 $fileAH = Get-Item -LiteralPath (New-FakeImage -DirPath $chAH -Name "neverfinishes_ah.jpg" -SleepMs 30000)
 $expectedJxlAH = Join-Path $chAH "neverfinishes_ah.jxl"
-$budgetAH = [System.Threading.SemaphoreSlim]::new(3, 3)
-$budgetAH.Wait(0) | Out-Null   # one slot pre-acquired to stand in for another engine
 $ctsAH = [System.Threading.CancellationTokenSource]::new()
 $pollAH = { param($inFlight) if ($inFlight.Count -gt 0) { $ctsAH.Cancel() } }
 
@@ -1833,7 +1781,7 @@ $script:realWriteLogFnAH = $realWriteLogFnAH
 $threwAH = $false
 try {
     $null = Convert-ImageBatch -ImageFiles @($fileAH) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 5 -DoFullLogging $false `
-        -CancelToken $ctsAH.Token -SharedBudget $budgetAH -AbortPollCallback $pollAH -AbortTimeoutSeconds 1
+        -CancelToken $ctsAH.Token -AbortPollCallback $pollAH -AbortTimeoutSeconds 1
 } catch {
     $threwAH = $true
 } finally {
@@ -1842,9 +1790,7 @@ try {
 }
 
 Test-Assert $threwAH "the injected failure propagated out of Convert-ImageBatch during the straggler-drain, not silently swallowed"
-Test-Assert ($budgetAH.CurrentCount -eq 2) ("the never-finished job's slot was still released exactly once by the new catch (got CurrentCount=" + $budgetAH.CurrentCount + ", would stay 1 if the catch never ran and leaked it)")
 Test-Assert (-not (Test-Path -LiteralPath $expectedJxlAH)) "no .jxl was ever created for a job that was force-killed mid-sleep (sanity check - fake cjxl only writes output AFTER its SLEEP_MS completes)"
-$budgetAH.Dispose()
 Write-Host ""
 
 # ==============================================================================

@@ -87,8 +87,6 @@ function Get-ExpectedModuleFileNames {
         "LeafDirectoryDiscovery.ps1"
         "Logging.ps1"
         "Menu.ps1"
-        "ResumeState.ps1"
-        "RezipPipeline.ps1"
         "Summary.ps1"
         "UnwantedImage.ps1"
         "ZipCreation.ps1"
@@ -226,8 +224,6 @@ try {
     . (Join-Path $modulesPath "ZipPipeline.ps1")
     . (Join-Path $modulesPath "ImageConversionPipeline.ps1")
     . (Join-Path $modulesPath "AnimatedConversionPipeline.ps1")
-    . (Join-Path $modulesPath "ResumeState.ps1")
-    . (Join-Path $modulesPath "RezipPipeline.ps1")
     . (Join-Path $modulesPath "Summary.ps1")
     . (Join-Path $modulesPath "UnwantedImage.ps1")
     . (Join-Path $modulesPath "Menu.ps1")

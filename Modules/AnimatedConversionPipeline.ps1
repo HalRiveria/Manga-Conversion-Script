@@ -276,7 +276,6 @@ function Complete-AnimatedConversionJob {
         [hashtable]$BatchResult,
         [bool]$DoFullLogging,
         [bool]$DoAnimatedDeleteSource,
-        [System.Threading.SemaphoreSlim]$SharedBudget,
         [bool]$IsAbortDrain = $false
     )
 
@@ -284,14 +283,11 @@ function Complete-AnimatedConversionJob {
     # /code-review 4th pass on the sibling ImageConversionPipeline.ps1,
     # which found and fixed the identical gap in its own
     # Complete-ImageConversionJob first): this is the one place a RUNNING
-    # job's process handle and SharedBudget slot get released - unlike
-    # every other resource-release path in this file, it wasn't guarded.
-    # A throw from ReadToEnd/ExitCode (unlikely on an already-exited
-    # process, but not impossible) used to skip Dispose() AND Release()
-    # entirely and propagate straight out of Convert-AnimatedBatch - a
-    # permanently leaked SemaphoreSlim slot for the rest of the run under
-    # Controller.ps1's Full Pipeline, where the budget is shared with the
-    # image engine.
+    # job's process handle gets disposed - unlike every other resource-
+    # release path in this file, it wasn't guarded. A throw from
+    # ReadToEnd/ExitCode (unlikely on an already-exited process, but not
+    # impossible) used to skip Dispose() entirely and propagate straight
+    # out of Convert-AnimatedBatch.
     try {
         # Await the tasks started right after Process::Start (2026-09-08
         # fix) rather than a synchronous ReadToEnd() here - by the time
@@ -306,14 +302,13 @@ function Complete-AnimatedConversionJob {
         $code   = $Job.Proc.ExitCode
     } finally {
         $Job.Proc.Dispose()
-        if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
         # SlotReleased marker (2026-08-31 fix, mirrors the sibling module's
         # identical fix, INCLUDING the data-loss correction a later
         # verification pass found there - see Convert-AnimatedBatch's own
         # outer catch below for the full reasoning) - lets that catch tell
         # a job whose own cleanup already ran apart from one genuinely
-        # still running, both for the SharedBudget double-release risk AND
-        # for not deleting an already-converted job's real output.
+        # still running, so it doesn't delete an already-converted job's
+        # real output.
         $Job.SlotReleased = $true
     }
 
@@ -469,7 +464,6 @@ function Convert-AnimatedBatch {
         [scriptblock]$AbortPollCallback = $null,
         [int]$AbortTimeoutSeconds       = 60,
         [int]$HeartbeatIntervalSeconds  = 30,
-        [System.Threading.SemaphoreSlim]$SharedBudget = $null,
         [System.Collections.Generic.HashSet[string]]$KnownAnimatedPaths = $null
     )
 
@@ -507,11 +501,10 @@ function Convert-AnimatedBatch {
     # try/catch around the whole dispatch loop (2026-08-31 fix, mirrors
     # Convert-ImageBatch's identical fix in the sibling module - see that
     # function's own header comment for the full reasoning: every OTHER
-    # exit from this loop already releases every running job's process
-    # handle and SharedBudget slot, but an unexpected throw from inside
-    # the loop itself (-AbortPollCallback, Write-Log on a locked log file,
-    # a rethrow from Complete-AnimatedConversionJob) had no such
-    # guarantee).
+    # exit from this loop already disposes every running job's process
+    # handle, but an unexpected throw from inside the loop itself
+    # (-AbortPollCallback, Write-Log on a locked log file, a rethrow from
+    # Complete-AnimatedConversionJob) had no such guarantee).
     try {
     while (($pending.Count -gt 0 -or $running.Count -gt 0) -and (-not $CancelToken.IsCancellationRequested)) {
 
@@ -520,15 +513,9 @@ function Convert-AnimatedBatch {
             & $AbortPollCallback $inFlight
         }
 
-        # Fill up to AnimatedThreads slots - or, when -SharedBudget is
-        # supplied (Controller.ps1's Full Pipeline engine only), up to
-        # however many slots the shared SemaphoreSlim currently has free,
-        # ignoring $AnimatedThreads entirely - same non-blocking Wait(0)
-        # shape and same "every early continue must release" contract as
-        # Convert-ImageBatch's own dispatch loop - see that function's
-        # comment for the full reasoning.
+        # Fill up to AnimatedThreads slots.
         while ($pending.Count -gt 0 -and (-not $CancelToken.IsCancellationRequested) -and `
-               $(if ($SharedBudget) { $SharedBudget.Wait(0) } else { $running.Count -lt $AnimatedThreads })) {
+               $running.Count -lt $AnimatedThreads) {
             $j = $pending.Dequeue()
             # Wrapped in try/catch (2026-08-31 fix) - see Convert-ImageBatch's
             # identical fix (ImageConversionPipeline.ps1) for the full
@@ -548,7 +535,6 @@ function Convert-AnimatedBatch {
                 Write-Log ("SKIPPING '" + $j.SrcPath + "': output '" + $j.WebpPath + "' already exists (Overwrite is off).")
                 $batchResult.SkippedCount++
                 $batchResult.SkippedPaths.Add($j.SrcPath)
-                if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
                 continue
             }
 
@@ -570,7 +556,6 @@ function Convert-AnimatedBatch {
                 } catch {
                     Write-Log ("Could not determine if '" + $j.SrcPath + "' is animated - skipping: " + $_) -Level Warn
                     $batchResult.InspectFailedCount++
-                    if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
                     continue
                 }
             }
@@ -579,7 +564,6 @@ function Convert-AnimatedBatch {
                 Write-Log ("'" + $j.SrcPath + "' is a static AVIF (not animated) - left unconverted.")
                 $batchResult.StaticSkippedCount++
                 $batchResult.StaticSkippedPaths.Add($j.SrcPath)
-                if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
                 continue
             }
 
@@ -667,7 +651,6 @@ function Convert-AnimatedBatch {
             } catch {
                 Write-Log ("FAILED to start conversion process for '" + $j.SrcPath + "': " + $_) -Level Error
                 $batchResult.FailedCount++
-                if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
             }
         }
 
@@ -675,7 +658,7 @@ function Convert-AnimatedBatch {
         $stillRunning = [System.Collections.Generic.List[hashtable]]::new()
         foreach ($j in $running) {
             if ($j.Proc.HasExited) {
-                Complete-AnimatedConversionJob -Job $j -BatchResult $batchResult -DoFullLogging $DoFullLogging -DoAnimatedDeleteSource $DoAnimatedDeleteSource -SharedBudget $SharedBudget
+                Complete-AnimatedConversionJob -Job $j -BatchResult $batchResult -DoFullLogging $DoFullLogging -DoAnimatedDeleteSource $DoAnimatedDeleteSource
             } else {
                 if ($HeartbeatIntervalSeconds -gt 0 -and
                     ($j.StartTime.Elapsed - $j.LastHeartbeat).TotalSeconds -ge $HeartbeatIntervalSeconds) {
@@ -692,9 +675,7 @@ function Convert-AnimatedBatch {
         # Always sleep briefly here - see Convert-ImageBatch's identical
         # fix (ImageConversionPipeline.ps1) for the full reasoning: the
         # outer while's own condition already guarantees there's work left
-        # whenever execution reaches this point, and the old conditional
-        # check busy-spun at ~100% CPU whenever -SharedBudget was smaller
-        # than $AnimatedThreads (the normal Full Pipeline case).
+        # whenever execution reaches this point.
         Start-Sleep -Milliseconds 50
     }
     } catch {
@@ -702,18 +683,18 @@ function Convert-AnimatedBatch {
         # per step, same as every other cleanup path in this file) - best
         # effort, since we're already unwinding from an unexpected failure
         # and must not let a cleanup error mask or replace the real one.
-        # $j.SlotReleased guards the Release() call AND the output-path
-        # deletion (2026-08-31 fix, mirrors Convert-ImageBatch's identical
-        # fix, INCLUDING the data-loss correction a verification pass
-        # found there - this $running list is STALE, since the poll loop
-        # above only reassigns it after its whole foreach pass completes,
-        # so it can still list a job that ALREADY completed successfully
-        # earlier in the SAME pass, source deleted and all, right
-        # alongside a job that throws later in that pass. SlotReleased is
-        # set in Complete-AnimatedConversionJob's own finally, true for
-        # any job whose own cleanup already ran - success or failure,
-        # doesn't matter which - false only for one genuinely still
-        # running when this catch fires).
+        # $j.SlotReleased guards the output-path deletion (2026-08-31 fix,
+        # mirrors Convert-ImageBatch's identical fix, INCLUDING the
+        # data-loss correction a verification pass found there - this
+        # $running list is STALE, since the poll loop above only
+        # reassigns it after its whole foreach pass completes, so it can
+        # still list a job that ALREADY completed successfully earlier in
+        # the SAME pass, source deleted and all, right alongside a job
+        # that throws later in that pass. SlotReleased is set in
+        # Complete-AnimatedConversionJob's own finally, true for any job
+        # whose own cleanup already ran - success or failure, doesn't
+        # matter which - false only for one genuinely still running when
+        # this catch fires).
         foreach ($j in $running) {
             try { if ($j.Proc -and -not $j.Proc.HasExited) { $j.Proc.Kill() } } catch { }
             try { if ($j.Proc) { $j.Proc.WaitForExit(5000) } } catch { }
@@ -740,7 +721,6 @@ function Convert-AnimatedBatch {
                 try { [System.IO.File]::Delete($j.MagickOutputPath) } catch { }
             }
             try { if ($j.Proc) { $j.Proc.Dispose() } } catch { }
-            if ($SharedBudget -and -not $j.SlotReleased) { try { $SharedBudget.Release() | Out-Null } catch { } }
         }
         throw
     }
@@ -769,7 +749,7 @@ function Convert-AnimatedBatch {
         # calls are all guarded by its own try/catch, so the realistic
         # trigger is the force-kill block's own unguarded "Force-stopping"
         # Write-Log call below) had no equivalent guard, leaking every
-        # remaining drain-list job's process handle and SharedBudget slot.
+        # remaining drain-list job's process handle.
         try {
             # -not [ConsoleCtrl]::IsCloseEvent (2026-09-03 fix, real bug -
             # same reasoning as the sibling module's identical fix, see
@@ -782,7 +762,7 @@ function Convert-AnimatedBatch {
                 $stillWaiting = [System.Collections.Generic.List[hashtable]]::new()
                 foreach ($j in $running) {
                     if ($j.Proc.HasExited) {
-                        Complete-AnimatedConversionJob -Job $j -BatchResult $batchResult -DoFullLogging $DoFullLogging -DoAnimatedDeleteSource $DoAnimatedDeleteSource -SharedBudget $SharedBudget -IsAbortDrain $true
+                        Complete-AnimatedConversionJob -Job $j -BatchResult $batchResult -DoFullLogging $DoFullLogging -DoAnimatedDeleteSource $DoAnimatedDeleteSource -IsAbortDrain $true
                     } else {
                         $stillWaiting.Add($j)
                     }
@@ -807,7 +787,7 @@ function Convert-AnimatedBatch {
                 $stillWaiting = [System.Collections.Generic.List[hashtable]]::new()
                 foreach ($j in $running) {
                     if ($j.Proc.HasExited) {
-                        Complete-AnimatedConversionJob -Job $j -BatchResult $batchResult -DoFullLogging $DoFullLogging -DoAnimatedDeleteSource $DoAnimatedDeleteSource -SharedBudget $SharedBudget -IsAbortDrain $true
+                        Complete-AnimatedConversionJob -Job $j -BatchResult $batchResult -DoFullLogging $DoFullLogging -DoAnimatedDeleteSource $DoAnimatedDeleteSource -IsAbortDrain $true
                     } else {
                         $stillWaiting.Add($j)
                     }
@@ -845,15 +825,14 @@ function Convert-AnimatedBatch {
                     # is already a safe no-op.
                     try { [System.IO.File]::Delete($j.MagickOutputPath) } catch { }
                     $j.Proc.Dispose()
-                    if ($SharedBudget) { $SharedBudget.Release() | Out-Null }
                     # $j.SlotReleased = $true (2026-08-31 fix, mirrors the
                     # identical fix in the sibling module's own force-kill
                     # loop - see that file's comment for the full
                     # reasoning): without this, a throw partway through
                     # THIS loop would drop into the outer catch below,
                     # which re-iterates this same $running list and could
-                    # release an already-released job's slot a second
-                    # time.
+                    # delete an already-processed job's real output a
+                    # second time.
                     $j.SlotReleased = $true
                 }
             }
@@ -868,7 +847,6 @@ function Convert-AnimatedBatch {
                     try { [System.IO.File]::Delete($j.MagickOutputPath) } catch { }
                 }
                 try { if ($j.Proc) { $j.Proc.Dispose() } } catch { }
-                if ($SharedBudget -and -not $j.SlotReleased) { try { $SharedBudget.Release() | Out-Null } catch { } }
             }
             throw
         }
@@ -999,14 +977,16 @@ function Complete-AnimatedDispatchJob {
         try/finally) - see that function's own header for the cross-
         reference. Genuinely different contract, not a lazy copy:
         Complete-AnimatedConversionJob's caller (Convert-AnimatedBatch,
-        still used directly by Controller.ps1's Full Pipeline until step
-        4 of the dispatch redesign migrates it too) owns process
-        disposal and -SharedBudget release itself; THIS function's
-        caller (Invoke-ChapterDispatch) already owns that generically for
-        every job on every exit path - duplicating it here would
-        double-release the same slot. No -IsAbortDrain distinction
-        either - Invoke-ChapterDispatch calls JobFinalize identically
-        whether a job finished during normal polling or during the
+        still used only by that function's own harness now - no real
+        caller left since Controller.ps1's Full Pipeline migrated onto
+        Invoke-ChapterDispatch, step 4 of the dispatch redesign) owns
+        process disposal itself; THIS function's caller
+        (Invoke-ChapterDispatch) already owns process disposal AND its
+        own -MaxConcurrent SemaphoreSlim release generically for every job
+        on every exit path - duplicating either here would double-release
+        the same slot. No -IsAbortDrain distinction either -
+        Invoke-ChapterDispatch calls JobFinalize identically whether a
+        job finished during normal polling or during the
         abort/drain window, so there's no separate wording variant to
         capture.
     .OUTPUTS

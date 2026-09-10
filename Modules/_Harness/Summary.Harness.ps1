@@ -41,7 +41,7 @@ function Test-Assert {
 }
 
 function Get-AllModeFlagsFalse {
-    return @{ RunImageConversion = $false; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false; RunConvertZipped = $false }
+    return @{ RunImageConversion = $false; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false }
 }
 
 Write-Host ""
@@ -73,32 +73,13 @@ Test-Assert ((Format-ElapsedTime -Elapsed ([timespan]::new(25, 5, 9))) -eq "01h 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario C: Get-SummaryLines - RunConvertZipped shows only the
-#  ZIP-pipeline rows
-# ==============================================================================
-Write-Host "=== Scenario C: Get-SummaryLines, RunConvertZipped only ===" -ForegroundColor Cyan
-$statsC = New-StatsTracker
-$statsC.ZipExtracted.Success = 5
-$flagsC = Get-AllModeFlagsFalse
-$flagsC.RunConvertZipped = $true
-$linesC = Get-SummaryLines -Stats $statsC -ElapsedString "00h 01m 00s" -ModeFlags $flagsC
-$blobC = $linesC -join "`n"
-Test-Assert ($blobC -match "ZIPs Extracted") "shows the ZIP-pipeline rows when RunConvertZipped is true"
-Test-Assert ($blobC -match "Success = 5") "the actual stat value appears in the line"
-Test-Assert ($blobC -notmatch "Loose Img Conv\.") "does not show loose-image rows when RunConvertZipped is the only flag set"
-Test-Assert ($blobC -notmatch "Zip-only") "does not show zip-only rows"
-Test-Assert ($blobC -notmatch "Inspect Failed") "does not show Inspect Failed - neither RunImageConversion nor RunAnimatedConversion is set"
-Test-Assert ($linesC[0] -eq "=== SUMMARY ===" -and $linesC[-1] -eq "=== Processing complete ===") "starts/ends with the standard header/footer"
-Write-Host ""
-
-# ==============================================================================
 #  Scenario D: Get-SummaryLines - Full Pipeline's flags (image + animated
 #  + zip) show exactly those three groups, nothing else
 # ==============================================================================
 Write-Host "=== Scenario D: Get-SummaryLines, Full Pipeline flags ===" -ForegroundColor Cyan
 $statsD = New-StatsTracker
 $statsD.InspectFailed.Count = 3
-$flagsD = @{ RunImageConversion = $true; RunAnimatedConversion = $true; RunZip = $true; RunZipOnly = $false; RunConvertZipped = $false }
+$flagsD = @{ RunImageConversion = $true; RunAnimatedConversion = $true; RunZip = $true; RunZipOnly = $false }
 $blobD = (Get-SummaryLines -Stats $statsD -ElapsedString "00h 00m 05s" -ModeFlags $flagsD) -join "`n"
 Test-Assert ($blobD -match "Loose Img Conv\.") "shows loose image conversion rows"
 Test-Assert ($blobD -match "Loose Anim\. Conv\.") "shows loose animated conversion rows"
