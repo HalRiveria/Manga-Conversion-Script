@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Controller - Full Pipeline's (mode 1) per-chapter engine: for each
     chapter, runs image conversion and animated conversion CONCURRENTLY
@@ -553,7 +553,8 @@ function Get-OrCreateFullPipelineSeriesBundle {
 
     $freshLazy = [System.Lazy[hashtable]]::new([Func[hashtable]]$factory, [System.Threading.LazyThreadSafetyMode]::ExecutionAndPublication)
     $lazy = $Cache.GetOrAdd($Series.FullName, $freshLazy)
-    return $lazy.Value
+    $result = $lazy.Value
+    return $result
 }
 
 function Get-OrCreateFullPipelineChapterClassification {
@@ -629,12 +630,26 @@ function Get-OrCreateFullPipelineChapterClassification {
                 # pulling OUT so the stale cleanup below doesn't delete a
                 # file the animated engine (Animated) or neither engine
                 # (Failed, ownership unresolved) should be touching.
-                $keepIfStatic = { -not $chAvifClassification.ContainsKey($_.FullName) -or $chAvifClassification[$_.FullName] -eq "Static" }
-                $images       = @($images | Where-Object $keepIfStatic)
-                $staleSources = @($staleSources | Where-Object $keepIfStatic)
-                $animated     = @($animated | Where-Object {
-                    -not $chAvifClassification.ContainsKey($_.FullName) -or $chAvifClassification[$_.FullName] -eq "Animated"
-                })
+                # Plain foreach, not Where-Object (2026-09-10) - Where-Object
+                # is ALSO a real hang risk under the same runspace-race bug
+                # LeafDirectoryDiscovery.ps1's Get-FilesRecursiveSafe/
+                # Get-ZippableLeafDirs/Test-ZippableLeafDirCandidate were
+                # fixed for (see those functions' own NOTES) - not just
+                # filesystem cmdlets, ANY cmdlet's first invocation racing
+                # across two runspaces is suspect. This factory runs inside
+                # that exact same per-chapter race window.
+                $keepIfStatic = { param($f) (-not $chAvifClassification.ContainsKey($f.FullName)) -or $chAvifClassification[$f.FullName] -eq "Static" }
+                $newImages = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+                foreach ($f in $images) { if (& $keepIfStatic $f) { $newImages.Add($f) } }
+                $images = $newImages
+                $newStale = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+                foreach ($f in $staleSources) { if (& $keepIfStatic $f) { $newStale.Add($f) } }
+                $staleSources = $newStale
+                $newAnimated = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+                foreach ($f in $animated) {
+                    if ((-not $chAvifClassification.ContainsKey($f.FullName)) -or $chAvifClassification[$f.FullName] -eq "Animated") { $newAnimated.Add($f) }
+                }
+                $animated = $newAnimated
                 foreach ($avifEntry in $chAvifClassification.GetEnumerator()) {
                     if ($avifEntry.Value -eq "Failed") {
                         Add-FullPipelineZipBlockReason -Dict $ZipBlockReasons -ChapterKey $ChapterInfo -Reason "AVIF classification failure"

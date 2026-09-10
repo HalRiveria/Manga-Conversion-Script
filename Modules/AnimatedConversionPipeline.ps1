@@ -894,17 +894,35 @@ function Get-LooseAnimatedCandidates {
         foreach ($stagingDir in $ExcludeStagingDirs) { $null = $zipBaseDirs.Add($stagingDir) }
     }
 
+    # Get-FilesRecursiveSafe (LeafDirectoryDiscovery.ps1), not
+    # Get-ChildItem -Recurse, as of 2026-09-10 - real, live-reproduced
+    # hang (not just slowness) when two runspaces both make their
+    # first-ever PowerShell FileSystem-provider call at close to the same
+    # moment - see that function's own header for the full story. A real
+    # `foreach` statement here, not `| ForEach-Object` - Get-FilesRecursiveSafe
+    # returns its List with the leading-comma collapse guard (see
+    # Docs/lessons-learned.md), which means a caller piping its output
+    # receives the WHOLE List as one pipeline object, not one item per
+    # element (that unrolling only happens for a cmdlet emitting items
+    # individually, e.g. Get-ChildItem, not a function returning a single
+    # comma-protected collection) - confirmed live, `$_.Add(...)` inside
+    # `| ForEach-Object` threw "Cannot find an overload for 'Add'" because
+    # `$_` was the List itself, not a FileInfo. `foreach` over the
+    # returned List enumerates its real elements correctly either way.
     $candidates = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-    Get-ChildItem -LiteralPath $ScanPath -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
-        if ($AnimatedFileExtensions -inotcontains $_.Extension) { return }
-        $fileDir = $_.DirectoryName
+    foreach ($file in (Get-FilesRecursiveSafe -ScanPath $ScanPath)) {
+        if ($AnimatedFileExtensions -inotcontains $file.Extension) { continue }
+        $fileDir = $file.DirectoryName
+        $isStaged = $false
         foreach ($stagingDir in $zipBaseDirs) {
             if ($fileDir.Equals($stagingDir, [System.StringComparison]::OrdinalIgnoreCase) -or
                 $fileDir.StartsWith($stagingDir + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
-                return
+                $isStaged = $true
+                break
             }
         }
-        $candidates.Add($_)
+        if ($isStaged) { continue }
+        $candidates.Add($file)
     }
 
     # Leading comma - same collection-collapse trap as every other

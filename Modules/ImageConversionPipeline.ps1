@@ -1501,63 +1501,81 @@ function Get-LooseImageCandidates {
         foreach ($stagingDir in $ExcludeStagingDirs) { $null = $zipBaseDirs.Add($stagingDir) }
     }
 
-    $allCandidates = @(Get-ChildItem -LiteralPath $ScanPath -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object {
-            if ($LooseImageExtensions -inotcontains $_.Extension) { return $false }
-            # Orphaned scratch files - Test-OrphanedScratchFileName (this
-            # module, single source of truth, 2026-09-03 cleanup - see its
-            # own header for the full reasoning, also used by
-            # Controller.ps1/ZipPipeline.ps1's matching sweeps).
-            if (Test-OrphanedScratchFileName -Name $_.Name) { return $false }
-            # Never-converted extensions (2026-09-02 fix, from a same-day
-            # review, live-confirmed) - excluded here for the same reason
-            # orphaned scratch files are excluded above: without this, a
-            # GIF (Convert-ImageBatch's own pre-pass always skips it,
-            # leaving it untouched with a "File left untouched" promise -
-            # see Get-NeverConvertedExtensions's own header) that happens
-            # to be OLDER than an unrelated same-basename .jxl gets
-            # classified as a stale leftover below and DELETED on the
-            # very next run, breaking that promise. Excluding it here
-            # means it's never even a NeedsConversion/StaleSources/
-            # NamingCollisions candidate - it just sits there, still
-            # visible to a folder-qualifying-extension check (so a
-            # chapter holding one is still discovered/walked, not
-            # invisible), permanently untouched by this function
-            # specifically. It does NOT keep blocking zip forever
-            # (2026-09-02 correction, caught by a second same-day
-            # review) - Controller.ps1's own mode-8 zip-blocking list
-            # also subtracts Get-NeverConvertedExtensions now, for
-            # exactly this reason: a never-converted file can never
-            # produce the "conversion failure resolved" state a
-            # blocking check like that expects, so leaving it as a
-            # permanent blocker there meant mode 8 could never zip that
-            # chapter, ever, on any run - live-confirmed. Full Pipeline
-            # has no such gate at all and simply sweeps it into the zip;
-            # mode 8 now matches that already-validated behavior.
-            if ((Get-NeverConvertedExtensions) -icontains $_.Extension) {
-                # Logged here, not just left silent like the scratch-file
-                # exclusion above (2026-09-02 fix) - a never-converted file
-                # is real user content, not internal debris, and this
-                # exclusion means Convert-ImageBatch's own matching
-                # "SKIPPING..." message (its pre-pass) can no longer fire
-                # for it through either real caller (both route through
-                # this function first) - without a message here, a
-                # chapter holding only a never-converted file would show
-                # nothing more specific than "no unconverted images",
-                # indistinguishable from a chapter that's genuinely fully
-                # done.
-                Write-Log ("SKIPPING '" + $_.FullName + "': not converted by this project (see Get-NeverConvertedExtensions's own comment for why). File left untouched.") -Level Warn
-                return $false
+    # Get-FilesRecursiveSafe (LeafDirectoryDiscovery.ps1), not
+    # Get-ChildItem -Recurse, as of 2026-09-10 - real, live-reproduced
+    # hang (not just slowness) when two runspaces both make their
+    # first-ever PowerShell FileSystem-provider call at close to the same
+    # moment - see that function's own header for the full story. A real
+    # `foreach` statement here, not `| Where-Object` - Get-FilesRecursiveSafe
+    # returns its List with the leading-comma collapse guard (see
+    # Docs/lessons-learned.md), which means a caller piping its output
+    # receives the WHOLE List as one pipeline object, not one item per
+    # element (that per-item unrolling only happens for a cmdlet emitting
+    # items individually, e.g. Get-ChildItem, not a function returning a
+    # single comma-protected collection) - confirmed live, Where-Object's
+    # own $_ was the List itself, not a FileInfo, throwing deep inside the
+    # filter body. `foreach` over the returned List enumerates its real
+    # elements correctly either way.
+    $allCandidates = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+    foreach ($file in (Get-FilesRecursiveSafe -ScanPath $ScanPath)) {
+        if ($LooseImageExtensions -inotcontains $file.Extension) { continue }
+        # Orphaned scratch files - Test-OrphanedScratchFileName (this
+        # module, single source of truth, 2026-09-03 cleanup - see its
+        # own header for the full reasoning, also used by
+        # Controller.ps1/ZipPipeline.ps1's matching sweeps).
+        if (Test-OrphanedScratchFileName -Name $file.Name) { continue }
+        # Never-converted extensions (2026-09-02 fix, from a same-day
+        # review, live-confirmed) - excluded here for the same reason
+        # orphaned scratch files are excluded above: without this, a
+        # GIF (Convert-ImageBatch's own pre-pass always skips it,
+        # leaving it untouched with a "File left untouched" promise -
+        # see Get-NeverConvertedExtensions's own header) that happens
+        # to be OLDER than an unrelated same-basename .jxl gets
+        # classified as a stale leftover below and DELETED on the
+        # very next run, breaking that promise. Excluding it here
+        # means it's never even a NeedsConversion/StaleSources/
+        # NamingCollisions candidate - it just sits there, still
+        # visible to a folder-qualifying-extension check (so a
+        # chapter holding one is still discovered/walked, not
+        # invisible), permanently untouched by this function
+        # specifically. It does NOT keep blocking zip forever
+        # (2026-09-02 correction, caught by a second same-day
+        # review) - Controller.ps1's own mode-8 zip-blocking list
+        # also subtracts Get-NeverConvertedExtensions now, for
+        # exactly this reason: a never-converted file can never
+        # produce the "conversion failure resolved" state a
+        # blocking check like that expects, so leaving it as a
+        # permanent blocker there meant mode 8 could never zip that
+        # chapter, ever, on any run - live-confirmed. Full Pipeline
+        # has no such gate at all and simply sweeps it into the zip;
+        # mode 8 now matches that already-validated behavior.
+        if ((Get-NeverConvertedExtensions) -icontains $file.Extension) {
+            # Logged here, not just left silent like the scratch-file
+            # exclusion above (2026-09-02 fix) - a never-converted file
+            # is real user content, not internal debris, and this
+            # exclusion means Convert-ImageBatch's own matching
+            # "SKIPPING..." message (its pre-pass) can no longer fire
+            # for it through either real caller (both route through
+            # this function first) - without a message here, a
+            # chapter holding only a never-converted file would show
+            # nothing more specific than "no unconverted images",
+            # indistinguishable from a chapter that's genuinely fully
+            # done.
+            Write-Log ("SKIPPING '" + $file.FullName + "': not converted by this project (see Get-NeverConvertedExtensions's own comment for why). File left untouched.") -Level Warn
+            continue
+        }
+        $fileDir = $file.DirectoryName
+        $isStaged = $false
+        foreach ($stagingDir in $zipBaseDirs) {
+            if ($fileDir.Equals($stagingDir, [System.StringComparison]::OrdinalIgnoreCase) -or
+                $fileDir.StartsWith($stagingDir + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $isStaged = $true
+                break
             }
-            $fileDir = $_.DirectoryName
-            foreach ($stagingDir in $zipBaseDirs) {
-                if ($fileDir.Equals($stagingDir, [System.StringComparison]::OrdinalIgnoreCase) -or
-                    $fileDir.StartsWith($stagingDir + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
-                    return $false
-                }
-            }
-            return $true
-        })
+        }
+        if ($isStaged) { continue }
+        $allCandidates.Add($file)
+    }
 
     $needsConversion = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
     $staleSources     = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
