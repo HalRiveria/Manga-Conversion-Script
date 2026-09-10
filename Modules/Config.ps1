@@ -143,6 +143,14 @@ function Get-DefaultScriptSettings {
         AnimatedDeleteSource             = $true
         ZipWithUnconvertedAnimated       = $false
         LastCoverDeletionPath            = ""
+        # Placeholder (2026-09-09, options-menu redesign) - exposed as a
+        # real, persisted toggle under the new "Full Pipeline Settings"
+        # submenu (Menu.ps1's Get-OptionsMenuSchema), but not yet read by
+        # Invoke-FullPipeline or anything else - flipping it currently has
+        # no effect. See Todo.md's "Run Cover Deletion automatically
+        # before Full Pipeline conversion" entry for the real feature this
+        # is scaffolding toward.
+        RunCoverDeletionBeforeConversion = $false
     }
 }
 

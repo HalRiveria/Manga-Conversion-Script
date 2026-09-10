@@ -192,9 +192,9 @@ Write-Host ""
 Write-Host "=== Scenario F: a change inside Options saves immediately, then mode selection continues ===" -ForegroundColor Cyan
 $settingsF = Get-DefaultScriptSettings
 $pathF = New-ScratchSettingsPath "scenario-f"
-$promptF = New-ScriptedPrompt -Responses @('0', '5', '0', '4')
+$promptF = New-ScriptedPrompt -Responses @('0', '6', '0', '4')
 $resultF = Show-ModeMenu -Settings $settingsF -SettingsPath $pathF -PromptFunc $promptF
-Test-Assert ($settingsF.PermanentDelete -eq $true) "toggling item 5 (Permanent Delete) flipped it to `$true in the live hashtable"
+Test-Assert ($settingsF.PermanentDelete -eq $true) "toggling item 6 (Permanent Delete) flipped it to `$true in the live hashtable"
 $reloadedF = Import-ScriptSettings -Path $pathF
 Test-Assert ($reloadedF.PermanentDelete -eq $true) "the toggle was actually persisted to disk immediately, not just in memory"
 Test-Assert ($resultF.Mode -eq 'ZipFolders') "after backing out of Options, '4' resolved to ZipFolders"
@@ -236,15 +236,19 @@ Write-Host ""
 # ==============================================================================
 Write-Host "=== Scenario I: Get-OptionsMenuSchema shape and Config cross-check ===" -ForegroundColor Cyan
 $schemaI = Get-OptionsMenuSchema
-Test-Assert ($schemaI.Count -eq 7) "seven top-level items (Image Conversion, Animated Conversion, Zip, Logging, Permanent Delete, Open Settings Location, Full Pipeline Max Concurrent Processes)"
-Test-Assert ($schemaI[0].Type -eq 'Submenu' -and $schemaI[0].Items.Count -eq 3) "Image Conversion Settings is a 3-item submenu"
-Test-Assert ($schemaI[1].Type -eq 'Submenu' -and $schemaI[1].Items.Count -eq 5) "Animated Conversion Settings is a 5-item submenu"
-Test-Assert ($schemaI[2].Type -eq 'Submenu' -and $schemaI[2].Items.Count -eq 2) "Zip Settings is a 2-item submenu"
-Test-Assert ($schemaI[3].Type -eq 'Submenu' -and $schemaI[3].Items.Count -eq 3) "Logging is a 3-item submenu"
-Test-Assert ($schemaI[4].Type -eq 'Bool' -and $schemaI[4].SettingsKey -eq 'PermanentDelete') "item 5 is the direct Permanent Delete Bool toggle"
-Test-Assert ($schemaI[5].Type -eq 'Action' -and $schemaI[5].Action -eq 'OpenSettingsLocation') "item 6 is the Open Settings File Location action"
-# 2026-09-03 addition, real bug fix (see CHANGELOG.md)
-Test-Assert ($schemaI[6].Type -eq 'Int' -and $schemaI[6].SettingsKey -eq 'FullPipelineMaxConcurrentProcs') "item 7 is the direct Full Pipeline Max Concurrent Processes Int setting"
+Test-Assert ($schemaI.Count -eq 7) "seven top-level items (Full Pipeline, Image Conversion, Animated Conversion, Zip, Logging, Permanent Delete, Open Settings Location)"
+# 2026-09-09 reorganization (see CHANGELOG.md) - a new top-level Full
+# Pipeline Settings submenu, everything else shifted down by one.
+Test-Assert ($schemaI[0].Type -eq 'Submenu' -and $schemaI[0].Items.Count -eq 2) "Full Pipeline Settings is a 2-item submenu"
+Test-Assert ($schemaI[0].Items[0].SettingsKey -eq 'FullPipelineMaxConcurrentProcs') "Full Pipeline Settings item 1 is Max Concurrent Processes"
+Test-Assert ($schemaI[0].Items[1].SettingsKey -eq 'RunCoverDeletionBeforeConversion') "Full Pipeline Settings item 2 is the Run Cover Deletion Before Conversion placeholder"
+Test-Assert ($schemaI[1].Type -eq 'Submenu' -and $schemaI[1].Items.Count -eq 3) "Image Conversion Settings is a 3-item submenu"
+Test-Assert ($schemaI[2].Type -eq 'Submenu' -and $schemaI[2].Items.Count -eq 5) "Animated Conversion Settings is a 5-item submenu"
+Test-Assert ($schemaI[3].Type -eq 'Submenu' -and $schemaI[3].Items.Count -eq 2) "Zip Settings is a 2-item submenu"
+Test-Assert ($schemaI[4].Type -eq 'Submenu' -and $schemaI[4].Items.Count -eq 3) "Logging is a 3-item submenu"
+Test-Assert ($schemaI[4].Items[1].Label -eq 'Disable Summary File' -and $schemaI[4].Items[1].SettingsKey -eq 'DisableSummaryFile') "Logging item 2's label matches its own settings key's sense (2026-09-09 rename, was 'Toggle Summary File')"
+Test-Assert ($schemaI[5].Type -eq 'Bool' -and $schemaI[5].SettingsKey -eq 'PermanentDelete') "item 6 is the direct Permanent Delete Bool toggle"
+Test-Assert ($schemaI[6].Type -eq 'Action' -and $schemaI[6].Action -eq 'OpenSettingsLocation') "item 7 is the Open Settings File Location action"
 
 $defaultsI = Get-DefaultScriptSettings
 function Get-AllSettingsKeysInSchema {
@@ -286,7 +290,7 @@ Write-Host ""
 Write-Host "=== Scenario K: Bool toggle inside a submenu persists ===" -ForegroundColor Cyan
 $settingsK = Get-DefaultScriptSettings
 $pathK = New-ScratchSettingsPath "scenario-k"
-$promptK = New-ScriptedPrompt -Responses @('1', '3', '0', '0')
+$promptK = New-ScriptedPrompt -Responses @('2', '3', '0', '0')
 Show-OptionsMenuLevel -Items (Get-OptionsMenuSchema) -Settings $settingsK -SettingsPath $pathK -PromptFunc $promptK
 Test-Assert ($settingsK.JpegLossless -eq $true) "Lossless Toggle inside Image Conversion Settings flipped to `$true"
 $reloadedK = Import-ScriptSettings -Path $pathK
@@ -299,7 +303,7 @@ Write-Host ""
 Write-Host "=== Scenario L: valid Int entry updates and saves ===" -ForegroundColor Cyan
 $settingsL = Get-DefaultScriptSettings
 $pathL = New-ScratchSettingsPath "scenario-l"
-$promptL = New-ScriptedPrompt -Responses @('1', '2', '55', '0', '0')
+$promptL = New-ScriptedPrompt -Responses @('2', '2', '55', '0', '0')
 Show-OptionsMenuLevel -Items (Get-OptionsMenuSchema) -Settings $settingsL -SettingsPath $pathL -PromptFunc $promptL
 Test-Assert ($settingsL.JpegQuality -eq 55) "Quality was updated to the entered value (55)"
 $reloadedL = Import-ScriptSettings -Path $pathL
@@ -313,7 +317,7 @@ Write-Host ""
 Write-Host "=== Scenario M: out-of-range Int entry is rejected, value unchanged ===" -ForegroundColor Cyan
 $settingsM = Get-DefaultScriptSettings
 $pathM = New-ScratchSettingsPath "scenario-m"
-$promptM = New-ScriptedPrompt -Responses @('1', '2', '500', '0', '0')
+$promptM = New-ScriptedPrompt -Responses @('2', '2', '500', '0', '0')
 Show-OptionsMenuLevel -Items (Get-OptionsMenuSchema) -Settings $settingsM -SettingsPath $pathM -PromptFunc $promptM
 Test-Assert ($settingsM.JpegQuality -eq 90) "Quality (500, out of the 1-100 range) was rejected - stayed at its default (90)"
 Test-Assert (-not (Test-Path -LiteralPath $pathM)) "nothing was ever saved, since no valid change was made in this session"
@@ -325,7 +329,7 @@ Write-Host ""
 Write-Host "=== Scenario M2: blank Int entry cancels ===" -ForegroundColor Cyan
 $settingsM2 = Get-DefaultScriptSettings
 $pathM2 = New-ScratchSettingsPath "scenario-m2"
-$promptM2 = New-ScriptedPrompt -Responses @('1', '2', '', '0', '0')
+$promptM2 = New-ScriptedPrompt -Responses @('2', '2', '', '0', '0')
 Show-OptionsMenuLevel -Items (Get-OptionsMenuSchema) -Settings $settingsM2 -SettingsPath $pathM2 -PromptFunc $promptM2
 Test-Assert ($settingsM2.JpegQuality -eq 90) "a blank entry cancelled - Quality stayed at its default"
 Test-Assert (-not (Test-Path -LiteralPath $pathM2)) "nothing was saved for a cancelled edit"
@@ -343,9 +347,9 @@ $actionHandlerN = {
     param($ActionName, $Settings, $SettingsPath)
     $actionCallsN.Add($ActionName)
 }.GetNewClosure()
-$promptN = New-ScriptedPrompt -Responses @('6', '0')
+$promptN = New-ScriptedPrompt -Responses @('7', '0')
 Show-OptionsMenuLevel -Items (Get-OptionsMenuSchema) -Settings $settingsN -SettingsPath $pathN -PromptFunc $promptN -ActionHandler $actionHandlerN
-Test-Assert ($actionCallsN.Count -eq 1 -and $actionCallsN[0] -eq 'OpenSettingsLocation') "picking item 6 dispatched the 'OpenSettingsLocation' action exactly once through the injected handler"
+Test-Assert ($actionCallsN.Count -eq 1 -and $actionCallsN[0] -eq 'OpenSettingsLocation') "picking item 7 dispatched the 'OpenSettingsLocation' action exactly once through the injected handler"
 Write-Host ""
 
 # ==============================================================================
@@ -412,12 +416,12 @@ $settingsQ2.PermanentDelete = $true
 $settingsQ2.CleanConsoleOutputEnabled = $true
 Export-ScriptSettings -Settings $settingsQ2 -Path (New-ScratchSettingsPath "scenario-q2-init") | Out-Null
 $pathQ2 = New-ScratchSettingsPath "scenario-q2"
-# '0' -> Options, '5' -> toggle Permanent Delete off (Options loops back
+# '0' -> Options, '6' -> toggle Permanent Delete off (Options loops back
 # to show itself again), '0' -> back out of Options to the main prompt,
 # '5' -> Cover Deletion (re-sync should fire here, BEFORE the stubbed
 # submenu below runs - the stub itself consumes no prompt), '2' -> resolve
 # a mode so the loop can return.
-$promptQ2 = New-ScriptedPrompt -Responses @('0', '5', '0', '5', '2')
+$promptQ2 = New-ScriptedPrompt -Responses @('0', '6', '0', '5', '2')
 $script:permDeleteAtCoverDeletionQ2 = $null
 $stubCoverMenuQ2 = { param($PromptFunc) $script:permDeleteAtCoverDeletionQ2 = $script:PermanentDelete }
 $realShowCoverDeletionMenuQ2 = ${function:Show-CoverDeletionMenu}

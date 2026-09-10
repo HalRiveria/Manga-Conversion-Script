@@ -257,36 +257,53 @@ function Get-OptionsMenuSchema {
         exactly - see that module for defaults/validation.
     #>
     return @(
-        @{ Key = '1'; Label = 'Image Conversion Settings'; Type = 'Submenu'; Items = @(
+        # 2026-09-09 reorganization (see CHANGELOG.md): a new top-level
+        # submenu for Full-Pipeline-specific settings, freeing the old
+        # bare top-level "Full Pipeline Max Concurrent Processes" item
+        # (originally added 2026-09-03, see that item's own history
+        # below) into a real home instead of sitting alone. Everything
+        # else shifted down by one to make room.
+        @{ Key = '1'; Label = 'Full Pipeline Settings'; Type = 'Submenu'; Items = @(
+            @{ Key = '1'; Label = 'Max Concurrent Processes'; Type = 'Int'; SettingsKey = 'FullPipelineMaxConcurrentProcs'; Min = 1; Max = [int]::MaxValue; Description = 'shared cjxl+magick process budget (independent of CJXL Processes/Animated Threads)' }
+            # Placeholder (2026-09-09) - RunCoverDeletionBeforeConversion
+            # (Config.ps1) is a real, persisted setting, but nothing reads
+            # it yet; toggling this currently has no effect on a real run.
+            # See Todo.md's "Run Cover Deletion automatically before Full
+            # Pipeline conversion" entry for the real feature this is
+            # scaffolding toward.
+            @{ Key = '2'; Label = 'Run Cover Deletion Before Conversion'; Type = 'Bool'; SettingsKey = 'RunCoverDeletionBeforeConversion'; Description = 'placeholder - not wired into a real run yet' }
+        ) }
+        @{ Key = '2'; Label = 'Image Conversion Settings'; Type = 'Submenu'; Items = @(
             @{ Key = '1'; Label = 'CJXL Processes'; Type = 'Int';  SettingsKey = 'MaxCjxlProcs'; Min = 1; Max = [int]::MaxValue; Description = 'how many cjxl.exe run at once per batch' }
             @{ Key = '2'; Label = 'Quality';         Type = 'Int';  SettingsKey = 'JpegQuality';   Min = 1; Max = 100;            Description = '1-100, only used when Lossless is off' }
             @{ Key = '3'; Label = 'Lossless Toggle';  Type = 'Bool'; SettingsKey = 'JpegLossless';  Description = 'on = lossless JPEG transcode, ignores Quality' }
         ) }
-        @{ Key = '2'; Label = 'Animated Conversion Settings'; Type = 'Submenu'; Items = @(
+        @{ Key = '3'; Label = 'Animated Conversion Settings'; Type = 'Submenu'; Items = @(
             @{ Key = '1'; Label = 'Threads';         Type = 'Int';  SettingsKey = 'AnimatedThreads';     Min = 1; Max = [int]::MaxValue; Description = 'parallel AVIF->WebP conversions' }
             @{ Key = '2'; Label = 'Quality';         Type = 'Int';  SettingsKey = 'AnimatedQuality';     Min = 1; Max = 100;            Description = '1-100, only used when Lossless is off' }
             @{ Key = '3'; Label = 'Lossless Toggle';  Type = 'Bool'; SettingsKey = 'AnimatedLossless';    Description = 'on = lossless WebP, ignores Quality' }
             @{ Key = '4'; Label = 'Overwrite Switch'; Type = 'Bool'; SettingsKey = 'AnimatedOverwrite';   Description = 'overwrite an existing .webp of the same name' }
             @{ Key = '5'; Label = 'Delete Original';  Type = 'Bool'; SettingsKey = 'AnimatedDeleteSource'; Description = 'delete the source .avif after a successful conversion' }
         ) }
-        @{ Key = '3'; Label = 'Zip Settings'; Type = 'Submenu'; Items = @(
+        @{ Key = '4'; Label = 'Zip Settings'; Type = 'Submenu'; Items = @(
             @{ Key = '1'; Label = 'Zip Pipeline Threads';               Type = 'Int';  SettingsKey = 'ZipParallelThreads';         Min = 1; Max = [int]::MaxValue; Description = 'parallel ZIP workers for Zip Folders' }
             @{ Key = '2'; Label = 'Zip with Unconverted Animated Files'; Type = 'Bool'; SettingsKey = 'ZipWithUnconvertedAnimated'; Description = 'off (default) = Image Conversion + Zip skips a folder with unconverted .avif files; on = zips anyway' }
         ) }
-        @{ Key = '4'; Label = 'Logging'; Type = 'Submenu'; Items = @(
-            @{ Key = '1'; Label = 'Full Logging';         Type = 'Bool'; SettingsKey = 'FullLogging';               Description = 'log every action, not just errors/summary' }
-            @{ Key = '2'; Label = 'Toggle Summary File';  Type = 'Bool'; SettingsKey = 'DisableSummaryFile';        Description = 'only matters when Full Logging is off' }
-            @{ Key = '3'; Label = 'Clean Console Output'; Type = 'Bool'; SettingsKey = 'CleanConsoleOutputEnabled'; Description = 'live per-series progress instead of per-file lines' }
+        @{ Key = '5'; Label = 'Logging'; Type = 'Submenu'; Items = @(
+            @{ Key = '1'; Label = 'Full Logging';          Type = 'Bool'; SettingsKey = 'FullLogging';               Description = 'log every action, not just errors/summary' }
+            # Label renamed from "Toggle Summary File" (2026-09-09,
+            # project owner's own catch) - the settings key is
+            # DisableSummaryFile, so [On] meant the summary file was
+            # OFF; the old label gave no indication which direction "On"
+            # pointed. Renamed to match the key's own sense instead of
+            # flipping the underlying setting (safer - an existing
+            # settings.json's stored value keeps meaning exactly what it
+            # already meant, only the menu's own label text changed).
+            @{ Key = '2'; Label = 'Disable Summary File';  Type = 'Bool'; SettingsKey = 'DisableSummaryFile';        Description = 'only matters when Full Logging is off' }
+            @{ Key = '3'; Label = 'Clean Console Output';  Type = 'Bool'; SettingsKey = 'CleanConsoleOutputEnabled'; Description = 'live per-series progress instead of per-file lines' }
         ) }
-        @{ Key = '5'; Label = 'Permanent Delete';           Type = 'Bool';   SettingsKey = 'PermanentDelete'; Description = 'off = Recycle Bin (default), on = bypasses it entirely' }
-        @{ Key = '6'; Label = 'Open Settings File Location'; Type = 'Action'; Action = 'OpenSettingsLocation'; Description = 'opens the settings folder in Explorer' }
-        # 2026-09-03 addition, real bug fix (see CHANGELOG.md) - Full
-        # Pipeline's shared image+animated process budget used to reuse
-        # MaxCjxlProcs alone as its total size, silently ignoring
-        # AnimatedThreads entirely. Dedicated setting instead of summing
-        # the other two (MaxCjxlProcs + AnimatedThreads would silently
-        # double-count for anyone who doesn't realize the two get added).
-        @{ Key = '7'; Label = 'Full Pipeline Max Concurrent Processes'; Type = 'Int'; SettingsKey = 'FullPipelineMaxConcurrentProcs'; Min = 1; Max = [int]::MaxValue; Description = 'total cjxl+magick processes Full Pipeline runs at once, shared dynamically between image and animated conversion - independent of CJXL Processes/Animated Threads, which still cap modes 2/3 on their own' }
+        @{ Key = '6'; Label = 'Permanent Delete';           Type = 'Bool';   SettingsKey = 'PermanentDelete'; Description = 'off = Recycle Bin (default), on = bypasses it entirely' }
+        @{ Key = '7'; Label = 'Open Settings File Location'; Type = 'Action'; Action = 'OpenSettingsLocation'; Description = 'opens the settings folder in Explorer' }
     )
 }
 
