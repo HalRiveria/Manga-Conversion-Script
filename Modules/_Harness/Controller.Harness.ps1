@@ -753,6 +753,7 @@ $fakeSettings = @{
     AnimatedLossless = $false; AnimatedQuality = 88; AnimatedThreads = 3; AnimatedOverwrite = $false; AnimatedDeleteSource = $true
     ZipParallelThreads = 2; PermanentDelete = $true
     CleanConsoleOutputEnabled = $false
+    RunCoverDeletionBeforeConversion = $false
     # Deliberately distinct from MaxCjxlProcs (2026-09-03 addition, real
     # bug fix, see CHANGELOG.md) - Scenario N below asserts THIS value,
     # not MaxCjxlProcs, reaches Invoke-Mode's FullPipeline dispatch; the
@@ -802,9 +803,10 @@ Test-Assert ($statsL.Aborted -eq $true -and $statsL.ForceKilledCount -eq 3) "Zip
 Write-Host ""
 
 Write-Host "=== Scenario N: Invoke-Mode / FullPipeline - all three stat groups populated at once ===" -ForegroundColor Cyan
-$capturedN = @{ FullPipelineMaxConcurrentProcs = $null }
-$fakeFullHandlerN = { param($Path, $CjxlExe, $MagickExe, $JpegLossless, $JpegQuality, $AnimatedLossless, $AnimatedQuality, $AnimatedOverwrite, $AnimatedDeleteSource, $FullPipelineMaxConcurrentProcs, $FullLogging, $LogFile, $LogErrorFile, $LogWarnFile, $PermanentDelete)
+$capturedN = @{ FullPipelineMaxConcurrentProcs = $null; RunCoverDeletionBeforeConversion = $null }
+$fakeFullHandlerN = { param($Path, $CjxlExe, $MagickExe, $JpegLossless, $JpegQuality, $AnimatedLossless, $AnimatedQuality, $AnimatedOverwrite, $AnimatedDeleteSource, $FullPipelineMaxConcurrentProcs, $FullLogging, $LogFile, $LogErrorFile, $LogWarnFile, $PermanentDelete, $RunCoverDeletionBeforeConversion)
     $capturedN.FullPipelineMaxConcurrentProcs = $FullPipelineMaxConcurrentProcs
+    $capturedN.RunCoverDeletionBeforeConversion = $RunCoverDeletionBeforeConversion
     return @{
         ConvertedImageSuccess = 5; ConvertedImageFail = 0; ConvertedImageSkipped = 0; DeletedImageSuccess = 5; DeletedImageFail = 0
         StaleImageCleanedSuccess = 0; StaleImageCleanedFail = 0
@@ -822,6 +824,7 @@ Test-Assert ($statsN.Aborted -eq $true -and $statsN.ForceKilledCount -eq 7) "Ful
 # confirms it now reads the dedicated $Settings.FullPipelineMaxConcurrentProcs
 # (9) instead, not silently the same value.
 Test-Assert ($capturedN.FullPipelineMaxConcurrentProcs -eq 9) ("FullPipeline: Settings.FullPipelineMaxConcurrentProcs (9), not MaxCjxlProcs (6), reached the handler (got " + $capturedN.FullPipelineMaxConcurrentProcs + ")")
+Test-Assert ($capturedN.RunCoverDeletionBeforeConversion -eq $false) "FullPipeline: Settings.RunCoverDeletionBeforeConversion (false in `$fakeSettings) reached the handler"
 Write-Host ""
 
 # ==============================================================================
@@ -855,7 +858,7 @@ $fakeZipHandlerN2 = { param([string]$Path, [int]$MaxParallel, [bool]$DeleteFolde
 $statsN2Zip = Invoke-Mode -Resolved @{ Mode = 'ZipFolders' } -TargetPath "C:\fake\lib" -Settings $fakeSettingsN2 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ZipFoldersHandler $fakeZipHandlerN2
 Test-Assert ($null -ne $statsN2Zip -and $statsN2Zip.ZipOnlyZipped.Success -eq 3) "ZipFolders completes normally (not swallowed into the fatal-handler `$null path) despite `$Settings missing FullLogging/PermanentDelete"
 
-$fakeFullHandlerN2 = { param([string]$Path, [string]$CjxlExe, [string]$MagickExe, [bool]$JpegLossless, [int]$JpegQuality, [bool]$AnimatedLossless, [int]$AnimatedQuality, [bool]$AnimatedOverwrite, [bool]$AnimatedDeleteSource, [int]$FullPipelineMaxConcurrentProcs, [Parameter(Mandatory)][bool]$FullLogging, [string]$LogFile, [string]$LogErrorFile, [string]$LogWarnFile, [Parameter(Mandatory)][bool]$PermanentDelete)
+$fakeFullHandlerN2 = { param([string]$Path, [string]$CjxlExe, [string]$MagickExe, [bool]$JpegLossless, [int]$JpegQuality, [bool]$AnimatedLossless, [int]$AnimatedQuality, [bool]$AnimatedOverwrite, [bool]$AnimatedDeleteSource, [int]$FullPipelineMaxConcurrentProcs, [Parameter(Mandatory)][bool]$FullLogging, [string]$LogFile, [string]$LogErrorFile, [string]$LogWarnFile, [Parameter(Mandatory)][bool]$PermanentDelete, [bool]$RunCoverDeletionBeforeConversion)
     return @{
         ConvertedImageSuccess = 7; ConvertedImageFail = 0; ConvertedImageSkipped = 0; DeletedImageSuccess = 7; DeletedImageFail = 0
         StaleImageCleanedSuccess = 0; StaleImageCleanedFail = 0
@@ -1052,6 +1055,55 @@ $chS = New-Dir "scenario-s\Series\Chapter 1"
 $totalsS = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-s") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
 
 Test-Assert ($totalsS.InspectFailedCount -eq 1) ("the image engine's inspect-failure was summed into Invoke-FullPipeline's own totals (got " + $totalsS.InspectFailedCount + ")")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario AA-AA4 (2026-09-09): RunCoverDeletionBeforeConversion pre-scan.
+#  All four use the same minimal "Empty Series" layout Scenario F already
+#  established (SeriesCount goes to 1 the moment discovery actually runs,
+#  even with zero chapters inside) - a cheap, unambiguous signal for
+#  "did chapter discovery/dispatch happen at all", since the pre-scan
+#  runs BEFORE any of that starts.
+# ==============================================================================
+Write-Host "=== Scenario AA: RunCoverDeletionBeforeConversion=`$false never calls the scan handler ===" -ForegroundColor Cyan
+New-Dir "scenario-aa\Empty Series" | Out-Null
+$calledAA = $false
+$fakeScanAA = { param($Path) $script:calledAA = $true; return @{ ScannedCount = 0 } }.GetNewClosure()
+$totalsAA = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-aa") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true -RunCoverDeletionBeforeConversion $false -CoverDeletionScanHandler $fakeScanAA
+Test-Assert ($calledAA -eq $false) "the scan handler was never invoked when the toggle is off"
+Test-Assert ($totalsAA.SeriesCount -eq 1) "the pipeline still ran normally"
+Write-Host ""
+
+Write-Host "=== Scenario AA2: RunCoverDeletionBeforeConversion=`$true calls the scan handler once, with -Path, before dispatch ===" -ForegroundColor Cyan
+New-Dir "scenario-aa2\Empty Series" | Out-Null
+$capturedAA2 = @{ Path = $null; CallCount = 0 }
+$fakeScanAA2 = { param($Path) $script:capturedAA2.Path = $Path; $script:capturedAA2.CallCount++; return @{ ScannedCount = 3; DeletedCount = 1 } }.GetNewClosure()
+$rootAA2 = Join-Path $scratchDir "scenario-aa2"
+$totalsAA2 = Invoke-FullPipeline -Path $rootAA2 -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true -RunCoverDeletionBeforeConversion $true -CoverDeletionScanHandler $fakeScanAA2
+Test-Assert ($capturedAA2.CallCount -eq 1 -and $capturedAA2.Path -eq $rootAA2) "the scan handler was called exactly once, with the pipeline's own -Path"
+Test-Assert ($totalsAA2.SeriesCount -eq 1 -and $totalsAA2.Aborted -eq $false) "a successful scan does not block the pipeline from running normally afterward"
+Write-Host ""
+
+Write-Host "=== Scenario AA3: a failed scan + 'Y' at the prompt continues into conversion ===" -ForegroundColor Cyan
+New-Dir "scenario-aa3\Empty Series" | Out-Null
+$fakeScanAA3 = { param($Path) throw "fake scan failure AA3" }
+# A hashtable field (mutated through the reference, not reassigned), not a
+# plain array + += (would reassign the variable - the exact GetNewClosure()
+# breaks-$script:-writes gotcha CLAUDE.md's lessons learned documents).
+$capturedAA3 = @{ Message = $null; CallCount = 0 }
+$fakePromptAA3 = { param($Message) $script:capturedAA3.Message = $Message; $script:capturedAA3.CallCount++; return "Y" }.GetNewClosure()
+$totalsAA3 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-aa3") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true -RunCoverDeletionBeforeConversion $true -CoverDeletionScanHandler $fakeScanAA3 -PromptFunc $fakePromptAA3
+Test-Assert ($capturedAA3.CallCount -eq 1 -and $capturedAA3.Message -like "*fake scan failure AA3*") "the prompt message named the real scan failure"
+Test-Assert ($totalsAA3.SeriesCount -eq 1 -and $totalsAA3.Aborted -eq $false) "answering Y continues into a normal pipeline run despite the scan failure"
+Write-Host ""
+
+Write-Host "=== Scenario AA4: a failed scan + declining (default/blank) at the prompt aborts before any dispatch ===" -ForegroundColor Cyan
+New-Dir "scenario-aa4\Empty Series" | Out-Null
+$fakeScanAA4 = { param($Path) throw "fake scan failure AA4" }
+$fakePromptAA4 = { param($Message) return "" }
+$totalsAA4 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-aa4") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true -RunCoverDeletionBeforeConversion $true -CoverDeletionScanHandler $fakeScanAA4 -PromptFunc $fakePromptAA4
+Test-Assert ($totalsAA4.Aborted -eq $true) "blank input at the prompt defaults to abort, not continue"
+Test-Assert ($totalsAA4.SeriesCount -eq 0) "chapter discovery/dispatch never started - the abort happened before it"
 Write-Host ""
 
 # ==============================================================================

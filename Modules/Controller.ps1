@@ -249,6 +249,9 @@
       - Compress-FolderToZip (ZipCreation.ps1), Test-ZipArchive
         (ZipValidation.ps1) - called directly, NOT via ZipPipeline.ps1's
         Invoke-LooseFolderZip (see "ZIP-BLOCKING POLICY" above for why)
+      - Invoke-UnwantedImageScan (UnwantedImage.ps1) - Invoke-FullPipeline's
+        RunCoverDeletionBeforeConversion pre-scan, main-thread-only (runs
+        before any chapter dispatch starts, see that param's own comment)
       - New-SeriesProvider, Get-SeriesChapters,
         Get-LeafDirectoryDiscoverySharedFunctionNames
         (LeafDirectoryDiscovery.ps1) - the shared-function-names getter
@@ -1346,7 +1349,10 @@ function Invoke-FullPipeline {
         [string[]]$FolderQualifyingExtensions = ((Get-LooseImageExtensions) + @(".jxl")),
         [System.Collections.Generic.HashSet[string]]$FolderExcludeStagingDirs = $null,
         [int]$AbortTimeoutSeconds = 60,
-        [int]$MaxQueueAhead = 3
+        [int]$MaxQueueAhead = 3,
+        [bool]$RunCoverDeletionBeforeConversion = $false,
+        [scriptblock]$CoverDeletionScanHandler = ${function:Invoke-UnwantedImageScan},
+        [scriptblock]$PromptFunc = { param($Message) Read-Host $Message }
     )
 
     $totals = @{
@@ -1362,6 +1368,37 @@ function Invoke-FullPipeline {
         SeriesCount              = 0
         ChapterCount             = 0
         Aborted                  = $false
+    }
+
+    # Cover Deletion pre-scan (2026-09-09, RunCoverDeletionBeforeConversion
+    # toggle - see Todo.md's "Run Cover Deletion automatically before Full
+    # Pipeline conversion" entry). Deliberately runs BEFORE any chapter
+    # discovery/dispatch starts - nothing else is running yet (no
+    # runspaces, no CancellationTokenSource registered below), so a
+    # blocking -PromptFunc call here is safe in a way it wouldn't be once
+    # the two ChapterDispatch engines are actually mid-run. Uses the SAME
+    # Invoke-UnwantedImageScan the Cover Deletion menu option calls -
+    # deletes real matches, respects $script:PermanentDelete, logs via
+    # Write-Log same as always (log-only for now, no summary field - see
+    # Todo.md). A per-file hash mismatch/failure inside the scan is
+    # already handled (logged, not thrown) by Invoke-UnwantedImageScan
+    # itself and never reaches this catch - only a scan that couldn't run
+    # at ALL (bad path, permissions, etc.) does. Default (blank/anything
+    # but Y) on the resulting prompt is ABORT, not continue - project
+    # owner's own call: don't silently plow into conversion after
+    # something already went wrong.
+    if ($RunCoverDeletionBeforeConversion) {
+        try {
+            $null = & $CoverDeletionScanHandler -Path $Path
+        } catch {
+            $exMessage = $_.Exception.Message
+            Write-Log ("Cover deletion pre-scan failed: " + $exMessage) -Level Error -ForceConsole
+            $answer = (& $PromptFunc ("Cover deletion scan failed: " + $exMessage + ". Continue with conversion anyway? (Y/N)")).Trim()
+            if ($answer -ne 'Y' -and $answer -ne 'y') {
+                $totals.Aborted = $true
+                return $totals
+            }
+        }
     }
 
     # Main-thread-only state (the merge dictionary keyed by chapterInfo
@@ -1785,7 +1822,8 @@ function Invoke-Mode {
                 $r = & $FullPipelineHandler -Path $TargetPath -CjxlExe $CjxlExe -MagickExe $MagickExe `
                     -JpegLossless ([bool]$Settings.JpegLossless) -JpegQuality $Settings.JpegQuality -AnimatedLossless ([bool]$Settings.AnimatedLossless) -AnimatedQuality $Settings.AnimatedQuality `
                     -AnimatedOverwrite ([bool]$Settings.AnimatedOverwrite) -AnimatedDeleteSource ([bool]$Settings.AnimatedDeleteSource) -FullPipelineMaxConcurrentProcs $Settings.FullPipelineMaxConcurrentProcs `
-                    -FullLogging $script:FullLogging -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete ([bool]$Settings.PermanentDelete)
+                    -FullLogging $script:FullLogging -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete ([bool]$Settings.PermanentDelete) `
+                    -RunCoverDeletionBeforeConversion ([bool]$Settings.RunCoverDeletionBeforeConversion)
                 $stats.LooseImgConverted.Success      = $r.ConvertedImageSuccess;    $stats.LooseImgConverted.Fail      = $r.ConvertedImageFail;    $stats.LooseImgConverted.Skipped = $r.ConvertedImageSkipped
                 $stats.LooseImgDeleted.Success        = $r.DeletedImageSuccess;      $stats.LooseImgDeleted.Fail        = $r.DeletedImageFail
                 $stats.LooseStaleCleaned.Success      = $r.StaleImageCleanedSuccess; $stats.LooseStaleCleaned.Fail      = $r.StaleImageCleanedFail
