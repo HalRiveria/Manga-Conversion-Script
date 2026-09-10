@@ -232,30 +232,44 @@ function Test-AvifAnimated {
     try {
         $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
         $stderrTask = $proc.StandardError.ReadToEndAsync()
-        # WaitForExit(timeoutMs), not WaitForExit() (2026-09-10, real bug
-        # found by /code-review high - this call used to have no timeout at
-        # all, and runs inline in JobBuilder's own per-chapter classification
-        # Lazy<T> factory (Controller.ps1's
+        # Manual HasExited poll loop, NOT WaitForExit(int) (2026-09-10,
+        # round 5 - WaitForExit(int) was tried first, and was itself the
+        # bug: live-caught multiple times with a full process snapshot
+        # confirming magick.exe had ALREADY exited, then confirmed via a
+        # 6-minute unattended wait that WaitForExit(30000) genuinely never
+        # returns - not slow, not buffered output, a real indefinite hang
+        # inside .NET's own timeout-overload of Process.WaitForExit(int)
+        # when called alongside two in-flight ReadToEndAsync() tasks from
+        # a PowerShell 5.1 runspace. Polling .HasExited directly sidesteps
+        # that .NET-level bug entirely, using the exact same mechanism
+        # ChapterDispatch.ps1's own JobPollCompleted already relies on for
+        # every other process in this codebase. Runs inline in JobBuilder's
+        # own per-chapter classification Lazy<T> factory (Controller.ps1's
         # Get-OrCreateFullPipelineChapterClassification), which BOTH Full
         # Pipeline engines share (LazyThreadSafetyMode::ExecutionAndPublication
-        # serializes every caller of .Value on the same cached Lazy). A
-        # genuinely stuck magick.exe here didn't just stall the calling
-        # engine's own dispatch loop (JobBuilder runs synchronously before
-        # ChapterDispatch.ps1's own poll-for-finished pass, so nothing
-        # already running gets polled/finalized either) - it froze the
-        # OTHER engine too, the instant its own JobBuilder reached the same
-        # shared chapter and blocked on the same Lazy.Value, with zero
-        # error and zero CPU. 30s is far beyond this call's own measured
-        # 0.15-0.35s real-world cost (see this function's own 2026-09-09
-        # rewrite comment above) even under heavy contention from both
-        # engines launching subprocesses at once - a real timeout here
-        # surfaces through the exact same "couldn't classify this AVIF"
-        # error path every caller already handles (skip/Warn, exclude from
-        # both engines in Full Pipeline's case via
+        # serializes every caller of .Value on the same cached Lazy) - a
+        # genuinely stuck (or, as it turned out, WaitForExit-poisoned)
+        # magick.exe here didn't just stall the calling engine's own
+        # dispatch loop, it froze the OTHER engine too the instant its own
+        # JobBuilder reached the same shared chapter, with zero error and
+        # zero CPU - exactly the symptom chased across this file's own
+        # 2026-09-10 investigation. 30s is far beyond this call's own
+        # measured 0.15-0.35s real-world cost (see this function's own
+        # 2026-09-09 rewrite comment above) even under heavy contention -
+        # a real timeout here surfaces through the exact same "couldn't
+        # classify this AVIF" error path every caller already handles
+        # (skip/Warn, exclude from both engines in Full Pipeline's case via
         # Add-FullPipelineZipBlockReason), not a new failure mode.
-        if (-not $proc.WaitForExit(30000)) {
+        $waitDeadline = [System.Diagnostics.Stopwatch]::StartNew()
+        while (-not $proc.HasExited -and $waitDeadline.Elapsed.TotalSeconds -lt 30) {
+            Start-Sleep -Milliseconds 50
+        }
+        if (-not $proc.HasExited) {
             try { $proc.Kill() } catch { }
-            try { $proc.WaitForExit(5000) } catch { }
+            $killDeadline = [System.Diagnostics.Stopwatch]::StartNew()
+            while (-not $proc.HasExited -and $killDeadline.Elapsed.TotalSeconds -lt 5) {
+                Start-Sleep -Milliseconds 50
+            }
             throw "magick identify did not exit within 30s - killed"
         }
         $stdout = $stdoutTask.GetAwaiter().GetResult()

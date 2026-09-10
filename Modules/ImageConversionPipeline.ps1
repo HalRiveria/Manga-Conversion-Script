@@ -389,15 +389,28 @@ function Invoke-IccStripRetryOrFail {
     try {
         $stripStdoutTask = $stripProc.StandardOutput.ReadToEndAsync()
         $stripStderrTask = $stripProc.StandardError.ReadToEndAsync()
-        # WaitForExit(timeoutMs), not WaitForExit() (2026-09-10, /code-review
-        # high finding, same fix as Test-AvifAnimated's identical change -
-        # see that function's own comment for the full reasoning). A strip
+        # Manual HasExited poll loop, NOT WaitForExit(int) (2026-09-10,
+        # round 5 correction - see Test-AvifAnimated's own identical
+        # comment in AnimatedConversionPipeline.ps1 for the full story:
+        # WaitForExit(int) itself was live-caught genuinely never
+        # returning - confirmed via a 6-minute unattended wait, well past
+        # its own timeout, with the real magick.exe process already long
+        # exited - not a stuck subprocess, a .NET-level bug in the
+        # timeout overload when called alongside in-flight
+        # ReadToEndAsync() tasks from a PowerShell 5.1 runspace). A strip
         # of one already-downloaded image is a sub-second operation in
         # practice; 60s is generous headroom while still guaranteeing this
         # worker's own dispatch loop can't freeze forever on a stuck magick.
-        if (-not $stripProc.WaitForExit(60000)) {
+        $waitDeadline = [System.Diagnostics.Stopwatch]::StartNew()
+        while (-not $stripProc.HasExited -and $waitDeadline.Elapsed.TotalSeconds -lt 60) {
+            Start-Sleep -Milliseconds 50
+        }
+        if (-not $stripProc.HasExited) {
             try { $stripProc.Kill() } catch { }
-            try { $stripProc.WaitForExit(5000) } catch { }
+            $killDeadline = [System.Diagnostics.Stopwatch]::StartNew()
+            while (-not $stripProc.HasExited -and $killDeadline.Elapsed.TotalSeconds -lt 5) {
+                Start-Sleep -Milliseconds 50
+            }
             Write-Log ("ICC-strip retry process for '" + $Job.SrcPath + "' did not exit within 60s - killed, counting as conversion failure.") -Level Error
             return $false
         }
