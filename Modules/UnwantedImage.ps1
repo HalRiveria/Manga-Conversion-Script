@@ -670,11 +670,17 @@ function Invoke-UnwantedImageScan {
         they happen to sit inside $Path) - optional, defaults to none.
     .OUTPUTS
         @{ ScannedCount; DeletedCount; DeleteFailedCount; HashMismatchCount;
-           HashFailureCount } - HashFailureCount (2026-09-02 review fix)
-        counts a file Test-UnwantedImageMatch couldn't hash at all (already
-        logged as its own Warn there) - distinct from HashMismatchCount
-        (hashed fine, just didn't match), same distinction
-        Get-TrailingZeroGroups's own HashFailureCount already makes.
+           HashFailureCount; AllScannedFiles } - HashFailureCount
+        (2026-09-02 review fix) counts a file Test-UnwantedImageMatch
+        couldn't hash at all (already logged as its own Warn there) -
+        distinct from HashMismatchCount (hashed fine, just didn't match),
+        same distinction Get-TrailingZeroGroups's own HashFailureCount
+        already makes. AllScannedFiles (2026-09-10 addition) is every
+        file under $Path this function's own walk found, BEFORE the
+        -ImageExtensions filter below - a caller that also needs to walk
+        the same tree for something else (Show-CoverDeletionMenu's
+        auto-chained trailing-zero audit) can reuse it instead of walking
+        again. See CHANGELOG.md's matching entry.
     #>
     param(
         [Parameter(Mandatory)]
@@ -703,7 +709,12 @@ function Invoke-UnwantedImageScan {
         AlreadyGoneCount  = 0   # 2026-09-03 addition, Todo.md finding - see Remove-Source call below
     }
 
-    $files = Get-ScannableFiles -Path $Path -ExcludePaths $ExcludePaths -ImageExtensions $ImageExtensions
+    # Unfiltered walk (every extension), then filtered to images
+    # in-memory rather than at the walk itself - lets AllScannedFiles
+    # below be a real superset a caller like Show-CoverDeletionMenu can
+    # reuse for its own, different-extension-scope trailing-zero walk.
+    $allScannedFiles = @(Get-ScannableFiles -Path $Path -ExcludePaths $ExcludePaths)
+    $files = $allScannedFiles | Where-Object { $ImageExtensions -icontains $_.Extension }
 
     foreach ($file in $files) {
         $totals.ScannedCount++
@@ -760,6 +771,7 @@ function Invoke-UnwantedImageScan {
     # silently, while still working and file-logging normally. See
     # Write-Log's own .PARAMETER doc (Logging.ps1) for the full reasoning.
     Write-Log ("Unwanted-image scan complete: " + $totals.DeletedCount + " deleted, " + $totals.HashMismatchCount + " hash mismatch(es), " + $totals.ScannedCount + " image(s) scanned.") -Level Summary -ForceConsole
+    $totals.AllScannedFiles = $allScannedFiles
     return $totals
 }
 
@@ -800,19 +812,33 @@ function Get-TrailingZeroGroups {
         A file that fails to hash (unreadable/locked) is logged at
         -Level Warn, counted in HashFailureCount, and excluded from
         Groups rather than failing the whole scan.
+    .PARAMETER PreScannedFiles
+        Optional - skips this function's own Get-ScannableFiles walk and
+        uses this list directly instead. Same purpose/caller as
+        Invoke-UnwantedImageScan's own -PreScannedFiles - see that
+        function's doc. Must already reflect current disk state (a path
+        that's since been deleted throws on the Get-FileHash call below
+        and gets counted as a normal HashFailureCount, not a crash, but
+        the caller should filter dead paths out first to avoid the noise
+        - see CHANGELOG.md's matching entry).
     #>
     param(
         [Parameter(Mandatory)]
         [string]$Path,
         [string[]]$Suffixes = @("_000", "_00", "_0"),
-        [string[]]$ExcludePaths = @()
+        [string[]]$ExcludePaths = @(),
+        [System.IO.FileInfo[]]$PreScannedFiles = $null
     )
 
     $seen          = [System.Collections.Generic.Dictionary[string, hashtable]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $orderedHashes = [System.Collections.Generic.List[string]]::new()
     $hashFailureCount = 0
 
-    $files = Get-ScannableFiles -Path $Path -ExcludePaths $ExcludePaths
+    if ($null -ne $PreScannedFiles) {
+        $files = $PreScannedFiles
+    } else {
+        $files = Get-ScannableFiles -Path $Path -ExcludePaths $ExcludePaths
+    }
 
     foreach ($file in $files) {
         if (-not (Test-TrailingZeroName -File $file -Suffixes $Suffixes)) { continue }
@@ -902,6 +928,9 @@ function Invoke-TrailingZeroAudit {
     .OUTPUTS
         @{ UniqueFileCount; HashFailureCount; ReportPath } - ReportPath
         is $null when nothing was found (no file written).
+    .PARAMETER PreScannedFiles
+        Optional - passed straight through to Get-TrailingZeroGroups's
+        own -PreScannedFiles. See that function's doc.
     #>
     param(
         [Parameter(Mandatory)]
@@ -909,10 +938,11 @@ function Invoke-TrailingZeroAudit {
         [Parameter(Mandatory)]
         [string]$ReportPath,
         [string[]]$Suffixes = @("_000", "_00", "_0"),
-        [string[]]$ExcludePaths = @()
+        [string[]]$ExcludePaths = @(),
+        [System.IO.FileInfo[]]$PreScannedFiles = $null
     )
 
-    $scanResult = Get-TrailingZeroGroups -Path $Path -Suffixes $Suffixes -ExcludePaths $ExcludePaths
+    $scanResult = Get-TrailingZeroGroups -Path $Path -Suffixes $Suffixes -ExcludePaths $ExcludePaths -PreScannedFiles $PreScannedFiles
 
     if ($scanResult.Groups.Count -eq 0) {
         Write-Log "Trailing-zero audit: no files with trailing-zero names found." -Level Summary -ForceConsole

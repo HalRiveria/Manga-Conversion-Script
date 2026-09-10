@@ -688,6 +688,44 @@ Test-Assert ($script:autoTZCallsU3.Count -eq 1) "the auto trailing-zero report s
 Write-Host ""
 
 # ==============================================================================
+#  Scenario U4 (2026-09-10, Cover Deletion redundant-walk fix - Todo.md
+#  finding): Show-CoverDeletionMenu's '1' branch reuses -RunHandler's own
+#  AllScannedFiles for the auto-chained trailing-zero audit instead of
+#  making it walk $path again - existence-filtered first, since item 1
+#  may have just deleted some of what it found. Two real files created on
+#  disk; one is deleted between the fake -RunHandler returning and the
+#  -AutoTrailingZeroHandler firing, simulating item 1's own real deletion
+#  pass. Fakes still stand in for the real scan/audit functions (that's
+#  Scenario S2/S3's job) - this proves ONLY the existence-filtered
+#  plumbing between them.
+# ==============================================================================
+Write-Host "=== Scenario U4: AllScannedFiles reused + existence-filtered for the auto trailing-zero audit ===" -ForegroundColor Cyan
+$survivingFileU4 = Join-Path $scratchDir "u4-survives.png"
+"x" | Set-Content -LiteralPath $survivingFileU4 -Encoding UTF8
+$deletedFileU4 = Join-Path $scratchDir "u4-deleted.png"
+"x" | Set-Content -LiteralPath $deletedFileU4 -Encoding UTF8
+$allScannedU4 = @((Get-Item -LiteralPath $survivingFileU4), (Get-Item -LiteralPath $deletedFileU4))
+
+$runHandlerU4 = {
+    param($ProfilesPath, $PromptFunc, $DefaultPath)
+    # Simulates item 1's own real scan-then-delete: the "deleted" file is
+    # removed from disk here, same as Invoke-UnwantedImageScan's own
+    # Remove-Source call would, AFTER the walk that produced AllScannedFiles.
+    Remove-Item -LiteralPath $deletedFileU4 -Force
+    @{ Ran = $true; Reason = $null; ResolvedPath = $fakePathU3; AllScannedFiles = $allScannedU4 }
+}
+$script:preScannedSeenU4 = $null
+$autoTZHandlerU4 = { param($Path, $PreScannedFiles) $script:preScannedSeenU4 = $PreScannedFiles; @{ Ran = $true } }
+$promptU4 = New-ScriptedPrompt -Responses @('1', '0')
+
+$outputU4 = Show-CoverDeletionMenu -ProfilesPath "unused" -PromptFunc $promptU4 -RunHandler $runHandlerU4 -AutoTrailingZeroHandler $autoTZHandlerU4
+Test-Assert ($null -eq $outputU4) "no output leak with the new AllScannedFiles plumbing in play"
+Test-Assert ($null -ne $script:preScannedSeenU4) "the auto trailing-zero handler received a non-null -PreScannedFiles"
+Test-Assert (($script:preScannedSeenU4 | Where-Object { $_.FullName -eq $survivingFileU4 }).Count -eq 1) "the file that's still on disk survives the existence filter"
+Test-Assert (($script:preScannedSeenU4 | Where-Object { $_.FullName -eq $deletedFileU4 }).Count -eq 0) "the file item 1 just deleted is filtered OUT before reaching the trailing-zero audit"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario U2 (2026-09-03 fix, the actual live-reproduced crash): the full
 #  real chain - Show-ModeMenu's '5' branch into the REAL Show-CoverDeletionMenu,
 #  whose default -TrailingZeroHandler resolves to the real

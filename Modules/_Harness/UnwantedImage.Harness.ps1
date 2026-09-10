@@ -858,6 +858,52 @@ Test-Assert (-not ($script:logCallsForceConsole -contains $false)) ("every Invok
 Write-Host ""
 
 # ==============================================================================
+#  Scenario Z (2026-09-10, Cover Deletion redundant-walk fix - Todo.md
+#  finding): Invoke-UnwantedImageScan's own AllScannedFiles output, and
+#  Get-TrailingZeroGroups/Invoke-TrailingZeroAudit's -PreScannedFiles
+#  input - the two halves of Show-CoverDeletionMenu's own "walk once,
+#  reuse for both steps" fix. See CHANGELOG.md's matching entry.
+# ==============================================================================
+Write-Host "=== Scenario Z: AllScannedFiles output and -PreScannedFiles input ===" -ForegroundColor Cyan
+$rootZ = Join-Path $scratchDir "scenario-z"
+New-Item -ItemType Directory -Path $rootZ -Force | Out-Null
+$imgZ = New-RealImage -Name "scenario-z\cover.png" -Width 11 -Height 22
+"not an image" | Set-Content -LiteralPath (Join-Path $rootZ "notes.txt") -Encoding UTF8
+
+$scanResultZ = Invoke-UnwantedImageScan -Path $rootZ -Profiles @()
+Test-Assert ($null -ne $scanResultZ.AllScannedFiles) "Invoke-UnwantedImageScan returns AllScannedFiles"
+Test-Assert (($scanResultZ.AllScannedFiles | Where-Object { $_.Name -eq "notes.txt" }).Count -eq 1) "AllScannedFiles includes a non-image file - the walk isn't extension-filtered like -ImageExtensions is"
+Test-Assert (($scanResultZ.AllScannedFiles | Where-Object { $_.Name -eq "cover.png" }).Count -eq 1) "AllScannedFiles also includes the real image"
+
+# -PreScannedFiles proves the function actually USED the supplied list
+# instead of doing its own walk: a real trailing-zero file exists on
+# disk but is deliberately left OUT of the supplied list, and a fake
+# path that does NOT exist on disk is put IN it - only reachable if
+# Get-TrailingZeroGroups skipped its own Get-ScannableFiles call.
+$rootZ2 = Join-Path $scratchDir "scenario-z2"
+New-Item -ItemType Directory -Path $rootZ2 -Force | Out-Null
+$onDiskZ2 = New-RealImage -Name "scenario-z2\real_0.png" -Width 5 -Height 5
+$fakeFileZ2 = Join-Path $scratchDir "scenario-z2\phantom_0.png"
+Copy-Item -LiteralPath $onDiskZ2.FullName -Destination $fakeFileZ2 -Force
+$fakeFileInfoZ2 = Get-Item -LiteralPath $fakeFileZ2
+Remove-Item -LiteralPath $fakeFileZ2 -Force   # gone from disk, but the FileInfo object (and its list entry) survives
+
+$preScannedZ2 = @($fakeFileInfoZ2)   # deliberately omits $onDiskZ2
+$groupsResultZ2 = Get-TrailingZeroGroups -Path $rootZ2 -PreScannedFiles $preScannedZ2
+Test-Assert ($groupsResultZ2.Groups.Count -eq 0) "phantom_0.png (in -PreScannedFiles, not on disk) fails to hash and is excluded, not found via a real walk"
+Test-Assert ($groupsResultZ2.HashFailureCount -eq 1) "the missing pre-scanned file is counted as a hash failure, not silently dropped"
+
+$preScannedZ2b = @($onDiskZ2)   # the REAL on-disk file, supplied explicitly
+$groupsResultZ2b = Get-TrailingZeroGroups -Path $rootZ2 -PreScannedFiles $preScannedZ2b
+Test-Assert ($groupsResultZ2b.Groups.Count -eq 1 -and $groupsResultZ2b.Groups[0].FileName -eq "real_0.png") "a real file supplied via -PreScannedFiles IS found and grouped"
+
+# Invoke-TrailingZeroAudit passes -PreScannedFiles straight through.
+$reportPathZ2 = Join-Path $scratchDir "scenario-z2-report.txt"
+$auditResultZ2 = Invoke-TrailingZeroAudit -Path $rootZ2 -ReportPath $reportPathZ2 -PreScannedFiles $preScannedZ2b
+Test-Assert ($auditResultZ2.UniqueFileCount -eq 1 -and (Test-Path -LiteralPath $reportPathZ2)) "Invoke-TrailingZeroAudit's own -PreScannedFiles reaches Get-TrailingZeroGroups and produces a real report"
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

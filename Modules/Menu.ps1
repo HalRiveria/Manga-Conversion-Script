@@ -558,7 +558,15 @@ function Invoke-CoverDeletionRun {
         Adds `ResolvedPath` to the existing result shape: the real path
         actually used when Ran is $true (freshly typed or reused from
         -DefaultPath), $null otherwise - Show-CoverDeletionMenu persists
-        this back to settings.json.
+        this back to settings.json. Also adds `AllScannedFiles` - passed
+        straight through from Invoke-UnwantedImageScan's own return value
+        (every file under $path, any extension, not just images - that
+        function's own walk covers this for free, see its .OUTPUTS doc).
+        Show-CoverDeletionMenu's '1' branch reuses this (existence-
+        filtered, since this run may have just deleted some of them) for
+        the auto-chained trailing-zero audit instead of making it walk
+        the same tree again - see CHANGELOG.md's matching entry. $null
+        when Ran is $false.
     #>
     param(
         [string]$ProfilesPath = (Get-UnwantedImageProfilesPath),
@@ -569,7 +577,7 @@ function Invoke-CoverDeletionRun {
     $path = Get-PathWithDefault -PromptFunc $PromptFunc -DefaultPath $DefaultPath
     if ($null -eq $path) {  # lint:ignore - $path here is a genuinely untyped local var (no [string]$path/$Path param in THIS function), Lint Rule 2's file-wide name match just collides with -Path elsewhere in Menu.ps1
         Write-Host "No path entered - cancelled." -ForegroundColor Yellow
-        return @{ Ran = $false; Reason = "No path entered."; ResolvedPath = $null }
+        return @{ Ran = $false; Reason = "No path entered."; ResolvedPath = $null; AllScannedFiles = $null }
     }
     # -PathType Container (2026-08-31 fix, caught by a same-day
     # /code-review full-codebase pass): a bare Test-Path matches a FILE
@@ -578,20 +586,25 @@ function Invoke-CoverDeletionRun {
     # rejected with a clear message.
     if (-not (Test-Path -LiteralPath $path -PathType Container)) {
         Write-Host ("Folder not found: '" + $path + "'") -ForegroundColor Red
-        return @{ Ran = $false; Reason = "Folder not found."; ResolvedPath = $null }
+        return @{ Ran = $false; Reason = "Folder not found."; ResolvedPath = $null; AllScannedFiles = $null }
     }
 
     $confirmAnswer = (& $PromptFunc ("About to scan '" + $path + "' and delete any matching files (respecting your Recycle Bin/Permanent Delete setting). Enter Y to run for real, D for a dry run (reports matches, deletes nothing), or anything else to cancel"))
     if ($null -ne $confirmAnswer) { $confirmAnswer = $confirmAnswer.Trim() }
     if ($confirmAnswer -notin @('Y', 'y', 'D', 'd')) {
         Write-Host "Cancelled - no scan was run." -ForegroundColor Yellow
-        return @{ Ran = $false; Reason = "Cancelled by user."; ResolvedPath = $null }
+        return @{ Ran = $false; Reason = "Cancelled by user."; ResolvedPath = $null; AllScannedFiles = $null }
     }
     $isDryRun = $confirmAnswer -in @('D', 'd')
 
     $result = Invoke-UnwantedImageScan -Path $path -Profiles (Get-AllUnwantedImageProfiles -ProfilesPath $ProfilesPath) -DryRun $isDryRun
     if ($isDryRun) { Write-Host "Dry run complete - nothing was deleted." -ForegroundColor Cyan }
-    return @{ Ran = $true; Reason = $null; Result = $result; DryRun = $isDryRun; ResolvedPath = $path }
+    # Reuses Invoke-UnwantedImageScan's own AllScannedFiles (its walk
+    # covers every extension, not just images - see that function's own
+    # .OUTPUTS doc) instead of walking $path again here - Show-CoverDeletionMenu's
+    # auto-chained trailing-zero audit picks this up. See CHANGELOG.md's
+    # matching entry.
+    return @{ Ran = $true; Reason = $null; Result = $result; DryRun = $isDryRun; ResolvedPath = $path; AllScannedFiles = $result.AllScannedFiles }
 }
 
 function Invoke-TrailingZeroAuditRun {
@@ -639,7 +652,16 @@ function Invoke-TrailingZeroAuditRun {
         # own .PARAMETER doc) - Show-CoverDeletionMenu threads the same
         # $Settings.LastCoverDeletionPath into both, one remembered
         # folder shared across the whole submenu.
-        [string]$DefaultPath = ""
+        [string]$DefaultPath = "",
+        # Optional - passed straight through to Invoke-TrailingZeroAudit's
+        # own -PreScannedFiles. Show-CoverDeletionMenu's '1' branch
+        # supplies this (existence-filtered against Invoke-CoverDeletionRun's
+        # own AllScannedFiles) so this function doesn't re-walk the same
+        # tree item 1 just scanned - see CHANGELOG.md's matching entry.
+        # $null (default) for every other caller - standalone item 5,
+        # harnesses - which still walk $resolvedPath themselves exactly
+        # as before.
+        [System.IO.FileInfo[]]$PreScannedFiles = $null
     )
 
     # A local variable named $path (or $Path) would be THE SAME VARIABLE
@@ -667,7 +689,7 @@ function Invoke-TrailingZeroAuditRun {
     $reportDir = Split-Path -Path $ReportPath -Parent
     if (-not (Test-Path -LiteralPath $reportDir)) { New-Item -ItemType Directory -Path $reportDir -Force | Out-Null }
 
-    $result = Invoke-TrailingZeroAudit -Path $resolvedPath -ReportPath $ReportPath
+    $result = Invoke-TrailingZeroAudit -Path $resolvedPath -ReportPath $ReportPath -PreScannedFiles $PreScannedFiles
     if ($null -eq $result.ReportPath) {
         Write-Host "No trailing-zero filenames found - nothing to report." -ForegroundColor Yellow
         return @{ Ran = $true; Reason = $null; Result = $result; ResolvedPath = $resolvedPath }
@@ -762,7 +784,7 @@ function Show-CoverDeletionMenu {
         [scriptblock]$AddHandler = { param($ProfilesPath, $PromptFunc) Show-AddUnwantedImageProfileFlow -ProfilesPath $ProfilesPath -PromptFunc $PromptFunc },
         [scriptblock]$ActionHandler = { param($ActionName, $ProfilesPath) Invoke-CoverDeletionAction -ActionName $ActionName -ProfilesPath $ProfilesPath },
         [scriptblock]$TrailingZeroHandler = { param($PromptFunc, $DefaultPath) Invoke-TrailingZeroAuditRun -PromptFunc $PromptFunc -DefaultPath $DefaultPath },
-        [scriptblock]$AutoTrailingZeroHandler = { param($Path) Invoke-TrailingZeroAuditRun -Path $Path },
+        [scriptblock]$AutoTrailingZeroHandler = { param($Path, $PreScannedFiles) Invoke-TrailingZeroAuditRun -Path $Path -PreScannedFiles $PreScannedFiles },
         [hashtable]$Settings = $null,
         [string]$SettingsPath
     )
@@ -788,7 +810,20 @@ function Show-CoverDeletionMenu {
                 $runResult = & $RunHandler $ProfilesPath $PromptFunc $defaultPath
                 if ($runResult -and $runResult.ResolvedPath) {
                     Save-LastCoverDeletionPath -Settings $Settings -SettingsPath $SettingsPath -ResolvedPath $runResult.ResolvedPath
-                    $null = & $AutoTrailingZeroHandler $runResult.ResolvedPath
+                    # Reuse item 1's own walk instead of making the
+                    # trailing-zero audit walk the same tree again -
+                    # existence-filtered since item 1 may have just
+                    # deleted some of these (a real fake -RunHandler in a
+                    # harness won't set AllScannedFiles, so this is $null
+                    # there - Invoke-TrailingZeroAuditRun's own
+                    # -PreScannedFiles default handles $null the same as
+                    # not being passed at all). See CHANGELOG.md's
+                    # matching entry.
+                    $survivingFiles = $null
+                    if ($runResult.AllScannedFiles) {
+                        $survivingFiles = @($runResult.AllScannedFiles | Where-Object { [System.IO.File]::Exists($_.FullName) })
+                    }
+                    $null = & $AutoTrailingZeroHandler $runResult.ResolvedPath $survivingFiles
                 }
                 Write-Host ""
             }
