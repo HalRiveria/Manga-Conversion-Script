@@ -1814,18 +1814,15 @@ function Invoke-Mode {
 
         switch ($Resolved.Mode) {
             'ImageConversion' {
-                # [bool](...) cast (2026-08-31 fix, from a same-day
-                # /code-review re-review) - same reasoning as the
-                # ZipFolders/FullPipeline cases below, missed here in the
-                # original pass: FullLogging is
+                # [bool](...) cast matters here, same reasoning as the
+                # ZipFolders/FullPipeline cases below: FullLogging is
                 # [Parameter(Mandatory)][bool] on
                 # Invoke-LooseImageConversionPipeline.
                 #
-                # $script:FullLogging, NOT [bool]$Settings.FullLogging
-                # (2026-08-31 fix, caught by a same-day /code-review
-                # full-codebase pass): every -FullLogging/-DoFullLogging
+                # $script:FullLogging, NOT [bool]$Settings.FullLogging -
+                # every -FullLogging/-DoFullLogging
                 # argument in this switch (and Write-SummaryReport's own
-                # call, further down) now reads the FROZEN value
+                # call, further down) reads the FROZEN value
                 # Initialize-LogPaths set in $script:FullLogging at
                 # bootstrap, not the LIVE $Settings.FullLogging - because
                 # $LogFile/$LogErrorFile/$LogWarnFile (passed alongside,
@@ -1835,18 +1832,19 @@ function Invoke-Mode {
                 # re-runs Initialize-LogPaths mid-session - see this
                 # function's own Invoke-MainLoop header comment for why).
                 # Reading the FullLogging flag live while the paths stay
-                # frozen let them drift out of sync the moment a user
-                # toggled Full Logging in the Options menu mid-session: a
-                # worker runspace (Convert-ImageBatch/Convert-AnimatedBatch,
-                # dispatched by Invoke-FullPipelineChapter) sets its OWN
-                # fresh $script:FullLogging from whatever value THIS
-                # switch passed it, so a live, post-toggle value there
-                # paired with the OLD, pre-toggle paths - live-reproduced:
-                # every worker-side Write-Log call after a toggle went to
-                # a $null path (split-mode's $logFile is never set) and
-                # was silently dropped, with no error, no console line,
-                # nothing on disk. Using the same frozen source for both
-                # keeps them consistent, matching this project's own
+                # frozen would let them drift out of sync the moment a
+                # user toggled Full Logging in the Options menu
+                # mid-session: a worker runspace
+                # (Convert-ImageBatch/Convert-AnimatedBatch, dispatched by
+                # Invoke-FullPipelineChapter) sets its own fresh
+                # $script:FullLogging from whatever value this switch
+                # passed it, so a live, post-toggle value there paired
+                # with the old, pre-toggle paths would send every
+                # worker-side Write-Log call after a toggle to a $null
+                # path (split-mode's $logFile is never set), silently
+                # dropped, with no error, no console line, nothing on
+                # disk. Using the same frozen source for both keeps them
+                # consistent, matching this project's own
                 # already-documented, deliberate design: the toggle
                 # doesn't take effect until the next relaunch, rather than
                 # partially applying and breaking logging outright.
@@ -1860,9 +1858,8 @@ function Invoke-Mode {
                 $stats.ForceKilledCount          = $r.ForceKilledCount
             }
             'AnimatedConversion' {
-                # [bool](...) casts (2026-08-31 fix, from a FOURTH same-day
-                # /code-review pass): NOT limited to Mandatory params -
-                # confirmed directly that a non-Mandatory [bool]$X = $false
+                # [bool](...) casts are NOT limited to Mandatory params -
+                # a non-Mandatory [bool]$X = $false
                 # parameter ALSO throws on an explicitly-passed $null (the
                 # Mandatory attribute only affects whether OMITTING the
                 # param is allowed; the [bool] type coercion runs
@@ -1881,8 +1878,7 @@ function Invoke-Mode {
                 $stats.ForceKilledCount               = $r.ForceKilledCount
             }
             'ZipFolders' {
-                # [bool](...) casts (2026-08-31 fix, from a same-day
-                # /code-review): FullLogging/PermanentDelete are both
+                # [bool](...) casts matter here too: FullLogging/PermanentDelete are both
                 # [Parameter(Mandatory)][bool] on the receiving function -
                 # a $Settings missing either key would otherwise fail
                 # PowerShell's own boolean coercion with a hard crash, the
@@ -1891,11 +1887,9 @@ function Invoke-Mode {
                     -FullLogging $script:FullLogging -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete ([bool]$Settings.PermanentDelete)
                 $stats.ZipOnlyZipped.Success        = $r.ZippedSuccess;        $stats.ZipOnlyZipped.Fail        = $r.ZippedFail
                 $stats.ZipOnlyFolderDeleted.Success = $r.FolderDeletedSuccess; $stats.ZipOnlyFolderDeleted.Fail = $r.FolderDeletedFail
-                # Aborted/ForceKilledCount (2026-09-03 fix, real bug caught
-                # by a same-session /code-review pass): Invoke-ZipOnlyPipeline
-                # gained a real Aborted field the same day (previously it had
-                # only ForceStoppedCount, with no way to distinguish "the run
-                # was cancelled" from "the run finished with a slow drain") -
+                # Invoke-ZipOnlyPipeline's Aborted field distinguishes "the
+                # run was cancelled" from "the run finished with a slow
+                # drain" (ForceStoppedCount alone can't tell those apart) -
                 # $r.ForceStoppedCount maps onto Stats' ForceKilledCount name.
                 $stats.Aborted           = $r.Aborted
                 $stats.ForceKilledCount  = $r.ForceStoppedCount
@@ -1919,8 +1913,7 @@ function Invoke-Mode {
                 $stats.ForceKilledCount               = $r.ForceKilledCount
             }
             'ImageConversionZip' {
-                # Mode 8's real zip-step wiring (2026-08-28, Phase 2 of the
-                # build plan) - the -ZipStepCallback contract ImageConversionPipeline.ps1
+                # Mode 8's real zip-step wiring - the -ZipStepCallback contract ImageConversionPipeline.ps1
                 # decided: this closure owns ALL of mode 8's own business
                 # logic (which extensions block zipping, based on
                 # ZipWithUnconvertedAnimated), while ImageConversionPipeline.ps1
@@ -1932,9 +1925,9 @@ function Invoke-Mode {
                 # -ZipFolderHandler - that would make Invoke-LooseFolderZip
                 # start its OWN CCR transition, which is exactly the
                 # second-transition shape this design rejected.
-                # Derived from Get-LooseImageExtensions() (2026-09-02 fix,
-                # from a same-day review), not a hand-retyped literal - the
-                # literal was a snapshot of the canonical list minus
+                # Derived from Get-LooseImageExtensions(), not a
+                # hand-retyped literal - a hand-typed literal would be a
+                # snapshot of the canonical list minus
                 # ".avif" (this toggle's own, literal, documented scope -
                 # "ZipWithUnconvertedAnimated" - never widened to cover
                 # ".webp", a pre-existing asymmetry this fix doesn't touch)
@@ -1944,19 +1937,17 @@ function Invoke-Mode {
                 # (magick missing, a future conversion failure) sailed
                 # past this gate and got zipped raw.
                 #
-                # Get-NeverConvertedExtensions() is ALSO subtracted here
-                # (2026-09-02 follow-up fix, same day, caught by a second
-                # full-codebase review) - an EARLIER version of this same
-                # fix deliberately kept ".gif" as a blocker in BOTH toggle
+                # Get-NeverConvertedExtensions() is ALSO subtracted here -
+                # keeping ".gif" as a blocker in BOTH toggle
                 # branches, reasoning it "counts as unconverted content" so
-                # should always block. That reasoning was wrong in
+                # should always block, would be wrong in
                 # practice: Convert-ImageBatch never even attempts to
                 # convert a never-converted extension, and
                 # Get-LooseImageCandidates never returns it as a
                 # NeedsConversion candidate either - there is no failure
                 # for the user to ever resolve, so a chapter containing a
-                # ".gif" could NEVER be zipped by mode 8, on any run,
-                # forever, live-confirmed. Full Pipeline has no such gate
+                # ".gif" would never be zippable by mode 8, on any run,
+                # ever. Full Pipeline has no such gate
                 # at all (Controller.ps1's own Invoke-FullPipelineChapter
                 # calls Compress-FolderToZip directly, see that function's
                 # own comment for why) and simply sweeps a never-converted
@@ -1982,7 +1973,7 @@ function Invoke-Mode {
                 $zipStep = {
                     param($Info)
                     # -RequireJxlEntry, computed the same way Invoke-FullPipelineChapter
-                    # computes $imageActuallyConverted (2026-09-04 fix, real bug): a
+                    # computes $imageActuallyConverted - a
                     # chapter whose only images are never-converted formats (e.g. all
                     # .gif) or all-animated-avif-routed-elsewhere has $Info.ChapterResult
                     # with ConvertedCount 0 (or $null when Get-ChapterProgressStatus's own
@@ -2006,10 +1997,8 @@ function Invoke-Mode {
                     return @{ Status = $zipResult.Status; Detail = $detail }
                 }.GetNewClosure()
 
-                # [bool](...) cast (2026-08-31 fix, from a THIRD same-day
-                # /code-review pass) - same reasoning as every other
-                # switch case in this function; this one (mode 8) was
-                # missed by both earlier passes.
+                # [bool](...) cast matters here too - same reasoning as
+                # every other switch case in this function.
                 $r = & $ImageConversionHandler -Path $TargetPath -CjxlExe $CjxlExe -MagickExe $MagickExe `
                     -JpegLossless ([bool]$Settings.JpegLossless) -JpegQuality $Settings.JpegQuality -MaxCjxlProcs $Settings.MaxCjxlProcs -FullLogging $script:FullLogging `
                     -ZipStepCallback $zipStep
@@ -2017,7 +2006,7 @@ function Invoke-Mode {
                 $stats.LooseImgDeleted.Success   = $r.DeletedSuccess;   $stats.LooseImgDeleted.Fail   = $r.DeletedFail
                 $stats.LooseStaleCleaned.Success = $r.StaleCleanedSuccess; $stats.LooseStaleCleaned.Fail = $r.StaleCleanedFail
                 $stats.InspectFailed.Count       = $r.InspectFailedCount
-                # LooseFolderZipped/LooseFolderDeleted - fixed 2026-08-28.
+                # LooseFolderZipped/LooseFolderDeleted:
                 # Invoke-LooseImageConversionPipeline's own $totals has no
                 # zip-step counters (ZipPipeline.ps1's domain, deliberately
                 # kept decoupled - see this module's header), so mode 8's
@@ -2028,10 +2017,9 @@ function Invoke-Mode {
                 $stats.LooseFolderZipped.Skipped   = $zipStatsBox.Skipped
                 $stats.LooseFolderDeleted.Success  = $zipStatsBox.FolderDeletedSuccess
                 $stats.LooseFolderDeleted.Fail      = $zipStatsBox.FolderDeletedFail
-                # Aborted/ForceKilledCount (2026-09-03 fix, real bug caught
-                # by a same-session /code-review pass - missed when the
+                # Aborted/ForceKilledCount matter here too, same as the
                 # 'ImageConversion'/'AnimatedConversion'/'FullPipeline'
-                # branches got these two lines): mode 8 calls the same
+                # branches above: mode 8 calls the same
                 # $ImageConversionHandler as 'ImageConversion' above, and
                 # $r carries the identical two fields.
                 $stats.Aborted           = $r.Aborted
