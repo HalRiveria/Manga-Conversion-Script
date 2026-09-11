@@ -549,8 +549,7 @@ function Complete-ImageConversionJob {
                     # PNG that fed the now-failed cjxl attempt, if any) is
                     # done being needed - the retry enqueued above is a
                     # SEPARATE job with its own (already-stripped) TempPng.
-                    # Cleaned up here (2026-08-31 fix, caught by a same-day
-                    # /code-review) since this early `return` skips the
+                    # Cleaned up here since this early `return` skips the
                     # normal TempPng cleanup below entirely - without this,
                     # every webp/avif source that ever hit an ICC-strip
                     # retry left its first attempt's own pre-conversion PNG
@@ -604,9 +603,9 @@ function Complete-ImageConversionJob {
 
     if ($convOk) {
         try {
-            # Return value checked, not discarded (2026-09-08 fix, same
-            # species as this project's other Remove-Source call sites -
-            # see FileDeletion.ps1's own .OUTPUTS) - Remove-Source returns
+            # Return value checked, not discarded - same
+            # species as this project's other Remove-Source call sites,
+            # see FileDeletion.ps1's own .OUTPUTS. Remove-Source returns
             # $false (not an exception) when the source already vanished
             # before deletion (a real TOCTOU gap). Neither a success nor a
             # real failure - left uncounted rather than falsely reporting
@@ -633,7 +632,7 @@ function Complete-ImageDispatchJob {
     .SYNOPSIS
         JobFinalize-shaped completion handler for a job dispatched via
         Invoke-ChapterDispatch (mode 2's own migration onto
-        ChapterDispatch.ps1, 2026-09-09 - see
+        ChapterDispatch.ps1 - see
         Docs\dispatch-redesign-design.md). Handles exit-code/output
         verification (including the ICC-profile-mismatch retry via
         Invoke-IccStripRetryOrFail) and (on success) source deletion,
@@ -647,8 +646,8 @@ function Complete-ImageDispatchJob {
         try/finally) - see that function's own header for the cross-
         reference. Genuinely different contract, not a lazy copy:
         Complete-ImageConversionJob's caller (Convert-ImageBatch, no
-        remaining real caller of its own since RezipPipeline.ps1 was
-        removed 2026-09-09 - see CHANGELOG.md) owns process disposal
+        remaining real caller of its own other than its own harness)
+        owns process disposal
         itself; THIS
         function's caller (Invoke-ChapterDispatch) already owns process
         disposal AND its own -MaxConcurrent SemaphoreSlim release
@@ -694,15 +693,14 @@ function Complete-ImageDispatchJob {
             # through to the normal failure path, not retry forever.
             if ($code -eq 1 -and $stderr -imatch 'Getting pixel data failed' -and $MagickExe -and -not $Job.IccRetried) {
                 # Bridge through a real, plain System.Collections.Queue,
-                # NOT $PendingQueue directly (2026-09-09, real bug caught
-                # before this ever ran) - Invoke-IccStripRetryOrFail's own
+                # NOT $PendingQueue directly - Invoke-IccStripRetryOrFail's own
                 # -Pending param is typed [System.Collections.Queue], and
                 # Queue[hashtable] does NOT derive from that non-generic
                 # type. PowerShell's own parameter binding silently
                 # CONVERTS a Queue[hashtable] argument into a brand-new,
                 # disconnected System.Collections.Queue instead of
                 # refusing the mismatch or passing the reference through -
-                # confirmed live: enqueuing into the converted copy left
+                # enqueuing into the converted copy would leave
                 # the caller's own original queue completely untouched, no
                 # error anywhere. Passed directly, the real retry job
                 # would silently vanish into that throwaway copy - the
@@ -721,8 +719,7 @@ function Complete-ImageDispatchJob {
                 $iccRetryLanding = [System.Collections.Queue]::new()
                 if (Invoke-IccStripRetryOrFail -Job $Job -Pending $iccRetryLanding -MagickExe $MagickExe -ChapterKey $Job.ChapterKey) {
                     foreach ($retryJob in $iccRetryLanding) { $PendingQueue.Enqueue($retryJob) }
-                    # [System.IO.File]::Exists, not Test-Path (2026-09-10,
-                    # /code-review high finding) - this whole function is
+                    # [System.IO.File]::Exists, not Test-Path - this whole function is
                     # JobFinalize for Full Pipeline's image engine, called
                     # from inside a fresh worker runspace on the hot path for
                     # every converted file - an unswept instance of the same
