@@ -1,119 +1,10 @@
-<#
-.SYNOPSIS
-    CleanConsoleRendering (CCR) - the "Clean Console Output" toggle's
-    renderer: a live, per-series/chapter progress display, replacing the
-    default per-file console spam. Never touches log file content - this
-    module owns console rendering only.
+# See Docs/module-descriptions.md for this module's full description.
 
-.DESCRIPTION
-    Pure definitions only - no top-level side effects, safe to dot-source
-    more than once or alongside other modules. No forward references -
-    this module is fully standalone, like DependencyDetection.ps1.
-
-    THE MODEL (fixed Library > Series > Chapter > Images layout, decided
-    during scoping - see CLAUDE.md's "Clean Console Output" section):
-      - Start-SeriesProgress registers a series and its total chapter
-        count (known upfront via a per-series eager scan - see CLAUDE.md
-        for why this doesn't reintroduce the incremental-scan hang fix).
-      - Start-ChapterProgress marks one chapter of that series as now
-        running.
-      - Complete-ChapterProgress resolves it: -Status Success just
-        removes it from the display entirely (it "clears out", per
-        explicit instruction). -Status Warning/Error instead moves it
-        into a PERSISTENT list that stays visible - even after the whole
-        series finishes and freezes into a permanent line - with an
-        optional caller-supplied -Detail string. This module never
-        interprets -Detail's contents, just displays it - keeps CCR
-        domain-agnostic about *why* something went wrong.
-      - The progress bar's numerator is SuccessCount only - a chapter
-        with issues does NOT count toward it, per explicit instruction.
-        A series can therefore finish (nothing left running) while its
-        bar still shows short of full (e.g. 6/8) - a deliberate signal,
-        not a bug: the persisted issue lines right below explain why.
-      - A series is "resolved" (nothing left running, freezes into a
-        permanent console line) once SuccessCount + issue-chapter count
-        reaches TotalChapters. Multiple series can be active/live at
-        once; each gets its own block. Only cleanly-successful chapters
-        ever actually disappear from the display.
-      - Write-CleanConsoleMessage is a 5th public function, for one-off
-        status lines from OTHER modules (currently
-        AbortPipeline.ps1's abort/drain messages) that aren't part of
-        the series/chapter model at all - printed as permanent content
-        above the live region without corrupting it, the same
-        erase-and-reprint mechanism Complete-ChapterProgress's
-        NewlyFrozen path already uses, just with raw text instead of a
-        formatted series.
-
-    RENDERING: tries real in-place redraw via [Console]::SetCursorPosition
-    (erase the previous live region, reprint - the actual "clean" part of
-    Clean Console Output), but this requires a real attached interactive
-    console. [Console]::CursorTop/SetCursorPosition throws a real
-    System.IO.IOException ("The handle is invalid") when output is
-    redirected or non-interactive, so cursor support is probed once
-    (Test-CleanConsoleCursorAvailable, cached) and everything falls back
-    to simple sequential Write-Host (no erase, accepting scrollback
-    duplication) if unavailable, rather than throwing an exception into
-    the middle of a conversion run. This fallback is the deliberately-
-    designed degradation path, not an afterthought.
-
-    Content generation (Get-ProgressBarString, Split-TextToWidth,
-    Format-SeriesLines) is fully separated from the actual console I/O
-    (Update-CleanConsoleDisplay) specifically so it can be tested without
-    a real console - see Modules\_Harness\CleanConsoleRendering.Harness.ps1's
-    own header for what is and isn't actually verifiable that way.
-
-    COLOR: persisted issue lines and the bar+count line are colored to
-    match this project's existing Warn/Error console conventions -
-    Yellow for Warning/Aborted, Red for Error (the bar+count line itself
-    takes the worst severity present: Red if any Error, else Yellow if
-    any Warning/Aborted, else uncolored). Series name and active-chapter
-    lines are always uncolored.
-
-    THREAD SAFETY / CALLING CONTEXT - IMPORTANT: every public function in
-    this module MUST be called from the main/orchestrating thread only -
-    NEVER from within a runspace worker script. $script:ccrActiveSeries is
-    per-runspace state, exactly like every other $script:-prefixed module
-    state in this project - a worker calling these functions would be
-    mutating its OWN isolated copy, invisible to the main thread's actual
-    live display. This is a silent failure mode (nothing crashes, nothing
-    errors, the display just never updates for that chapter) rather than
-    an obvious one, so it's called out here prominently rather than left
-    for whoever wires ImageConversionPipeline.ps1/ZipPipeline.ps1 up to
-    discover the hard way. The correct call sites are the dispatch loop's
-    own pre-dispatch code (Start-ChapterProgress) and its -ResultHandler
-    callback (Complete-ChapterProgress) - both already run on the main
-    thread in this project's established runspace-pool pattern, same as
-    Write-Log's own $script:workerConsoleQueue/Flush-ConsoleQueue split
-    exists to solve the identical problem for console output.
-
-.NOTES
-    Brand new module - no reference extraction exists for this (the
-    feature didn't exist when the original reference-extraction pass was
-    done). Built entirely from the scoping discussion recorded in
-    CLAUDE.md.
-#>
-
-# ==============================================================================
-#  Module-owned state
-# ==============================================================================
 $script:ccrActiveSeries       = [System.Collections.Specialized.OrderedDictionary]::new()
-# key = series name; value = @{
-#     TotalChapters  = <int>
-#     SuccessCount   = <int>                                    # bar numerator - Success only
-#     ActiveChapters = [System.Collections.Generic.List[string]]  # currently running
-#     IssueChapters  = [System.Collections.Generic.List[hashtable]]  # @{ChapterName;Status;Detail} - persists
-# }
-$script:ccrLiveRegionLineCount = 0      # physical console rows the live region currently occupies
-$script:ccrCursorAvailable     = $null  # $null = not yet probed; cached True/False after first probe
+$script:ccrLiveRegionLineCount = 0
+$script:ccrCursorAvailable     = $null
 
 function Test-CleanConsoleCursorAvailable {
-    <#
-    .SYNOPSIS
-        Probes once (cached) whether real console cursor control is
-        available. Read-only probe - does not move the cursor. Returns
-        $false in any redirected/non-interactive context instead of
-        letting a later real redraw attempt throw mid-run.
-    #>
     if ($null -ne $script:ccrCursorAvailable) { return $script:ccrCursorAvailable }
     try {
         $null = [Console]::CursorTop
@@ -126,14 +17,6 @@ function Test-CleanConsoleCursorAvailable {
 }
 
 function Get-ProgressBarString {
-    <#
-    .SYNOPSIS
-        Builds a plain-ASCII "[####------]" bar string (not Unicode
-        block characters - safer across older/legacy console fonts that
-        may not render them, matching this project's console output
-        conventions elsewhere). -Total 0 renders as fully filled (a
-        0-chapter series has nothing to be "in progress" about).
-    #>
     param(
         [Parameter(Mandatory)]
         [int]$Completed,
@@ -151,43 +34,23 @@ function Get-ProgressBarString {
 }
 
 function Test-WideCharacter {
-    <#
-    .SYNOPSIS
-        True if $Char renders as 2 console columns wide (CJK/fullwidth),
-        false for a normal 1-column-wide character. Covers the ranges
-        this project's own domain actually hits (this is a manga-library
-        tool - Japanese/Korean/Chinese filenames are routine, see
-        Logging.ps1's own non-ASCII handling) - not a complete Unicode
-        East Asian Width table, the practically-relevant subset of it.
-    #>
     param([Parameter(Mandatory)][char]$Char)
     $code = [int][char]$Char
     return (
-        ($code -ge 0x1100 -and $code -le 0x115F) -or   # Hangul Jamo
-        ($code -ge 0x2E80 -and $code -le 0x303E) -or   # CJK radicals/punctuation
-        ($code -ge 0x3041 -and $code -le 0x33FF) -or   # Hiragana/Katakana/CJK symbols
-        ($code -ge 0x3400 -and $code -le 0x4DBF) -or   # CJK Extension A
-        ($code -ge 0x4E00 -and $code -le 0x9FFF) -or   # CJK Unified Ideographs
-        ($code -ge 0xA000 -and $code -le 0xA4CF) -or   # Yi
-        ($code -ge 0xAC00 -and $code -le 0xD7A3) -or   # Hangul Syllables
-        ($code -ge 0xF900 -and $code -le 0xFAFF) -or   # CJK Compatibility Ideographs
-        ($code -ge 0xFF00 -and $code -le 0xFF60) -or   # Fullwidth forms
-        ($code -ge 0xFFE0 -and $code -le 0xFFE6)       # Fullwidth signs
+        ($code -ge 0x1100 -and $code -le 0x115F) -or
+        ($code -ge 0x2E80 -and $code -le 0x303E) -or
+        ($code -ge 0x3041 -and $code -le 0x33FF) -or
+        ($code -ge 0x3400 -and $code -le 0x4DBF) -or
+        ($code -ge 0x4E00 -and $code -le 0x9FFF) -or
+        ($code -ge 0xA000 -and $code -le 0xA4CF) -or
+        ($code -ge 0xAC00 -and $code -le 0xD7A3) -or
+        ($code -ge 0xF900 -and $code -le 0xFAFF) -or
+        ($code -ge 0xFF00 -and $code -le 0xFF60) -or
+        ($code -ge 0xFFE0 -and $code -le 0xFFE6)
     )
 }
 
 function Get-DisplayWidth {
-    <#
-    .SYNOPSIS
-        Total console column width of $Text - 2 per wide/CJK character
-        (Test-WideCharacter), 1 per everything else. $Text.Length is a
-        .NET UTF-16 code-unit count, not a column count - the two only
-        diverge for wide characters, but that divergence is exactly what
-        caused a real CJK redraw desync: a chunk sized in characters
-        could still be wider than the console in actual columns, so the
-        terminal's own automatic wrap kicked in and desynced this
-        module's row-count math for every line drawn after it.
-    #>
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
     $width = 0
     foreach ($ch in $Text.ToCharArray()) {
@@ -197,14 +60,6 @@ function Get-DisplayWidth {
 }
 
 function Set-PadToDisplayWidth {
-    <#
-    .SYNOPSIS
-        Pads $Text with trailing spaces until its DISPLAY width (not
-        $Text.Length) reaches $Width - the .PadRight equivalent for the
-        same CJK/wide-character gap Get-DisplayWidth exists for. Returns
-        $Text unchanged if its display width already meets or exceeds
-        $Width, matching .PadRight's own no-op behavior in that case.
-    #>
     param(
         [Parameter(Mandatory)]
         [AllowEmptyString()]
@@ -218,22 +73,6 @@ function Set-PadToDisplayWidth {
 }
 
 function Split-TextToWidth {
-    <#
-    .SYNOPSIS
-        Splits $Text into chunks that each fit within $Width console
-        COLUMNS (not characters - see Get-DisplayWidth), the last one
-        shorter if it doesn't divide evenly. Used so long series/chapter
-        names wrap under this module's own control instead of relying on
-        the terminal's automatic wrap - needed because the redraw
-        algorithm must know exactly how many physical rows each logical
-        line will occupy to move the cursor correctly. Chunking by
-        character count alone let a CJK-heavy chunk render wider than
-        $Width columns despite fitting within $Width characters,
-        triggering the terminal's own wrap and desyncing the row-count
-        math for every row after it.
-    .OUTPUTS
-        string[] - always at least one element, even for empty input.
-    #>
     param(
         [Parameter(Mandatory)]
         [AllowEmptyString()]
@@ -249,10 +88,6 @@ function Split-TextToWidth {
     $currentWidth = 0
     foreach ($ch in $Text.ToCharArray()) {
         $chWidth = if (Test-WideCharacter -Char $ch) { 2 } else { 1 }
-        # Flush before appending if this character would overflow the
-        # chunk - unless the chunk is still empty (a single wide
-        # character in a $Width=1 line unavoidably exceeds it; better to
-        # let that one chunk run 1 column over than emit an empty chunk).
         if (($currentWidth + $chWidth) -gt $Width -and $current.Length -gt 0) {
             $chunks.Add($current.ToString())
             $current = [System.Text.StringBuilder]::new()
@@ -262,28 +97,10 @@ function Split-TextToWidth {
         $currentWidth += $chWidth
     }
     if ($current.Length -gt 0 -or $chunks.Count -eq 0) { $chunks.Add($current.ToString()) }
-    # Deliberately NO leading comma here, unlike the List-returning
-    # functions elsewhere in this project (e.g. Get-ZippableLeafDirs) -
-    # this function's only real caller uses `foreach (... in (Split-TextToWidth ...))`,
-    # which correctly handles a 0- or 1-element collapse on its own
-    # (foreach over $null is zero iterations; foreach over a bare scalar
-    # is one iteration) - the comma isn't needed there, and a caller
-    # doing `@(Split-TextToWidth ...)` (as this module's own harness
-    # does, for easy assertions) would double-wrap if this function ALSO
-    # added a comma: `@()` around an already-comma-protected single
-    # object produces a 1-element array whose only element is the whole
-    # inner list, not its contents. Verified live - this exact double-
-    # wrap bug was caught by the harness before being fixed here.
     return $chunks
 }
 
 function Get-IssueStatusColor {
-    <#
-    .SYNOPSIS
-        Internal helper - the console color for a given issue -Status.
-        Yellow for Warning/Aborted (not necessarily a hard failure), Red
-        for Error. $null (no color / console default) for anything else.
-    #>
     param([string]$Status)
     switch ($Status) {
         "Error"    { return "Red" }
@@ -294,21 +111,6 @@ function Get-IssueStatusColor {
 }
 
 function Format-SeriesLines {
-    <#
-    .SYNOPSIS
-        Builds the logical display lines for one series - works
-        identically whether that series is still live (may have
-        ActiveChapters) or has just frozen (ActiveChapters is always
-        empty by the time a series resolves, so this naturally produces
-        the correct "frozen" look with no separate function needed):
-        series name, progress bar + "X/Y chapters", then persisted issue
-        chapters (Warning/Error/Aborted, always shown), then currently-
-        active chapters (only present while still live).
-    .OUTPUTS
-        Array of @{ Text = <string>; Color = <string or $null> } - logical
-        lines, NOT yet wrapped/padded to console width. Color is $null
-        for uncolored (console-default) lines.
-    #>
     param(
         [Parameter(Mandatory)]
         [string]$SeriesName,
@@ -318,10 +120,6 @@ function Format-SeriesLines {
     $lines = [System.Collections.Generic.List[hashtable]]::new()
     $lines.Add(@{ Text = $SeriesName; Color = $null })
 
-    # Bar+count line takes the worst severity present among this
-    # series' issue chapters (Red beats Yellow beats uncolored) - a
-    # second, cheaper-to-spot signal on top of the bar itself already
-    # stalling short of full.
     $barColor = $null
     foreach ($issue in $Entry.IssueChapters) {
         if ($issue.Status -eq "Error") { $barColor = "Red"; break }
@@ -338,23 +136,10 @@ function Format-SeriesLines {
         $lines.Add(@{ Text = ("    " + $active + " (in progress)"); Color = $null })
     }
 
-    # No leading comma - see Split-TextToWidth's comment for why: the
-    # real caller uses foreach (handles 0/1-element collapse safely on
-    # its own), and this module's harness uses @() at call sites, which
-    # would double-wrap if this also added its own comma.
     return $lines
 }
 
 function Get-WrappedSeriesRows {
-    <#
-    .SYNOPSIS
-        Private helper - one series' lines (Format-SeriesLines), each
-        wrapped to $Width (Split-TextToWidth), as a flat list of
-        @{ Text; Color } rows. Shared by Update-CleanConsoleDisplay's
-        $NewlyFrozen loop and its live-series loop, which previously each
-        ran this identical "format then wrap" nested loop by hand,
-        differing only in which collection they iterated.
-    #>
     param(
         [Parameter(Mandatory)]
         [string]$SeriesName,
@@ -374,18 +159,6 @@ function Get-WrappedSeriesRows {
 }
 
 function Update-CleanConsoleDisplay {
-    <#
-    .SYNOPSIS
-        Internal helper (not meant to be called from outside this
-        module, except by this module's own public functions below) -
-        redraws the console: erases the previous live region (if cursor
-        control is available) and reprints it, promoting any
-        just-completed series to permanent scrolled content first.
-    .PARAMETER NewlyFrozen
-        List of @{ Name; Entry } for series that just resolved as part of
-        THIS update - printed as new permanent content before the
-        (possibly now-shorter) still-live region is reprinted below it.
-    #>
     param(
         [System.Collections.Generic.List[hashtable]]$NewlyFrozen = $null,
         [System.Collections.Generic.List[hashtable]]$ExtraFrozenRows = $null
@@ -400,15 +173,8 @@ function Update-CleanConsoleDisplay {
         } catch { $script:ccrCursorAvailable = $false; $cursorOk = $false }
     }
 
-    # Rows carry their inherited color forward from the logical line they
-    # were split from - @{ Text; Color }, same shape Format-SeriesLines
-    # itself uses.
     $frozenRows = [System.Collections.Generic.List[hashtable]]::new()
 
-    # Raw one-off rows (e.g. Write-CleanConsoleMessage's abort/drain text)
-    # that never went through Format-SeriesLines - printed first, still
-    # wrapped to the same $effectiveWidth as everything else so a long
-    # message can't desync the cursor math below.
     if ($ExtraFrozenRows) {
         foreach ($rawRow in $ExtraFrozenRows) {
             foreach ($chunk in (Split-TextToWidth -Text $rawRow.Text -Width $effectiveWidth)) {
@@ -438,12 +204,6 @@ function Update-CleanConsoleDisplay {
             if ($oldCount -gt 0) {
                 [Console]::SetCursorPosition(0, [Console]::CursorTop - $oldCount)
             }
-            # Set-PadToDisplayWidth, not .PadRight - .PadRight pads by
-            # character count, so a CJK row already at $effectiveWidth
-            # characters (but narrower than that in actual columns) would
-            # get padded to the wrong on-screen width, leaving stale
-            # characters from a longer previous row visible past the end
-            # of the new one.
             foreach ($row in $newContentRows) { Write-ColoredConsoleRow -Text (Set-PadToDisplayWidth -Text $row.Text -Width $effectiveWidth) -Color $row.Color }
             if ($newContentRows.Count -lt $oldCount) {
                 $blankRowsNeeded = $oldCount - $newContentRows.Count
@@ -451,13 +211,6 @@ function Update-CleanConsoleDisplay {
                 [Console]::SetCursorPosition(0, [Console]::CursorTop - $blankRowsNeeded)
             }
         } catch {
-            # Cursor support broke mid-redraw (rare - the upfront probe
-            # above already covers the common "no console at all" case).
-            # Fall back for THIS and all future calls; note the content
-            # already Write-Host'd above (if any) may be duplicated by
-            # the fallback print below for this one transition only -
-            # accepted as a narrow, one-time cosmetic edge case rather
-            # than engineered away.
             $script:ccrCursorAvailable = $false
             foreach ($row in $newContentRows) { Write-ColoredConsoleRow -Text $row.Text -Color $row.Color }
         }
@@ -469,12 +222,6 @@ function Update-CleanConsoleDisplay {
 }
 
 function Write-ColoredConsoleRow {
-    <#
-    .SYNOPSIS
-        Internal helper - Write-Host with -ForegroundColor only when a
-        color is actually specified, since passing -ForegroundColor $null
-        is not the same as omitting the parameter entirely.
-    #>
     param(
         [Parameter(Mandatory)]
         [AllowEmptyString()]
@@ -489,16 +236,6 @@ function Write-ColoredConsoleRow {
 }
 
 function Start-SeriesProgress {
-    <#
-    .SYNOPSIS
-        Registers a new active series. -TotalChapters must already be
-        known (from a per-series eager scan - see this module's header)
-        - a 0-chapter series is rendered as an immediately-frozen "0/0"
-        line and never enters the active registry at all. A NEGATIVE
-        -TotalChapters throws rather than being silently treated the
-        same as the legitimate 0-chapter case - that would mask a real
-        caller bug instead of surfacing it.
-    #>
     param(
         [Parameter(Mandatory)]
         [string]$SeriesName,
@@ -531,10 +268,6 @@ function Start-SeriesProgress {
 }
 
 function Start-ChapterProgress {
-    <#
-    .SYNOPSIS
-        Marks one chapter of an already-started series as now running.
-    #>
     param(
         [Parameter(Mandatory)]
         [string]$SeriesName,
@@ -549,22 +282,6 @@ function Start-ChapterProgress {
 }
 
 function Complete-ChapterProgress {
-    <#
-    .SYNOPSIS
-        Resolves one running chapter. -Status Success removes it from
-        the display entirely. -Status Warning/Error instead moves it
-        into a persistent list (with optional -Detail) that stays
-        visible even after the series freezes - and does NOT count
-        toward the series' progress-bar numerator. ("Aborted" is a third
-        persistent status, used only internally by
-        Complete-AllActiveSeriesProgress for chapters still running when
-        a series gets force-resolved - not a value this function accepts
-        directly, since a caller reporting a chapter's outcome always
-        knows whether it succeeded, warned, or errored.)
-    .OUTPUTS
-        @{ SeriesCompleted = <bool> } - whether this call was the one
-        that resolved the whole series (nothing left running).
-    #>
     param(
         [Parameter(Mandatory)]
         [string]$SeriesName,
@@ -605,33 +322,6 @@ function Complete-ChapterProgress {
 }
 
 function Write-CleanConsoleMessage {
-    <#
-    .SYNOPSIS
-        Prints a one-off status line (e.g. AbortPipeline.ps1's abort/
-        drain messages) as permanent console content without corrupting
-        the live progress region - the region is erased, the message
-        printed above it, then the live region is reprinted below,
-        exactly like a series freezing into permanent content. Exists so
-        out-of-band messages from other modules have somewhere safe to
-        land instead of a raw Write-Host
-        landing wherever the cursor happens to be mid-redraw (see
-        CLAUDE.md's "Clean Console Output" section, AbortPipeline touch
-        point).
-    .PARAMETER Text
-        The message to print. May contain "`n" - AbortPipeline.ps1's
-        existing abort messages lead with a blank line (e.g.
-        "`n[ABORT] Ctrl+C detected..."); each "`n"-separated segment
-        becomes its own row, independently width-wrapped like any other
-        displayed line.
-    .PARAMETER Color
-        Optional -ForegroundColor, same meaning as Write-Host's own
-        parameter. Applies to every row this message produces. Omit for
-        an uncolored (console-default) message.
-    .OUTPUTS
-        None. Safe to call whether or not any series is currently
-        active - with nothing active, this just prints the message and
-        leaves the (empty) live region as-is.
-    #>
     param(
         [Parameter(Mandatory)]
         [AllowEmptyString()]
@@ -646,22 +336,6 @@ function Write-CleanConsoleMessage {
 }
 
 function Write-GatedConsoleMessage {
-    <#
-    .SYNOPSIS
-        Prints $Text through Write-CleanConsoleMessage when
-        -CleanConsoleOutputEnabled is true, else a raw
-        Write-Host -ForegroundColor $Color - centralizing the gate that
-        was duplicated across AbortPipeline.ps1 (3 call sites),
-        ImageConversionPipeline.ps1, and AnimatedConversionPipeline.ps1.
-        A raw Write-Host while CCR's live region is mid-redraw would land
-        wherever the cursor happens to be and get mangled by the next
-        redraw - see this module's own header.
-    .PARAMETER CleanConsoleOutputEnabled
-        Explicit parameter, not a read of $script:CleanConsoleOutputEnabled
-        (owned by Logging.ps1) - this module documents itself as having
-        NO forward references, and stays that way: every caller already
-        has that value in its own scope and passes it in directly.
-    #>
     param(
         [Parameter(Mandatory)]
         [AllowEmptyString()]
@@ -680,20 +354,6 @@ function Write-GatedConsoleMessage {
 }
 
 function Complete-AllActiveSeriesProgress {
-    <#
-    .SYNOPSIS
-        Force-resolves every still-active series - for shutdown/abort,
-        when the run is ending with series/chapters genuinely still in
-        progress (a live region would otherwise be left stuck forever,
-        since nothing else would ever call Complete-ChapterProgress for
-        those remaining chapters). Any chapter still active is treated
-        exactly like a Warning/Error chapter - moved into the persistent
-        issue list (so it stays visible, does not count toward the bar's
-        numerator) - just with -Status "Aborted" instead. No -Detail is
-        set; the status itself already says what happened.
-    .OUTPUTS
-        None. No-ops cleanly if nothing is currently active.
-    #>
     param()
 
     if ($script:ccrActiveSeries.Count -eq 0) { return }
