@@ -1387,9 +1387,8 @@ function Convert-ImageBatch {
                         try { [System.IO.File]::Delete($j.JxlPath) } catch { }
                     }
                     $j.Proc.Dispose()
-                    # $j.SlotReleased = $true (2026-08-31 fix, caught by
-                    # verifying a same-day /code-review pass): without
-                    # this, a throw partway through THIS SAME loop (e.g.
+                    # $j.SlotReleased = $true matters here: without
+                    # it, a throw partway through THIS SAME loop (e.g.
                     # Process.Dispose() itself throwing) would drop
                     # straight into the outer catch below, which
                     # re-iterates this same $running list - any job THIS
@@ -1419,11 +1418,11 @@ function Convert-ImageBatch {
     # be started) - callers that surface a "still pending" count need this,
     # since $pending itself is local to this function. A job here can only
     # have a non-null TempPng if it's an ICC-strip retry enqueued by
-    # Invoke-IccStripRetryOrFail during the abort-drain above (2026-08-31
-    # fix) - that retry never gets dispatched once cancelled (the drain
+    # Invoke-IccStripRetryOrFail during the abort-drain above - that retry
+    # never gets dispatched once cancelled (the drain
     # only waits for ALREADY-running processes, it doesn't start new ones),
     # so without this cleanup the real, already-stripped PNG it produced
-    # was orphaned on disk with nothing to ever delete it - a stray file a
+    # would be orphaned on disk with nothing to ever delete it - a stray file a
     # later run's Get-LooseImageCandidates would pick up as a real loose
     # image. The source itself is correctly left alone here (still
     # reported as pending, retried fresh on the next run).
@@ -1445,9 +1444,9 @@ function Get-LooseImageCandidates {
         Scans $ScanPath for loose image files (outside any known ZIP's
         staging/extraction directory), classifying each as needing
         conversion or stale (a valid non-zero-byte .jxl counterpart
-        already exists, and isn't OLDER than this source - see 2026-08-31
-        fix note below - safe to delete without converting). A third,
-        unreturned case (2026-08-31): a source NEWER than its same-basename
+        already exists, and isn't OLDER than this source - see the note
+        below - safe to delete without converting). A third,
+        unreturned case: a source NEWER than its same-basename
         .jxl is a real naming collision this function can't safely resolve
         either way - excluded from both NeedsConversion and StaleSources,
         logged as an Error, left untouched on disk.
@@ -1482,13 +1481,12 @@ function Get-LooseImageCandidates {
         function has no other concept of it.
     .OUTPUTS
         @{ NeedsConversion = List[FileInfo]; StaleSources = List[FileInfo];
-           NamingCollisions = List[FileInfo] } - NamingCollisions (added
-        2026-08-31, from a same-day /code-review) makes the naming-
-        collision exclusion described above VISIBLE to callers: before
-        this field existed, a chapter whose only loose image was such a
-        collision had zero entries in either returned list, so
-        Convert-ImageBatch was never even dispatched for it and the
-        chapter's own ChapterResult stayed $null - Get-ChapterProgressStatus
+           NamingCollisions = List[FileInfo] } - NamingCollisions makes the naming-
+        collision exclusion described above VISIBLE to callers: without
+        this field, a chapter whose only loose image was such a
+        collision would have zero entries in either returned list, so
+        Convert-ImageBatch would never even be dispatched for it and the
+        chapter's own ChapterResult would stay $null - Get-ChapterProgressStatus
         maps a $null result to a clean Success with no way to know a real,
         unconverted file was sitting there. Both real callers (this
         module's own Invoke-LooseImageConversionPipeline, and
