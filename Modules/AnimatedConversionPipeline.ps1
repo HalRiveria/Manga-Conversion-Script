@@ -1,158 +1,10 @@
-<#
-.SYNOPSIS
-    AnimatedConversionPipeline - PART 1: Convert-AnimatedBatch, the
-    shared per-batch AVIF->WebP conversion engine (mirrors
-    ImageConversionPipeline.ps1's Convert-ImageBatch, one animated
-    conversion at a time per magick.exe process, up to -AnimatedThreads
-    concurrent). PART 2: Invoke-LooseAnimatedConversionPipeline, mode 3
-    ("Animated Conversion") end to end - the library-walking orchestrator
-    mirroring ImageConversionPipeline.ps1's PART 2
-    (Invoke-LooseImageConversionPipeline), built once Full
-    Pipeline's per-chapter coordination was settled (see Todo.md), which
-    removed the "would be built twice" concern that deferred it originally.
-
-.DESCRIPTION
-    Pure definitions only - no top-level side effects, safe to dot-source
-    more than once or alongside other modules.
-
-    SCOPE: originally just the batch-conversion PRIMITIVE (PART 1),
-    deliberately deferring the library-walking orchestrator until Full
-    Pipeline's real "image + animated conversion per chapter, then zip"
-    coordination was decided, so this wouldn't be built twice. That
-    coordination is now settled (`Controller.ps1`, per Todo.md) - and
-    critically, Controller does NOT call this module's PART 2 at all; it
-    walks its own per-chapter loop and calls Convert-AnimatedBatch (PART
-    1) directly, concurrently with Convert-ImageBatch, sharing one
-    process budget. That means PART 2 here is safe to build purely for
-    mode 3 ("Animated Conversion" alone, no zip, no Full Pipeline
-    involvement) without any risk of duplicating Controller's own logic -
-    the two are independent consumers of the same PART 1 primitive, not
-    one built on top of the other.
-
-    PART 2 mirrors ImageConversionPipeline.ps1's PART 2
-    (Invoke-LooseImageConversionPipeline) closely, with two real
-    differences, not oversights:
-      - No "stale source" pre-filtering pass. Get-LooseImageCandidates
-        splits NeedsConversion vs. StaleSources (a valid .jxl counterpart
-        already exists) so the image pipeline can proactively delete
-        stale sources before batching. Convert-AnimatedBatch already
-        makes its own skip-vs-convert decision per file (an existing
-        .webp with -DoAnimatedOverwrite off is a skip, not a
-        pre-filtered deletion) - duplicating that check in
-        Get-LooseAnimatedCandidates would just be a second, possibly-
-        drifting copy of logic PART 1 already owns and already tests.
-      - No ZipOut/IsZippable/-PostChapterCallback zip-domain fields. Mode
-        3 never zips (no "Animated Conversion + Zip" mode exists in the
-        current menu design), so -PostChapterCallback's payload here is
-        just @{ SeriesName; ChapterName; Dir; ChapterResult } - the image
-        pipeline's IsZippable distinction exists specifically for mode
-        2's benefit and has no equivalent need here.
-
-    STATIC AVIF, decided explicitly: a real animation check
-    (Test-AvifAnimated, via `magick identify -ping -format "%T"` on
-    frame [0] only - the animation delay, not a frame count) runs before
-    each file is dispatched. A static AVIF (delay 0) is left untouched
-    entirely - not converted, not deleted, not recorded as a failure.
-    FLAGGED FOR FUTURE REVIEW, not decided or
-    built: whether static AVIF should eventually be converted to JXL
-    instead of being left alone forever - the project owner wants to
-    evaluate whether that's actually worth doing before any code gets
-    written for it (see Todo.md).
-
-    HEARTBEAT LOGGING, decided explicitly: build the primitive now (a
-    "still converting (Xs elapsed)" line per job exceeding
-    -HeartbeatIntervalSeconds, via -Level Info Write-Log calls), and
-    include BATCH-level progress in it (N of Total files done so far -
-    trivially available from this function's own counters) since that
-    was asked for and cheap to add. PER-FILE progress (percent complete
-    of one magick.exe conversion) is NOT included - magick.exe doesn't
-    expose that, and figuring out a real way to get it (tailing some
-    progress-monitor output, if one even exists) wasn't worth the time
-    for this pass - flagged in Todo.md as a real future exploration, not
-    silently dropped.
-
-    This module's own harness uses a compiled fake magick.exe stand-in
-    (same technique as ImageConversionPipeline.Harness.ps1's fake
-    cjxl.exe) to test the branching LOGIC (parse the delay value, static
-    vs. animated, convert vs. skip) against 3 independent fake-magick.exe
-    copies across this codebase (this module's own, plus
-    Controller.Harness.ps1's and ImageConversionPipeline.Harness.ps1's) -
-    Test-AvifAnimated's real classification method was additionally
-    validated live against 9 real-world AVIF files across 3 independent
-    encoders/pipelines (this project's own test library, link-u/
-    avif-sample-images, and AOMediaCodec/libavif's own official animated
-    conformance test files) - see CHANGELOG.md's matching entry.
-
-    REAL DELETION SEMANTICS, ported deliberately from the disregarded
-    JXL-approach script rather than the WebP script this module's own
-    approach is otherwise based on (see
-    Modules\_Reference\AnimatedConversionPipeline.reference.ps1's own
-    header - both were flagged there as worth porting): the source .avif
-    is deleted via Remove-Source (respecting $script:PermanentDelete,
-    same as every other deletion in this project) only when
-    -AnimatedDeleteSource is true AND the conversion is verified
-    successful - exit code 0 AND the output .webp exists AND is
-    non-zero-byte, not just exit code alone (the WebP script only checked
-    exit code; the JXL script's stricter check is what's used here).
-
-    FORWARD REFERENCES (not defined in this module - callers must
-    dot-source the owning module(s) first):
-      - Write-Log (Modules\Logging.ps1)
-      - Remove-Source, $script:PermanentDelete (Modules\FileDeletion.ps1)
-      - $script:CleanConsoleOutputEnabled, Write-GatedConsoleMessage
-        (Modules\CleanConsoleRendering.ps1) - PART 1's own
-        Convert-AnimatedBatch needs these too now, to gate its straggler-
-        drain wait message the same way ImageConversionPipeline.ps1's
-        Convert-ImageBatch does (a raw Write-Host there would corrupt
-        CCR's live region mid-redraw). Write-GatedConsoleMessage takes
-        the toggle as an explicit param rather than reading
-        $script:CleanConsoleOutputEnabled itself (CleanConsoleRendering.ps1
-        has no forward references of its own) - this call site supplies it.
-      - PART 2 only: Test-AbortSignal, Register-AbortCancellationSource,
-        Unregister-AbortCancellationSource (Modules\AbortPipeline.ps1);
-        New-SeriesProvider, Get-SeriesChapters
-        (Modules\LeafDirectoryDiscovery.ps1); Start-SeriesProgress,
-        Start-ChapterProgress, Complete-ChapterProgress,
-        Complete-AllActiveSeriesProgress (Modules\CleanConsoleRendering.ps1) -
-        same set ImageConversionPipeline.ps1's PART 2 forward-references,
-        for the same reasons; Invoke-ChapterDispatch (Modules\ChapterDispatch.ps1 -
-        see Invoke-LooseAnimatedConversionPipeline's own
-        header for the migration this module was the first real caller
-        of). NOT New-LibraryChapterProvider - that function's own header
-        explains why this module builds its own -ChapterProvider closure
-        instead.
-
-.NOTES
-    Built from Backups\Old Scripts\Convert-AnimatedAvifToWebp.ps1 (the
-    approach actually used - see Modules\_Reference\AnimatedConversionPipeline.reference.ps1
-    for the full reasoning) plus two specific improvements ported from
-    the disregarded Convert-AnimatedToJxl.ps1 (delete-on-success,
-    stricter success verification) per that reference file's own
-    explicit recommendation. The PS7-only `ForEach-Object -Parallel`
-    path in the old WebP script does not exist on PS 5.1 (this project's
-    hard constraint) - replaced here with the same N-concurrent-process
-    pattern Convert-ImageBatch already established, not a runspace-pool
-    rewrite (unnecessary - external processes, not PowerShell code, do
-    the real work in both cases).
-#>
+# See Docs/module-descriptions.md for this module's full description.
 
 # ==============================================================================
 #  PART 1 - Convert-AnimatedBatch, the per-batch conversion engine
 # ==============================================================================
 
 function Test-AvifAnimated {
-    <#
-    .SYNOPSIS
-        True if $AvifPath is animated - a real magick identify call reads
-        the container's animation delay metadata (`-ping -format "%T\n"`
-        on frame `[0]` only) rather than counting frames: nonzero delay
-        means animated, "0" (no delay box at all) means static. Throws if
-        magick itself fails or the output can't be parsed as an integer -
-        callers decide how to treat that (this project's convention: log
-        a Warn and skip, matching how a corrupt/unreadable file is
-        treated elsewhere in this project, e.g. RezipPipeline.ps1's ZIP
-        inspection).
-    #>
     param(
         [Parameter(Mandatory)]
         [string]$AvifPath,
@@ -161,40 +13,6 @@ function Test-AvifAnimated {
     )
     if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated ENTER " + $AvifPath) } # TEMP-TRACE
 
-    # `identify -format "%n\n" <path>` (no frame index) makes ImageMagick
-    # decode and enumerate EVERY frame in the sequence just to count them -
-    # measured at 8-27s per file on real animated AVIFs, the dominant
-    # cost in a run with many animated chapters. Addressing frame `[0]`
-    # only, with `-ping` (skip pixel decode), and reading `%T` (the
-    # animation delay, straight from container metadata) instead of `%n`
-    # avoids touching any frame but the first - measured at
-    # 0.15-0.35s per file, same real AVIFs, ~30-50x faster. Validated
-    # against 9 real-world files across three independent
-    # encoders/pipelines (this project's own crash-chapter AVIFs,
-    # link-u/avif-sample-images' real photos including rotation/mirror/
-    # EXIF variants, and AOMediaCodec/libavif's own official animated
-    # conformance test files) - 9/9 correct, zero false positives or
-    # negatives against the frame-count method's own verdict.
-    # `-ping` alone (no frame index) does NOT fix this - still ~8s,
-    # since ImageMagick still enumerates every frame's own container
-    # entry under `-ping`, it just skips decoding pixel data for
-    # whichever frame(s) get loaded.
-    #
-    # Appending "[0]" to $AvifPath is safe even when the real filename or
-    # an ancestor directory already contains literal "["/"]" (a genuinely
-    # common scanlation-group naming convention, e.g.
-    # "[Group] Series\Chapter [Special]\page[01].avif") - ImageMagick's
-    # own path parser only treats a TRAILING bracket construct as a
-    # frame/scene selector, so an earlier bracket pair anywhere else in
-    # the path never gets misread as one.
-    # [System.Diagnostics.ProcessStartInfo]::new(), not New-Object - see
-    # Controller.ps1's own matching JobStarter comment for the full
-    # reasoning. This function is
-    # called from inside Get-OrCreateFullPipelineChapterClassification's
-    # Lazy<T> factory, itself reached from JobBuilder in a fresh worker
-    # runspace - the same first-cmdlet-call-in-a-fresh-runspace race
-    # already fixed for Test-Path/Get-ChildItem/etc., never audited for
-    # New-Object before now.
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName               = $MagickExe
     $psi.Arguments              = "identify -ping -format `"%T\n`" `"" + $AvifPath + "[0]`""
@@ -203,19 +21,9 @@ function Test-AvifAnimated {
     $psi.RedirectStandardError  = $true
     $psi.CreateNoWindow         = $true
 
-    # Raw OS handle wait for exit detection, ReadToEndAsync kept for pipe
-    # draining (round 6 fix). Both HasExited and WaitForExit(int) were
-    # confirmed to hang indefinitely under concurrent first-use from two
-    # fresh PS 5.1 runspaces - see full-pipeline-hang-investigation.md.
-    # This approach wraps the native process handle in a WaitHandle and
-    # calls WaitOne (a direct kernel WaitForSingleObject), bypassing all
-    # of Process's .NET-level exit-tracking state. ReadToEndAsync is kept:
-    # removing it reintroduces the proven pipe-buffer deadlock (a corrupt
-    # AVIF can fill stderr, and the child blocks writing to a full pipe it
-    # can't drain if nothing reads from it during execution).
     # DOCUMENTED DUPLICATE: Invoke-IccStripRetryOrFail in
     # ImageConversionPipeline.ps1 uses the identical raw-handle-wait
-    # pattern - keep both in sync.
+    # pattern below - keep both in sync.
     if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated before Process.Start " + $AvifPath) } # TEMP-TRACE
     $proc = [System.Diagnostics.Process]::Start($psi)
     if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated after Process.Start, pid=" + $proc.Id) } # TEMP-TRACE
@@ -258,10 +66,6 @@ function Test-AvifAnimated {
         throw ("magick identify exited " + $code + ". Stderr: " + $stderr.Trim())
     }
 
-    # Raw .NET, not Where-Object | Select-Object (cmdlets race on first
-    # invocation across fresh concurrent runspaces - same bug class as
-    # Test-Path/Get-ChildItem, already fixed everywhere else in this
-    # concurrent-runspace code path).
     $firstLine = $null
     foreach ($line in $stdout.Split([char[]]@("`r", "`n"), [System.StringSplitOptions]::RemoveEmptyEntries)) {
         $firstLine = $line
@@ -276,28 +80,9 @@ function Test-AvifAnimated {
 }
 
 function Complete-AnimatedConversionJob {
-    <#
-    .SYNOPSIS
-        Private helper - handles one finished job's process cleanup,
-        exit-code/output verification, and (on success) source deletion,
-        mutating $BatchResult in place. Shared by Convert-AnimatedBatch's
-        main dispatch loop and its straggler-drain loop, which previously
-        each implemented this ~35-line block almost verbatim - the only
-        real differences were the drain copy skipping the -DoFullLogging
-        stdout dump and the success log message (no byte count, "(abort
-        drain)" wording instead), both captured here via -IsAbortDrain.
-
-        DOCUMENTED DUPLICATE: the exit-code/File.Replace/delete-source portion of
-        this function (everything after its own try/finally) is copied,
-        not shared, into PART 2's Complete-AnimatedDispatchJob (see that
-        function's own header for why - Invoke-ChapterDispatch owns
-        process disposal/-SharedBudget release generically now, this
-        function's own callers still don't). Keep both in sync if either
-        changes.
-    .PARAMETER IsAbortDrain
-        $true from the straggler-drain loop; $false (default) from the
-        main dispatch loop - see SYNOPSIS for what this changes.
-    #>
+    # DOCUMENTED DUPLICATE: everything below the try/finally is copied,
+    # not shared, into PART 2's Complete-AnimatedDispatchJob - see that
+    # function's own header for why. Keep both in sync if either changes.
     param(
         [Parameter(Mandatory)]
         [hashtable]$Job,
@@ -308,32 +93,12 @@ function Complete-AnimatedConversionJob {
         [bool]$IsAbortDrain = $false
     )
 
-    # try/finally matters here - this is the one place a running job's
-    # process handle gets disposed, unlike every other resource-release
-    # path in this file. Without it, a throw from ReadToEnd/ExitCode
-    # (unlikely on an already-exited process, but not impossible) would
-    # skip Dispose() entirely and propagate straight out of
-    # Convert-AnimatedBatch.
     try {
-        # Await the tasks started right after Process::Start rather than
-        # a synchronous ReadToEnd() here - by the time
-        # this function runs the process has already exited (both call
-        # sites gate on HasExited first), so this just collects output
-        # that was draining concurrently all along instead of being the
-        # thing that could deadlock a chatty child. Falls back to a
-        # synchronous read for any job that predates this field (defensive
-        # only - every real dispatch path now sets it).
         $stdout = if ($Job.StdoutTask) { $Job.StdoutTask.GetAwaiter().GetResult() } else { $Job.Proc.StandardOutput.ReadToEnd() }
         $stderr = if ($Job.StderrTask) { $Job.StderrTask.GetAwaiter().GetResult() } else { $Job.Proc.StandardError.ReadToEnd() }
         $code   = $Job.Proc.ExitCode
     } finally {
         $Job.Proc.Dispose()
-        # SlotReleased marker mirrors the sibling module's identical
-        # field - see Convert-AnimatedBatch's own
-        # outer catch below for the full reasoning - lets that catch tell
-        # a job whose own cleanup already ran apart from one genuinely
-        # still running, so it doesn't delete an already-converted job's
-        # real output.
         $Job.SlotReleased = $true
     }
 
@@ -344,52 +109,10 @@ function Complete-AnimatedConversionJob {
     $convOk = $false
     try {
         if ($code -ne 0) { throw ("magick exited with code " + $code + ". Stderr: " + $stderr) }
-        # One stat instead of a separate Test-Path + Get-Item pair, for
-        # every completed job. Left on FileInfo, unlike
-        # Complete-AnimatedDispatchJob's own copy of this same check
-        # (below) which uses raw .NET Exists - this function only ever
-        # runs main-thread or inside a single worker runspace
-        # (mode 3/Convert-AnimatedBatch), never racing a second fresh
-        # runspace's own first cmdlet call the way Full Pipeline's
-        # two-engine dispatch does.
         $webpItem = [System.IO.FileInfo]::new($Job.MagickOutputPath)
         if (-not $webpItem.Exists) { throw ("Output .webp was not created: '" + $Job.MagickOutputPath + "'") }
         $webpSize = $webpItem.Length
         if ($webpSize -eq 0) { throw ("Output .webp is 0 bytes: '" + $Job.MagickOutputPath + "'") }
-        # Move the verified-good temp file into place - only when magick
-        # was pointed at a temp path in the first place
-        # (an overwrite of a pre-existing file - see $j.MagickOutputPath's
-        # own comment in Convert-AnimatedBatch for why). The real WebpPath
-        # is only ever replaced HERE, after full verification, never by
-        # magick itself - so a crash/force-kill mid-encode can no longer
-        # damage the original.
-        #
-        # [System.IO.File]::Replace, NOT Move-Item -Force - confirmed
-        # directly against PowerShell's own real source
-        # (FileSystemProvider's MoveFileInfoItem) that Move-Item -Force
-        # onto an EXISTING destination is NOT atomic - it deletes the
-        # destination, then makes a SEPARATE MoveTo call to rename the
-        # source into place. A crash, kill, or a locked-file/out-of-space
-        # error landing in that gap deletes the original good .webp
-        # without ever completing the rename - BOTH files gone, strictly
-        # worse than the in-place-corruption bug this whole mechanism
-        # exists to prevent. File.Replace wraps the Win32 ReplaceFile API,
-        # which performs the swap as one atomic operation on NTFS - always
-        # safe here since $Job.MagickOutputPath is always in the same
-        # directory (and therefore volume) as $Job.WebpPath, and this
-        # branch is only reached when WebpPath is already known to exist
-        # (that's the entire reason a temp path was used in the first
-        # place).
-        #
-        # A real (non-$null) -destinationBackupFileName is required
-        # (verified directly on this machine's real PowerShell 5.1/.NET
-        # Framework): passing $null throws "The path is not of a legal
-        # form", even though .NET's own documentation says null should be
-        # accepted to skip the backup. A throwaway backup path is used and
-        # then best-effort deleted immediately after - it's a byte-for-byte
-        # copy of the .webp being replaced, which is exactly the file
-        # already fully verified above, so there's nothing worth keeping
-        # once the atomic swap has actually completed.
         if ($Job.MagickOutputPath -ne $Job.WebpPath) {
             $webpReplaceBackup = $Job.WebpPath + "_replace_backup.tmp"
             [System.IO.File]::Replace($Job.MagickOutputPath, $Job.WebpPath, $webpReplaceBackup)
@@ -406,42 +129,12 @@ function Complete-AnimatedConversionJob {
     } catch {
         Write-Log ("FAILED conversion of animated AVIF '" + $Job.SrcPath + "': " + $_) -Level Error
         $BatchResult.FailedCount++
-        # Always safe to delete $Job.MagickOutputPath on failure: it's
-        # either a dedicated temp path magick wrote to (an overwrite
-        # case - never the original file, safe unconditionally) or, when
-        # there was no pre-existing file to protect, it's $Job.WebpPath
-        # itself, the "genuine partial/corrupt file this attempt itself
-        # created" case. Either way, the original good .webp (when one
-        # existed) was never touched by magick in the first place, so
-        # there's nothing to preserve here. The inner catch is swallowed
-        # deliberately - best-effort cleanup of a temp/partial file; a
-        # locked-file delete failure here just leaves that harmless
-        # leftover for a later run to pick up, not worth failing the
-        # whole batch over. No Test-Path guard needed - File.Delete on a
-        # missing path is already a safe no-op.
         try { [System.IO.File]::Delete($Job.MagickOutputPath) } catch { }
-        # $webpReplaceBackup cleanup matters here too - it's only ever
-        # deleted on the success path (right after File.Replace itself
-        # succeeds). If File.Replace THROWS (e.g. a momentary lock on
-        # $Job.WebpPath), execution lands here instead, and the backup -
-        # a full copy of the pre-replace .webp, already-verified content
-        # with nothing worth keeping - would otherwise never get cleaned
-        # up. $webpReplaceBackup is
-        # $null here if this failure happened before that code ever ran
-        # (or $Job.MagickOutputPath -eq $Job.WebpPath, meaning no backup
-        # was ever created), so this is safe unconditionally.
         if ($webpReplaceBackup) { try { [System.IO.File]::Delete($webpReplaceBackup) } catch { } }
     }
 
     if ($convOk -and $DoAnimatedDeleteSource) {
         try {
-            # Return value checked, not discarded - same as this
-            # project's other Remove-Source call sites, see
-            # FileDeletion.ps1's own .OUTPUTS. Remove-Source returns
-            # $false (not an exception) when the source already vanished
-            # before deletion (a real TOCTOU gap). Neither a success nor a
-            # real failure - left uncounted rather than falsely reporting
-            # a delete that didn't happen.
             $removed = Remove-Source -ItemPath $Job.SrcPath
             if ($removed) {
                 $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
@@ -458,20 +151,6 @@ function Complete-AnimatedConversionJob {
 }
 
 function Convert-AnimatedBatch {
-    <#
-    .SYNOPSIS
-        Converts a batch of animated AVIF files to animated WebP via
-        $MagickExe. Dispatches up to $AnimatedThreads processes in
-        parallel, skips static (non-animated) AVIF files entirely,
-        deletes each source on a verified-successful conversion (when
-        -AnimatedDeleteSource is true), and gracefully drains (then
-        force-kills stragglers) on cancellation.
-    .OUTPUTS
-        @{ ConvertedCount; FailedCount; SkippedCount; StaticSkippedCount;
-           InspectFailedCount; DeletedCount; DeleteFailedCount;
-           ConvertedPaths; SkippedPaths; StaticSkippedPaths;
-           PendingPaths; ForceKilledCount }
-    #>
     param(
         [System.IO.FileInfo[]]$AnimatedFiles,
         [Parameter(Mandatory)]
@@ -524,13 +203,6 @@ function Convert-AnimatedBatch {
     }
     $running = [System.Collections.Generic.List[hashtable]]::new()
 
-    # try/catch around the whole dispatch loop mirrors Convert-ImageBatch's
-    # identical guard in the sibling module - see that function's own
-    # header comment for the full reasoning: every other exit from this
-    # loop already disposes every running job's process handle, but an
-    # unexpected throw from inside the loop itself (-AbortPollCallback,
-    # Write-Log on a locked log file, a rethrow from
-    # Complete-AnimatedConversionJob) has no such guarantee otherwise.
     try {
     while (($pending.Count -gt 0 -or $running.Count -gt 0) -and (-not $CancelToken.IsCancellationRequested)) {
 
@@ -541,22 +213,11 @@ function Convert-AnimatedBatch {
             & $AbortPollCallback $inFlight
         }
 
-        # Fill up to AnimatedThreads slots.
         while ($pending.Count -gt 0 -and (-not $CancelToken.IsCancellationRequested) -and `
                $running.Count -lt $AnimatedThreads) {
             $j = $pending.Dequeue()
-            # Wrapped in try/catch - see Convert-ImageBatch's
-            # identical guard (ImageConversionPipeline.ps1) for the full
-            # reasoning: a raw .NET exception from Process.Start() below (a
-            # stale cached -MagickExe path, etc.) is not a terminating error
-            # in this scriptblock, so without this it would keep going with
-            # $j.Proc left $null - that job then sits in $running forever
-            # (HasExited on $null never becomes true) and hangs the whole
-            # dispatch loop indefinitely instead of failing that one job.
             try {
 
-            # Computed once, reused below for WebpExistedBeforeJob -
-            # avoids stat'ing this same path twice per dispatched job.
             $webpPathExists = [System.IO.File]::Exists($j.WebpPath)
             if ($webpPathExists -and -not $DoAnimatedOverwrite) {
                 Write-Log ("SKIPPING '" + $j.SrcPath + "': output '" + $j.WebpPath + "' already exists (Overwrite is off).")
@@ -565,15 +226,6 @@ function Convert-AnimatedBatch {
                 continue
             }
 
-            # -KnownAnimatedPaths matters here for efficiency: Controller.ps1's
-            # Full Pipeline already ran Test-AvifAnimated on every ambiguous
-            # .avif during its own per-series ownership classification,
-            # before ever dispatching to this function - re-running it here
-            # for every one of those files was a pure redundant magick
-            # identify spawn per file. A file already confirmed animated by
-            # the caller skips the re-check entirely; anything NOT in the
-            # set (standalone mode 3, or any caller that never classified)
-            # falls through to the real check unchanged.
             $isAnimated = $false
             if ($KnownAnimatedPaths -and $KnownAnimatedPaths.Contains($j.SrcPath)) {
                 $isAnimated = $true
@@ -594,35 +246,6 @@ function Convert-AnimatedBatch {
                 continue
             }
 
-            # Captured before Process.Start(). With -DoAnimatedOverwrite
-            # on, letting magick write straight to an existing good .webp
-            # and then crash/get force-killed/exit non-zero partway
-            # through encoding would destroy the original before any
-            # cleanup code got a chance to protect it - a plain
-            # WebpExistedBeforeJob delete-guard only ever protects a
-            # pre-existing .webp from this script's own Delete calls, not
-            # from magick overwriting it directly. So when overwriting an
-            # existing file, magick targets a temp path instead of the
-            # real one; the real WebpPath is only replaced (via
-            # File.Replace, in Complete-AnimatedConversionJob) after a
-            # verified-successful conversion. When there's no pre-existing
-            # file to protect, magick still writes directly to WebpPath as
-            # before - nothing to lose in that case, and no temp-file/move
-            # overhead added for the common (non-overwrite) path.
-            # $j.TempOverwritePath is a separate handle on the temp
-            # overwrite file, distinct from $j.MagickOutputPath, so the
-            # outer dispatch-loop catch below can delete it unconditionally
-            # (like the sibling module deletes its own TempPng) instead of
-            # only when SlotReleased is false. Without a separate handle, a
-            # job whose own Complete-AnimatedConversionJob call threw after
-            # its SlotReleased-setting finally would leave its
-            # "_tmp_overwrite.webp" debris on disk forever - SlotReleased
-            # being true correctly protects a job's real output
-            # ($j.MagickOutputPath when it equals $j.WebpPath) from the
-            # outer catch, but a temp overwrite file isn't real output.
-            # $null when there's no pre-existing file to protect (magick
-            # writes directly to $j.WebpPath in that case - nothing to
-            # clean up).
             $j.TempOverwritePath = if ($webpPathExists) {
                 [System.IO.Path]::Combine(
                     [System.IO.Path]::GetDirectoryName($j.WebpPath),
@@ -633,9 +256,6 @@ function Convert-AnimatedBatch {
             }
             $j.MagickOutputPath = if ($j.TempOverwritePath) { $j.TempOverwritePath } else { $j.WebpPath }
 
-            # [System.Diagnostics.ProcessStartInfo]::new(), not New-Object -
-            # same fix as Controller.ps1's own matching JobStarter comment
-            # (this module's mode-3 counterpart of the same closure shape).
             $psi = [System.Diagnostics.ProcessStartInfo]::new()
             $psi.FileName = $MagickExe
             $qualityArg = if ($DoAnimatedLossless) { "-define webp:lossless=true" } else { "-quality " + $AnimatedQuality }
@@ -648,16 +268,6 @@ function Convert-AnimatedBatch {
             Write-Log ("Converting animated: '" + $j.SrcPath + "'")
 
             $j.Proc          = [System.Diagnostics.Process]::Start($psi)
-            # Start draining both redirected streams immediately, not when
-            # the job is later found HasExited - same species as
-            # Convert-ImageBatch's own cjxl handling. A magick invocation
-            # that writes more than the OS pipe buffer to stderr before
-            # exiting (e.g. per-frame warnings on a malformed/quirky
-            # animated AVIF) would otherwise block on that write forever -
-            # HasExited never becomes true, and this job sits in $running
-            # for the rest of the run with no timeout.
-            # Complete-AnimatedConversionJob awaits these tasks instead of
-            # calling ReadToEnd() itself.
             $j.StdoutTask    = $j.Proc.StandardOutput.ReadToEndAsync()
             $j.StderrTask    = $j.Proc.StandardError.ReadToEndAsync()
             $j.StartTime     = [System.Diagnostics.Stopwatch]::StartNew()
@@ -669,7 +279,6 @@ function Convert-AnimatedBatch {
             }
         }
 
-        # Poll for finished processes; heartbeat any still running past the threshold
         $stillRunning = [System.Collections.Generic.List[hashtable]]::new()
         foreach ($j in $running) {
             if ($j.Proc.HasExited) {
@@ -687,49 +296,15 @@ function Convert-AnimatedBatch {
         }
         $running = $stillRunning
 
-        # Always sleep briefly here - see Convert-ImageBatch's identical
-        # fix (ImageConversionPipeline.ps1) for the full reasoning: the
-        # outer while's own condition already guarantees there's work left
-        # whenever execution reaches this point.
         [System.Threading.Thread]::Sleep(50)
     }
     } catch {
-        # Force-cleanup mirrors the force-kill block below (own try/catch
-        # per step, same as every other cleanup path in this file) - best
-        # effort, since we're already unwinding from an unexpected failure
-        # and must not let a cleanup error mask or replace the real one.
-        # $j.SlotReleased guards the output-path deletion below, mirroring
-        # Convert-ImageBatch's identical guard - this $running list is
-        # STALE, since the poll loop above only reassigns it after its
-        # whole foreach pass completes, so it can still list a job that
-        # already completed successfully earlier in the same pass, source
-        # deleted and all, right alongside a job that throws later in
-        # that pass. SlotReleased is set in Complete-AnimatedConversionJob's
-        # own finally, true for any job whose own cleanup already ran -
-        # success or failure, doesn't matter which - false only for one
-        # genuinely still running when this catch fires.
         foreach ($j in $running) {
             try { if ($j.Proc -and -not $j.Proc.HasExited) { $j.Proc.Kill() } } catch { }
             try { if ($j.Proc) { $j.Proc.WaitForExit(5000) } } catch { }
-            # $j.TempOverwritePath cleanup is intentionally NOT guarded by
-            # SlotReleased, mirroring the sibling module's own TempPng
-            # cleanup - see this file's own comment at the
-            # field's assignment above: it's never real output, regardless
-            # of which state this job is in when the catch fires - still
-            # genuinely encoding into it (real debris to clean up),
-            # verified and already File.Replace'd into the real WebpPath
-            # (this path is now stale, Delete is a safe no-op), or failed
-            # (already deleted by Complete-AnimatedConversionJob's own
-            # failure cleanup, same no-op) - so it's always safe to delete
-            # unconditionally. $null when there was no pre-existing file to
-            # protect in the first place (nothing to clean up).
             if ($j.TempOverwritePath) {
                 try { [System.IO.File]::Delete($j.TempOverwritePath) } catch { }
             }
-            # $j.MagickOutputPath itself IS guarded by SlotReleased - when
-            # there was no pre-existing file to protect, it equals
-            # $j.WebpPath directly (the job's REAL output), which a job
-            # whose own cleanup already ran must not have touched.
             if (-not $j.SlotReleased) {
                 try { [System.IO.File]::Delete($j.MagickOutputPath) } catch { }
             }
@@ -738,38 +313,13 @@ function Convert-AnimatedBatch {
         throw
     }
 
-    # ------------------------------------------------------------------
-    #  Stragglers: cancelled while jobs were still running - wait up to
-    #  -AbortTimeoutSeconds, then force-kill anything left. Mirrors
-    #  Convert-ImageBatch's own drain shape (no ICC-retry logic here -
-    #  that's cjxl/PNG-specific, not applicable to magick WebP output).
-    # ------------------------------------------------------------------
     if ($CancelToken.IsCancellationRequested -and $running.Count -gt 0) {
         if ($AbortWaitMessage) {
-            # Same CCR gate as ImageConversionPipeline.ps1's Convert-ImageBatch
-            # straggler drain - see that function's own comment for why (a
-            # raw Write-Host here would corrupt CCR's live region mid-redraw).
             Write-GatedConsoleMessage -Text $AbortWaitMessage -Color Yellow -CleanConsoleOutputEnabled ([bool]$script:CleanConsoleOutputEnabled)
         }
         $abortDeadline = [System.Diagnostics.Stopwatch]::StartNew()
 
-        # try/catch around the whole straggler-drain body mirrors both
-        # this function's own outer dispatch-loop catch above and the
-        # identical guard on the sibling module's own straggler drain:
-        # that outer catch only covers the main loop, and an unexpected
-        # throw here (Complete-AnimatedConversionJob's Write-Log calls are
-        # all guarded by its own try/catch, so the realistic trigger is
-        # the force-kill block's own unguarded "Force-stopping" Write-Log
-        # call below) would otherwise leak every remaining drain-list
-        # job's process handle.
         try {
-            # -not [ConsoleCtrl]::IsCloseEvent - same reasoning as the
-            # sibling module's identical guard, see
-            # ImageConversionPipeline.ps1's Convert-ImageBatch straggler
-            # drain for the full writeup: Windows force-kills the whole
-            # process ~5s after a CTRL_CLOSE_EVENT regardless of what this
-            # drain does, so waiting out any part of -AbortTimeoutSeconds
-            # can never fit - skip straight to the force-kill block below.
             while ($running.Count -gt 0 -and -not [ConsoleCtrl]::IsCloseEvent -and $abortDeadline.Elapsed.TotalSeconds -lt $AbortTimeoutSeconds) {
                 $stillWaiting = [System.Collections.Generic.List[hashtable]]::new()
                 foreach ($j in $running) {
@@ -783,17 +333,6 @@ function Convert-AnimatedBatch {
                 if ($running.Count -gt 0) { [System.Threading.Thread]::Sleep(250) }
             }
 
-            # One final completion-check pass before declaring anything
-            # force-stopped - same reasoning as the sibling module's
-            # identical guard, see ImageConversionPipeline.ps1's
-            # Convert-ImageBatch straggler drain for the full writeup:
-            # IsCloseEvent can exit the while loop above before even one
-            # poll of $running has happened, so a job whose process had
-            # already exited successfully could still be sitting in
-            # $running with nothing having checked HasExited for it yet -
-            # without this pass, the force-kill block below
-            # would delete that legitimate output as if it were partial/
-            # corrupt from a killed process.
             if ($running.Count -gt 0) {
                 $stillWaiting = [System.Collections.Generic.List[hashtable]]::new()
                 foreach ($j in $running) {
@@ -806,44 +345,15 @@ function Convert-AnimatedBatch {
                 $running = $stillWaiting
             }
 
-            # Force-kill anything still running past the timeout
             if ($running.Count -gt 0) {
                 $batchResult.ForceKilledCount = $running.Count
                 $labelSuffix = if ($BatchLabel) { " in '" + $BatchLabel + "'" } else { "" }
                 Write-Log ("Force-stopping " + $running.Count + " job(s) that did not finish within " + $AbortTimeoutSeconds + "s" + $labelSuffix + ".") -Level Warn
                 foreach ($j in $running) {
-                    # Swallowed deliberately: a TOCTOU race between the
-                    # HasExited check and Kill() (or an access-denied Kill()/
-                    # WaitForExit()) would otherwise propagate out of an
-                    # already-aborting run's own cleanup - best-effort only,
-                    # matching this file's established best-effort cleanup
-                    # idiom used throughout.
                     try { if (-not $j.Proc.HasExited) { $j.Proc.Kill() } } catch { }
                     try { $j.Proc.WaitForExit(5000) } catch { }
-                    # Always safe to delete $j.MagickOutputPath, mirroring
-                    # Complete-AnimatedConversionJob's own failure
-                    # cleanup - see that function's comment: it's either a
-                    # dedicated temp path magick was writing to (an overwrite
-                    # case, never the original file) or, when there was no
-                    # pre-existing file, $j.WebpPath itself. A Ctrl+C during a
-                    # -DoAnimatedOverwrite re-conversion pass force-killing a
-                    # job mid-flight can no longer damage the pre-existing
-                    # good .webp, since magick was never pointed at it
-                    # directly in that case. The inner catch is swallowed
-                    # deliberately, same reasoning as the identical cleanup in
-                    # Complete-AnimatedConversionJob - best-effort only. No
-                    # Test-Path guard needed - File.Delete on a missing path
-                    # is already a safe no-op.
                     try { [System.IO.File]::Delete($j.MagickOutputPath) } catch { }
                     $j.Proc.Dispose()
-                    # $j.SlotReleased = $true mirrors the identical guard
-                    # in the sibling module's own force-kill loop - see
-                    # that file's comment for the full reasoning: without
-                    # this, a throw partway through
-                    # THIS loop would drop into the outer catch below,
-                    # which re-iterates this same $running list and could
-                    # delete an already-processed job's real output a
-                    # second time.
                     $j.SlotReleased = $true
                 }
             }
@@ -873,19 +383,6 @@ function Convert-AnimatedBatch {
 # ==============================================================================
 
 function Get-LooseAnimatedCandidates {
-    <#
-    .SYNOPSIS
-        Scans $ScanPath for loose animated-source files (.avif by
-        default, outside any known ZIP's staging/extraction directory).
-        Unlike Get-LooseImageCandidates, there is no NeedsConversion/
-        StaleSources split here - Convert-AnimatedBatch (PART 1) already
-        decides skip-vs-convert per file itself, see this module's
-        header for why duplicating that here would be wrong.
-    .PARAMETER KnownZipPaths / -ExcludeStagingDirs
-        Same staging-exclusion contract as Get-LooseImageCandidates.
-    .OUTPUTS
-        List[System.IO.FileInfo]
-    #>
     param(
         [Parameter(Mandatory)]
         [string]$ScanPath,
@@ -905,21 +402,6 @@ function Get-LooseAnimatedCandidates {
         foreach ($stagingDir in $ExcludeStagingDirs) { $null = $zipBaseDirs.Add($stagingDir) }
     }
 
-    # Get-FilesRecursiveSafe (LeafDirectoryDiscovery.ps1), not
-    # Get-ChildItem -Recurse - can hang, not just run slowly, when two
-    # runspaces both make their
-    # first-ever PowerShell FileSystem-provider call at close to the same
-    # moment - see that function's own header for the full story. A real
-    # `foreach` statement here, not `| ForEach-Object` - Get-FilesRecursiveSafe
-    # returns its List with the leading-comma collapse guard (see
-    # Docs/lessons-learned.md), which means a caller piping its output
-    # receives the WHOLE List as one pipeline object, not one item per
-    # element (that unrolling only happens for a cmdlet emitting items
-    # individually, e.g. Get-ChildItem, not a function returning a single
-    # comma-protected collection) - confirmed live, `$_.Add(...)` inside
-    # `| ForEach-Object` threw "Cannot find an overload for 'Add'" because
-    # `$_` was the List itself, not a FileInfo. `foreach` over the
-    # returned List enumerates its real elements correctly either way.
     $candidates = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
     foreach ($file in (Get-FilesRecursiveSafe -ScanPath $ScanPath)) {
         if ($AnimatedFileExtensions -inotcontains $file.Extension) { continue }
@@ -936,47 +418,18 @@ function Get-LooseAnimatedCandidates {
         $candidates.Add($file)
     }
 
-    # Leading comma - same collection-collapse trap as every other
-    # List<T>-returning function in this project (see
-    # Docs/lessons-learned.md); a 0- or 1-element $candidates would
-    # otherwise unwrap on return.
     return ,$candidates
 }
 
 function Get-ChapterAnimatedStatus {
-    <#
-    .SYNOPSIS
-        Maps a Convert-AnimatedBatch result to the Status/Detail pair
-        Complete-ChapterProgress expects - mirrors
-        Get-ChapterProgressStatus's severity ordering (Error > Warning >
-        Success), both treating InspectFailedCount as Error-tier - an
-        inspect failure leaves a raw, completely unconverted file
-        on disk, which must block the zip gate the same way a real
-        conversion failure does. A $null $ChapterResult (nothing left to
-        convert) always maps to a clean Success. StaticSkippedCount does
-        NOT count toward Warning - a static AVIF being left untouched is
-        expected, deliberate behavior (see this module's header), not a
-        problem worth surfacing on the CCR line.
-    .OUTPUTS
-        Two values: Status ("Success"/"Warning"/"Error"), Detail (string,
-        or $null for a clean Success).
-    #>
     param(
         [hashtable]$ChapterResult
     )
     if ($null -eq $ChapterResult) { return "Success", $null }
 
-    # InspectFailedCount is Error-tier, not Warning: unlike SkippedCount (a
-    # file deliberately left alone because its output already exists - a
-    # non-problem), an inspect failure means Test-AvifAnimated couldn't even
-    # determine whether the file needs converting, so it was left as a raw,
-    # completely unconverted .avif on disk. A Warning-tier chapter still
-    # passes the zip gate (Controller.ps1's Invoke-FullPipelineChapter only
-    # blocks on 'Error') - left as Warning, that raw file would get zipped
-    # into the archive and its source folder deleted anyway.
-    # This condition + parts-building block is a deliberate duplicate of
-    # ImageConversionPipeline.ps1's Get-ChapterProgressStatus (same four
-    # fields, same Error-tier severity ordering) - keep both in sync.
+    # DOCUMENTED DUPLICATE of ImageConversionPipeline.ps1's
+    # Get-ChapterProgressStatus (same four fields, same severity
+    # ordering) - keep both in sync.
     if ($ChapterResult.FailedCount -gt 0 -or $ChapterResult.ForceKilledCount -gt 0 -or $ChapterResult.DeleteFailedCount -gt 0 -or $ChapterResult.InspectFailedCount -gt 0) {
         $parts = [System.Collections.Generic.List[string]]::new()
         if ($ChapterResult.FailedCount -gt 0)        { $parts.Add($ChapterResult.FailedCount.ToString() + " failed") }
@@ -992,40 +445,10 @@ function Get-ChapterAnimatedStatus {
 }
 
 function Complete-AnimatedDispatchJob {
-    <#
-    .SYNOPSIS
-        JobFinalize-shaped completion handler for a job dispatched via
-        Invoke-ChapterDispatch (mode 3's own migration onto
-        ChapterDispatch.ps1 - see
-        Docs\dispatch-redesign-design.md). Handles exit-code/output
-        verification and (on success) source deletion, mutating
-        $ChapterResult (this chapter's own per-chapter accumulator, built
-        by Invoke-LooseAnimatedConversionPipeline's own JobBuilder) in
-        place.
-
-        DOCUMENTED DUPLICATE, not a call-through, of
-        Complete-AnimatedConversionJob's own exit-code/File.Replace/
-        delete-source logic (everything after that function's own
-        try/finally) - see that function's own header for the cross-
-        reference. Genuinely different contract, not a lazy copy:
-        Complete-AnimatedConversionJob's caller (Convert-AnimatedBatch,
-        still used only by that function's own harness now - no real
-        caller left since Controller.ps1's Full Pipeline migrated onto
-        Invoke-ChapterDispatch, step 4 of the dispatch redesign) owns
-        process disposal itself; THIS function's caller
-        (Invoke-ChapterDispatch) already owns process disposal AND its
-        own -MaxConcurrent SemaphoreSlim release generically for every job
-        on every exit path - duplicating either here would double-release
-        the same slot. No -IsAbortDrain distinction either -
-        Invoke-ChapterDispatch calls JobFinalize identically whether a
-        job finished during normal polling or during the
-        abort/drain window, so there's no separate wording variant to
-        capture.
-    .OUTPUTS
-        @{ Success = [bool] } - Invoke-ChapterDispatch only cares that
-        this is never @{ Requeued = $true } (mode 3 has no retry-requeue
-        mechanism, unlike the image engine's ICC-strip retry).
-    #>
+    # DOCUMENTED DUPLICATE, not a call-through, of
+    # Complete-AnimatedConversionJob's own exit-code/File.Replace/
+    # delete-source logic - see that function's own header. Keep both
+    # in sync if either changes.
     param(
         [Parameter(Mandatory)]
         [hashtable]$Job,
@@ -1047,23 +470,9 @@ function Complete-AnimatedDispatchJob {
     $webpReplaceBackup = $null
     try {
         if ($code -ne 0) { throw ("magick exited with code " + $code + ". Stderr: " + $stderr) }
-        # [System.IO.FileInfo]::new, not Get-Item - this is JobFinalize
-        # for Full Pipeline's animated engine, called from inside a fresh
-        # worker runspace on the hot path for every converted file, so it
-        # needs the same cmdlet-first-invocation-in-a-fresh-runspace race
-        # LeafDirectoryDiscovery.ps1's functions were fixed for (see those
-        # functions' own NOTES). Complete-AnimatedConversionJob's own copy
-        # of this check (this function's own sibling, above) stays on
-        # Get-Item - it never runs inside a runspace racing a SECOND fresh
-        # runspace's own first cmdlet call the way this one does.
         if (-not [System.IO.File]::Exists($Job.MagickOutputPath)) { throw ("Output .webp was not created: '" + $Job.MagickOutputPath + "'") }
         $webpSize = [System.IO.FileInfo]::new($Job.MagickOutputPath).Length
         if ($webpSize -eq 0) { throw ("Output .webp is 0 bytes: '" + $Job.MagickOutputPath + "'") }
-        # File.Replace, atomic swap - see Complete-AnimatedConversionJob's
-        # own comment at its identical line for the full reasoning
-        # (Move-Item -Force confirmed non-atomic on an existing
-        # destination; a real, non-$null backup path is required on this
-        # machine's real PS 5.1/.NET Framework).
         if ($Job.MagickOutputPath -ne $Job.WebpPath) {
             $webpReplaceBackup = $Job.WebpPath + "_replace_backup.tmp"
             [System.IO.File]::Replace($Job.MagickOutputPath, $Job.WebpPath, $webpReplaceBackup)
@@ -1099,103 +508,6 @@ function Complete-AnimatedDispatchJob {
 }
 
 function Invoke-LooseAnimatedConversionPipeline {
-    <#
-    .SYNOPSIS
-        Mode 3 ("Animated Conversion") end to end, migrated
-        onto ChapterDispatch.ps1's Invoke-ChapterDispatch (step 2 of
-        Docs\dispatch-redesign-design.md's 4-step migration order, mode 3
-        chosen first as the simpler of the two conversion engines) -
-        idle concurrency now picks up the NEXT chapter's jobs immediately
-        instead of blocking on one chapter's Convert-AnimatedBatch call
-        finishing before the next chapter's files are even enumerated.
-        Walks the library the same two-tier way as before
-        (New-SeriesProvider lazy across series, Get-SeriesChapters eager
-        per series) via a custom -ChapterProvider closure (not
-        ChapterDispatch.ps1's own New-LibraryChapterProvider - that
-        function doesn't know about this module's own "extra chapter-
-        equivalent entry" completeness fold-in below, which is genuinely
-        per-engine domain logic, not something the generic primitive
-        should own).
-
-        Same chapter-discovery completeness handling as before:
-        Get-SeriesChapters's former-container/zip-staleness guards decide
-        "is this worth re-zipping", not "does this hold unconverted
-        animated files" - a directory those guards exclude but that
-        actually has .avif files needing conversion is folded in as an
-        extra chapter-equivalent entry, so coverage can never silently
-        regress the way it once did for images (see that module's own
-        header for the real bug this already caught once there).
-
-        WHAT MOVED WHERE, mapping today's callbacks onto
-        Invoke-ChapterDispatch's seven scriptblocks: the -ChapterProvider
-        closure below owns the series/chapter walk (same as before) and
-        embeds each chapter's own AnimatedFiles list directly on the
-        yielded chapter item; JobBuilder owns everything Convert-AnimatedBatch's
-        own dispatch loop used to decide BEFORE ever acquiring a
-        concurrency slot for a file (webp-already-exists skip, static-vs-
-        animated classification via Test-AvifAnimated, the temp-overwrite-
-        path decision) - moved here from mid-dispatch specifically so it
-        happens in one clean pre-pass per chapter, matching
-        Convert-ImageBatch's own already-more-mature pattern (see that
-        function's own header) rather than porting Convert-AnimatedBatch's
-        older "classify after acquiring a slot" shape as-is; JobStarter
-        just spawns magick.exe; JobPollCompleted also owns heartbeat
-        logging (the one place a still-running job's own "-HeartbeatIntervalSeconds
-        elapsed" check has a natural home in this callback shape);
-        JobFinalize is Complete-AnimatedDispatchJob (see that function's
-        own header for why it's a documented duplicate of
-        Complete-AnimatedConversionJob, not a call-through);
-        JobAbortCleanup deletes a force-killed job's own TempOverwritePath/
-        MagickOutputPath (both always safe to delete unconditionally here,
-        unlike the old code's SlotReleased-guarded version - this
-        callback is ONLY ever invoked for a job Invoke-ChapterDispatch
-        confirms never reached JobFinalize, so there's no "already
-        finalized earlier in this same pass" case to guard against, the
-        exact ambiguity SlotReleased existed to resolve in the old,
-        single-chapter-at-a-time code); ChapterCompleteCallback resolves
-        CCR/the per-chapter PostChapterCallback and merges that chapter's
-        own accumulator into $totals.
-
-        A NEW per-chapter accumulator dictionary ($chapterResults, keyed
-        by the exact chapterInfo value each chapter provider yields -
-        matching ChapterDispatch.ps1's own chapter-identity contract)
-        replaces the old code's implicit "one chapter, one blocking
-        Convert-AnimatedBatch call" scoping - Invoke-ChapterDispatch now
-        interleaves multiple chapters' jobs concurrently, so per-chapter
-        results can no longer come from a single function call's own
-        return value.
-
-        NO LONGER A PER-CHAPTER .GetNewClosure() SCRIPTBLOCK: the old
-        code built a fresh $abortPoll closure inside the per-chapter
-        foreach loop, once per chapter (flagged in Todo.md as
-        structurally similar to - though never confirmed as the actual
-        cause of - the still-unexplained intermittent "Test-AbortSignal
-        not recognized" crash in the sibling image-conversion module).
-        This migration's JobBuilder/JobStarter/JobPollCompleted/
-        JobFinalize/JobAbortCleanup/ChapterCompleteCallback/-AbortPollCallback
-        are each built exactly ONCE, before Invoke-ChapterDispatch is
-        ever called, not per chapter - there is no longer a closure
-        recreated on every chapter iteration in this code path at all.
-    .PARAMETER PostChapterCallback
-        Invoked once per chapter with @{ SeriesName; ChapterName; Dir;
-        ChapterResult } - $ChapterResult is $null when the chapter had no
-        animated files to convert (unchanged contract).
-    .OUTPUTS
-        @{ ConvertedSuccess; ConvertedFail; ConvertedSkipped;
-           StaticSkippedCount; InspectFailedCount; DeletedSuccess;
-           DeletedFail; ForceKilledCount; LastCompletedPaths;
-           LastSkippedPaths; LastStaticSkippedPaths; StillPendingPaths;
-           SeriesCount; ChapterCount; Aborted } - unchanged shape, but
-        LastCompletedPaths/StillPendingPaths are now always empty lists,
-        not populated (a deliberate simplification, not an oversight -
-        their old semantics were an "at the exact instant abort was
-        detected" snapshot scoped to ONE chapter's own blocking batch
-        call, which has no clean equivalent once dispatch spans the whole
-        run and multiple chapters interleave; confirmed via a repo-wide
-        grep that nothing outside this module and its own harness ever
-        reads either field). LastSkippedPaths/LastStaticSkippedPaths are
-        still fully populated - those were cheap to keep exact.
-    #>
     param(
         [Parameter(Mandatory)]
         [string]$Path,
@@ -1211,14 +523,6 @@ function Invoke-LooseAnimatedConversionPipeline {
         [bool]$FullLogging,
         [string[]]$AnimatedFileExtensions = @(".avif"),
         [string[]]$KnownZipPaths = @(),
-        # Kept as its own literal, not ImageConversionPipeline.ps1's shared
-        # Get-LooseImageExtensions, even though this is the
-        # exact same list - this module's own harness dot-sources it
-        # standalone, without ImageConversionPipeline.ps1, by design
-        # (this project's "own standalone test harness, verified in
-        # isolation" convention). A cross-module default-value dependency
-        # would break that. Must be kept in sync by hand with the
-        # canonical list if it ever changes.
         [string[]]$FolderQualifyingExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif", ".gif", ".bmp", ".heic", ".heif"),
         [System.Collections.Generic.HashSet[string]]$FolderExcludeStagingDirs = $null,
         [scriptblock]$PostChapterCallback = $null,
@@ -1245,38 +549,14 @@ function Invoke-LooseAnimatedConversionPipeline {
         Aborted                = $false
     }
 
-    # Per-chapter accumulator, keyed by the exact chapterInfo value each
-    # chapter provider yields (see this function's own header) - built by
-    # JobBuilder, mutated by JobFinalize, read and removed by
-    # ChapterCompleteCallback.
     $chapterResults = [System.Collections.Generic.Dictionary[object,hashtable]]::new()
 
-    # Captured once, read by every closure below instead of each one
-    # reading $script:CleanConsoleOutputEnabled directly - see this
-    # function's own header's "GENUINE, PREVIOUSLY-UNDOCUMENTED
-    # SCOPING HAZARD" note. Safe to snapshot once - nothing in this
-    # project mutates this mid-run, only between runs.
     $cleanConsoleOutputEnabled = [bool]$script:CleanConsoleOutputEnabled
 
-    # Registered for the whole pipeline call (one phase) - same contract
-    # as Invoke-LooseImageConversionPipeline's own $looseCts, and the
-    # same bug that registration omission caused there (Test-AbortSignal
-    # would never actually cancel this token) - registered from day one
-    # here rather than needing a later fix.
-    #
-    # Construction/registration moved INSIDE the try, same reasoning as
-    # ZipParallelProcessing.ps1's mutex-leak fix -
-    # if either throws, the finally block below still runs and disposes
-    # $animatedCts if it was actually created.
     try {
         $animatedCts = [System.Threading.CancellationTokenSource]::new()
         Register-AbortCancellationSource -Cts $animatedCts
 
-        # --- Chapter provider: same two-tier walk + extra-dir fold-in as
-        #     before, restructured as a lazy "-> next chapter or $null"
-        #     closure instead of a nested foreach - see this function's
-        #     own header for why this isn't ChapterDispatch.ps1's
-        #     New-LibraryChapterProvider. ---
         $seriesProvider  = New-SeriesProvider -LibraryPath $Path
         $chapterQueue    = [System.Collections.Generic.Queue[hashtable]]::new()
         $seriesExhausted = $false
@@ -1333,9 +613,6 @@ function Invoke-LooseAnimatedConversionPipeline {
             return $null
         }.GetNewClosure()
 
-        # --- JobBuilder: pre-dispatch classification pre-pass, once per
-        #     chapter (see this function's own header for why this moved
-        #     here from mid-dispatch). ---
         $jobBuilder = {
             param($chapterInfo)
 
@@ -1386,11 +663,6 @@ function Invoke-LooseAnimatedConversionPipeline {
                     continue
                 }
 
-                # Same temp-overwrite-path decision as Convert-AnimatedBatch's
-                # own dispatch loop - see that function's own comment on
-                # $j.TempOverwritePath/$j.MagickOutputPath for the full
-                # "why a temp path" reasoning (magick must never write
-                # straight over a pre-existing good .webp).
                 $tempOverwritePath = if ($webpPathExists) {
                     [System.IO.Path]::Combine([System.IO.Path]::GetDirectoryName($webpPath), [System.IO.Path]::GetFileNameWithoutExtension($webpPath) + "_tmp_overwrite.webp")
                 } else {
@@ -1409,10 +681,6 @@ function Invoke-LooseAnimatedConversionPipeline {
 
         $jobStarter = {
             param($job)
-            # [System.Diagnostics.ProcessStartInfo]::new(), not New-Object -
-            # same fix as Convert-AnimatedBatch's own copy of this closure
-            # above (this is Complete-AnimatedConversionJob's sibling
-            # JobStarter, mode 3's own ChapterDispatch-migrated dispatch).
             $psi = [System.Diagnostics.ProcessStartInfo]::new()
             $psi.FileName = $MagickExe
             $qualityArg = if ($AnimatedLossless) { "-define webp:lossless=true" } else { "-quality " + $AnimatedQuality }
@@ -1432,10 +700,6 @@ function Invoke-LooseAnimatedConversionPipeline {
             return $job
         }.GetNewClosure()
 
-        # Heartbeat logging lives here - see this function's
-        # own header for why this callback is its natural home. Called
-        # every poll pass for every still-running job, the same place the
-        # old dispatch loop's own poll pass checked it.
         $jobPollCompleted = {
             param($job)
             if ($job.Proc.HasExited) { return $true }
@@ -1455,16 +719,6 @@ function Invoke-LooseAnimatedConversionPipeline {
             return Complete-AnimatedDispatchJob -Job $job -ChapterResult $cr -DoFullLogging $FullLogging -DoAnimatedDeleteSource $AnimatedDeleteSource
         }.GetNewClosure()
 
-        # Always safe to delete both paths unconditionally here - see
-        # this function's own header - Invoke-ChapterDispatch only
-        # ever calls JobAbortCleanup for a job it has confirmed never
-        # reached JobFinalize, unlike the old code's own force-kill block,
-        # which had to guard $j.MagickOutputPath's deletion with
-        # SlotReleased to avoid tearing down a DIFFERENT, already-finished
-        # job's real output (a stale-$running-list race - see
-        # Convert-AnimatedBatch's own comment on that guard). That
-        # ambiguity can't happen here; Invoke-ChapterDispatch's own
-        # SlotReleased-equivalent bookkeeping is entirely internal to it.
         $jobAbortCleanup = {
             param($job)
             if ($job.TempOverwritePath) { try { [System.IO.File]::Delete($job.TempOverwritePath) } catch { } }
@@ -1493,23 +747,9 @@ function Invoke-LooseAnimatedConversionPipeline {
             if ($null -ne $PostChapterCallback) {
                 & $PostChapterCallback @{ SeriesName = $chapterInfo.SeriesName; ChapterName = $chapterInfo.ChapterName; Dir = $chapterInfo.Dir; ChapterResult = $chapterResultForCallback }
             }
-            # Bounds memory across a long run - matches
-            # Invoke-ChapterDispatch's own per-chapter cleanup philosophy.
             $chapterResults.Remove($chapterInfo)
         }.GetNewClosure()
 
-        # Test-AbortSignal must be called from SOMEWHERE regularly for a
-        # real abort to ever propagate into $animatedCts - it's the one
-        # function that actually cancels every registered CTS (see
-        # AbortPipeline.ps1's own docstring); nothing does that
-        # automatically just because a CTS was registered. This
-        # -AbortPollCallback (called every poll pass, same as the old
-        # code's own $abortPoll) is now the ONLY place that happens in
-        # this whole function, replacing both the old per-chapter-loop
-        # top-of-loop checks (Invoke-ChapterDispatch's own pull-ahead
-        # already stops calling -ChapterProvider once -CancelToken trips,
-        # so a separate check there would be redundant) and prints the
-        # old code's own one-time "[ABORT] Waiting..." message.
         $abortMessagePrinted = $false
         $abortPollCallback = {
             param($runningJobs)
@@ -1531,14 +771,10 @@ function Invoke-LooseAnimatedConversionPipeline {
         $totals.ForceKilledCount = $dispatchResult.ForceKilledCount
         $totals.Aborted          = $dispatchResult.Aborted
     } finally {
-        # $animatedCts can be unset if construction/registration itself
-        # threw (now inside the try above).
         if ($animatedCts) {
             Unregister-AbortCancellationSource -Cts $animatedCts
             $animatedCts.Dispose()
         }
-        # Safety net for the abort/shutdown path - same reasoning as
-        # Invoke-LooseImageConversionPipeline's own finally block.
         if ($script:CleanConsoleOutputEnabled) {
             $null = Complete-AllActiveSeriesProgress
         }
@@ -1548,15 +784,5 @@ function Invoke-LooseAnimatedConversionPipeline {
 }
 
 function Get-AnimatedConversionSharedFunctionNames {
-    <#
-    .SYNOPSIS
-        The function names a caller must add to its own -SharedFunctionNames
-        list (Invoke-ZipParallelProcessing) to safely call Convert-AnimatedBatch
-        from inside a runspace worker - single source of truth for this
-        group (see Logging.ps1's Get-LoggingSharedFunctionNames for why this
-        exists). Does NOT include Write-GatedConsoleMessage - see
-        Get-ImageConversionSharedFunctionNames's own docstring for why
-        (same reason, same deliberate gap).
-    #>
     return @('Convert-AnimatedBatch', 'Complete-AnimatedConversionJob', 'Test-AvifAnimated')
 }
