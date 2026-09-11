@@ -1004,13 +1004,12 @@ function Convert-ImageBatch {
     foreach ($j in $jobs) { $pending.Enqueue($j) }
     $running = [System.Collections.Generic.List[hashtable]]::new()
 
-    # try/catch around the whole dispatch loop (2026-08-31 fix, caught by a
-    # same-day /code-review 4th pass): every OTHER exit from this loop
-    # (normal completion, or cancellation via the straggler-drain/force-kill
-    # block below) already disposes every running job's process handle. An
-    # unexpected throw from inside the loop itself (-AbortPollCallback,
-    # Write-Log on a locked log file, a rethrow from
-    # Complete-ImageConversionJob) had no such guarantee - it propagated
+    # try/catch around the whole dispatch loop matters here: every OTHER
+    # exit from this loop (normal completion, or cancellation via the
+    # straggler-drain/force-kill block below) already disposes every
+    # running job's process handle. An unexpected throw from inside the
+    # loop itself (-AbortPollCallback, Write-Log on a locked log file, a
+    # rethrow from Complete-ImageConversionJob) would otherwise propagate
     # straight out of Convert-ImageBatch with $running jobs' handles
     # undisposed.
     try {
@@ -1027,20 +1026,19 @@ function Convert-ImageBatch {
                $running.Count -lt $MaxCjxlProcs) {
             $j   = $pending.Dequeue()
             # Everything from here through $running.Add($j) below is wrapped
-            # in one try/catch (2026-08-31 fix) - a raw .NET exception from
+            # in one try/catch - a raw .NET exception from
             # either Process.Start() call in this block (magick's
             # pre-conversion spawn or cjxl's own spawn - a stale cached exe
             # path, a locked file, etc.) is NOT a terminating error in this
             # scriptblock (no $ErrorActionPreference = "Stop" is set here),
-            # so without this it would print a non-terminating error and
+            # so without this guard it would print a non-terminating error and
             # keep going with $j.Proc left $null - $null.HasExited then
-            # never becomes true, so that job sits in $running forever and
-            # the WHOLE dispatch loop (and the chapter, and the run) hangs
-            # indefinitely instead of failing that one job. Confirmed live:
-            # a stale/bad -CjxlExe path hung indefinitely before this fix.
+            # never becomes true, so that job would sit in $running forever and
+            # the WHOLE dispatch loop (and the chapter, and the run) would hang
+            # indefinitely instead of failing that one job.
             $magickProcLocal = $null
-            # Reset per-iteration, same reasoning as $magickProcLocal above
-            # (2026-08-31 fix): $j.TempPng is only assigned AFTER the
+            # Reset per-iteration, same reasoning as $magickProcLocal above:
+            # $j.TempPng is only assigned AFTER the
             # magick Process.Start/WaitForExit calls below succeed, so if
             # either throws, the catch block's own cleanup (which checks
             # $j.TempPng) can't see a temp file magick may have already
@@ -1065,8 +1063,8 @@ function Convert-ImageBatch {
             # directly - transcode to a temp PNG first. Animated WebP/AVIF
             # are skipped entirely (cjxl has no multi-frame support) -
             # animated AVIF has its own conversion pipeline,
-            # AnimatedConversionPipeline.ps1. BMP/HEIC/HEIF (2026-09-02
-            # addition) need no animation pre-check - neither format
+            # AnimatedConversionPipeline.ps1. BMP/HEIC/HEIF need no
+            # animation pre-check - neither format
             # carries the kind of animation this project routes specially
             # (a real HEIC/HEIF "image sequence," e.g. a burst photo, just
             # transcodes its first image via magick's own "[0]" selector
@@ -1086,27 +1084,27 @@ function Convert-ImageBatch {
                 # produced directly from the ORIGINAL source in one step
                 # (magick reads webp/avif/anything natively for that single
                 # strip+grayscale command - see that function). Checked
-                # BEFORE the isWebp/isAvif branch below (2026-08-31 fix,
-                # caught by a same-day /code-review) - $j.SrcPath still
+                # BEFORE the isWebp/isAvif branch below on purpose -
+                # $j.SrcPath still
                 # carries the original extension even for a webp/avif
-                # retry, so checking isWebp/isAvif first redid an entirely
+                # retry, so checking isWebp/isAvif first would redo an entirely
                 # separate, non-ICC-stripped pre-conversion every time,
                 # silently overwriting this TempPng value, orphaning the
                 # real stripped PNG on disk (a stray file a later run's
                 # Get-LooseImageCandidates would pick up as a real loose
                 # image), and failing the retry the same way every time
-                # since the fresh pre-conversion was never actually
+                # since the fresh pre-conversion would never actually be
                 # ICC-stripped.
                 $cjxlSrc = $j.TempPng
             } elseif ($isWebp -or $isAvif -or $isBmp -or $isHeic -or $isHeif) {
-                # Animation classification for WebP/AVIF now happens in the
+                # Animation classification for WebP/AVIF happens in the
                 # pre-pass that builds $allJobs, before the collision count -
-                # see that pre-pass's own comment (2026-08-31 fix). A job
+                # see that pre-pass's own comment. A job
                 # reaching here is therefore already known non-animated
                 # (unless $MagickExe was missing at pre-pass time too, in
-                # which case it falls through to the same error below,
-                # matching prior behavior). BMP/HEIC/HEIF never went
-                # through that pre-pass at all (2026-09-02 addition) -
+                # which case it falls through to the same error below).
+                # BMP/HEIC/HEIF never go
+                # through that pre-pass at all -
                 # neither format needs an animation check, see this
                 # branch's own header comment above.
                 $formatLabel = if ($isAvif) { "AVIF" } elseif ($isWebp) { "WebP" } elseif ($isBmp) { "BMP" } elseif ($isHeic) { "HEIC" } else { "HEIF" }
@@ -1130,8 +1128,8 @@ function Convert-ImageBatch {
                 $magickPsi.RedirectStandardOutput = $true
                 $magickPsi.RedirectStandardError  = $true
                 $magickPsi.CreateNoWindow         = $true
-                # ReadToEndAsync (2026-08-31 fix, from a THIRD same-day
-                # /code-review pass) - same redirect-deadlock species as
+                # ReadToEndAsync matters here too - same redirect-deadlock
+                # species as
                 # Invoke-IccStripRetryOrFail's own fix above and
                 # AnimatedConversionPipeline.ps1's Test-AvifAnimated: both
                 # streams were redirected but never read, and this call
@@ -1163,12 +1161,12 @@ function Convert-ImageBatch {
 
             # JPEG encoding: controlled by the -DoJpegLossless / -DoJpegQuality params.
             # Non-JPEGs (PNG/WebP/TIFF): always lossy at quality 90.
-            # --num_threads=1 on every invocation (2026-09-03 fix, real bug,
-            # live-reported): cjxl's own default ("-1" = use machine
-            # default) was never overridden, so every concurrently-
-            # dispatched cjxl process independently grabbed its own
-            # machine-default thread pool - MaxCjxlProcs controlled how
-            # many PROCESSES ran, not how many real worker THREADS existed,
+            # --num_threads=1 on every invocation matters: without it,
+            # cjxl's own default ("-1" = use machine
+            # default) means every concurrently-
+            # dispatched cjxl process independently grabs its own
+            # machine-default thread pool - MaxCjxlProcs would control how
+            # many PROCESSES run, not how many real worker THREADS exist,
             # so e.g. MaxCjxlProcs=4 could saturate far more than 4 threads
             # system-wide. Pinning this makes MaxCjxlProcs mean what it
             # says: one real worker thread per configured process slot.
@@ -1187,7 +1185,7 @@ function Convert-ImageBatch {
             # Start draining both redirected streams immediately, not when
             # the job is later found HasExited - same redirect-deadlock
             # species as the magick pre-conversion fix above and
-            # Invoke-IccStripRetryOrFail's own fix (2026-09-04): this cjxl
+            # Invoke-IccStripRetryOrFail's own: this cjxl
             # job is polled via HasExited rather than read synchronously
             # inline, so a cjxl that writes more than the OS pipe buffer to
             # stdout/stderr before exiting would otherwise block on that
@@ -1201,8 +1199,7 @@ function Convert-ImageBatch {
             } catch {
                 Write-Log ("FAILED to start conversion process for '" + $j.SrcPath + "': " + $_) -Level Error
                 $batchResult.FailedCount++
-                # Swallowed deliberately (2026-08-31, from a same-day
-                # /code-review): a TOCTOU race between the HasExited check
+                # Swallowed deliberately: a TOCTOU race between the HasExited check
                 # and Kill() (or an access-denied Kill()) would otherwise
                 # propagate out of an already-failing job's own cleanup -
                 # best-effort only, matching this file's established
