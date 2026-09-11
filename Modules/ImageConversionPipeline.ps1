@@ -302,8 +302,8 @@ function Invoke-IccStripRetryOrFail {
         [System.IO.Path]::GetFileNameWithoutExtension($Job.SrcPath) + "_tmp_iccstrip.png"
     )
     Write-Log ("ICC profile mismatch on '" + $Job.SrcPath + "' - stripping profile and retrying.") -Level Warn
-    # [System.Diagnostics.ProcessStartInfo]::new(), not New-Object
-    # (2026-09-10, real bug found live-catching a Controller.Harness.ps1
+    # [System.Diagnostics.ProcessStartInfo]::new(), not New-Object -
+    # a real bug found live-catching a Controller.Harness.ps1
     # hang with NO subprocess alive at all - see Controller.ps1's own
     # matching JobStarter comment for the full reasoning). This function is
     # called from Complete-ImageDispatchJob, Full Pipeline's own image-
@@ -313,7 +313,7 @@ function Invoke-IccStripRetryOrFail {
     # New-Object before now.
     $stripPsi = [System.Diagnostics.ProcessStartInfo]::new()
     $stripPsi.FileName               = $MagickExe
-    # -strip ONLY - no -colorspace Gray (2026-08-31, project owner's own
+    # -strip ONLY - no -colorspace Gray, project owner's own
     # explicit decision: color data must never be force-converted, full
     # stop). The retry trigger is cjxl's generic "Getting pixel data
     # failed" stderr match - broader than the one specific case
@@ -327,9 +327,9 @@ function Invoke-IccStripRetryOrFail {
     # -colorspace Gray usage was inherited from the original monolithic
     # reference script; removing it here is a deliberate, explicit
     # deviation from that reference, not an oversight.
-    # Deliberately NO "[0]" frame selector here (2026-09-02, considered and
-    # rejected during the same review that found the orphaned-numbered-PNG
-    # leak this retry can cause against a multi-frame/multi-image source -
+    # Deliberately NO "[0]" frame selector here - considered and
+    # rejected, since this retry can leak an orphaned numbered PNG
+    # against a multi-frame/multi-image source -
     # see the calling function's own header and Get-LooseImageCandidates's
     # matching exclusion fix). Adding "[0]" WOULD stop magick from auto-
     # numbering its output - but it would also silently strip every frame
@@ -341,7 +341,7 @@ function Invoke-IccStripRetryOrFail {
     # quiet, lossy "success" that silently truncates real content. That is
     # exactly the class of bug this project's own standing rule already
     # exists to prevent (see the -colorspace Gray removal above, same
-    # function, same day - "never silently strip data, full stop"). The
+    # function - "never silently strip data, full stop"). The
     # numbered-orphan-file problem is real but cosmetic (disk space, not
     # data loss) and is fixed instead at the cleanup side - see
     # Get-LooseImageCandidates's own widened orphan-sweep regex, which now
@@ -351,16 +351,15 @@ function Invoke-IccStripRetryOrFail {
     $stripPsi.RedirectStandardOutput = $true
     $stripPsi.RedirectStandardError  = $true
     $stripPsi.CreateNoWindow         = $true
-    # ReadToEndAsync + try/finally (2026-08-31 fix, from a THIRD same-day
-    # /code-review pass - same species already found and fixed in
-    # AnimatedConversionPipeline.ps1's Test-AvifAnimated, confirmed live
-    # there via a harness revert that genuinely hung): both streams
+    # ReadToEndAsync + try/finally matter here, same species already
+    # found and fixed in
+    # AnimatedConversionPipeline.ps1's Test-AvifAnimated: both streams
     # redirected but never read is the classic Process redirect deadlock -
     # if magick writes enough combined stdout+stderr to fill the OS pipe
     # buffer, it blocks writing while nothing ever drains the pipes, so
     # WaitForExit() never returns. Draining both asynchronously before
     # WaitForExit() prevents either buffer from ever filling.
-    # Start() itself guarded (2026-09-04 fix) - both sibling Process::Start
+    # Start() itself guarded - both sibling Process::Start
     # calls in this file (the magick pre-conversion above, and the cjxl
     # dispatch in Convert-ImageBatch) already wrap Start in try/catch for a
     # stale/missing exe path; this one didn't, so the same failure here
@@ -410,8 +409,7 @@ function Invoke-IccStripRetryOrFail {
 
     if ($stripExitCode -eq 0 -and [System.IO.File]::Exists($strippedPng)) {
         # Clean up any partial/corrupt .jxl the ORIGINAL failed attempt
-        # may have already written to this same path (2026-08-31 fix,
-        # PLAUSIBLE finding from a same-day /code-review) - the retry
+        # may have already written to this same path - the retry
         # below targets the identical $Job.JxlPath, and this function's
         # own early `return $true` skips the normal failure path's own
         # partial-.jxl cleanup entirely. Real cjxl.exe was confirmed to
@@ -464,8 +462,7 @@ function Complete-ImageConversionJob {
         stdout dump and the success log message (no byte count, "(abort
         drain)" wording instead), both captured via -IsAbortDrain.
 
-        DOCUMENTED DUPLICATE (2026-09-09, mode 2's ChapterDispatch.ps1
-        migration): the exit-code/ICC-retry-decision/delete-source
+        DOCUMENTED DUPLICATE: the exit-code/ICC-retry-decision/delete-source
         portion of this function (everything after its own try/finally)
         is copied, not shared, into Complete-ImageDispatchJob - see that
         function's own header for why (Invoke-ChapterDispatch owns
@@ -497,15 +494,14 @@ function Complete-ImageConversionJob {
         [bool]$IsAbortDrain = $false
     )
 
-    # try/finally (2026-08-31 fix, caught by a same-day /code-review 4th
-    # pass): this is the one place a RUNNING job's process handle gets
-    # disposed - unlike every other resource-release path in this file, it
-    # wasn't guarded. A throw from ReadToEnd/ExitCode (unlikely on an
-    # already-exited process, but not impossible) used to skip Dispose()
-    # entirely and propagate straight out of Convert-ImageBatch.
+    # try/finally matters here - this is the one place a RUNNING job's
+    # process handle gets disposed - unlike every other resource-release
+    # path in this file, it needs the guard. Without it, a throw from
+    # ReadToEnd/ExitCode (unlikely on an already-exited process, but not
+    # impossible) would skip Dispose() entirely and propagate straight
+    # out of Convert-ImageBatch.
     try {
-        # Await the tasks started right after Process::Start (2026-09-04
-        # fix) rather than a synchronous ReadToEnd() here - by the time
+        # Await the tasks started right after Process::Start rather than
         # this function runs the process has already exited (both call
         # sites gate on HasExited first), so this just collects output
         # that was draining concurrently all along instead of being the
@@ -517,8 +513,7 @@ function Complete-ImageConversionJob {
         $code   = $Job.Proc.ExitCode
     } finally {
         $Job.Proc.Dispose()
-        # SlotReleased marker (2026-08-31 fix, caught by verifying this same
-        # day's /code-review 4th pass): Convert-ImageBatch's own dispatch-
+        # SlotReleased marker matters here: Convert-ImageBatch's own dispatch-
         # loop try/catch (see that function's header comment) does its own
         # bulk cleanup of every job still in $running if something throws -
         # but the poll loop that calls this function only reassigns
