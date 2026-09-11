@@ -2041,7 +2041,7 @@ function Invoke-MainLoop {
     <#
     .SYNOPSIS
         The run loop that used to live inline in the main script's own
-        `while` block (moved here 2026-08-28, per the "Show-PostRunPrompt's
+        `while` block (moved here per the "Show-PostRunPrompt's
         run loop lives in Controller.ps1" decision, Todo.md): resolve a
         mode, run it via Invoke-Mode, report the result, prompt to
         continue or exit. Loops until Show-PostRunPrompt (or its
@@ -2072,7 +2072,7 @@ function Invoke-MainLoop {
         Ctrl+C handler a real run is in progress, so Ctrl+C at the menu
         (between calls) falls through to the OS's own default action
         instead of being caught and leaking into the next iteration's
-        run (project owner's own explicit decision, 2026-08-31).
+        run (project owner's own explicit decision).
     .PARAMETER SetQuickEditHandler
         Injectable, defaults to the real AbortPipeline.ps1's
         Set-ConsoleQuickEditEnabled. Called $false right before, $true
@@ -2081,8 +2081,7 @@ function Invoke-MainLoop {
         text pauses all console output; a stray right-click afterward
         pastes the clipboard back in as keystrokes) is a real hazard while
         a run is actually dispatching work, but harmless - and useful, for
-        copying real output - once a run has finished (project owner's
-        own live report, 2026-09-08).
+        copying real output - once a run has finished.
     .PARAMETER ScriptDir
         Where log files live - threaded through so a mid-session
         FullLogging/DisableSummaryFile re-sync (see below) can call
@@ -2100,8 +2099,7 @@ function Invoke-MainLoop {
     .PARAMETER InitializeLogPathsHandler
     .PARAMETER InitializeLogMutexHandler
         Injectable, default to the real Initialize-LogPaths/
-        Initialize-LogMutex. Called mid-loop (2026-09-03 fix, Todo.md's
-        mid-session-toggle finding) only when FullLogging or
+        Initialize-LogMutex. Called mid-loop only when FullLogging or
         DisableSummaryFile actually changed since the last call - now
         safe to re-call at all only because neither logging mode
         deletes/clears anything on a repeat call anymore (see Logging.ps1).
@@ -2140,8 +2138,7 @@ function Invoke-MainLoop {
     )
 
     # Tracks the FullLogging/DisableSummaryFile values Initialize-LogPaths
-    # was last actually called with, so the re-sync below (2026-09-03 fix -
-    # see Todo.md's mid-session-toggle finding) only re-calls it when either
+    # was last actually called with, so the re-sync below only re-calls it when either
     # one has genuinely changed since the LAST iteration, not on every
     # single one - now safe to re-call at all only because neither logging
     # mode deletes/clears anything on a repeat call anymore (see
@@ -2155,15 +2152,14 @@ function Invoke-MainLoop {
     while ($true) {
         & $ResetAbortHandler
 
-        # try/catch around $GetModeHandler (2026-09-02 review fix): mode 5
+        # try/catch around $GetModeHandler matters here: mode 5
         # (Cover Deletion)'s own real, destructive work runs INSIDE this
         # call (Get-SelectedMode -> Show-ModeMenu -> Show-CoverDeletionMenu),
         # unlike every other mode, which runs inside $InvokeModeHandler
         # below - already wrapped, and Invoke-Mode has its own further
-        # internal catch besides. Before this fix, an uncaught throw
-        # anywhere under mode 5 (e.g. Test-UnwantedImageMatch's own
-        # Get-FileHash call, fixed the same day) had nothing between it
-        # and the bootstrap's top-level catch - it took down the entire
+        # internal catch besides. Without this, an uncaught throw
+        # anywhere under mode 5 would have nothing between it
+        # and the bootstrap's top-level catch - it would take down the entire
         # script (a FATAL ERROR message, keypress, exit) instead of being
         # reported and returning to the menu like every other mode's own
         # crash already does. Same containment/-LogHandler shape as
@@ -2195,8 +2191,8 @@ function Invoke-MainLoop {
         # picked up the change, so a single run could silently mix
         # Recycle-Bin and permanent deletions.
         #
-        # FullLogging/DisableSummaryFile get the SAME re-sync treatment now
-        # (2026-09-03 fix - Todo.md's mid-session-toggle finding), gated on
+        # FullLogging/DisableSummaryFile get the SAME re-sync treatment,
+        # gated on
         # an actual change since Initialize-LogPaths' own $lastFullLogging/
         # $lastDisableSummaryFile were last updated: neither logging mode
         # deletes/clears anything on a repeat call anymore (Logging.ps1),
@@ -2210,8 +2206,7 @@ function Invoke-MainLoop {
         $currentDisableSummaryFile = [bool]$Settings.DisableSummaryFile
         if ($currentFullLogging -ne $lastFullLogging -or $currentDisableSummaryFile -ne $lastDisableSummaryFile) {
             & $InitializeLogPathsHandler -TargetPath $TargetPath -FullLogging $currentFullLogging -DisableSummaryFile $currentDisableSummaryFile -ScriptDir $ScriptDir
-            # Dispose the PREVIOUS mutex before re-creating (2026-09-03
-            # fix, real bug caught by a same-session /code-review pass) -
+            # Dispose the PREVIOUS mutex before re-creating -
             # Initialize-LogMutex's own docstring deliberately does NOT
             # dispose it (ZipParallelProcessing.ps1's own save/restore
             # pattern depends on that old reference staying valid) and
@@ -2232,8 +2227,7 @@ function Invoke-MainLoop {
             $lastFullLogging        = $currentFullLogging
             $lastDisableSummaryFile = $currentDisableSummaryFile
         }
-        # [bool](...) casts (2026-08-31 fix, caught by a same-day
-        # /code-review): both -Enabled/-PermanentDelete are
+        # [bool](...) casts matter here too - both -Enabled/-PermanentDelete are
         # [Parameter(Mandatory)][bool] - a $Settings hashtable missing
         # either key passes $null, which fails PowerShell's own boolean
         # type coercion with a hard, uncaught terminating error (this
@@ -2241,7 +2235,7 @@ function Invoke-MainLoop {
         # instead of just degrading gracefully. Config.ps1 always defaults
         # both keys today, so this can't fire against a real settings
         # file - but any future caller building $Settings by hand (a
-        # test, a script, a partial hashtable) hit a hard crash on the
+        # test, a script, a partial hashtable) would hit a hard crash on the
         # very first iteration instead of a graceful $false. [bool]$null
         # correctly coerces to $false, same as PowerShell's own default
         # falsy treatment of a missing/null value everywhere else in this
@@ -2249,24 +2243,22 @@ function Invoke-MainLoop {
         Initialize-CleanConsoleOutput -Enabled ([bool]$Settings.CleanConsoleOutputEnabled)
         Initialize-FileDeletion -PermanentDelete ([bool]$Settings.PermanentDelete)
 
-        # Set-AbortHandlerRunActive $true/$false around the actual run
-        # (2026-08-31 addition, project owner's own explicit decision -
+        # Set-AbortHandlerRunActive $true/$false around the actual run,
+        # project owner's own explicit decision -
         # see AbortPipeline.ps1's ConsoleCtrl.RunActive comment for the
-        # full reasoning): Ctrl+C is the dedicated abort key for an
+        # full reasoning: Ctrl+C is the dedicated abort key for an
         # active run, but at the menu there's nothing to abort - the
-        # native handler now falls through to the OS's own default
-        # Ctrl+C action there instead of catching it, closing a real leak
-        # (a menu-time Ctrl+C used to set AbortRequested, which then
-        # aborted THIS SAME iteration's freshly-dispatched run on its
+        # native handler falls through to the OS's own default
+        # Ctrl+C action there instead of catching it, avoiding a real leak
+        # (a menu-time Ctrl+C setting AbortRequested, which would then
+        # abort THIS SAME iteration's freshly-dispatched run on its
         # very first poll, with no new Ctrl+C from the user) and a real
         # waste (the handler thread blocking up to 65s on a drain that
         # was never going to happen). try/finally so a crash inside the
         # run still clears it - Reset-AbortState's own defensive reset at
         # the top of the NEXT iteration is the second layer, not the
         # only one.
-        # Start-LogRun (2026-09-03 fix, real bug caught by a same-session
-        # /code-review pass - see Start-LogRun's own header for the full
-        # story): must run EVERY iteration, not just when the
+        # Start-LogRun must run EVERY iteration, not just when the
         # FullLogging/DisableSummaryFile re-sync above fires - unlike
         # Initialize-LogPaths (which only needs recomputing when the log
         # PATHS actually change), each run needs its own header and prior-
@@ -2285,18 +2277,18 @@ function Invoke-MainLoop {
         }
         $runStopwatch.Stop()
 
-        # Complete-LogRun (2026-09-03 addition - split-log Errors/Warnings
-        # now accumulate across runs, newest on top): every worker runspace
+        # Complete-LogRun (split-log Errors/Warnings
+        # accumulate across runs, newest on top): every worker runspace
         # this run dispatched has already joined back by the time
         # $InvokeModeHandler returns, so it's safe to do the reorder here,
         # unconditionally, regardless of whether $stats came back $null - a
         # crashed/aborted run's own logged Errors/Warnings still deserve to
-        # be promoted to the top like a normal run's would. Moved to AFTER
-        # the $stats-null Warn below (2026-09-04 fix, real bug) - it used to
-        # run BEFORE that Warn was logged, so the Warn landed appended at
+        # be promoted to the top like a normal run's would. Called AFTER
+        # the $stats-null Warn below on purpose - calling it before that
+        # Warn is logged would leave the Warn appended at
         # the bottom of Warnings.txt, detached from its own run's just-
-        # reordered header, and the NEXT run's Start-LogRun then captured it
-        # as stale prior content, so it was never correctly reordered on any
+        # reordered header, and the NEXT run's Start-LogRun would then capture it
+        # as stale prior content, so it would never get correctly reordered on any
         # later pass either - exactly the failure path a user is most
         # likely to go check the warnings file for.
         if ($null -eq $stats) {
@@ -2308,12 +2300,10 @@ function Invoke-MainLoop {
         } else {
             $elapsedString = Format-ElapsedTime -Elapsed $runStopwatch.Elapsed
             $summaryLines = Get-SummaryLines -Stats $stats -ElapsedString $elapsedString -ModeFlags $resolved
-            # [bool](...) cast (2026-08-31 fix, from a THIRD same-day
-            # /code-review pass) - Write-SummaryReport's -FullLogging is
-            # also [Parameter(Mandatory)][bool] (Summary.ps1); missed by
-            # both earlier passes even though the two calls right above
-            # this one (Initialize-CleanConsoleOutput/Initialize-FileDeletion)
-            # already got this exact cast.
+            # [bool](...) cast matters here too - Write-SummaryReport's
+            # -FullLogging is also [Parameter(Mandatory)][bool] (Summary.ps1),
+            # same reasoning as the two calls right above
+            # this one (Initialize-CleanConsoleOutput/Initialize-FileDeletion).
             Write-SummaryReport -Lines $summaryLines -FullLogging $script:FullLogging
             & $CompleteLogRunHandler
         }
