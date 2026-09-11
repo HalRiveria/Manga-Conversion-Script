@@ -1244,30 +1244,27 @@ function Convert-ImageBatch {
     } catch {
         # Force-cleanup mirrors the force-kill block below (own try/catch
         # per step, same as every other cleanup path in this file, INCLUDING
-        # the partial/corrupt .jxl deletion - 2026-08-31 fix, caught by
-        # verifying this same day's /code-review 4th pass, this block
-        # originally dropped that one step despite the comment claiming
-        # parity: a killed cjxl can leave a non-zero-byte truncated .jxl
+        # the partial/corrupt .jxl deletion - a killed cjxl can leave a
+        # non-zero-byte truncated .jxl
         # NEWER than its source, which the NEXT run's Get-LooseImageCandidates
         # then classifies as a stale leftover and deletes the real source,
         # keeping only the garbage output) - best effort, since we're
         # already unwinding from an unexpected failure and must not let a
         # cleanup error mask or replace the real one.
-        # $j.SlotReleased guards the .jxl deletion below (2026-08-31 fix,
-        # corrected after a third verification pass found a real DATA-LOSS
-        # bug in the second pass's own fix: this $running list is STALE -
-        # the poll loop only reassigns it after its whole foreach pass
-        # completes - so it can still list a job that ALREADY completed
-        # successfully earlier in the SAME pass, source deleted and all.
-        # SlotReleased is set in Complete-ImageConversionJob's own finally
-        # block, true for exactly those already-finished jobs (success OR
-        # failure, doesn't matter which - either way their OWN cleanup
-        # already ran and this block must leave their .jxl alone) and
-        # false for the genuinely-still-running jobs this force-kill path
-        # exists for. Verified live: without this guard, a job that
-        # converted successfully and had its source already deleted lost
-        # its .jxl too the moment a LATER job in the same poll pass threw -
-        # the image was gone entirely, not just its source. TempPng
+        # $j.SlotReleased guards the .jxl deletion below: this $running
+        # list is STALE - the poll loop only reassigns it after its whole
+        # foreach pass completes - so it can still list a job that ALREADY
+        # completed successfully earlier in the SAME pass, source deleted
+        # and all. SlotReleased is set in Complete-ImageConversionJob's
+        # own finally block, true for exactly those already-finished jobs
+        # (success OR failure, doesn't matter which - either way their OWN
+        # cleanup already ran and this block must leave their .jxl alone)
+        # and false for the genuinely-still-running jobs this force-kill
+        # path exists for. Without this guard, a job that
+        # converted successfully and had its source already deleted would
+        # lose its .jxl too the moment a LATER job in the same poll pass
+        # throws - the image would be gone entirely, not just its source.
+        # TempPng
         # cleanup is intentionally NOT guarded by this flag -
         # Complete-ImageConversionJob's own TempPng cleanup runs AFTER its
         # SlotReleased-setting finally, so a job marked SlotReleased via an
@@ -1308,20 +1305,18 @@ function Convert-ImageBatch {
         }
         $abortDeadline = [System.Diagnostics.Stopwatch]::StartNew()
 
-        # try/catch around the whole straggler-drain body (2026-08-31
-        # addition - project owner approved as an easy fix, same shape as
-        # the main dispatch loop's own outer catch above): that catch only
+        # try/catch around the whole straggler-drain body, same shape as
+        # the main dispatch loop's own outer catch above: that catch only
         # covers the MAIN loop - an unexpected throw here (the same
         # unguarded Write-Log calls inside Complete-ImageConversionJob are
-        # the realistic trigger) had no equivalent guard, leaking every
-        # remaining drain-list job's process handle. Mirrors that catch's
+        # the realistic trigger) would otherwise have no equivalent guard,
+        # leaking every remaining drain-list job's process handle. Mirrors that catch's
         # own cleanup exactly, including the
         # SlotReleased-guarded .jxl deletion (the identical stale-list/
         # data-loss shape applies here too - the drain's own polling loop
         # only reassigns $running after its whole foreach pass completes).
         try {
-            # -not [ConsoleCtrl]::IsCloseEvent (2026-09-03 fix, real bug,
-            # live-reported and live-tested): Windows force-kills the whole
+            # -not [ConsoleCtrl]::IsCloseEvent matters here: Windows force-kills the whole
             # process ~5s after a CTRL_CLOSE_EVENT (the X button) regardless
             # of what this drain does - confirmed via this machine's
             # WaitToKillAppTimeout registry value AND a live test (force-
@@ -1350,8 +1345,7 @@ function Convert-ImageBatch {
             }
 
             # One final completion-check pass before declaring anything
-            # force-stopped (2026-09-03 fix, real bug found by code review
-            # after the IsCloseEvent fast-path above was added). Same closing
+            # force-stopped. Same closing
             # move Invoke-GracefulDrain's own drain loop already uses for the
             # identical race at the normal -AbortTimeoutSeconds boundary -
             # needed MORE here now, not less: IsCloseEvent can exit the while
