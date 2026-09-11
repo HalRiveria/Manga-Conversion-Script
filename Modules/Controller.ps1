@@ -10,7 +10,7 @@
     Pure definitions only - no top-level side effects, safe to dot-source
     more than once or alongside other modules.
 
-    SCOPE - built 2026-08-28 against the design settled in Todo.md's
+    SCOPE - built against the design settled in Todo.md's
     "Full Pipeline (per-chapter controller design)" section (read that
     first for the full reasoning behind every decision below - this
     header summarizes, it doesn't replace it). This module is named
@@ -35,7 +35,7 @@
     controller costume - this module walks the library exactly ONCE and
     dispatches both engines per chapter.
 
-    CONCURRENCY MECHANICS (rewritten 2026-09-09, dispatch redesign step 4
+    CONCURRENCY MECHANICS (dispatch redesign step 4
     of 4 - full design in the "DISPATCH-REDESIGN STEP 4" comment block
     right above Get-OrCreateFullPipelineSeriesBundle, below): TWO
     independent Invoke-ChapterDispatch (ChapterDispatch.ps1) engines -
@@ -120,8 +120,7 @@
     convention as the two solo orchestrators) before Start-SeriesProgress
     is called.
 
-    TOP-LEVEL DISPATCHER (Invoke-Mode) - built 2026-08-28, second build
-    pass. Runs whichever mode Menu.ps1's Resolve-ModeSelection resolved,
+    TOP-LEVEL DISPATCHER (Invoke-Mode). Runs whichever mode Menu.ps1's Resolve-ModeSelection resolved,
     translating one $Settings hashtable into each real pipeline entry
     point's own param list (they were never unified - each was built
     independently with its own flat param list), and returns
@@ -130,7 +129,7 @@
     hand the result straight to Get-SummaryLines. One shared
     try/catch around the whole dispatch calls Invoke-AbortOrFatalHandler
     on anything that escapes - this is the "shared top-level catch, not
-    per-pipeline copies" decision (Todo.md, 2026-08-28), verified
+    per-pipeline copies" decision (Todo.md), verified
     against all five real entry points' actual outer-scope structure
     before deciding: at the time, four of five only had try/finally at
     their outer scope (an exception already propagates this far as-is);
@@ -146,8 +145,7 @@
     explicitly (the real-function defaults only matter for an actual
     caller that doesn't override them).
 
-    Mode 8 (ImageConversionZip) - real, built 2026-08-28 (Phase 2 of the
-    build plan): dispatches to Invoke-LooseImageConversionPipeline with a
+    Mode 8 (ImageConversionZip) dispatches to Invoke-LooseImageConversionPipeline with a
     real -ZipStepCallback closure that owns mode 8's own business logic
     (which extensions block zipping, based on
     $Settings.ZipWithUnconvertedAnimated) and calls Invoke-LooseFolderZip
@@ -155,7 +153,7 @@
     was a stub through Phase 1 - built here only once Invoke-Mode itself
     was proven standalone, touching no other module.
 
-    Invoke-MainLoop (2026-08-28) - the run loop that used to live inline
+    Invoke-MainLoop is the run loop that used to live inline
     in the main script: resolve a mode (Get-SelectedMode), run it
     (Invoke-Mode), report it (Format-ElapsedTime/Get-SummaryLines/
     Write-SummaryReport), prompt to continue or exit
@@ -166,10 +164,10 @@
     this brings in: Menu.ps1 (Get-SelectedMode, Show-PostRunPrompt) -
     Controller.ps1 never needed Menu.ps1 before this.
 
-    AVIF CLASSIFICATION (2026-08-28, the Full-Pipeline AVIF race fix;
-    mechanism rewritten 2026-09-09 for the dispatch redesign - the RACE
-    ITSELF and why it exists are unchanged, only WHERE/WHEN classification
-    happens moved). Invoke-FullPipeline's own -LooseImageExtensions
+    AVIF CLASSIFICATION exists to close a real race (the mechanism has
+    been rewritten for the dispatch redesign, but the race itself and why
+    it exists are unchanged, only where/when classification happens
+    moved). Invoke-FullPipeline's own -LooseImageExtensions
     default includes .avif (previously excluded specifically to avoid this
     problem) - static AVIF gets converted here too, for the same
     "consistency across the whole library" reason ImageConversionPipeline.ps1
@@ -216,13 +214,12 @@
         Remove-StaleLooseSources, Get-ChapterProgressStatus,
         Get-NeverConvertedExtensions, Test-WebPAnimated,
         Complete-ImageDispatchJob, Invoke-LooseImageConversionPipeline
-        (ImageConversionPipeline.ps1) - NOT Convert-ImageBatch itself
-        (2026-09-09 change, dispatch redesign step 4) - Full Pipeline
+        (ImageConversionPipeline.ps1) - NOT Convert-ImageBatch itself.
+        Full Pipeline
         builds its own image-engine JobBuilder/JobStarter/JobFinalize now
         (see "DISPATCH-REDESIGN STEP 4" below) instead of calling that
         function directly; Convert-ImageBatch has no remaining real caller
-        (RezipPipeline.ps1, its last one, was removed 2026-09-09) other
-        than its own harness.
+        other than its own harness.
       - Get-AnimatedConversionSharedFunctionNames, Get-LooseAnimatedCandidates,
         Get-ChapterAnimatedStatus, Test-AvifAnimated, Complete-AnimatedDispatchJob,
         Invoke-LooseAnimatedConversionPipeline (AnimatedConversionPipeline.ps1) -
@@ -235,15 +232,14 @@
         builds its own -ChapterProvider closures instead, same reasoning
         modes 2/3 already documented on their own copies of this same
         decision).
-      - Get-*SharedFunctionNames (2026-08-29, one per group above) are
+      - Get-*SharedFunctionNames (one per group above) are
         each module's own single source of truth for what a caller needs
         in -SharedFunctionNames to call into it from a runspace worker -
         $engineWorkerSharedFunctionNames below concatenates all of them
         instead of hand-typing every individual name, so a future new
         helper anywhere in this dependency chain only needs its own
         group's getter updated, not every caller across this codebase
-        (the exact bug pattern that bit this project four times in one
-        session - see CHANGELOG.md 2026-08-29). Deliberately does NOT
+        (see CHANGELOG.md for the real bug pattern this closes). Deliberately does NOT
         cover Write-GatedConsoleMessage - see
         Get-ImageConversionSharedFunctionNames's own docstring for why.
       - Compress-FolderToZip (ZipCreation.ps1), Test-ZipArchive
@@ -278,12 +274,12 @@
         of Invoke-Mode doesn't override -ZipFoldersHandler; not dot-
         sourced by this module's own harness, see above
       - Invoke-LooseFolderZip (ZipPipeline.ps1) - same caveat, for
-        -ZipFolderHandler (mode 8's real zip step, built 2026-08-28)
+        -ZipFolderHandler (mode 8's real zip step)
       - New-StatsTracker, Format-ElapsedTime, Get-SummaryLines,
         Write-SummaryReport (Summary.ps1) - the last three for
-        Invoke-MainLoop specifically (2026-08-28), needed unconditionally
+        Invoke-MainLoop specifically, needed unconditionally
       - Get-SelectedMode, Show-PostRunPrompt (Menu.ps1) - Invoke-MainLoop
-        only (2026-08-28), same caveat as the Invoke-Mode handlers above:
+        only, same caveat as the Invoke-Mode handlers above:
         only matters for a real caller that doesn't override
         -GetModeHandler/-PostRunPromptHandler
     Same dot-source ordering rule as ZipPipeline.ps1:
@@ -299,7 +295,7 @@
 #>
 
 # ==============================================================================
-#  DISPATCH-REDESIGN STEP 4 (2026-09-09) - see Docs\dispatch-redesign-design.md
+#  DISPATCH-REDESIGN STEP 4 - see Docs\dispatch-redesign-design.md
 #  for the full design. Full Pipeline now runs two INDEPENDENT
 #  Invoke-ChapterDispatch engines concurrently (one per file type), each
 #  inside its own Invoke-ZipParallelProcessing worker runspace, sharing one
@@ -414,9 +410,8 @@ function Get-OrCreateFullPipelineSeriesBundle {
         [Parameter(Mandatory)]
         [System.IO.DirectoryInfo]$Series,
         [string]$MagickExe,
-        # NOT [Parameter(Mandatory)] on any of these three (2026-09-09,
-        # real bug caught by this module's own harness - Scenario S) -
-        # PowerShell rejects an EMPTY array passed to a Mandatory
+        # NOT [Parameter(Mandatory)] on any of these three - see this
+        # module's own harness Scenario S - PowerShell rejects an EMPTY array passed to a Mandatory
         # array-typed parameter outright ("Cannot bind argument... because
         # it is an empty array"), even though an empty list is a
         # perfectly legitimate, real value here (Scenario S deliberately
@@ -457,9 +452,7 @@ function Get-OrCreateFullPipelineSeriesBundle {
         #      can look "stale" purely by basename match (see
         #      ImageConversionPipeline.ps1's own known gap), and must not
         #      be deleted before classification says it's safe to.
-        #   2. Performance/responsiveness (Scenario Z4, and the real
-        #      2026-09-03 fix this migration's first draft accidentally
-        #      undid): classifying every chapter's avifs in ONE pass here,
+        #   2. Performance/responsiveness (Scenario Z4): classifying every chapter's avifs in ONE pass here,
         #      before this factory returns, would mean a huge series (the
         #      exact "100+ chapters, a few hundred avifs" case that fix was
         #      written for) blocks EVERY chapter's dispatch on classifying
@@ -521,9 +514,7 @@ function Get-OrCreateFullPipelineSeriesBundle {
             })
             Write-Log ("Series '" + $Series.Name + "': '" + $extraDir.Name + "' has unconverted content but wasn't found by chapter discovery (e.g. a stray .zip sitting alongside it, or files outside a normal chapter folder) - converting it anyway, but NOT treating it as zippable.") -Level Warn
         }
-        # A directory holding ONLY a stale leftover (2026-09-03 fix,
-        # ported from the old single-threaded code - see this module's
-        # own header/CHANGELOG.md history) - excluded from
+        # A directory holding ONLY a stale leftover is excluded from
         # $extraDirPaths above (neither NeedsConversion nor animated), so
         # it would otherwise never reach the per-chapter stale-cleanup
         # loop below at all. No "converting it anyway" Warn for this case
@@ -569,9 +560,9 @@ function Get-OrCreateFullPipelineChapterClassification {
         its own per-series factory) so a huge series' worth of chapters
         don't all have to be classified before the FIRST of them can
         dispatch - see Get-OrCreateFullPipelineSeriesBundle's own comment,
-        right above where this used to run inline, for the real
-        2026-09-03 regression this split fixes (caught by this module's
-        own harness, Scenario Z4, before this migration ever shipped).
+        right above where this used to run inline, for the regression
+        this split fixes (caught by this module's
+        own harness, Scenario Z4).
     .OUTPUTS
         @{ Images = List[FileInfo]; AnimatedFiles = List[FileInfo] } -
         both already filtered to whichever engine actually owns each file;
@@ -632,7 +623,7 @@ function Get-OrCreateFullPipelineChapterClassification {
                 # pulling OUT so the stale cleanup below doesn't delete a
                 # file the animated engine (Animated) or neither engine
                 # (Failed, ownership unresolved) should be touching.
-                # Plain foreach, not Where-Object (2026-09-10) - Where-Object
+                # Plain foreach, not Where-Object - Where-Object
                 # is ALSO a real hang risk under the same runspace-race bug
                 # LeafDirectoryDiscovery.ps1's Get-FilesRecursiveSafe/
                 # Get-ZippableLeafDirs/Test-ZippableLeafDirCandidate were
@@ -660,9 +651,8 @@ function Get-OrCreateFullPipelineChapterClassification {
             }
         }
 
-        # Re-checked here, not just inside the classification loop above
-        # (2026-09-04 fix, real bug, ported from the old single-threaded
-        # code - see CHANGELOG.md's matching history) - an abort raised
+        # Re-checked here, not just inside the classification loop above -
+        # an abort raised
         # mid-classification must also stop THIS chapter's own stale-
         # source deletion from running at all, not just stop classifying
         # further contested files.
