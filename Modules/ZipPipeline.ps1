@@ -1,150 +1,9 @@
-<#
-.SYNOPSIS
-    ZipPipeline - all zip-domain orchestration that isn't the parallel-
-    dispatch engine itself: mode 3 (zip-only) end to end, and mode 8's
-    per-folder zip step.
-
-.DESCRIPTION
-    Pure definitions only - no top-level side effects (assigning the
-    $script:zipOnlyWorker scriptblock literal is inert, same category as
-    AbortPipeline.ps1's $script:abortCancellationSources list init) -
-    safe to dot-source more than once or alongside other modules.
-
-    Per the reference extraction's ARCHITECTURE decision: any zip logic
-    lives here, not scattered across whichever mode happens to need it.
-    Covers PART 1 (mode 3, zip-only pipeline) and PART 2 (mode 8's
-    per-folder zip step, which runs right after ImageConversionPipeline
-    converts each batch - see that module's own PART 2 for the orchestration
-    this was pulled out of). PART 2 was built against an earlier menu
-    design where this was called "mode 2" - the menu was renumbered
-    (Menu.ps1) before PART 2 got wired up for real, so every "mode 2"
-    reference below actually means what's now mode 8 ("Image Conversion +
-    Zip") - see Controller.ps1's Invoke-Mode, the real -ZipFolderHandler
-    caller.
-
-    FORWARD REFERENCES (not defined in this module - callers must
-    dot-source the owning module(s) first):
-      - Write-Log, Get-LoggingSharedFunctionNames (Logging.ps1)
-      - Move-ToRecycleBin, Remove-ItemPermanently, Remove-Source,
-        Get-FileDeletionSharedFunctionNames (FileDeletion.ps1)
-      - Compress-FolderToZip, Get-ZipCreationSharedFunctionNames (ZipCreation.ps1)
-      - Test-ZipArchive, Get-ZipValidationSharedFunctionNames (ZipValidation.ps1)
-      - Get-*SharedFunctionNames are each module's own single
-        source of truth for what a caller needs in -SharedFunctionNames -
-        see Controller.ps1's own header for the full reasoning.
-      - New-ZippableLeafDirProvider (LeafDirectoryDiscovery.ps1) -
-        incremental leaf discovery, not the full-scan Get-ZippableLeafDirs
-        (see "INCREMENTAL SCANNING" below)
-      - Invoke-ZipParallelProcessing (ZipParallelProcessing.ps1) - mode 3
-        is ZPP's one current caller; this is where that wiring lives.
-      - Register-AbortCancellationSource, Unregister-AbortCancellationSource
-        (AbortPipeline.ps1) - needed now that ZPP is on
-        AbortPipeline.ps1's registry (see "ABORT WIRING NOTE" below);
-        ZPP itself also forward-references AbortPipeline.ps1/
-        Logging.ps1 directly, so both must be dot-sourced before ZPP.
-    Modules\_Harness\ZipPipeline.Harness.ps1 dot-sources all of the above
-    real, already-built modules (this is the first module built with
-    enough real dependencies available to test against the genuine
-    things instead of stubs for most of them - only Write-Log is stubbed,
-    so log output can be inspected by the harness).
-
-    IMPORTANT ordering note for any caller: dot-source Logging.ps1 (and
-    FileDeletion.ps1) BEFORE ZipParallelProcessing.ps1. ZipParallelProcessing.ps1
-    has its own inline (and currently stale - see CLAUDE.md "Known gaps")
-    copies of Write-Log/Move-ToRecycleBin/etc. Invoke-ZipParallelProcessing's
-    -SharedFunctionNames mechanism captures whichever definition is
-    CURRENTLY active in the caller's scope at call time - dot-sourcing
-    Logging.ps1/FileDeletion.ps1 after ZipParallelProcessing.ps1 (or not
-    at all) means ZPP's own stale inline copies would silently win instead.
-
-    -SharedFunctionNames must include 'Invoke-MutexGuardedWrite', which
-    Write-Log itself calls internally for every Warn/Error-level line
-    (and every line at all in full-logging mode). Without it propagated
-    into the worker runspace's InitialSessionState, any Write-Log call at
-    Warn/Error level from inside $script:zipOnlyWorker (e.g. "FAILED to
-    zip '...'") crashes the entire worker with an unhandled "term not
-    recognized" error - the job's real result never gets returned at
-    all, silently miscounted as neither a success nor a failure. Any
-    caller (including a harness) must also forward real
-    -LogFile/-LogErrorFile/-LogWarnFile paths rather than leaving them at
-    their empty-string default - PS 5.1 binds an omitted [string]
-    parameter to "", never $null (see Docs/lessons-learned.md), and
-    Write-Log's Out-File throws on an empty -FilePath the first time an
-    Error/Warn line is attempted from a worker.
-
-    ABORT WIRING NOTE: now that ZipParallelProcessing.ps1
-    has migrated onto AbortPipeline.ps1 (see that module's own header),
-    Invoke-ZipOnlyPipeline registers $script:zipOnlyCts with
-    Register-AbortCancellationSource right after creating it, and
-    unregisters it in the same finally block that disposes it - matching
-    ImageConversionPipeline.ps1's own $looseCts pattern exactly. It still
-    keeps the name $script:zipOnlyCts (harmless, just a local variable
-    name at this point, not a magic name anything else depends on) rather
-    than renaming it, since nothing about the registry cares what the
-    caller calls its own CTS.
-
-    INCREMENTAL SCANNING: Invoke-ZipOnlyPipeline dispatches
-    via LeafDirectoryDiscovery.ps1's New-ZippableLeafDirProvider +
-    Invoke-ZipParallelProcessing's -NextJobProvider, not
-    Get-ZippableLeafDirs's full-tree scan + -JobParams. The whole point
-    of -NextJobProvider (built for exactly this, see CHANGELOG.md v16.1,
-    never wired up anywhere until now) is that dispatch can begin on the
-    first qualifying folder while the rest of a large library is still
-    being walked - scanning the ENTIRE tree before doing any work at all
-    is what actually caused the "hangs while it searches every folder at
-    once" symptom on large libraries. One real consequence: this
-    function's own CandidateCount is no longer known before dispatch
-    starts, so the old "found N folder(s), running..." log line before
-    dispatch is gone - the total only exists once the whole run finishes.
-
-    CLEAN CONSOLE OUTPUT: mode 3 does NOT switch onto
-    New-SeriesProvider/Get-SeriesChapters the way ImageConversionPipeline.ps1
-    did - deliberately. Those two enforce the FIXED Library > Series >
-    Chapter > Images layout (series exactly one level below the root,
-    chapters found by a recursive scan bounded to one series). Mode 3's
-    OWN existing, already-tested behavior (ZipPipeline.Harness.ps1
-    Scenario A) has leaf directories sitting DIRECTLY under -Path with no
-    series folder at all - "zip-only handles arbitrary already-ready
-    content" per this function's own docstring, not necessarily a manga
-    library. Porting the strict two-tier model here would have silently
-    broken that. Instead: New-ZippableLeafDirProvider (unchanged,
-    arbitrary depth, still the real incremental job source) drives
-    dispatch exactly as before; for CCR display purposes only, each
-    discovered leaf's "series" is derived as its own top-level ancestor
-    directory name relative to -Path (falls back to the leaf's own name
-    when the leaf sits directly under -Path - a degenerate one-chapter
-    "series"). The first time a given top-level ancestor is seen, ONE
-    bounded Get-ZippableLeafDirs scan of just that top-level folder
-    (same guards as the incremental scan, via the same
-    Test-ZippableLeafDirCandidate helper) gets a real chapter count for
-    Start-SeriesProgress - bounded per series, not a whole-library
-    up-front scan, matching the exact principle that made the two-tier
-    approach safe elsewhere without requiring its strict layout
-    assumption here. CCR calls are gated on
-    $script:CleanConsoleOutputEnabled through small ordinary (non-
-    closure) wrapper functions below - reading that flag, or calling any
-    CCR function, directly inside a .GetNewClosure()'d scriptblock would
-    reproduce the exact frozen-scope bug ImageConversionPipeline.ps1's
-    Opus review caught (see CHANGELOG.md) - $script: inside a closure
-    resolves to that closure's own disconnected dynamic module, not
-    Logging.ps1's real one.
-
-.NOTES
-    Extracted from Conversion Script Main.ps1 - see
-    Modules\_Reference\ZipPipeline.reference.ps1 for the verbatim source
-    this was built from, with original line numbers.
-#>
+# See Docs/module-descriptions.md for this module's full description.
 
 # ==============================================================================
 #  PART 1 - mode 3 (zip-only pipeline)
 # ==============================================================================
 
-# ---- CCR helpers: plain functions, deliberately NOT closures - see this
-#      module's header ("CLEAN CONSOLE OUTPUT") for why $script:
-#      CleanConsoleOutputEnabled (owned by Logging.ps1) must only ever be
-#      read from an ordinary function, never inline inside a
-#      .GetNewClosure()'d scriptblock. Shared by both mode 3's dispatch
-#      loop and PART 2's Invoke-LooseFolderZip. ----
 function Start-CcrSeriesProgressIfEnabled {
     param([string]$SeriesName, [int]$TotalChapters)
     if ($script:CleanConsoleOutputEnabled) { Start-SeriesProgress -SeriesName $SeriesName -TotalChapters $TotalChapters }
@@ -161,52 +20,19 @@ function Complete-CcrAllSeriesProgressIfEnabled {
     if ($script:CleanConsoleOutputEnabled) { $null = Complete-AllActiveSeriesProgress }
 }
 function Test-CcrEnabledForZipOnly {
-    <#
-    .SYNOPSIS
-        Ordinary function wrapper around $script:CleanConsoleOutputEnabled -
-        same reason the four IfEnabled wrappers above exist: mode 3's own
-        -NextJobProvider closure
-        (.GetNewClosure()'d, see this module's header) needs to gate its
-        per-series chapter-count side-scan on this flag too, and an
-        inline $script: read inside that closure is exactly the pattern
-        this module's header already calls out as unsafe - an ordinary
-        function call is not.
-    #>
     return [bool]$script:CleanConsoleOutputEnabled
 }
 
 function Get-ZipChapterProgressStatus {
-    <#
-    .SYNOPSIS
-        Maps $script:zipOnlyWorker's own result hashtable to CCR's
-        Status/Detail pair - same plain-language convention
-        ImageConversionPipeline.ps1's Get-ChapterProgressStatus already
-        established (see CLAUDE.md's "-Detail string shape" note), not a
-        different shape invented here.
-    .OUTPUTS
-        Two values: Status ("Success"/"Warning"/"Error"), Detail (string
-        or $null for a clean Success).
-    #>
     param(
         [hashtable]$ZipResult
     )
-    # Checked before Failed/FolderDeleteFailed since a cancelled-before-start
-    # job's result is otherwise indistinguishable from a real clean success
-    # (Success=0/Failed=0/FolderDeleteFailed=0 all fall through to Success).
-    # Without this check, a Ctrl+C mid-run would leave an already-queued
-    # worker's "nothing attempted" result reported as a clean Success in
-    # Clean Console Output instead of flagging that the folder was never
-    # zipped.
     if ($ZipResult.Cancelled -eq 1) { return "Warning", "cancelled before starting - not zipped" }
     if ($ZipResult.Failed -eq 1) { return "Error", "zip failed" }
     if ($ZipResult.FolderDeleteFailed -eq 1) { return "Warning", "zipped OK, but source folder delete failed" }
     return "Success", $null
 }
 
-# ---- Worker scriptblock, dispatched once per qualifying leaf folder via
-#      Invoke-ZipParallelProcessing. Must declare CancelToken/LogMutex/
-#      ConsoleQueue per ZPP's contract - see ZipParallelProcessing.ps1's
-#      own docstring. ----
 $script:zipOnlyWorker = {
     param(
         [string]$FolderPath,
@@ -227,10 +53,6 @@ $script:zipOnlyWorker = {
     Add-Type -AssemblyName "Microsoft.VisualBasic"
     Add-Type -AssemblyName "System.IO.Compression.FileSystem"
 
-    # Bootstrap: this runspace has its own independent script scope, so
-    # the shared functions (registered via -SharedFunctionNames) need
-    # these same-named script-scope variables set here, matching the
-    # established pattern (see ZipParallelProcessing.ps1's own docstring).
     $script:logMutex           = $LogMutex
     $script:workerConsoleQueue = $ConsoleQueue
     $script:FullLogging        = $DoFullLogging
@@ -238,20 +60,8 @@ $script:zipOnlyWorker = {
     $script:logErrorFile       = $LogErrorFile
     $script:logWarnFile        = $LogWarnFile
     $script:PermanentDelete    = $DoPermanentDelete
-    # This flag needs setting here too, matching Controller.ps1's chapter
-    # worker's own bootstrap. Left unset, it's $null in this runspace's
-    # independent script scope, so Write-Log's CCO gate (Logging.ps1)
-    # never fires here - every log line from this worker would be
-    # enqueued and printed straight into CCR's live-redraw region instead
-    # of being suppressed.
     $script:CleanConsoleOutputEnabled = $CleanConsoleOutputEnabled
 
-    # SeriesName is pass-through only - this runspace never touches CCR
-    # (every CCR call is main-thread-only, see this module's header) - it
-    # rides along in the result purely so the main thread's -ResultHandler
-    # can call Complete-ChapterProgress with the right SeriesName/
-    # ChapterName pair without having to keep its own FolderPath->Series
-    # lookup in sync with what actually got dispatched.
     $folderName = [System.IO.Path]::GetFileName($FolderPath)
     $result = @{
         FolderName         = $folderName
@@ -270,19 +80,8 @@ $script:zipOnlyWorker = {
     }
 
     try {
-        # Orphaned "_tmp_*" scratch file sweep - without it, a chapter
-        # left with a leftover _tmp_iccstrip.png/etc. from an earlier
-        # force-killed conversion run would get that debris permanently
-        # archived into the .cbz as a junk page, with the source folder
-        # deleted right after. Same literal pattern as
-        # Invoke-LooseFolderZip's own sweep in this file (kept inline, not
-        # calling ImageConversionPipeline.ps1's Test-OrphanedScratchFileName -
-        # this module's harness deliberately doesn't dot-source that module;
-        # see Invoke-LooseFolderZip's own comment for why) - keep in sync if
-        # either ever changes. Mode 3 has no post-conversion "unconverted
-        # source remains" guard by design (it never converts anything - see
-        # CLAUDE.md's Known limitations), so this sweep is the only
-        # protection this path has against archiving stale scratch debris.
+        # Same orphaned-scratch-file regex trio as Invoke-LooseFolderZip's
+        # own sweep below in this file - keep both in sync if either changes.
         $orphanedScratchFiles = @(Get-ChildItem -LiteralPath $FolderPath -Recurse -File -ErrorAction SilentlyContinue |
             Where-Object {
                 $_.Name -imatch '_tmp_iccstrip(-\d+)?\.png$' -or
@@ -308,9 +107,6 @@ $script:zipOnlyWorker = {
 
         if ($DeleteFolders) {
             try {
-                # Return value checked, not discarded - same reasoning as
-                # UnwantedImage.ps1's Invoke-UnwantedImageScan and
-                # Controller.ps1's Invoke-FullPipelineChapter.
                 $removed = Remove-Source -ItemPath $FolderPath
                 if ($removed) {
                     $deleteDesc = if ($DoPermanentDelete) { "permanently" } else { "Recycle Bin" }
@@ -327,7 +123,6 @@ $script:zipOnlyWorker = {
     } catch {
         Write-Log ("FAILED to zip '" + $folderName + "': " + $_) -Level Error
         $result.Failed = 1
-        # Remove the broken partial zip if it was created
         try {
             if (Test-Path -LiteralPath $ZipOutPath) { [System.IO.File]::Delete($ZipOutPath) }
         } catch { }
@@ -337,32 +132,6 @@ $script:zipOnlyWorker = {
 }
 
 function Invoke-ZipOnlyPipeline {
-    <#
-    .SYNOPSIS
-        Mode 4 end to end: discovers zippable leaf folders under $Path,
-        zips each one in parallel (via Invoke-ZipParallelProcessing), and
-        optionally deletes each source folder after a successful zip.
-    .PARAMETER QualifyingExtensions
-        Defaults to this module's own broad list (images, video,
-        document/archive formats) since zip-only handles arbitrary
-        already-ready content, not just images awaiting conversion.
-    .OUTPUTS
-        @{ CandidateCount; ZippedSuccess; ZippedFail; FolderDeletedSuccess;
-           FolderDeletedFail; ForceStoppedCount } - a plain result object,
-        not a mutation of an external $stats hashtable (unlike the
-        original main-script code this was extracted from) - the caller
-        folds this into whatever stats shape it uses.
-    .NOTES
-        Discovers and dispatches INCREMENTALLY (LeafDirectoryDiscovery.ps1's
-        New-ZippableLeafDirProvider + Invoke-ZipParallelProcessing's
-        -NextJobProvider), not via a full up-front scan - work starts on
-        the first qualifying folder while the rest of a large library is
-        still being walked. CandidateCount therefore isn't known until
-        the whole run finishes (it's a running count of what was actually
-        found and dispatched, not a pre-scan total) - the "N folder(s)
-        found, running..." log line this function used to print before
-        dispatch started no longer applies for the same reason.
-    #>
     param(
         [Parameter(Mandatory)]
         [string]$Path,
@@ -393,58 +162,19 @@ function Invoke-ZipOnlyPipeline {
         Aborted              = $false
     }
 
-    # No outer catch here, matching every other real pipeline entry
-    # point (each only has try/finally at this level, letting a genuine
-    # exception propagate to the caller). Controller.ps1's Invoke-Mode
-    # owns the shared top-level catch - swallowing an exception here
-    # would make that catch unreachable for this pipeline. Expected
-    # per-item failures (a single zip failing) aren't affected either
-    # way - those are already fully handled inside $script:zipOnlyWorker's
-    # own try/catch, folded into $r.Failed, never thrown this far.
     try {
         Write-Log ("Zip-only: scanning and zipping leaf directories incrementally (up to " + $MaxParallel + " in parallel)...")
 
-        # Incremental discovery (LeafDirectoryDiscovery.ps1's
-        # New-ZippableLeafDirProvider), not Get-ZippableLeafDirs's full
-        # up-front scan - lets dispatch start on the first qualifying
-        # folder while the rest of a large library is still being walked,
-        # instead of the whole tree needing to finish scanning first (see
-        # CLAUDE.md - this was the actual cause of the "hangs while it
-        # searches every folder at once" symptom on large libraries).
-        # UNCHANGED by Clean Console Output - see this module's header for
-        # why the strict two-tier series/chapter model isn't used here.
         $leafProvider = New-ZippableLeafDirProvider -ScanPath $Path -QualifyingExtensions $QualifyingExtensions -ForceRezip $false
 
-        # Tracks which top-level ancestor directories (this function's own
-        # notion of "series" for CCR display) have already had their
-        # bounded Get-ZippableLeafDirs side-scan run - see header.
         $zoSeenSeriesNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         $trimmedPath = $Path.TrimEnd([System.IO.Path]::DirectorySeparatorChar)
 
-        # Translates the leaf provider's @{ Dir; ZipOut } shape into
-        # $script:zipOnlyWorker's own bound parameter names, and counts
-        # how many candidates were actually found - with incremental
-        # discovery the total isn't known upfront the way it was with the
-        # old full-scan-then-dispatch approach, so this is the only place
-        # left to count it. Also derives/emits this leaf's CCR series and
-        # chapter events - both helper calls are ordinary functions (not
-        # inline $script: reads), safe from inside this .GetNewClosure()'d
-        # scriptblock - see header.
         $zoJobProvider = {
             $next = & $leafProvider
             if ($null -eq $next) { return $null }
             $totals.CandidateCount++
 
-            # StartsWith check before the Substring matters here -
-            # Substring-by-length doesn't verify the prefix actually
-            # matches, it just chops off N characters regardless. A
-            # prefix mismatch (a symlink resolving elsewhere, UNC vs.
-            # mapped-drive normalization, any case where
-            # $next.Dir.FullName genuinely doesn't start with
-            # $trimmedPath) would otherwise silently mis-slice into a
-            # bogus "series" name instead of failing loudly or degrading
-            # sanely. CCR display only - falling back to the leaf's own
-            # folder name has no effect on the actual zip/dispatch below.
             $dirFullName = $next.Dir.FullName
             if ($dirFullName.StartsWith($trimmedPath, [System.StringComparison]::OrdinalIgnoreCase)) {
                 $relativePath = $dirFullName.Substring($trimmedPath.Length).TrimStart([System.IO.Path]::DirectorySeparatorChar)
@@ -455,17 +185,6 @@ function Invoke-ZipOnlyPipeline {
                 $seriesName = $next.Dir.Name
             }
 
-            # Gated on Test-CcrEnabledForZipOnly - this whole block
-            # exists only to compute -TotalChapters for
-            # Start-CcrSeriesProgressIfEnabled, which itself no-ops when
-            # Clean Console Output is off (the default). Without this
-            # gate, the bounded Get-ZippableLeafDirs side-scan below would
-            # run unconditionally on every default-settings mode-3 run -
-            # doubled directory I/O (a full second recursive walk of every
-            # series folder, synchronously, right before that series'
-            # first job dispatches) and a duplicated Test-
-            # ZippableLeafDirCandidate skip-reason Warn in the log for
-            # every skip, for a value nothing ever consumed.
             if ((Test-CcrEnabledForZipOnly) -and -not $zoSeenSeriesNames.Contains($seriesName)) {
                 $null = $zoSeenSeriesNames.Add($seriesName)
                 $seriesRoot  = Join-Path $trimmedPath $seriesName
@@ -492,11 +211,6 @@ function Invoke-ZipOnlyPipeline {
             }
         }.GetNewClosure()
 
-        # Registered for the whole mode-3 call (one phase), not per-job -
-        # see this module's own header ("ABORT WIRING NOTE") and matches
-        # Register-AbortCancellationSource's own "call once per pipeline
-        # phase" contract, same pattern ImageConversionPipeline.ps1 uses
-        # for its own $looseCts.
         $script:zipOnlyCts = [System.Threading.CancellationTokenSource]::new()
         Register-AbortCancellationSource -Cts $script:zipOnlyCts
         try {
@@ -516,12 +230,6 @@ function Invoke-ZipOnlyPipeline {
                 -MaxParallel $MaxParallel -Cts $script:zipOnlyCts -ResultHandler $zoResultHandler
 
             $totals.ForceStoppedCount = $zoOutcome.ForceStoppedCount
-            # Read before the CTS is disposed in the finally block below -
-            # Controller.ps1's Invoke-Mode maps this onto Summary.ps1's
-            # Aborted/ForceKilledCount fields the same way
-            # Invoke-FullPipeline/Invoke-LooseImageConversionPipeline do,
-            # so mode 3's own summary can say "Processing ABORTED" too
-            # instead of always "Processing complete."
             $totals.Aborted = $script:zipOnlyCts.Token.IsCancellationRequested
         } finally {
             Unregister-AbortCancellationSource -Cts $script:zipOnlyCts
@@ -540,9 +248,6 @@ function Invoke-ZipOnlyPipeline {
         }
         Write-Log $zoCompleteMsg -Level Summary
     } finally {
-        # Safety net for the abort/shutdown path, same as
-        # ImageConversionPipeline.ps1's own finally block - force-resolves
-        # any series left mid-flight. A no-op when nothing is still active.
         Complete-CcrAllSeriesProgressIfEnabled
     }
 
@@ -554,40 +259,6 @@ function Invoke-ZipOnlyPipeline {
 # ==============================================================================
 
 function Invoke-LooseFolderZip {
-    <#
-    .SYNOPSIS
-        Zips one already-converted folder (mode 2's per-folder step,
-        called right after ImageConversionPipeline finishes converting
-        that folder), then deletes the source folder on a successful zip.
-        Guards against zipping a folder that still has unconverted source
-        images - partial-failure protection, never locks a partial result
-        into a ZIP.
-    .PARAMETER LooseImageExtensions
-        Extensions checked for "still unconverted" - typically the
-        original source image extensions (not .jxl).
-    .PARAMETER SeriesName
-    .PARAMETER ChapterName
-        OPTIONAL - only pass both when THIS call is meant to be the
-        chapter's one and only CCR transition (Start-ChapterProgress here,
-        Complete-ChapterProgress on every exit path including Skipped).
-        This function does NOT call Start-SeriesProgress itself - it has
-        no way to know that series' real total chapter count, so the
-        CALLER must have already started that series (exactly like
-        ImageConversionPipeline.ps1 already does when it walks a series'
-        chapters) before passing -SeriesName here, or CCR throws ("not an
-        active series"). Mode 8's real caller (Controller.ps1's Invoke-Mode)
-        does NOT pass -SeriesName/-ChapterName here - it merges this
-        function's outcome into ImageConversionPipeline.ps1's own single
-        Complete-ChapterProgress call instead (see that module's
-        -ZipStepCallback), so this parameter pair stays unused by the one
-        real caller today. Left optional and self-contained for a future
-        caller that might want a second, standalone CCR transition
-        instead.
-    .OUTPUTS
-        @{ Status = "Success"|"Fail"|"Skipped"; ZipSize; EntryCount;
-           FolderDeleted; FolderDeleteFailed } - a plain result object,
-        the caller folds this into whatever stats shape it uses.
-    #>
     param(
         [Parameter(Mandatory)]
         [string]$FolderPath,
@@ -609,48 +280,16 @@ function Invoke-LooseFolderZip {
     }
 
     $folderName = Split-Path -Path $FolderPath -Leaf
-    # $PSBoundParameters.ContainsKey(...), not "$null -ne $SeriesName" - an
-    # omitted [string] parameter binds to "", never $null (this project's
-    # own documented lessons-learned trap #5), so the $null-based check was
-    # $true for EVERY caller, including the one real caller (Controller.ps1)
-    # that deliberately omits both names to avoid a second CCR transition -
-    # crashing the whole run the first time it zipped a chapter with Clean
-    # Console Output on, since Start-CcrChapterProgressIfEnabled then got
-    # called with -SeriesName "".
     $reportCcr  = ($PSBoundParameters.ContainsKey('SeriesName') -and $PSBoundParameters.ContainsKey('ChapterName'))
     if ($reportCcr) { Start-CcrChapterProgressIfEnabled -SeriesName $SeriesName -ChapterName $ChapterName }
 
     try {
-        # Orphaned "_tmp_*" scratch files are actually DELETED here, not
-        # just excluded from the guard below - a plain exclusion would
-        # let the debris survive to get zipped: this function's own
-        # Compress-FolderToZip call archives the whole folder, and a
-        # successful zip deletes the source folder right after, so an
-        # excluded-but-not-deleted scratch file would end up permanently
-        # embedded in the .cbz as a junk page with no record anywhere it
-        # happened. These are job-generated intermediates - always safe
-        # to delete permanently regardless of $PermanentDelete, per this
-        # project's own established deletion semantics (only
-        # ORIGINAL/source files respect that toggle) - the owning module
-        # (ImageConversionPipeline.ps1's Invoke-IccStripRetryOrFail, its
-        # WebP/AVIF pre-conversion detour, and
-        # AnimatedConversionPipeline.ps1's -DoAnimatedOverwrite staging)
-        # already has its own cleanup for every real leak path; this is the
-        # boundary-level backstop for when that cleanup couldn't run (a
-        # force-killed process, a locked file swallowed by a bare
-        # `catch {}`).
+        # Same orphaned-scratch-file regex trio as $script:zipOnlyWorker's
+        # own sweep above in this file - keep both in sync if either changes.
         # Kept as this module's own literal rather than calling
-        # ImageConversionPipeline.ps1's Test-OrphanedScratchFileName (the
-        # single source of truth for this pattern trio, also used by
-        # Controller.ps1) - this
-        # module's own standalone harness deliberately does NOT dot-source
-        # ImageConversionPipeline.ps1 (same "verified in isolation"
-        # precedent AnimatedConversionPipeline.ps1's own
-        # -FolderQualifyingExtensions default already follows, see
-        # ImageConversionPipeline.ps1's Get-LooseImageExtensions
-        # docstring), so a real forward-reference here would break that.
-        # Keep this literal in sync with Test-OrphanedScratchFileName's own
-        # pattern if either ever changes.
+        # ImageConversionPipeline.ps1's Test-OrphanedScratchFileName since
+        # this module's own harness deliberately doesn't dot-source that
+        # module - see Docs/function-notes.md.
         $orphanedScratchFiles = @(Get-ChildItem -LiteralPath $FolderPath -Recurse -File -ErrorAction SilentlyContinue |
             Where-Object {
                 $_.Name -imatch '_tmp_iccstrip(-\d+)?\.png$' -or
@@ -658,14 +297,6 @@ function Invoke-LooseFolderZip {
                 $_.Name -imatch '_tmp_overwrite\.webp$'
             })
         foreach ($orphan in $orphanedScratchFiles) {
-            # A failed delete (locked file, AV hold) is logged explicitly
-            # rather than swallowed silently, per this project's own
-            # review checklist ("no silent catches without a reason") -
-            # a bare "Deleting..." line would assert success regardless
-            # of outcome, and a failure here means the orphan survives
-            # into the `$remainingSrcImages` check right below, which
-            # blocks the zip with its own separate Warn - visible, but
-            # this makes the ROOT cause visible too, not just the symptom.
             try {
                 [System.IO.File]::Delete($orphan.FullName)
                 Write-Log ("Deleted orphaned scratch file (its owning cleanup could not run earlier): '" + $orphan.FullName + "'") -Level Warn
@@ -697,9 +328,6 @@ function Invoke-LooseFolderZip {
             $result.EntryCount = $verify.EntryCount
 
             try {
-                # Return value checked, not discarded - same reasoning as
-                # UnwantedImage.ps1's Invoke-UnwantedImageScan and
-                # Controller.ps1's Invoke-FullPipelineChapter.
                 $removed = Remove-Source -ItemPath $FolderPath
                 if ($removed) {
                     $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
@@ -715,17 +343,6 @@ function Invoke-LooseFolderZip {
         } catch {
             Write-Log ("FAILED to zip folder '" + $FolderPath + "': " + $_) -Level Error
             $result.Status = "Fail"
-            # Remove a broken/partial zip left on disk - Compress-FolderToZip
-            # cleans up after itself on its own throw, but Test-ZipArchive
-            # runs after it, on an already-written file. A verification
-            # failure (e.g. "contains no .jxl files", "0 entries") would
-            # otherwise leave a real, complete-looking zip on disk with
-            # nothing to delete it, and Test-ZippableLeafDirCandidate's
-            # own staleness guard would then see that fresh zip, newer
-            # than every file in the folder, and skip the chapter forever
-            # on every later run. Invoke-ZipOnlyPipeline's own worker
-            # (above in this file) already had this cleanup; this call
-            # path needs it too.
             try {
                 if (Test-Path -LiteralPath $ZipOut) { [System.IO.File]::Delete($ZipOut) }
             } catch { }
