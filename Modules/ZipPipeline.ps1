@@ -29,7 +29,7 @@
         Get-FileDeletionSharedFunctionNames (FileDeletion.ps1)
       - Compress-FolderToZip, Get-ZipCreationSharedFunctionNames (ZipCreation.ps1)
       - Test-ZipArchive, Get-ZipValidationSharedFunctionNames (ZipValidation.ps1)
-      - Get-*SharedFunctionNames (2026-08-29) are each module's own single
+      - Get-*SharedFunctionNames are each module's own single
         source of truth for what a caller needs in -SharedFunctionNames -
         see Controller.ps1's own header for the full reasoning.
       - New-ZippableLeafDirProvider (LeafDirectoryDiscovery.ps1) -
@@ -38,9 +38,9 @@
       - Invoke-ZipParallelProcessing (ZipParallelProcessing.ps1) - mode 3
         is ZPP's one current caller; this is where that wiring lives.
       - Register-AbortCancellationSource, Unregister-AbortCancellationSource
-        (AbortPipeline.ps1) - added 2026-08-27 once ZPP migrated onto
+        (AbortPipeline.ps1) - needed now that ZPP is on
         AbortPipeline.ps1's registry (see "ABORT WIRING NOTE" below);
-        ZPP itself also now forward-references AbortPipeline.ps1/
+        ZPP itself also forward-references AbortPipeline.ps1/
         Logging.ps1 directly, so both must be dot-sourced before ZPP.
     Modules\_Harness\ZipPipeline.Harness.ps1 dot-sources all of the above
     real, already-built modules (this is the first module built with
@@ -57,29 +57,22 @@
     Logging.ps1/FileDeletion.ps1 after ZipParallelProcessing.ps1 (or not
     at all) means ZPP's own stale inline copies would silently win instead.
 
-    REAL BUG FOUND AND FIXED (2026-08-27, while adding CCR test coverage
-    for a real zip failure - Scenario K): -SharedFunctionNames was missing
-    'Invoke-MutexGuardedWrite', which Write-Log itself calls internally
-    for every Warn/Error-level line (and every line at all in full-logging
-    mode). Since that helper wasn't propagated into the worker runspace's
-    InitialSessionState, ANY Write-Log call at Warn/Error level from
-    inside $script:zipOnlyWorker (e.g. "FAILED to zip '...'") crashed the
-    entire worker with an unhandled "term not recognized" error - the
-    job's real result was never returned at all, silently miscounted as
-    neither a success nor a failure. Fully latent until now: no harness
-    scenario had ever exercised a real zip failure from inside the
-    worker before Scenario K. A second, compounding gap the same fix
-    exposed: this harness's own Invoke-ZipOnlyPipeline calls never
-    forwarded -LogFile/-LogErrorFile/-LogWarnFile at all (defaulting to
-    empty strings - PS 5.1 binds an omitted [string] parameter to "",
-    never $null, see Docs/lessons-learned.md), so even with the shared-
-    function fix, Write-Log's Out-File would still throw on an empty
-    -FilePath the first time an Error/Warn line was ever attempted from a
-    worker. Fixed in the harness too (now forwards the real
-    $script:logFile/logErrorFile/logWarnFile paths Initialize-LogPaths
-    already set up, matching what any real caller must do).
+    -SharedFunctionNames must include 'Invoke-MutexGuardedWrite', which
+    Write-Log itself calls internally for every Warn/Error-level line
+    (and every line at all in full-logging mode). Without it propagated
+    into the worker runspace's InitialSessionState, any Write-Log call at
+    Warn/Error level from inside $script:zipOnlyWorker (e.g. "FAILED to
+    zip '...'") crashes the entire worker with an unhandled "term not
+    recognized" error - the job's real result never gets returned at
+    all, silently miscounted as neither a success nor a failure. Any
+    caller (including a harness) must also forward real
+    -LogFile/-LogErrorFile/-LogWarnFile paths rather than leaving them at
+    their empty-string default - PS 5.1 binds an omitted [string]
+    parameter to "", never $null (see Docs/lessons-learned.md), and
+    Write-Log's Out-File throws on an empty -FilePath the first time an
+    Error/Warn line is attempted from a worker.
 
-    ABORT WIRING NOTE (updated 2026-08-27): now that ZipParallelProcessing.ps1
+    ABORT WIRING NOTE: now that ZipParallelProcessing.ps1
     has migrated onto AbortPipeline.ps1 (see that module's own header),
     Invoke-ZipOnlyPipeline registers $script:zipOnlyCts with
     Register-AbortCancellationSource right after creating it, and
@@ -90,7 +83,7 @@
     than renaming it, since nothing about the registry cares what the
     caller calls its own CTS.
 
-    INCREMENTAL SCANNING (2026-08-17): Invoke-ZipOnlyPipeline dispatches
+    INCREMENTAL SCANNING: Invoke-ZipOnlyPipeline dispatches
     via LeafDirectoryDiscovery.ps1's New-ZippableLeafDirProvider +
     Invoke-ZipParallelProcessing's -NextJobProvider, not
     Get-ZippableLeafDirs's full-tree scan + -JobParams. The whole point
@@ -104,7 +97,7 @@
     starts, so the old "found N folder(s), running..." log line before
     dispatch is gone - the total only exists once the whole run finishes.
 
-    CLEAN CONSOLE OUTPUT (2026-08-27): mode 3 does NOT switch onto
+    CLEAN CONSOLE OUTPUT: mode 3 does NOT switch onto
     New-SeriesProvider/Get-SeriesChapters the way ImageConversionPipeline.ps1
     did - deliberately. Those two enforce the FIXED Library > Series >
     Chapter > Images layout (series exactly one level below the root,
@@ -170,10 +163,9 @@ function Complete-CcrAllSeriesProgressIfEnabled {
 function Test-CcrEnabledForZipOnly {
     <#
     .SYNOPSIS
-        Ordinary function wrapper around $script:CleanConsoleOutputEnabled
-        (2026-08-31 addition, caught by a same-day /code-review
-        full-codebase pass) - same reason the four IfEnabled wrappers
-        above exist: mode 3's own -NextJobProvider closure
+        Ordinary function wrapper around $script:CleanConsoleOutputEnabled -
+        same reason the four IfEnabled wrappers above exist: mode 3's own
+        -NextJobProvider closure
         (.GetNewClosure()'d, see this module's header) needs to gate its
         per-series chapter-count side-scan on this flag too, and an
         inline $script: read inside that closure is exactly the pattern
@@ -200,10 +192,11 @@ function Get-ZipChapterProgressStatus {
     )
     # Checked before Failed/FolderDeleteFailed since a cancelled-before-start
     # job's result is otherwise indistinguishable from a real clean success
-    # (Success=0/Failed=0/FolderDeleteFailed=0 all fall through to Success) -
-    # 2026-08-31 fix: a Ctrl+C mid-run left an already-queued worker's
-    # "nothing attempted" result reported as a clean Success in Clean
-    # Console Output instead of flagging that the folder was never zipped.
+    # (Success=0/Failed=0/FolderDeleteFailed=0 all fall through to Success).
+    # Without this check, a Ctrl+C mid-run would leave an already-queued
+    # worker's "nothing attempted" result reported as a clean Success in
+    # Clean Console Output instead of flagging that the folder was never
+    # zipped.
     if ($ZipResult.Cancelled -eq 1) { return "Warning", "cancelled before starting - not zipped" }
     if ($ZipResult.Failed -eq 1) { return "Error", "zip failed" }
     if ($ZipResult.FolderDeleteFailed -eq 1) { return "Warning", "zipped OK, but source folder delete failed" }
@@ -245,12 +238,12 @@ $script:zipOnlyWorker = {
     $script:logErrorFile       = $LogErrorFile
     $script:logWarnFile        = $LogWarnFile
     $script:PermanentDelete    = $DoPermanentDelete
-    # 2026-09-04 fix, real bug: this was the one worker bootstrap in the
-    # codebase that didn't set this flag (Controller.ps1's chapter worker
-    # does, at its own bootstrap). Left unset, it's $null in this runspace's
-    # independent script scope, so Write-Log's CCO gate (Logging.ps1) never
-    # fires here - every log line from this worker was enqueued and printed
-    # straight into CCR's live-redraw region instead of being suppressed.
+    # This flag needs setting here too, matching Controller.ps1's chapter
+    # worker's own bootstrap. Left unset, it's $null in this runspace's
+    # independent script scope, so Write-Log's CCO gate (Logging.ps1)
+    # never fires here - every log line from this worker would be
+    # enqueued and printed straight into CCR's live-redraw region instead
+    # of being suppressed.
     $script:CleanConsoleOutputEnabled = $CleanConsoleOutputEnabled
 
     # SeriesName is pass-through only - this runspace never touches CCR
@@ -277,12 +270,11 @@ $script:zipOnlyWorker = {
     }
 
     try {
-        # Orphaned "_tmp_*" scratch file sweep (2026-09-04 fix, real bug) -
-        # this worker was the one zip path in this file with no sweep at
-        # all: a chapter left with a leftover _tmp_iccstrip.png/etc. from an
-        # earlier force-killed conversion run got that debris permanently
+        # Orphaned "_tmp_*" scratch file sweep - without it, a chapter
+        # left with a leftover _tmp_iccstrip.png/etc. from an earlier
+        # force-killed conversion run would get that debris permanently
         # archived into the .cbz as a junk page, with the source folder
-        # then deleted right after. Same literal pattern as
+        # deleted right after. Same literal pattern as
         # Invoke-LooseFolderZip's own sweep in this file (kept inline, not
         # calling ImageConversionPipeline.ps1's Test-OrphanedScratchFileName -
         # this module's harness deliberately doesn't dot-source that module;
@@ -316,10 +308,9 @@ $script:zipOnlyWorker = {
 
         if ($DeleteFolders) {
             try {
-                # Return value checked, not discarded (2026-09-04 fix, same
-                # species as UnwantedImage.ps1's Invoke-UnwantedImageScan
-                # fix) - see Controller.ps1's Invoke-FullPipelineChapter's
-                # matching fix for the full reasoning.
+                # Return value checked, not discarded - same reasoning as
+                # UnwantedImage.ps1's Invoke-UnwantedImageScan and
+                # Controller.ps1's Invoke-FullPipelineChapter.
                 $removed = Remove-Source -ItemPath $FolderPath
                 if ($removed) {
                     $deleteDesc = if ($DoPermanentDelete) { "permanently" } else { "Recycle Bin" }
@@ -402,15 +393,12 @@ function Invoke-ZipOnlyPipeline {
         Aborted              = $false
     }
 
-    # No outer catch here (2026-08-28, Phase 2 of the main-script-rewrite
-    # build plan) - this used to swallow any exception into a generic
-    # "Zip-only pipeline error: ..." Write-Log call, the one real outlier
-    # among all five real pipeline entry points (the other four only have
-    # try/finally at this level, letting a genuine exception propagate to
-    # the caller). Controller.ps1's Invoke-Mode owns the shared top-level
-    # catch now (Todo.md's decided design) - swallowing here would have
-    # made that catch permanently unreachable for this pipeline. Expected
-    # per-item failures (a single zip failing) were never affected either
+    # No outer catch here, matching every other real pipeline entry
+    # point (each only has try/finally at this level, letting a genuine
+    # exception propagate to the caller). Controller.ps1's Invoke-Mode
+    # owns the shared top-level catch - swallowing an exception here
+    # would make that catch unreachable for this pipeline. Expected
+    # per-item failures (a single zip failing) aren't affected either
     # way - those are already fully handled inside $script:zipOnlyWorker's
     # own try/catch, folded into $r.Failed, never thrown this far.
     try {
@@ -447,14 +435,14 @@ function Invoke-ZipOnlyPipeline {
             if ($null -eq $next) { return $null }
             $totals.CandidateCount++
 
-            # StartsWith check before the Substring (2026-09-03 fix,
-            # Todo.md finding) - Substring-by-length doesn't verify the
-            # prefix actually matches, it just chops off N characters
-            # regardless. A prefix mismatch (a symlink resolving
-            # elsewhere, UNC vs. mapped-drive normalization, any case
-            # where $next.Dir.FullName genuinely doesn't start with
-            # $trimmedPath) used to silently mis-slice into a bogus
-            # "series" name instead of failing loudly or degrading
+            # StartsWith check before the Substring matters here -
+            # Substring-by-length doesn't verify the prefix actually
+            # matches, it just chops off N characters regardless. A
+            # prefix mismatch (a symlink resolving elsewhere, UNC vs.
+            # mapped-drive normalization, any case where
+            # $next.Dir.FullName genuinely doesn't start with
+            # $trimmedPath) would otherwise silently mis-slice into a
+            # bogus "series" name instead of failing loudly or degrading
             # sanely. CCR display only - falling back to the leaf's own
             # folder name has no effect on the actual zip/dispatch below.
             $dirFullName = $next.Dir.FullName
@@ -467,19 +455,17 @@ function Invoke-ZipOnlyPipeline {
                 $seriesName = $next.Dir.Name
             }
 
-            # Gated on Test-CcrEnabledForZipOnly (2026-08-31 fix, caught by
-            # a same-day /code-review full-codebase pass) - this whole
-            # block exists ONLY to compute -TotalChapters for
+            # Gated on Test-CcrEnabledForZipOnly - this whole block
+            # exists only to compute -TotalChapters for
             # Start-CcrSeriesProgressIfEnabled, which itself no-ops when
             # Clean Console Output is off (the default). Without this
-            # gate, the bounded Get-ZippableLeafDirs side-scan below ran
-            # unconditionally on every default-settings mode-3 run -
+            # gate, the bounded Get-ZippableLeafDirs side-scan below would
+            # run unconditionally on every default-settings mode-3 run -
             # doubled directory I/O (a full second recursive walk of every
             # series folder, synchronously, right before that series'
-            # first job dispatches) and duplicated every Test-
-            # ZippableLeafDirCandidate skip-reason Warn in the log
-            # (verified live: an up-to-date-zip skip logged twice), for a
-            # value nothing ever consumed.
+            # first job dispatches) and a duplicated Test-
+            # ZippableLeafDirCandidate skip-reason Warn in the log for
+            # every skip, for a value nothing ever consumed.
             if ((Test-CcrEnabledForZipOnly) -and -not $zoSeenSeriesNames.Contains($seriesName)) {
                 $null = $zoSeenSeriesNames.Add($seriesName)
                 $seriesRoot  = Join-Path $trimmedPath $seriesName
@@ -530,15 +516,12 @@ function Invoke-ZipOnlyPipeline {
                 -MaxParallel $MaxParallel -Cts $script:zipOnlyCts -ResultHandler $zoResultHandler
 
             $totals.ForceStoppedCount = $zoOutcome.ForceStoppedCount
-            # Aborted (2026-09-03 fix, real bug caught by a same-session
-            # /code-review pass): read BEFORE the CTS is disposed in the
-            # finally block below - Controller.ps1's Invoke-Mode maps this
-            # onto Summary.ps1's new Aborted/ForceKilledCount fields the
-            # same way Invoke-FullPipeline/Invoke-LooseImageConversionPipeline
-            # already do, so mode 3's own summary can say "Processing
-            # ABORTED" too instead of always "Processing complete" - this
-            # pipeline previously had no Aborted field at all, only
-            # ForceStoppedCount.
+            # Read before the CTS is disposed in the finally block below -
+            # Controller.ps1's Invoke-Mode maps this onto Summary.ps1's
+            # Aborted/ForceKilledCount fields the same way
+            # Invoke-FullPipeline/Invoke-LooseImageConversionPipeline do,
+            # so mode 3's own summary can say "Processing ABORTED" too
+            # instead of always "Processing complete."
             $totals.Aborted = $script:zipOnlyCts.Token.IsCancellationRequested
         } finally {
             Unregister-AbortCancellationSource -Cts $script:zipOnlyCts
@@ -639,16 +622,15 @@ function Invoke-LooseFolderZip {
 
     try {
         # Orphaned "_tmp_*" scratch files are actually DELETED here, not
-        # just excluded from the guard below (2026-08-31 fix, corrected
-        # after a same-day /code-review 4th pass verification found that a
-        # plain exclusion let the debris survive to get zipped: this
-        # function's own Compress-FolderToZip call archives the WHOLE
-        # folder, and a successful zip deletes the source folder right
-        # after, so an excluded-but-not-deleted scratch file ended up
-        # permanently embedded in the .cbz as a junk page with no record
-        # anywhere it happened). These are job-generated intermediates -
-        # always safe to delete permanently regardless of $PermanentDelete,
-        # per this project's own established deletion semantics (only
+        # just excluded from the guard below - a plain exclusion would
+        # let the debris survive to get zipped: this function's own
+        # Compress-FolderToZip call archives the whole folder, and a
+        # successful zip deletes the source folder right after, so an
+        # excluded-but-not-deleted scratch file would end up permanently
+        # embedded in the .cbz as a junk page with no record anywhere it
+        # happened. These are job-generated intermediates - always safe
+        # to delete permanently regardless of $PermanentDelete, per this
+        # project's own established deletion semantics (only
         # ORIGINAL/source files respect that toggle) - the owning module
         # (ImageConversionPipeline.ps1's Invoke-IccStripRetryOrFail, its
         # WebP/AVIF pre-conversion detour, and
@@ -657,10 +639,10 @@ function Invoke-LooseFolderZip {
         # boundary-level backstop for when that cleanup couldn't run (a
         # force-killed process, a locked file swallowed by a bare
         # `catch {}`).
-        # Kept as this module's own literal (2026-09-03 cleanup, Todo.md
-        # item) rather than calling ImageConversionPipeline.ps1's new
-        # Test-OrphanedScratchFileName (now the single source of truth
-        # for this pattern trio, also used by Controller.ps1) - this
+        # Kept as this module's own literal rather than calling
+        # ImageConversionPipeline.ps1's Test-OrphanedScratchFileName (the
+        # single source of truth for this pattern trio, also used by
+        # Controller.ps1) - this
         # module's own standalone harness deliberately does NOT dot-source
         # ImageConversionPipeline.ps1 (same "verified in isolation"
         # precedent AnimatedConversionPipeline.ps1's own
@@ -677,10 +659,9 @@ function Invoke-LooseFolderZip {
             })
         foreach ($orphan in $orphanedScratchFiles) {
             # A failed delete (locked file, AV hold) is logged explicitly
-            # rather than swallowed silently (2026-08-31 fix, caught by
-            # verifying a same-day /code-review pass - CLAUDE.md's own
-            # review checklist: "no silent catches without a reason") -
-            # the original "Deleting..." line asserted success regardless
+            # rather than swallowed silently, per this project's own
+            # review checklist ("no silent catches without a reason") -
+            # a bare "Deleting..." line would assert success regardless
             # of outcome, and a failure here means the orphan survives
             # into the `$remainingSrcImages` check right below, which
             # blocks the zip with its own separate Warn - visible, but
@@ -716,10 +697,9 @@ function Invoke-LooseFolderZip {
             $result.EntryCount = $verify.EntryCount
 
             try {
-                # Return value checked, not discarded (2026-09-04 fix, same
-                # species as UnwantedImage.ps1's Invoke-UnwantedImageScan
-                # fix) - see Controller.ps1's Invoke-FullPipelineChapter's
-                # matching fix for the full reasoning.
+                # Return value checked, not discarded - same reasoning as
+                # UnwantedImage.ps1's Invoke-UnwantedImageScan and
+                # Controller.ps1's Invoke-FullPipelineChapter.
                 $removed = Remove-Source -ItemPath $FolderPath
                 if ($removed) {
                     $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
@@ -735,18 +715,17 @@ function Invoke-LooseFolderZip {
         } catch {
             Write-Log ("FAILED to zip folder '" + $FolderPath + "': " + $_) -Level Error
             $result.Status = "Fail"
-            # Remove a broken/partial zip left on disk (2026-09-02 review
-            # fix, same species as the 2026-09-01 .jxl-discovery bug):
-            # Compress-FolderToZip cleans up after ITSELF on its own
-            # throw, but Test-ZipArchive runs AFTER it, on an already-
-            # written file - a verification failure (e.g. "contains no
-            # .jxl files", "0 entries") left a real, complete-looking
-            # zip on disk with nothing to delete it. Test-ZippableLeafDirCandidate's
-            # own staleness guard then saw that fresh zip, newer than
-            # every file in the folder, and skipped the chapter forever
-            # on every later run - live-reproduced. Invoke-ZipOnlyPipeline's
-            # own worker (above in this file) already had this cleanup;
-            # this call path was missing it.
+            # Remove a broken/partial zip left on disk - Compress-FolderToZip
+            # cleans up after itself on its own throw, but Test-ZipArchive
+            # runs after it, on an already-written file. A verification
+            # failure (e.g. "contains no .jxl files", "0 entries") would
+            # otherwise leave a real, complete-looking zip on disk with
+            # nothing to delete it, and Test-ZippableLeafDirCandidate's
+            # own staleness guard would then see that fresh zip, newer
+            # than every file in the folder, and skip the chapter forever
+            # on every later run. Invoke-ZipOnlyPipeline's own worker
+            # (above in this file) already had this cleanup; this call
+            # path needs it too.
             try {
                 if (Test-Path -LiteralPath $ZipOut) { [System.IO.File]::Delete($ZipOut) }
             } catch { }

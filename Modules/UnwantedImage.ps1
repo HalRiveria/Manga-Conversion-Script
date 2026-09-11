@@ -50,9 +50,9 @@
         Windows-only, but this whole project is Windows-only already, and
         nothing about porting this module changes that calculus.
 
-    PROFILE PERSISTENCE (added 2026-08-27, per explicit follow-up
-    request - "point the script at an image and have it pull the info
-    and add it... automatically"): $TargetProfiles is still exposed via
+    PROFILE PERSISTENCE (built per an explicit follow-up request - "point
+    the script at an image and have it pull the info and add it...
+    automatically"): $TargetProfiles is still exposed via
     Get-UnwantedImageProfiles as a hardcoded table, unchanged - but
     that's now only the BUILT-IN half. A separate persisted store lives
     at Get-UnwantedImageProfilesPath's location
@@ -127,9 +127,9 @@ function Get-UnwantedImageProfilesPath {
 function Get-TrailingZeroReportPath {
     <#
     .SYNOPSIS
-        "<BaseDir>\ConversionScript\trailing-zero-report.txt" (2026-08-31
-        addition, for Menu.ps1's Cover Deletion submenu item 5) - same
-        base directory as Get-UnwantedImageProfilesPath/settings.json,
+        "<BaseDir>\ConversionScript\trailing-zero-report.txt" - for
+        Menu.ps1's Cover Deletion submenu item 5. Same base directory as
+        Get-UnwantedImageProfilesPath/settings.json,
         same "one place this filename is decided" precedent. Overwritten
         on every run - Invoke-TrailingZeroAudit's own report is a
         point-in-time scan result, not something to accumulate.
@@ -156,22 +156,15 @@ function Import-UnwantedImageProfiles {
 
     if (-not (Test-Path -LiteralPath $ProfilesPath)) { return @() }
 
-    # The per-field cast block below is inside THIS SAME try (2026-09-02
-    # review fix) - it used to run after the try/catch had already
-    # exited, unguarded, contradicting this function's own docstring
-    # above ("rather than throwing"). A hand-edited profiles file (the
-    # whole point of it being plain JSON) with one non-numeric
-    # Width/Height/SizeBytes/SizeTolerance value parsed as valid JSON
-    # (so the try/catch above never caught it) but then threw a real
-    # "Cannot convert value..." error on the [int]/[int64] cast, live-
-    # reproduced. Confirmed this escaped all the way out to
-    # Invoke-CoverDeletionRun/Add-UnwantedImageProfile's own callers -
-    # contained today by Invoke-MainLoop's own $GetModeHandler catch (a
-    # same-day fix), but with no ".corrupt-*.bak" recovery and no reset,
-    # so every LATER Cover Deletion action failed identically until the
-    # file was found and fixed by hand. Same single try, same recovery
-    # path as a parse failure now - a bad field value is exactly as
-    # "corrupt" as bad JSON syntax from this function's own point of view.
+    # The per-field cast block below runs inside this same try, matching
+    # this function's own docstring above ("rather than throwing"). A
+    # hand-edited profiles file with one non-numeric
+    # Width/Height/SizeBytes/SizeTolerance value parses as valid JSON (so
+    # the try/catch alone wouldn't catch it) but throws a real "Cannot
+    # convert value..." error on the [int]/[int64] cast - a bad field
+    # value is exactly as "corrupt" as bad JSON syntax from this
+    # function's own point of view, so both get the same single try and
+    # the same recovery path.
     try {
         $raw = [System.IO.File]::ReadAllText($ProfilesPath) | ConvertFrom-Json
         $profiles = @(foreach ($p in $raw) {
@@ -193,15 +186,13 @@ function Import-UnwantedImageProfiles {
         $backupOk = $false
         try { Copy-Item -LiteralPath $ProfilesPath -Destination $backupPath -Force -ErrorAction Stop; $backupOk = $true } catch { }
         if ($backupOk) {
-            # Repair the file with an empty list (2026-09-04 fix, real bug) -
-            # this function's own docstring already claimed "same resilience
-            # convention as Config.ps1's Import-ScriptSettings", but unlike
-            # that function it only backed up and never wrote good content
-            # back - the same corrupt file sat at $ProfilesPath forever, so
-            # every future Cover Deletion action re-hit this exact branch:
-            # another timestamped .bak and another Warn, indefinitely, until
-            # someone found and fixed it by hand. Gated on the backup having
-            # actually succeeded, same reasoning as Config.ps1's matching fix.
+            # Repair the file with an empty list - without this, the same
+            # corrupt file would sit at $ProfilesPath forever, and every
+            # future Cover Deletion action would re-hit this exact
+            # branch: another timestamped .bak and another Warn,
+            # indefinitely, until someone found and fixed it by hand.
+            # Gated on the backup having actually succeeded, same
+            # reasoning as Config.ps1's matching resilience convention.
             try { Export-UnwantedImageProfiles -Profiles @() -ProfilesPath $ProfilesPath } catch { }
         } else {
             Write-Log ("Could not back up the corrupt profiles file '" + $ProfilesPath + "' - leaving it untouched rather than risk overwriting it with no backup. It will be re-detected as corrupt on the next scan.") -Level Warn
@@ -216,11 +207,10 @@ function Export-UnwantedImageProfiles {
     .SYNOPSIS
         Writes $Profiles to $ProfilesPath as a proper JSON array
         regardless of count (0, 1, or many) - via -InputObject rather
-        than the pipeline, same array-safety technique
-        ResumeState.ps1's Merge-ResumeStateEntries uses (PS 5.1's
-        ConvertTo-Json has no -AsArray; piping a single object through
-        it serializes a bare object instead of a one-element array).
-        Creates the parent directory if it doesn't exist yet.
+        than the pipeline, since PS 5.1's ConvertTo-Json has no -AsArray;
+        piping a single object through it serializes a bare object
+        instead of a one-element array. Creates the parent directory if
+        it doesn't exist yet.
     #>
     param(
         [Parameter(Mandatory)]
@@ -228,15 +218,15 @@ function Export-UnwantedImageProfiles {
         [array]$Profiles,
         [string]$ProfilesPath = (Get-UnwantedImageProfilesPath)
     )
-    # [AllowEmptyCollection()] (2026-09-04 fix, real bug caught by this
-    # session's own harness) - a Mandatory array parameter rejects an
-    # EMPTY array by default in PowerShell ("Cannot bind argument to
-    # parameter 'Profiles' because it is an empty collection"), distinct
-    # from rejecting $null. Import-UnwantedImageProfiles's new corrupt-
-    # file repair calls this with -Profiles @() to write back a valid
-    # empty list - without this attribute that call threw, silently
-    # swallowed by its own best-effort try/catch, so the "repair" never
-    # actually happened and the corrupt file was left untouched forever.
+    # [AllowEmptyCollection()] matters here - a Mandatory array parameter
+    # rejects an EMPTY array by default in PowerShell ("Cannot bind
+    # argument to parameter 'Profiles' because it is an empty
+    # collection"), distinct from rejecting $null. Import-UnwantedImageProfiles's
+    # corrupt-file repair calls this with -Profiles @() to write back a
+    # valid empty list - without this attribute that call would throw,
+    # silently swallowed by its own best-effort try/catch, so the
+    # "repair" would never actually happen and the corrupt file would be
+    # left untouched forever.
 
     $dir = Split-Path -Path $ProfilesPath -Parent
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
@@ -312,16 +302,16 @@ function New-UnwantedImageProfileFromFile {
         Height        = $height
         SizeBytes     = $file.Length
         SizeTolerance = $SizeTolerance
-        # -ErrorAction Stop (2026-09-02 fix, consistency with this file's
-        # other two Get-FileHash call sites, both fixed the same day):
-        # this function's own docstring already documents "throws if
-        # $Path can't be read" as its contract (unlike Test-UnwantedImageMatch,
-        # which promises never to throw) - this doesn't change that
-        # contract, it just makes the throw reliable regardless of the
-        # ambient $ErrorActionPreference a future caller might have,
-        # rather than depending on inheriting the bootstrap's own 'Stop'
-        # setting. Without it, a non-'Stop' caller would get a silent
-        # non-terminating error and a profile with Hash = $null - one
+        # -ErrorAction Stop, matching this file's other two Get-FileHash
+        # call sites: this function's own docstring already documents
+        # "throws if $Path can't be read" as its contract (unlike
+        # Test-UnwantedImageMatch, which promises never to throw). This
+        # doesn't change that contract, it just makes the throw reliable
+        # regardless of the ambient $ErrorActionPreference a future
+        # caller might have, rather than depending on inheriting the
+        # bootstrap's own 'Stop' setting. Without it, a non-'Stop' caller
+        # would get a silent non-terminating error and a profile with
+        # Hash = $null - one
         # that looks successfully added but can never match anything.
         Hash          = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
     }
@@ -512,8 +502,8 @@ function Test-UnwantedImageMatch {
         Checks $File against $Profiles, cheapest-first: file size
         (tolerance-bounded) -> pixel dimensions -> SHA-256 hash. Every
         profile whose size+dimensions match is tried until a real hash
-        Match is found (2026-09-03 fix, Todo.md finding - see below); if
-        none of them actually matches by hash, the FIRST one's own
+        Match is found (see below); if none of them actually matches by
+        hash, the FIRST one's own
         HashMismatch is returned, matching this function's original
         reporting for the "nothing really matched" case. A HashFailure
         (the file itself couldn't be hashed at all - not a per-profile
@@ -531,10 +521,9 @@ function Test-UnwantedImageMatch {
         [AllowEmptyCollection()]
         [array]$Profiles
     )
-    # [AllowEmptyCollection()] (2026-09-08 fix, latent gap caught by a
-    # full-codebase audit - same species as Export-UnwantedImageProfiles's
-    # own real bug, 2026-09-04): a Mandatory array parameter rejects an
-    # EMPTY array by default in PowerShell ("Cannot bind argument...
+    # [AllowEmptyCollection()] matters here too, same reasoning as
+    # Export-UnwantedImageProfiles - a Mandatory array parameter rejects
+    # an EMPTY array by default in PowerShell ("Cannot bind argument...
     # because it is an empty collection"). Not reachable via any real
     # caller today (Invoke-UnwantedImageScan's own -Profiles defaults to
     # Get-AllUnwantedImageProfiles, which always includes the hardcoded
@@ -544,26 +533,25 @@ function Test-UnwantedImageMatch {
     # throw on the first scanned file instead of correctly reporting
     # every file as NoMatch.
 
-    # Fallback result (2026-09-03 fix, Todo.md finding - a real, previously
-    # unfixed shadowing risk): this used to return on the FIRST profile
-    # whose size+dimensions matched, even on a hash MISMATCH - so a
-    # later profile sharing the exact same size+dimensions but a
-    # genuinely matching hash was never even tried, and a real, wanted
-    # deletion was silently missed. Now every size+dimension-matching
-    # profile is tried; only a real Match returns immediately. If none of
-    # them actually matches by hash, the FIRST one's own HashMismatch is
-    # what gets returned (preserved here), matching this function's
-    # original reporting for that case.
+    # Fallback result: without trying every size+dimension-matching
+    # profile (below), this would return on the FIRST profile whose
+    # size+dimensions matched, even on a hash MISMATCH - so a later
+    # profile sharing the exact same size+dimensions but a genuinely
+    # matching hash would never even get tried, and a real, wanted
+    # deletion would be silently missed. Every size+dimension-matching
+    # profile is tried instead; only a real Match returns immediately. If
+    # none of them actually matches by hash, the FIRST one's own
+    # HashMismatch is what gets returned (preserved here), matching this
+    # function's original reporting for that case.
     $fallbackResult = $null
 
     # Dimensions/hash are properties of $File itself, not of any one
-    # profile - computed at most ONCE per call and cached here (2026-09-03
-    # fix, real bug caught by a same-session /code-review pass: trying
-    # every matching profile, above, means a file matching N profiles by
-    # size used to have its dimensions read N times and be fully SHA-256'd
-    # N times, all recomputing the exact same answer - real, measurable
-    # waste on a large library where several profiles share dimensions).
-    # $dimsAttempted/$hashAttempted distinguish "not tried yet" from
+    # profile - computed at most once per call and cached here. Without
+    # this, trying every matching profile above means a file matching N
+    # profiles by size would have its dimensions read N times and be
+    # fully SHA-256'd N times, all recomputing the exact same answer -
+    # real, measurable waste on a large library where several profiles
+    # share dimensions. $dimsAttempted/$hashAttempted distinguish "not tried yet" from
     # "tried and genuinely failed" so a failure is only logged/retried
     # once, not once per matching profile either.
     $dimsAttempted = $false
@@ -589,9 +577,8 @@ function Test-UnwantedImageMatch {
         if ($cachedWidth -ne $profile.Width -or $cachedHeight -ne $profile.Height) { continue }
 
         if (-not $hashAttempted) {
-            # try/catch (2026-09-02 review fix): Get-FileHash used to run
-            # bare, unlike Get-TrailingZeroGroups's own identical call
-            # further down this file - with the bootstrap's
+            # try/catch here matters, same as Get-TrailingZeroGroups's own
+            # identical call further down this file - with the bootstrap's
             # $ErrorActionPreference = 'Stop' inherited into this
             # function, a file that disappears or gets locked (a sync
             # client, an indexer, another app) in the window between the
@@ -670,25 +657,22 @@ function Invoke-UnwantedImageScan {
         they happen to sit inside $Path) - optional, defaults to none.
     .OUTPUTS
         @{ ScannedCount; DeletedCount; DeleteFailedCount; HashMismatchCount;
-           HashFailureCount; AllScannedFiles } - HashFailureCount
-        (2026-09-02 review fix) counts a file Test-UnwantedImageMatch
-        couldn't hash at all (already logged as its own Warn there) -
-        distinct from HashMismatchCount (hashed fine, just didn't match),
-        same distinction Get-TrailingZeroGroups's own HashFailureCount
-        already makes. AllScannedFiles (2026-09-10 addition) is every
-        file under $Path this function's own walk found, BEFORE the
-        -ImageExtensions filter below - a caller that also needs to walk
-        the same tree for something else (Show-CoverDeletionMenu's
-        auto-chained trailing-zero audit) can reuse it instead of walking
-        again. See CHANGELOG.md's matching entry.
+           HashFailureCount; AllScannedFiles } - HashFailureCount counts a
+        file Test-UnwantedImageMatch couldn't hash at all (already logged
+        as its own Warn there), distinct from HashMismatchCount (hashed
+        fine, just didn't match) - same distinction Get-TrailingZeroGroups's
+        own HashFailureCount makes. AllScannedFiles is every file under
+        $Path this function's own walk found, BEFORE the -ImageExtensions
+        filter below - a caller that also needs to walk the same tree for
+        something else (Show-CoverDeletionMenu's auto-chained trailing-zero
+        audit) can reuse it instead of walking again.
     #>
     param(
         [Parameter(Mandatory)]
         [string]$Path,
         [array]$Profiles = (Get-AllUnwantedImageProfiles),
-        # ".tif" added alongside ".tiff" (2026-09-02 review fix,
-        # live-confirmed) - New-UnwantedImageProfileFromFile itself
-        # applies no extension filter (System.Drawing.Image.FromFile
+        # ".tif" is needed alongside ".tiff" - New-UnwantedImageProfileFromFile
+        # itself applies no extension filter (System.Drawing.Image.FromFile
         # decides what's readable, and it reads both .tif and .tiff), so
         # a user could add a profile from a real .tif cover, get the
         # "will be caught on every future scan" confirmation, and have it
@@ -706,7 +690,7 @@ function Invoke-UnwantedImageScan {
         DeleteFailedCount = 0
         HashMismatchCount = 0
         HashFailureCount  = 0
-        AlreadyGoneCount  = 0   # 2026-09-03 addition, Todo.md finding - see Remove-Source call below
+        AlreadyGoneCount  = 0   # see Remove-Source call below
     }
 
     # Unfiltered walk (every extension), then filtered to images
@@ -740,14 +724,13 @@ function Invoke-UnwantedImageScan {
         }
 
         try {
-            # Return value checked, not discarded (2026-09-03 fix, Todo.md
-            # finding) - Remove-Source returns $false (not an exception)
-            # when the file already vanished before deletion (a real
-            # TOCTOU gap: something else - a sync client, another run -
-            # could remove it between Test-UnwantedImageMatch reading it
-            # and this call). Discarding that meant a file that was never
-            # actually there got logged and counted as a successful
-            # delete anyway.
+            # Return value checked, not discarded - Remove-Source returns
+            # $false (not an exception) when the file already vanished
+            # before deletion (a real TOCTOU gap: something else, a sync
+            # client or another run, could remove it between
+            # Test-UnwantedImageMatch reading it and this call).
+            # Discarding that would log and count a file that was never
+            # actually there as a successful delete.
             $removed = Remove-Source -ItemPath $file.FullName
             if ($removed) {
                 $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
@@ -763,12 +746,12 @@ function Invoke-UnwantedImageScan {
         }
     }
 
-    # -ForceConsole on every line above and below (2026-09-03 fix, real
-    # bug, live-reported): Cover Deletion has no CCR live-progress display
-    # to replace the console output Write-Log's own CCO gate normally
-    # expects something else to be providing - without it, a scan with
-    # Clean Console Output on reported nothing to the console at all,
-    # silently, while still working and file-logging normally. See
+    # -ForceConsole on every line above and below matters here - Cover
+    # Deletion has no CCR live-progress display to replace the console
+    # output Write-Log's own CCO gate normally expects something else to
+    # be providing. Without it, a scan with Clean Console Output on would
+    # report nothing to the console at all, silently, while still
+    # working and file-logging normally. See
     # Write-Log's own .PARAMETER doc (Logging.ps1) for the full reasoning.
     Write-Log ("Unwanted-image scan complete: " + $totals.DeletedCount + " deleted, " + $totals.HashMismatchCount + " hash mismatch(es), " + $totals.ScannedCount + " image(s) scanned.") -Level Summary -ForceConsole
     $totals.AllScannedFiles = $allScannedFiles
@@ -954,8 +937,8 @@ function Invoke-TrailingZeroAudit {
     if (-not (Test-Path -LiteralPath $reportDir)) { New-Item -ItemType Directory -Path $reportDir -Force | Out-Null }
     Set-Content -LiteralPath $ReportPath -Value $lines -Encoding UTF8
 
-    # -ForceConsole (2026-09-03 fix) - same reason as Invoke-UnwantedImageScan's
-    # own fix above: no CCR display exists for this pipeline to report through.
+    # -ForceConsole matters here too, same reason as Invoke-UnwantedImageScan's
+    # own comment above: no CCR display exists for this pipeline to report through.
     Write-Log ("Trailing-zero audit: " + $scanResult.Groups.Count + " unique file(s) found, report written to '" + $ReportPath + "'.") -Level Summary -ForceConsole
     return @{ UniqueFileCount = $scanResult.Groups.Count; HashFailureCount = $scanResult.HashFailureCount; ReportPath = $ReportPath }
 }
