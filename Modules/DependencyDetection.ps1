@@ -58,28 +58,24 @@ function Test-PathSafely {
     .SYNOPSIS
         Internal helper - Test-Path, but a malformed path (illegal
         characters, etc.) is treated the same as "doesn't exist" ($false)
-        instead of throwing. Verified live: Test-Path throws a real
+        instead of throwing. Test-Path throws a real
         System.ArgumentException for a path containing characters like
-        "|"/"<"/">" under $ErrorActionPreference = 'Stop' (the real
-        script's own setting) - without this, Find-Exe/Find-ExeCached's
-        own documented "a stale/wrong -UserPath falls through" contract
-        only actually held for a NONEXISTENT path, not a malformed one.
-        A System.IO.PathTooLongException (an excessively long path) is
-        the same class of "can't evaluate this path" problem and is
+        "|"/"<"/">" under this project's $ErrorActionPreference = 'Stop',
+        so without this, Find-Exe/Find-ExeCached's own "a stale/wrong
+        -UserPath falls through" contract only held for a nonexistent
+        path, not a malformed one. A System.IO.PathTooLongException (an
+        excessively long path) is the same class of problem and is
         caught here too.
 
-        -PathType Leaf (2026-09-02 review fix, live-confirmed): every
-        real caller (Find-Exe's -UserPath check and its -Candidates
-        loop, Find-ExeCached's cache check) is asking "is there an
-        executable file here," never "is there a directory here" - a
-        bare Test-Path returns $true for a directory too, so a mistyped
-        -CjxlPath pointing at an install FOLDER instead of the .exe
-        inside it (or a hand-edited settings.json with the same mistake)
-        used to be accepted as a valid path, silently, with no error
-        until every single file in the library failed at cjxl-exec time
-        with an unrelated-looking error, instead of this project's own
-        "cjxl.exe could not be found..." message written for exactly
-        this case.
+        Uses -PathType Leaf because every real caller is asking "is
+        there an executable file here," never "is there a directory
+        here." A bare Test-Path returns $true for a directory too, so a
+        mistyped -CjxlPath pointing at an install folder instead of the
+        .exe inside it (or the same mistake hand-edited into
+        settings.json) would otherwise be accepted as valid, silently,
+        until every file in the library failed at cjxl-exec time with an
+        unrelated-looking error instead of this project's own "cjxl.exe
+        could not be found..." message.
     #>
     param([Parameter(Mandatory)][string]$Path)
     try {
@@ -117,17 +113,13 @@ function Find-Exe {
 
     if ($UserPath -and (Test-PathSafely -Path $UserPath)) { return $UserPath }
 
-    # -CommandType Application, and a non-empty .Source check (2026-08-31
-    # fix, caught by a same-day /code-review full-codebase pass) - without
-    # -CommandType, Get-Command also matches a function or alias that
-    # happens to share $ExeName (a "magick"/"cjxl" helper in the user's
-    # own PowerShell profile is a real, not hypothetical, case) - its
-    # .Source is an EMPTY STRING, not $null, which is still truthy for
-    # $inPath's own if-check, so this returned "" instead of falling
-    # through to -Candidates: a real exe sitting at a candidate path was
-    # never found, and the docstring's "Returns $null if none of those
-    # found it" contract broke (a caller checking $null -eq $result saw a
-    # false hit on "").
+    # -CommandType Application matters: without it, Get-Command also
+    # matches a function or alias that happens to share $ExeName (a
+    # "magick"/"cjxl" helper in the user's own PowerShell profile is a
+    # real case). Its .Source is an empty string, not $null, which is
+    # still truthy for the check below, so this would return "" instead
+    # of falling through to -Candidates - a real exe sitting at a
+    # candidate path would never get found.
     $inPath = Get-Command $ExeName -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($inPath -and $inPath.Source) { return $inPath.Source }
 

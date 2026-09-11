@@ -29,9 +29,8 @@
     this inlined copy had already been proven via real runs. See
     CLAUDE.md's "Module loading & settings persistence" section.
 
-    DISPATCH AND MAIN LOOP (2026-08-28, Phases 3 and the following
-    session): this file now just calls Controller.ps1's Invoke-MainLoop.
-    Everything that used to be stubbed or inlined here - per-mode param
+    DISPATCH AND MAIN LOOP: this file now just calls Controller.ps1's
+    Invoke-MainLoop. Everything that used to be stubbed or inlined here - per-mode param
     translation, output normalization onto Summary.ps1's $stats shape,
     the shared abort/fatal-error catch (Invoke-Mode, Phase 3), AND the
     run loop itself including Show-PostRunPrompt (Invoke-MainLoop, built
@@ -163,13 +162,13 @@ function Resolve-ModulesPath {
 #  BOOTSTRAP - resolve Modules\, load settings, dot-source everything
 # ==============================================================================
 
-# TOP-LEVEL TRY/CATCH (2026-08-28, real bug fix - see Todo.md/CHANGELOG.md):
-# this whole body used to have no catch at all - a throw anywhere in here
+# TOP-LEVEL TRY/CATCH: without this, a throw anywhere in this body
 # (a bad -ModulesPathOverride, a missing cjxl.exe, a malformed -CjxlPath,
-# any real module dot-source failure) surfaced as a raw PowerShell
-# exception dump instead of a clean message, and could close the window
-# before anyone read it if the script was launched by double-click rather
-# than from an already-open terminal. Routes through AbortPipeline.ps1's
+# any real module dot-source failure) surfaces as a raw PowerShell
+# exception dump instead of a clean message, and can close the window
+# before anyone reads it if the script was launched by double-click
+# rather than from an already-open terminal. Routes through
+# AbortPipeline.ps1's
 # own Invoke-AbortOrFatalHandler once it's dot-sourced (same
 # crash-vs-own-abort disambiguation, and the same fatal-message shape,
 # every real pipeline run already gets via Invoke-Mode's own catch) - but
@@ -257,27 +256,22 @@ try {
     # same unambiguous absolute path.
     $Path = (Resolve-Path -LiteralPath $Path).ProviderPath
 
-    # [bool](...) casts (2026-08-31 fix, caught by a same-day /code-review
-    # full-codebase pass - missed by the original sweep because it only
-    # covered Controller.ps1) - same reasoning as the two calls below:
-    # -FullLogging is Mandatory, -DisableSummaryFile isn't, but a
-    # non-Mandatory [bool] param throws on an explicitly-passed $null just
-    # as hard (Mandatory only controls whether OMITTING the param is
-    # allowed, not the type coercion once a value is passed - see
-    # CLAUDE.md's own record of this discovery). Import-ScriptSettings
-    # defaults both keys today so this can't fire against a real settings
-    # file, but the two calls below already got this exact cast for the
-    # identical reason - this call was the one the original sweep missed.
+    # [bool](...) casts: -FullLogging is Mandatory, -DisableSummaryFile
+    # isn't, but a non-Mandatory [bool] param throws on an explicitly-
+    # passed $null just as hard as a Mandatory one (Mandatory only
+    # controls whether omitting the param is allowed, not the type
+    # coercion once a value is passed - see CLAUDE.md's "Lessons
+    # learned"). Import-ScriptSettings defaults both keys today so this
+    # can't actually fire against a real settings file, but the cast
+    # keeps this call site from being fragile against any future change
+    # to how $settings is built above this line.
     Initialize-LogPaths -TargetPath $Path -FullLogging ([bool]$settings.FullLogging) -DisableSummaryFile ([bool]$settings.DisableSummaryFile) -ScriptDir $scriptDir
     Initialize-LogMutex
-    # [bool](...) casts (2026-08-31 fix, from a same-day /code-review): both
-    # parameters are [Parameter(Mandatory)][bool] - Import-ScriptSettings
-    # always defaults both keys today so $settings can't actually be
-    # missing either one here, but Controller.ps1's Invoke-MainLoop got
-    # this identical cast for its own re-sync of the same two calls (a
-    # hand-built $Settings there COULD be missing a key) - applied here too
-    # so this call site isn't left fragile against any future change to
-    # how $settings is built above this line.
+    # Same [bool](...) reasoning as Initialize-LogPaths above - both
+    # parameters here are [Parameter(Mandatory)][bool], and
+    # Import-ScriptSettings always defaults both keys today, but a
+    # hand-built $Settings could be missing a key, so the cast stays
+    # defensive rather than relying on that always being true.
     Initialize-CleanConsoleOutput -Enabled ([bool]$settings.CleanConsoleOutputEnabled)
     Initialize-FileDeletion -PermanentDelete ([bool]$settings.PermanentDelete)
 
@@ -306,7 +300,7 @@ try {
     Write-Log ("Conversion Script starting. Path: '" + $Path + "'. cjxl: '" + $resolvedCjxlPath + "'. magick: '" + $(if ($resolvedMagickPath) { $resolvedMagickPath } else { "(not found - WebP/AVIF/BMP/HEIC/HEIF input will fail)" }) + "'.")
 
     # ==========================================================================
-    #  MAIN LOOP - moved into Controller.ps1's Invoke-MainLoop (2026-08-28) -
+    #  MAIN LOOP - lives in Controller.ps1's Invoke-MainLoop -
     #  this file's job is now purely bootstrap; the run loop itself, including
     #  Show-PostRunPrompt, lives in Controller.ps1.
     # ==========================================================================

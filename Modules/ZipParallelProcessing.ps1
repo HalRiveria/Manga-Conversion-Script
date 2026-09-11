@@ -17,12 +17,10 @@
     file's own historical notes about "copy X here if Y changes" no longer
     apply.
 
-    MIGRATED (2026-08-27) onto Logging.ps1/AbortPipeline.ps1, per an
-    explicit go-ahead - this file no longer carries its own inline
-    ConsoleCtrl/Write-Log/Flush-ConsoleQueue/Test-AbortSignal copies (see
-    CLAUDE.md "Known gaps" for the full inline-duplication audit that
-    flagged them, and CHANGELOG.md for this migration's own build story).
-    Pure definitions only - no top-level side effects. Dot-source
+    This file dot-sources Logging.ps1/AbortPipeline.ps1 rather than
+    carrying its own inline ConsoleCtrl/Write-Log/Flush-ConsoleQueue/
+    Test-AbortSignal copies. Pure definitions only - no top-level side
+    effects. Dot-source
     AbortPipeline.ps1 and Logging.ps1 BEFORE this file (see FORWARD
     REFERENCES below); dot-source this file to get
     Invoke-ZipParallelProcessing itself.
@@ -91,11 +89,10 @@ function Invoke-ZipParallelProcessing {
         [Parameter(Mandatory)]
         [scriptblock]$ResultHandler,
         [string]$AbortWaitMessage = "[ABORT] Waiting for current jobs to finish (up to 60s)...",
-        # $null default = unchanged behavior for every existing caller
-        # (2026-09-09 addition, Full Pipeline's dispatch-redesign
-        # migration, step 4 of 4). Invoked once per dispatch-loop pass,
-        # right after Flush-ConsoleQueue below - same cadence, same
-        # reasoning: a caller running two Invoke-ChapterDispatch instances
+        # $null default = unchanged behavior for every existing caller.
+        # Invoked once per dispatch-loop pass, right after
+        # Flush-ConsoleQueue below - same cadence, same reasoning: a
+        # caller running two Invoke-ChapterDispatch instances
         # concurrently inside this function's own two worker runspaces
         # needs a way to drain a SEPARATE cross-worker event queue (Clean
         # Console Output updates neither worker can safely call directly -
@@ -135,21 +132,19 @@ function Invoke-ZipParallelProcessing {
     $forceStoppedCount = 0
 
     try {
-        # Was its own inline "JxlLogMutex_" + $pathHash construction - now
-        # Logging.ps1's Initialize-LogMutex (same naming convention,
-        # single implementation instead of a third copy of it - see
-        # CLAUDE.md). $previousLogMutex saved BEFORE overwriting
-        # (2026-08-31 fix): this call always creates a brand-new Mutex
+        # Uses Logging.ps1's Initialize-LogMutex rather than an inline
+        # "JxlLogMutex_" + $pathHash construction - single implementation
+        # instead of a third copy of it. $previousLogMutex is saved
+        # before overwriting: this call always creates a brand-new Mutex
         # object regardless of what was already there, so the caller's
         # own (e.g. bootstrap's) mutex reference needs to be restored
-        # afterward, not discarded - see the `finally` block below. Moved
-        # inside the try (2026-08-31 fix, caught by a same-day
-        # /code-review of the original fix) - this line and everything
-        # through $localPool.Open() below used to sit BEFORE the try, so
-        # an exception here (or from the -SharedFunctionNames Get-Item
-        # lookup, or from CreateRunspacePool/Open() failing) skipped the
-        # `finally` entirely, leaving $script:logMutex pointed at this
-        # call's own local mutex forever with its handle never disposed.
+        # afterward, not discarded - see the `finally` block below. This
+        # line and everything through $localPool.Open() below sit inside
+        # the try on purpose, so an exception here (or from the
+        # -SharedFunctionNames Get-Item lookup, or from
+        # CreateRunspacePool/Open() failing) still reaches `finally`
+        # instead of leaving $script:logMutex pointed at this call's own
+        # local mutex forever with its handle never disposed.
         $previousLogMutex = $script:logMutex
         Initialize-LogMutex
         $localLogMutex = $script:logMutex
@@ -157,8 +152,8 @@ function Invoke-ZipParallelProcessing {
 
         $localIss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
         foreach ($sharedFn in $SharedFunctionNames) {
-            # 2026-08-31 fix: a misspelled name, or one whose owning module
-            # wasn't dot-sourced before this call, used to throw a bare
+            # A misspelled name, or one whose owning module wasn't
+            # dot-sourced before this call, would otherwise throw a bare
             # ItemNotFoundException with no mention of -SharedFunctionNames
             # or a dot-sourcing-order problem - re-thrown here with that
             # context so the actual cause is obvious instead of a generic
@@ -229,18 +224,17 @@ function Invoke-ZipParallelProcessing {
                     } finally {
                         $h.PS.Dispose()
                     }
-                    # -ResultHandler runs OUTSIDE the try/catch above
-                    # (2026-09-03 fix, Todo.md finding) - a bug in the
-                    # CALLER's own -ResultHandler used to be caught here
-                    # too and mislabeled as "Error collecting runspace
-                    # result", silently dropping any remaining results
-                    # from this same job with no indication the real bug
-                    # was in the caller's own code, not the runspace.
-                    # Letting it propagate uncaught surfaces the real
-                    # exception with its own message/stack, and this
-                    # function's own outer `finally` still tears down the
-                    # pool/mutex normally - $h.PS is already disposed
-                    # above either way.
+                    # -ResultHandler runs outside the try/catch above on
+                    # purpose. A bug in the caller's own -ResultHandler
+                    # would otherwise be caught here too and mislabeled as
+                    # "Error collecting runspace result," silently
+                    # dropping any remaining results from this same job
+                    # with no indication the real bug was in the caller's
+                    # own code, not the runspace. Letting it propagate
+                    # uncaught surfaces the real exception with its own
+                    # message and stack; this function's own outer
+                    # `finally` still tears down the pool/mutex normally,
+                    # and $h.PS is already disposed above either way.
                     if ($null -ne $localResults) {
                         foreach ($r in $localResults) { & $ResultHandler $r }
                     }
@@ -256,23 +250,20 @@ function Invoke-ZipParallelProcessing {
         # finish naturally, then force-stop anything still running. Jobs the
         # provider hadn't yet produced (or hadn't been dispatched due to a
         # full pool) are simply never dispatched - nothing to drain for those.
-        # Was its own inline copy of this loop - now AbortPipeline.ps1's
-        # Invoke-GracefulDrain, which additionally fixes a race this inline
-        # version had (a job finishing in the gap between the last poll and
-        # the timeout firing was silently discarded and miscounted as
-        # force-stopped - see this module's own header and CLAUDE.md's
-        # "Known gaps") and signals [ConsoleCtrl]::DrainComplete, which this
-        # inline version never did at all. Deliberately still gated on
-        # $Cts.Token.IsCancellationRequested, same as before - Invoke-
-        # GracefulDrain must NOT run (and must NOT signal DrainComplete) on
-        # a normal, non-aborted completion. AbortPipeline.ps1's
-        # Reset-AbortState now resets DrainComplete once per loop iteration
-        # (Controller.ps1's Invoke-MainLoop, before the next mode is
-        # resolved) - but that's once per RUN, not continuously, so within
-        # a single run this still applies: signalling it here unconditionally
-        # would make a LATER, real Ctrl+C's own drain wait return instantly
-        # for the rest of THIS run, risking the OS force-killing the process
-        # before that real drain has actually happened.
+        # Uses AbortPipeline.ps1's Invoke-GracefulDrain rather than an
+        # inline copy of this loop - it fixes a real race (a job finishing
+        # in the gap between the last poll and the timeout firing was
+        # silently discarded and miscounted as force-stopped) and signals
+        # [ConsoleCtrl]::DrainComplete. This stays gated on
+        # $Cts.Token.IsCancellationRequested - Invoke-GracefulDrain must
+        # not run, and must not signal DrainComplete, on a normal,
+        # non-aborted completion. Reset-AbortState resets DrainComplete
+        # once per loop iteration (Controller.ps1's Invoke-MainLoop,
+        # before the next mode is resolved), so within a single run,
+        # signalling it here unconditionally would make a later, real
+        # Ctrl+C's own drain wait return instantly for the rest of that
+        # run, risking the OS force-killing the process before the real
+        # drain has actually happened.
         if ($Cts.Token.IsCancellationRequested) {
             $drainResult = Invoke-GracefulDrain -Handles $localHandles -ResultHandler $ResultHandler `
                 -ConsoleQueue $localConsoleQueue -TimeoutSeconds 60 -AbortWaitMessage $AbortWaitMessage `
@@ -281,33 +272,30 @@ function Invoke-ZipParallelProcessing {
         }
 
         Flush-ConsoleQueue -Queue $localConsoleQueue
-        # One final drain (2026-09-09 addition, same call): a job that
-        # completed on the very last pass through the loop above can leave
-        # a PollCallback-relevant event enqueued with no further pass ever
-        # coming to drain it otherwise - mirrors this exact function's own
-        # final Flush-ConsoleQueue call immediately above, for the same
-        # reason.
+        # One final drain: a job that completed on the very last pass
+        # through the loop above can leave a PollCallback-relevant event
+        # enqueued with no further pass ever coming to drain it otherwise -
+        # mirrors this exact function's own final Flush-ConsoleQueue call
+        # immediately above, for the same reason.
         if ($null -ne $PollCallback) { & $PollCallback }
     } finally {
-        # Dispose any $localHandles left over (2026-08-31 addition, project
-        # owner approved as an easy fix). On the normal completion path
-        # this list is already empty (the collection loop above drains
-        # it). On the abort path it's usually NOT empty here (correction,
-        # caught by verifying a same-day /code-review pass) -
+        # Dispose any $localHandles left over. On the normal completion
+        # path this list is already empty (the collection loop above
+        # drains it). On the abort path it's usually not empty here -
         # Invoke-GracefulDrain takes a snapshot of $localHandles (its own
-        # `$localHandles = $Handles` parameter binding) and disposes
-        # THAT list as jobs complete, but never writes back into ZPP's
-        # own `$localHandles` variable, so this loop still runs over
-        # every handle that was in flight when the drain started -
-        # harmlessly, since `Stop()`/`Dispose()` are both wrapped in
-        # try/catch here and `Dispose()` is idempotent. The case this
-        # loop actually exists for is something throwing BEFORE the
-        # drain ever gets a chance to run at all (-NextJobProvider itself
-        # throwing, or Test-AbortSignal/Flush-ConsoleQueue failing) -
-        # contained even without this fix (the pool close/process exit
-        # below still clean up eventually) but matches this project's own
-        # "resource lifecycle matches acquisition, including the error
-        # path" review checklist item.
+        # `$localHandles = $Handles` parameter binding) and disposes that
+        # list as jobs complete, but never writes back into this
+        # function's own `$localHandles` variable, so this loop still
+        # runs over every handle that was in flight when the drain
+        # started. That's harmless, since `Stop()`/`Dispose()` are both
+        # wrapped in try/catch here and `Dispose()` is idempotent. The
+        # case this loop actually exists for is something throwing before
+        # the drain ever gets a chance to run at all (-NextJobProvider
+        # itself throwing, or Test-AbortSignal/Flush-ConsoleQueue
+        # failing) - contained even without this (the pool close/process
+        # exit below still cleans up eventually) but matches this
+        # project's own "resource lifecycle matches acquisition,
+        # including the error path" review checklist item.
         foreach ($h in $localHandles) {
             try { $h.PS.Stop() } catch { }
             try { $h.PS.Dispose() } catch { }
@@ -316,8 +304,8 @@ function Invoke-ZipParallelProcessing {
         # -ResultHandler throws - the previous version of this function had
         # no such guarantee and could leak the pool/mutex on an exception.
         if ($null -ne $localPool) { try { $localPool.Close() } catch { }; try { $localPool.Dispose() } catch { } }
-        # Restore the caller's own mutex reference (2026-08-31 fix) rather
-        # than nulling it - this function's own $localLogMutex is disposed
+        # Restore the caller's own mutex reference rather than nulling
+        # it - this function's own $localLogMutex is disposed
         # below (it was only ever needed to seed the worker runspaces'
         # InitialSessionState), but $script:logMutex is shared, main-thread
         # state the CALLER still needs for its own Write-Log calls after

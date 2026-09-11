@@ -36,18 +36,16 @@
     ConvertedSkipped/DeletedSuccess/DeletedFail output onto these fields
     directly, tested in Controller.Harness.ps1.
 
-    InspectFailed (2026-08-28, Todo.md's decided design): its own field,
-    NOT folded into any engine's Fail count - "couldn't determine if a
-    file is animated" (a real Test-AvifAnimated failure) isn't the same
-    kind of outcome as "conversion actually failed," same distinction
-    this module already draws for StaticSkippedCount getting no row at
-    all (a static AVIF being left alone is expected, not report-worthy -
-    InspectFailed IS report-worthy, a genuine "couldn't tell" problem).
-    Shared by BOTH the image and animated engines (each can hit this same
-    failure mode independently now that ImageConversionPipeline.ps1 also
-    does its own Test-AvifAnimated call for the static-AVIF path) -
-    shown whenever either RunImageConversion or RunAnimatedConversion is
-    active, one shared line rather than two near-duplicate ones.
+    InspectFailed gets its own field, kept out of every engine's Fail
+    count. A file we couldn't determine is animated or not (a real
+    Test-AvifAnimated failure) is a different kind of outcome than a
+    conversion that actually failed - same distinction this module
+    already draws for StaticSkippedCount getting no row at all (a static
+    AVIF being left alone is expected, while InspectFailed is a genuine
+    "couldn't tell" problem worth reporting). Both the image and animated
+    engines can hit this failure mode independently, so it's shown as one
+    shared line whenever either RunImageConversion or
+    RunAnimatedConversion is active, rather than two near-duplicate rows.
 
 .NOTES
     Extracted from Conversion Script Main.ps1 - see
@@ -147,16 +145,11 @@ function Get-SummaryLines {
     }
 
     $lines.Add("Time taken          : " + $ElapsedString)
-    # Aborted/ForceKilledCount (2026-09-03 fix, Todo.md finding): every
-    # pipeline that has an abort loop tracks these ($totals.Aborted/
-    # $totals.ForceKilledCount in Controller.ps1) but this function used to
-    # ignore both, so an aborted run's summary ended with the exact same
-    # "Processing complete" framing as a normal finish - no visible sign
-    # the run didn't actually run to completion. Shown unconditionally
-    # when Aborted is true (a real, run-defining fact, not noise); the
-    # force-killed count is folded into that same line rather than a
-    # separate row, since it's only ever meaningful in the aborted case
-    # (a normal completion has nothing force-stopped by definition).
+    # Shown whenever Aborted is true, since a run that didn't finish
+    # normally shouldn't end with the same "Processing complete" framing
+    # as a clean run. The force-killed count is folded into this same
+    # line rather than a separate row, since it's only ever meaningful in
+    # the aborted case.
     if ($Stats.Aborted) {
         $lines.Add("Run was ABORTED     : " + $Stats.ForceKilledCount + " job(s) force-stopped after the drain timeout")
         $lines.Add("=== Processing ABORTED ===")

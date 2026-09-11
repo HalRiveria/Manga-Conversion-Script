@@ -60,17 +60,12 @@ function Compress-FolderToZip {
     )
 
     if (Test-Path -LiteralPath $ZipOut) {
-        # Captured into $removed, not discarded (2026-09-08 fix, same
-        # species as this project's other Remove-Source call sites) - the
-        # ORIGINAL reason this was `$null =` still applies and is why a
-        # captured variable is used here too, not a bare call: an
-        # uncaptured Remove-Source return would leak into THIS function's
-        # own output stream and silently turn the single Int64 $zipSize
-        # return into a 2-element array (caught live via
-        # ZipCreation.Harness.ps1 Scenario B - see that history). The
-        # ADDITIONAL fix here is checking $removed itself - a $false
-        # (the file vanished in the narrow gap between Test-Path above and
-        # this call) used to still log "Deleted existing ZIP" regardless.
+        # Capture Remove-Source's return instead of discarding it. An
+        # uncaptured call here would leak into this function's own output
+        # stream and turn the single Int64 $zipSize return into a
+        # 2-element array. Checking $removed also lets us log honestly
+        # when the file vanished between the Test-Path above and this
+        # call, instead of always claiming "Deleted existing ZIP."
         $removed = Remove-Source -ItemPath $ZipOut
         if ($removed) {
             $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
@@ -93,16 +88,13 @@ function Compress-FolderToZip {
         if ($zipSize -eq 0) { throw ("ZIP is 0 bytes: '" + $ZipOut + "'") }
         return $zipSize
     } catch {
-        # CreateFromDirectory can leave a stray, broken ZIP file behind even
-        # when it throws - verified live: a missing $SourceDir still leaves
-        # a 22-byte empty ZIP at $ZipOut before the "directory not found"
-        # failure actually surfaces (Harness Scenario C). That debris was
-        # never a real "original" file, so clean it up unconditionally via
-        # Remove-ItemPermanently (a forward reference to FileDeletion.ps1,
-        # same as Remove-Source above) rather than $script:PermanentDelete/
-        # Remove-Source - matches CLAUDE.md's deletion-semantics convention
-        # for job-generated intermediates that were never legitimate source
-        # data to begin with.
+        # CreateFromDirectory can leave a stray, broken ZIP file behind
+        # even when it throws (e.g. a missing $SourceDir still leaves a
+        # 22-byte empty ZIP before the "directory not found" error
+        # surfaces). That debris was never real source data, so clean it
+        # up unconditionally with Remove-ItemPermanently rather than
+        # Remove-Source, matching this project's deletion-semantics
+        # convention for job-generated intermediates.
         if (Test-Path -LiteralPath $ZipOut) {
             try { $null = Remove-ItemPermanently -ItemPath $ZipOut } catch { }
         }

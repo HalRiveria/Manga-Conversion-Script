@@ -31,12 +31,13 @@
     for that case.
 
     Logging.ps1's Initialize-LogPaths already calls Move-ToRecycleBin as a
-    FORWARD REFERENCE (it was built before this module existed for real) -
-    BOTH branches (full-logging and split-log) call it, not just one
-    (2026-08-31 fix - split-log's own stale-log cleanup used to permanently
-    Remove-Item instead). That call site uses `-ItemPath <string>`, a
-    single file path - matches this module's real signature exactly, so no
-    changes needed there now that this module exists. Dot-source
+    forward reference (it was built before this module existed for real).
+    Both branches (full-logging and split-log) call it, not just one -
+    split-log's own stale-log cleanup used to permanently Remove-Item
+    instead, which didn't respect the Recycle Bin setting. That call site
+    uses `-ItemPath <string>`, a single file path - matches this module's
+    real signature exactly, so no changes needed there now that this
+    module exists. Dot-source
     FileDeletion.ps1 before Logging.ps1 (or in either order, as long as
     both are dot-sourced before Initialize-LogPaths actually runs) so
     Move-ToRecycleBin resolves when that cleanup code executes.
@@ -132,16 +133,13 @@ function Resolve-ItemPathOrNull {
         path via GetUnresolvedProviderPathFromPSPath (see Move-ToRecycleBin/
         Remove-ItemPermanently's own header comments for why that specific
         API, not Resolve-Path). Returns $null instead of throwing when the
-        path can't be resolved at all (2026-09-03 fix, real bug caught by a
-        same-session /code-review pass, verified live:
-        GetUnresolvedProviderPathFromPSPath throws for a path on a drive
-        that isn't currently mounted - e.g. a disconnected removable/
-        network drive - where Test-Path on the same string just returns
-        $false). Both callers treat a $null return the same as "doesn't
-        exist" ($false, nothing to do) - preserving the "$false if it
-        didn't exist" contract this fix was specifically meant to keep,
-        not silently break for exactly the kind of target (a removable
-        library drive) this project's own domain makes realistic.
+        path can't be resolved at all - GetUnresolvedProviderPathFromPSPath
+        throws for a path on a drive that isn't currently mounted (a
+        disconnected removable or network drive, a realistic case for
+        this project's own library targets), where Test-Path on the same
+        string just returns $false. Both callers treat a $null return the
+        same as "doesn't exist" ($false, nothing to do), so this keeps
+        that contract instead of throwing for that specific case.
     #>
     param([Parameter(Mandatory)][string]$ItemPath)
     try {
@@ -170,45 +168,39 @@ function Move-ToRecycleBin {
         [Parameter(Mandatory)]
         [string]$ItemPath
     )
-    # Resolved to an absolute, provider-native path FIRST (2026-09-03 fix,
-    # Todo.md finding - latent, not live: every current call site already
-    # passes an absolute path) - a relative $ItemPath would otherwise pass
-    # Test-Path (resolved against PowerShell's own $PWD/provider location)
-    # but then the VB FileIO/.NET calls below resolve it against the
-    # PROCESS's real current directory instead, which can silently differ
-    # from $PWD (Set-Location/Push-Location only move PowerShell's own
-    # location, not [System.Environment]::CurrentDirectory - the exact
-    # gotcha CLAUDE.md's "Lessons learned" documents, and the same root
-    # cause the already-fixed LeafDirectoryDiscovery.ps1 relative-path bug
-    # had). Resolve-ItemPathOrNull (not a bare GetUnresolvedProviderPathFromPSPath
-    # call) is used so a path that can't be resolved AT ALL (an unmounted
-    # drive - see that helper's own header) degrades to the same $false
-    # this function already returns for a path that resolves fine but
-    # doesn't exist, instead of throwing. The result is captured into a
-    # SEPARATE, untyped local first, not reassigned straight into
-    # $ItemPath - $ItemPath's own [string] parameter type would silently
-    # coerce a real $null back to "" (the exact "[string] binding to ''
-    # rather than $null" gotcha CLAUDE.md's "Lessons learned" documents),
-    # which then made Test-Path below throw ParameterBindingValidationException
-    # ("empty string") instead of degrading - caught live testing this
-    # exact fix.
+    # Resolved to an absolute, provider-native path first - a relative
+    # $ItemPath would otherwise pass Test-Path (resolved against
+    # PowerShell's own $PWD/provider location) but then the VB FileIO/
+    # .NET calls below resolve it against the process's real current
+    # directory instead, which can silently differ from $PWD
+    # (Set-Location/Push-Location only move PowerShell's own location,
+    # not [System.Environment]::CurrentDirectory - see CLAUDE.md's
+    # "Lessons learned"). Resolve-ItemPathOrNull is used instead of a
+    # bare GetUnresolvedProviderPathFromPSPath call so a path that can't
+    # be resolved at all (an unmounted drive) degrades to the same
+    # $false this function already returns for a path that resolves fine
+    # but doesn't exist, instead of throwing. The result is captured into
+    # a separate, untyped local first rather than reassigned straight
+    # into $ItemPath - $ItemPath's own [string] parameter type would
+    # silently coerce a real $null back to "" (see CLAUDE.md's "Lessons
+    # learned" again), which then makes Test-Path throw a
+    # ParameterBindingValidationException instead of degrading cleanly.
     $resolvedItemPath = Resolve-ItemPathOrNull -ItemPath $ItemPath
     if ($null -eq $resolvedItemPath) { return $false }
     $ItemPath = $resolvedItemPath
-    # [System.IO.File]::Exists/[System.IO.Directory]::Exists, not Test-Path
-    # (2026-09-10, /code-review high finding) - this runs on the hot
-    # per-file deletion path both Full Pipeline engine worker runspaces
-    # call after every successful conversion, an unswept instance of the
-    # same cmdlet-first-invocation-in-a-fresh-runspace race
-    # LeafDirectoryDiscovery.ps1's functions were fixed for (see those
-    # functions' own NOTES) - this module was never part of that sweep.
+    # [System.IO.File]::Exists/[System.IO.Directory]::Exists, not
+    # Test-Path - this runs on the hot per-file deletion path both Full
+    # Pipeline engine worker runspaces call after every successful
+    # conversion, the same cmdlet-first-invocation-in-a-fresh-runspace
+    # race LeafDirectoryDiscovery.ps1's functions are fixed for (see
+    # those functions' own NOTES).
     if (-not ([System.IO.File]::Exists($ItemPath) -or [System.IO.Directory]::Exists($ItemPath))) { return $false }
 
     return Invoke-DeleteTreatingVanishedAsFalse -Action {
-        # [System.IO.File]::GetAttributes, not Get-Item -Force (same fix as
-        # above) - works on both files and directories despite the "File"
-        # in the name, and reads raw attributes directly so it sees a
-        # Hidden/System item without needing -Force at all.
+        # [System.IO.File]::GetAttributes, not Get-Item -Force - works on
+        # both files and directories despite the "File" in the name, and
+        # reads raw attributes directly so it sees a Hidden/System item
+        # without needing -Force at all.
         $attr = [System.IO.File]::GetAttributes($ItemPath)
         if ($attr -band [System.IO.FileAttributes]::Directory) {
             # Verified live (Harness Scenario L) against a real NTFS directory
@@ -249,9 +241,9 @@ function Remove-ItemPermanently {
     )
     # Resolved to an absolute, provider-native path FIRST - see
     # Move-ToRecycleBin's own matching comment above for the full
-    # reasoning (2026-09-03 fix, Todo.md finding), and Resolve-ItemPathOrNull's
-    # own header for why a bare GetUnresolvedProviderPathFromPSPath call
-    # isn't safe to use directly here. Captured into a separate, untyped
+    # reasoning, and Resolve-ItemPathOrNull's own header for why a bare
+    # GetUnresolvedProviderPathFromPSPath call isn't safe to use directly
+    # here. Captured into a separate, untyped
     # local first - see Move-ToRecycleBin's own matching comment above for
     # why reassigning straight into the [string]-typed $ItemPath is unsafe.
     $resolvedItemPath = Resolve-ItemPathOrNull -ItemPath $ItemPath
