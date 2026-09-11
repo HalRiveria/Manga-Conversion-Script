@@ -1678,9 +1678,9 @@ function Remove-StaleLooseSources {
     foreach ($stale in $StaleSources) {
         if (Test-AbortSignal) { break }
         try {
-            # Return value checked, not discarded (2026-09-08 fix, same
-            # species as this project's other Remove-Source call sites) -
-            # see Complete-ImageConversionJob's matching fix above for the
+            # Return value checked, not discarded - same
+            # species as this project's other Remove-Source call sites,
+            # see Complete-ImageConversionJob's matching case above for the
             # full reasoning.
             $removed = Remove-Source -ItemPath $stale.FullName
             if ($removed) {
@@ -1715,12 +1715,12 @@ function Get-ChapterProgressStatus {
     if ($null -eq $ChapterResult) { return "Success", $null }
 
     # InspectFailedCount is Error-tier: it means Test-AvifAnimated couldn't
-    # even determine whether an AVIF needs converting, so it was left as a
-    # raw, completely unconverted file on disk - previously not checked
-    # here AT ALL, so it was silently treated as a clean Success, letting
+    # even determine whether an AVIF needs converting, so it's left as a
+    # raw, completely unconverted file on disk - without this check, it
+    # would be silently treated as a clean Success, letting
     # the zip gate proceed with an unconverted file in the chapter. Same
     # underlying issue as AnimatedConversionPipeline.ps1's own
-    # Get-ChapterAnimatedStatus, fixed there the same day (2026-08-31).
+    # Get-ChapterAnimatedStatus.
     # This condition + parts-building block is a deliberate duplicate of
     # that function's own copy (same four fields, same Error-tier severity
     # ordering) - keep both in sync.
@@ -1749,11 +1749,10 @@ function Get-ZipBlockedStatusOverride {
         existing Error alone (already correctly severe, and already the
         reason zipping was skipped, not this).
 
-        SOLE DEFINITION, reused by Controller.ps1 (2026-09-09, revised
-        same day by a code-review fix - see Docs/zip-blocked-status-
+        SOLE DEFINITION, reused by Controller.ps1 - see Docs/zip-blocked-status-
         design.md's "Decided" section for the original "documented
         duplicate" reasoning, and CHANGELOG.md for why that shape got
-        replaced with this one): originally an identical copy also lived
+        replaced with this one: an identical copy would otherwise live
         in Controller.ps1 for Full Pipeline's own three block-reason
         cases, but both files are always dot-sourced into the same script
         scope (Controller.ps1 already unconditionally depends on this
@@ -1782,9 +1781,9 @@ function Get-ZipBlockedStatusOverride {
         [string]$BlockedReason
     )
     if ($Status -eq 'Error') { return $Status, $Detail }
-    # Lowercase "zip skipped" (2026-09-09, code-review fix), matching
+    # Lowercase "zip skipped" matches
     # ZipPipeline.ps1's own existing "zip skipped: ..." Detail text for
-    # the identical concept - was "Zip skipped" (capital Z), a
+    # the identical concept, avoiding a
     # user-visible casing mismatch between two pipelines' Detail text
     # for the same underlying event.
     $newDetail = if ($Detail) { $Detail + " | zip skipped: " + $BlockedReason } else { "zip skipped: " + $BlockedReason }
@@ -1794,8 +1793,8 @@ function Get-ZipBlockedStatusOverride {
 function Invoke-LooseImageConversionPipeline {
     <#
     .SYNOPSIS
-        Mode 2 end to end (and mode 2's conversion half of mode 8).
-        Migrated 2026-09-09 onto ChapterDispatch.ps1's Invoke-ChapterDispatch
+        Mode 2 end to end (and mode 2's conversion half of mode 8),
+        migrated onto ChapterDispatch.ps1's Invoke-ChapterDispatch
         (step 3 of Docs\dispatch-redesign-design.md's 4-step migration
         order, after mode 3) - idle concurrency now picks up the NEXT
         chapter's jobs immediately instead of blocking on one chapter's
