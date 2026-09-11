@@ -20,10 +20,10 @@
       - Initialize-CleanConsoleOutput (Modules\Logging.ps1),
         Initialize-FileDeletion (Modules\FileDeletion.ps1) - Show-ModeMenu's
         own "5" branch re-syncs both from the current $Settings right
-        before Show-CoverDeletionMenu runs (2026-08-31 fix - Cover
-        Deletion's real, permanent-deletion-capable scan happens INSIDE
-        that same call, before Controller.ps1's own Invoke-MainLoop
-        re-sync would ever get a chance to run).
+        before Show-CoverDeletionMenu runs - Cover Deletion's real,
+        permanent-deletion-capable scan happens inside that same call,
+        before Controller.ps1's own Invoke-MainLoop re-sync would ever
+        get a chance to run.
 
     TESTABILITY: every interactive loop takes a -PromptFunc scriptblock
     (defaults to a thin `Read-Host` wrapper) instead of calling Read-Host
@@ -142,59 +142,54 @@ function Show-ModeMenu {
         $choice = (& $PromptFunc "Enter a number").Trim()
 
         if ($choice -eq '0') {
-            # $null = (2026-09-03 fix - see this file's own header/CHANGELOG.md
-            # for the FATAL-crash root cause this same species caused via
-            # Show-CoverDeletionMenu below): a bare call's return value
-            # becomes part of THIS function's own output stream unless
+            # $null = matters here - a bare call's return value becomes
+            # part of THIS function's own output stream unless
             # suppressed, silently corrupting the eventual `return $resolved`
             # into a multi-element array the first time anything in this
-            # branch's call tree returns non-$null.
+            # branch's call tree returns non-$null (same species of bug
+            # Show-CoverDeletionMenu below caused a real FATAL crash with).
             $null = Show-OptionsMenuLevel -Items (Get-OptionsMenuSchema) -Settings $Settings -SettingsPath $SettingsPath -PromptFunc $PromptFunc -Title "Options"
             Write-Host ""
             continue
         }
 
         if ($choice -eq '5') {
-            # Re-sync PermanentDelete/CleanConsoleOutputEnabled here too
-            # (2026-08-31 fix, caught by a same-day /code-review full-
-            # codebase pass) - Controller.ps1's Invoke-MainLoop already
-            # re-syncs both AFTER Get-SelectedMode returns, but Cover
-            # Deletion does its real, permanent-deletion-capable work
-            # (Invoke-CoverDeletionRun -> Invoke-UnwantedImageScan ->
-            # Remove-Source, reading $script:PermanentDelete) INSIDE this
-            # same call, before that re-sync ever runs. A user who opens
-            # Options, turns Permanent Delete off, backs out, and picks
-            # Cover Deletion in the SAME menu visit was still deleting
-            # permanently on the stale bootstrap value - live-reproduced,
-            # a real data-loss bug (files that should have gone to the
-            # Recycle Bin didn't). Same file bypasses Recycle Bin only
-            # when explicitly asked to; this closes the one path that
-            # wasn't honoring a just-made "off" choice. CleanConsoleOutput
-            # is re-synced alongside it for the same reason - stale-on
-            # would silently suppress every "Deleted..." console line for
-            # the scan the user is about to run.
+            # Re-sync PermanentDelete/CleanConsoleOutputEnabled here too -
+            # Controller.ps1's Invoke-MainLoop already re-syncs both after
+            # Get-SelectedMode returns, but Cover Deletion does its real,
+            # permanent-deletion-capable work (Invoke-CoverDeletionRun ->
+            # Invoke-UnwantedImageScan -> Remove-Source, reading
+            # $script:PermanentDelete) inside this same call, before that
+            # re-sync ever runs. Without this, a user who opens Options,
+            # turns Permanent Delete off, backs out, and picks Cover
+            # Deletion in the same menu visit would still delete
+            # permanently on the stale bootstrap value - a real data-loss
+            # risk (files that should go to the Recycle Bin wouldn't).
+            # CleanConsoleOutput is re-synced alongside it for the same
+            # reason - stale-on would silently suppress every "Deleted..."
+            # console line for the scan the user is about to run.
             Initialize-CleanConsoleOutput -Enabled ([bool]$Settings.CleanConsoleOutputEnabled)
             Initialize-FileDeletion -PermanentDelete ([bool]$Settings.PermanentDelete)
-            # Start-LogRun/Complete-LogRun bracket (2026-09-04 fix, real bug) -
+            # Start-LogRun/Complete-LogRun bracket matters here too -
             # Cover Deletion is the one mode whose real work (scan, hash,
             # delete, all inside Show-CoverDeletionMenu below) never goes
-            # through Invoke-MainLoop's own Invoke-Mode dispatch, so it was
-            # never bracketed by that loop's Start-LogRun/Complete-LogRun
-            # pair either. In split-log mode its Warn/Error lines landed
-            # appended with no run-separator header, and the NEXT real run's
-            # Start-LogRun then snapshotted those un-headered lines as
-            # "prior content" belonging to whatever ran before them -
-            # Complete-LogRun's reorder permanently stranded Cover
-            # Deletion's own output under an unrelated earlier run instead
-            # of giving it its own newest-on-top section. Called directly
-            # (not via an injected handler, unlike Invoke-MainLoop's own
-            # pair) - Start-LogRun/Complete-LogRun are ordinary Logging.ps1
-            # functions in the same script scope as every other module here,
-            # and this is the one call site outside Invoke-MainLoop itself
-            # that needs them.
+            # through Invoke-MainLoop's own Invoke-Mode dispatch, so
+            # without this it would never be bracketed by that loop's
+            # Start-LogRun/Complete-LogRun pair either. In split-log mode
+            # its Warn/Error lines would land appended with no
+            # run-separator header, and the next real run's Start-LogRun
+            # would then snapshot those un-headered lines as "prior
+            # content" belonging to whatever ran before them, stranding
+            # Cover Deletion's own output under an unrelated earlier run
+            # instead of giving it its own newest-on-top section. Called
+            # directly here (not via an injected handler, unlike
+            # Invoke-MainLoop's own pair) - Start-LogRun/Complete-LogRun
+            # are ordinary Logging.ps1 functions in the same script scope
+            # as every other module here, and this is the one call site
+            # outside Invoke-MainLoop itself that needs them.
             Start-LogRun
-            # $null = (2026-09-03 fix): Show-CoverDeletionMenu's own '1'/'2'/'5'
-            # branches return a hashtable (Invoke-CoverDeletionRun/
+            # $null = matters here too - Show-CoverDeletionMenu's own
+            # '1'/'2'/'5' branches return a hashtable (Invoke-CoverDeletionRun/
             # Show-AddUnwantedImageProfileFlow/Invoke-TrailingZeroAuditRun all
             # do) from a bare, unsuppressed call of their own - that hashtable
             # was escaping THIS call too, silently added to Show-ModeMenu's own
