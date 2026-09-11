@@ -1875,8 +1875,8 @@ function Invoke-LooseImageConversionPipeline {
         ONLY when IsZippable is true, matching Convert-ImageBatch's own
         -AbortPollCallback precedent for this kind of hook.
     .PARAMETER ZipStepCallback
-        Mode 8's ("Image Conversion + Zip") decided CCR-fold mechanism,
-        2026-08-28 - see this module's header, "-ZIPSTEPCALLBACK".
+        Mode 8's ("Image Conversion + Zip") decided CCR-fold mechanism -
+        see this module's header, "-ZIPSTEPCALLBACK".
         Invoked with @{ SeriesName; ChapterName; Dir; ChapterResult;
         ZipOut } ONLY when IsZippable is true AND conversion didn't
         already hit an Error - must return @{ Status =
@@ -1899,7 +1899,7 @@ function Invoke-LooseImageConversionPipeline {
         the sum of every chapter's Convert-ImageBatch InspectFailedCount
         (AVIF files whose animation status couldn't be determined) PLUS
         any Get-LooseImageCandidates NamingCollisions this run hit
-        directly (2026-08-31) - both mean "a real file this run couldn't
+        directly - both mean "a real file this run couldn't
         safely act on", counted the same way Controller.ps1's own
         Full Pipeline combines its AVIF-classification failures.
     #>
@@ -1917,14 +1917,14 @@ function Invoke-LooseImageConversionPipeline {
         [bool]$FullLogging,
         [string[]]$LooseImageExtensions = (Get-LooseImageExtensions),
         [string[]]$KnownZipPaths = @(),
-        # Get-LooseImageExtensions() PLUS ".jxl" (2026-09-01 live-shakedown
-        # fix, same root cause as Controller.ps1's Full Pipeline default -
-        # see that parameter's own comment there for the full explanation).
+        # Get-LooseImageExtensions() PLUS ".jxl" - same root cause as
+        # Controller.ps1's Full Pipeline default - see that parameter's
+        # own comment there for the full explanation.
         # This engine's own output extension is ".jxl", which the bare
         # loose list doesn't include - a chapter this pipeline already
-        # finished converting (source images deleted, only .jxl left) was
-        # otherwise invisible to Get-SeriesChapters on any later solo-mode
-        # run, permanently, with no warning logged.
+        # finished converting (source images deleted, only .jxl left)
+        # would otherwise be invisible to Get-SeriesChapters on any later
+        # solo-mode run, permanently, with no warning logged.
         [string[]]$FolderQualifyingExtensions = ((Get-LooseImageExtensions) + @(".jxl")),
         [System.Collections.Generic.HashSet[string]]$FolderExcludeStagingDirs = $null,
         [scriptblock]$PostChapterCallback = $null,
@@ -1971,8 +1971,8 @@ function Invoke-LooseImageConversionPipeline {
     # own CancelToken check would never fire on a real Ctrl+C - see this
     # module's header for how that was caught.
     #
-    # Construction/registration moved INSIDE the try (2026-08-31 fix, same
-    # species as ZipParallelProcessing.ps1's mutex-leak fix earlier today) -
+    # Construction/registration moved INSIDE the try, same species as
+    # ZipParallelProcessing.ps1's mutex-leak guard -
     # if either throws, the finally block below still runs and disposes
     # $looseCts if it was actually created.
     try {
@@ -1989,9 +1989,8 @@ function Invoke-LooseImageConversionPipeline {
         $seriesExhausted = $false
         $chapterProvider = {
             while ($chapterQueue.Count -eq 0 -and -not $seriesExhausted) {
-                # Checked here, not just via -AbortPollCallback (2026-09-09,
-                # real behavior gap caught by this module's own harness) -
-                # the old code's per-series while loop checked
+                # Checked here, not just via -AbortPollCallback - see this
+                # module's own harness: the old code's per-series while loop checked
                 # Test-AbortSignal at the very top, before fetching the
                 # next series at all; -AbortPollCallback alone only runs
                 # once per Invoke-ChapterDispatch pass (after pull-ahead
@@ -2399,12 +2398,12 @@ function Get-ImageConversionSharedFunctionNames {
         Write-GatedConsoleMessage: Convert-ImageBatch's own straggler-drain
         can call it, but propagating it is unsafe (CleanConsoleRendering.ps1's
         module-scope state is never initialized inside a fresh runspace) -
-        see CLAUDE.md's Known gaps / CHANGELOG.md 2026-08-29 for the real
+        see CLAUDE.md's Known gaps / CHANGELOG.md for the real
         gap this leaves (deliberately, not an oversight either). Includes
-        Get-NeverConvertedExtensions (2026-09-02) - Convert-ImageBatch's
+        Get-NeverConvertedExtensions - Convert-ImageBatch's
         own pre-pass calls it directly to decide whether to skip a file
         (currently just ".gif") rather than dispatch it to cjxl. Includes
-        Test-WebPAnimated (2026-09-09 extraction, this same module) -
+        Test-WebPAnimated (this same module) -
         Convert-ImageBatch's own WebP pre-pass calls it directly, same
         reason as Test-AvifAnimated above.
     #>

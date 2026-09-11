@@ -15,21 +15,16 @@
     Pure definitions only - no top-level side effects, safe to dot-source
     more than once or alongside other modules.
 
-    FIRST REAL CALLER (2026-09-09): mode 3's Invoke-LooseAnimatedConversionPipeline
-    (AnimatedConversionPipeline.ps1) - step 2 of the dispatch-redesign
-    design doc's 4-step migration order, after step 1 (this module,
-    built standalone). Controller.ps1/ImageConversionPipeline.ps1 don't
-    call this yet, and Conversion Script Main.ps1 does not dot-source it
-    at the top level yet either (each module that DOES call it dot-sources
-    it directly, matching AnimatedConversionPipeline.ps1's own updated
-    FORWARD REFERENCES). Intended load position once wired into the main
-    script directly: right after LeafDirectoryDiscovery.ps1, before
+    Dot-sourced at the top level by Conversion Script Main.ps1, right
+    after LeafDirectoryDiscovery.ps1 and before
     ZipParallelProcessing.ps1/ZipPipeline.ps1/ImageConversionPipeline.ps1/
     AnimatedConversionPipeline.ps1/Controller.ps1 - see that script's own
-    dot-source order.
+    dot-source order. All four dispatch-redesign migration steps
+    (AnimatedConversionPipeline.ps1, ImageConversionPipeline.ps1,
+    Controller.ps1's two-engine dispatch) call into this module - see
+    Docs\dispatch-redesign-design.md.
 
-    CALLING CONVENTION - READ BEFORE WRITING A NEW CALLER (2026-09-09,
-    real bug caught building mode 3's migration, before it ever ran):
+    CALLING CONVENTION - READ BEFORE WRITING A NEW CALLER:
     every -JobBuilder/-JobStarter/-JobPollCompleted/-JobFinalize/
     -JobAbortCleanup/-ChapterCompleteCallback/-ChapterProvider/
     -AbortPollCallback scriptblock you pass in MUST be built with
