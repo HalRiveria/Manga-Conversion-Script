@@ -787,8 +787,8 @@ function Get-MergedChapterStatus {
     .SYNOPSIS
         Merges an image ChapterResult and an animated ChapterResult (each
         possibly $null - nothing to convert for that engine this
-        chapter) into ONE Status/Detail pair for Complete-ChapterProgress
-        - confirmed 2026-08-28 design: concatenate both engines' own
+        chapter) into ONE Status/Detail pair for Complete-ChapterProgress -
+        concatenates both engines' own
         sub-summaries into one Detail string, Status is whichever of the
         two is worse (Error > Warning > Success). Reuses
         Get-ChapterProgressStatus/Get-ChapterAnimatedStatus directly -
@@ -816,8 +816,8 @@ function Get-MergedChapterStatus {
     return $mergedStatus, ($parts -join " | ")
 }
 
-# Get-ZipBlockedStatusOverride is NOT redefined here (2026-09-09, code-
-# review fix) - it used to be a "documented duplicate" of
+# Get-ZipBlockedStatusOverride is NOT redefined here - it used to be a
+# "documented duplicate" of
 # ImageConversionPipeline.ps1's own copy, but both files are dot-sourced
 # into the same script scope on every real run (and in this module's own
 # harness, which dot-sources ImageConversionPipeline.ps1 before
@@ -1035,7 +1035,7 @@ $script:fullPipelineEngineWorker = {
             $failureAlreadyAccounted = $false
             try {
                 # [System.Diagnostics.ProcessStartInfo]::new(), not
-                # New-Object (2026-09-10, real bug found live-catching a
+                # New-Object - a real bug found live-catching a
                 # Controller.Harness.ps1 hang with NO subprocess alive at
                 # all - ruling out every prior "magick.exe/cjxl.exe itself
                 # hung" theory and pointing at pure PowerShell-side code
@@ -1127,8 +1127,7 @@ $script:fullPipelineEngineWorker = {
                     $magickExitCode = $magickProc.ExitCode
                     $magickProc.Dispose()
                     $magickProcLocal = $null
-                    # [System.IO.File]::Exists, not Test-Path (2026-09-10,
-                    # /code-review high finding) - this whole JobStarter is
+                    # [System.IO.File]::Exists, not Test-Path - this whole JobStarter is
                     # the hot per-file path for Full Pipeline's image
                     # engine, called from inside a fresh worker runspace -
                     # an unswept instance of the same
@@ -1229,7 +1228,7 @@ $script:fullPipelineEngineWorker = {
                 $srcPath  = $f.FullName
                 $webpPath = [System.IO.Path]::ChangeExtension($srcPath, ".webp")
 
-                # [System.IO.File]::Exists, not Test-Path (2026-09-10) -
+                # [System.IO.File]::Exists, not Test-Path -
                 # same reasoning as LeafDirectoryDiscovery.ps1's NOTES -
                 # this runs once per animated file, on the very first
                 # chapter either engine dispatches, right after both
@@ -1357,7 +1356,7 @@ $script:fullPipelineEngineWorker = {
 function Invoke-FullPipeline {
     <#
     .SYNOPSIS
-        Mode 1 ("Full Pipeline") end to end. Migrated 2026-09-09 onto
+        Mode 1 ("Full Pipeline") end to end, migrated onto
         ChapterDispatch.ps1's Invoke-ChapterDispatch (step 4 of
         Docs\dispatch-redesign-design.md's 4-step migration order, the
         last and hardest - two engines instead of one) - idle concurrency
@@ -1456,7 +1455,7 @@ function Invoke-FullPipeline {
         Aborted                  = $false
     }
 
-    # Cover Deletion pre-scan (2026-09-09, RunCoverDeletionBeforeConversion
+    # Cover Deletion pre-scan (RunCoverDeletionBeforeConversion
     # toggle - see Todo.md's "Run Cover Deletion automatically before Full
     # Pipeline conversion" entry). Deliberately runs BEFORE any chapter
     # discovery/dispatch starts - nothing else is running yet (no
@@ -1718,10 +1717,8 @@ function Invoke-FullPipeline {
             Unregister-AbortCancellationSource -Cts $fullCts
             $fullCts.Dispose()
         }
-        # $sharedBudget disposal (2026-09-09, caught in a self-review of
-        # this migration before it shipped - the old single-threaded code
-        # had this same line, dropped by mistake during the rewrite) - a
-        # SemaphoreSlim handle leaked every real run otherwise. Guarded
+        # $sharedBudget disposal matters here - without it, a
+        # SemaphoreSlim handle leaks every real run. Guarded
         # like $fullCts above, same reason: construction itself is inside
         # the try, so a throw before it ever runs leaves this unset.
         if ($sharedBudget) { $sharedBudget.Dispose() }
@@ -1761,7 +1758,7 @@ function Invoke-Mode {
         resolve at all, so it never needs Invoke-Mode's own harness to
         dot-source ZipPipeline.ps1 - see this module's header.
     .PARAMETER ZipFolderHandler
-        Mode 8's real zip step (2026-08-28, Phase 2) - defaults to
+        Mode 8's real zip step - defaults to
         Invoke-LooseFolderZip (ZipPipeline.ps1), same injectable/caveat-
         gated shape as the handlers above. The closure built for mode 8's
         -ZipStepCallback calls this WITHOUT -SeriesName/-ChapterName
