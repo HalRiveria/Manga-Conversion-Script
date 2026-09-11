@@ -15,7 +15,7 @@
       $script:logFile, $script:logSummaryFile, $script:logErrorFile,
       $script:logWarnFile, $script:pathHash, $script:CleanConsoleOutputEnabled
 
-    Clean Console Output (2026-08-18): when
+    Clean Console Output: when
     Initialize-CleanConsoleOutput -Enabled $true has been called,
     Write-Log stops echoing to the console entirely (both the direct
     Write-Host path and the worker-queue-then-Flush-ConsoleQueue path -
@@ -33,8 +33,8 @@
 
     Runspace workers get their own independent copy of this state (a
     runspace doesn't share the parent scope) - the established pattern
-    elsewhere in this codebase (see Modules\_Reference\ZipPipeline's
-    $zipOnlyWorker, RezipPipeline's $zipWorker) is for the worker
+    elsewhere in this codebase (see ZipPipeline.ps1's own
+    $script:zipOnlyWorker) is for the worker
     scriptblock to set $script:logFile/$script:logMutex/etc. itself from
     parameters it was bound at dispatch time, then call Write-Log exactly
     as the main thread does. Write-Log/Write-SummaryLog reference this
@@ -53,7 +53,7 @@
     doesn't need to repeat that handling itself.
 
     Neither logging mode ever deletes or clears a previous run's own log
-    content (2026-09-03 fix, project owner's own explicit call): full-
+    content, per the project owner's own explicit call: full-
     logging mode gets a fresh uniquely-timestamped file every run (nothing
     to clear - no fixed-name ambiguity); split-log mode's fixed-name
     Errors/Warnings/Summary files all ACCUMULATE across runs instead, with
@@ -191,26 +191,19 @@ function Initialize-LogPaths {
         $script:logWarnFile    = $null
         $script:SummaryFileEnabled = $true   # DisableSummaryFile is ignored in this mode - see param docs
 
-        # No old-log cleanup in this branch (2026-09-03 fix, real bug,
-        # live-reported: a previous run's own timestamped full-logging
-        # file - the one the user was actively looking at right after
-        # that run finished - got Recycle-Bin'd out from under them the
-        # moment the NEXT run against the same target started).
-        # Previously this block swept every OTHER "Conversion Log - * -
-        # <pathHash>.log" file for the same target into the Recycle Bin
-        # on every run, on the theory that a fresh timestamped file every
-        # run needed the same "clean up the old one" treatment split-log
-        # mode's fixed-name Errors/Warnings files get. That reasoning
-        # doesn't hold: a fixed-name file has to be cleared or it can't
-        # tell this run's own errors from a stale previous run's, but a
-        # UNIQUELY-timestamped file never has that ambiguity - there's no
-        # reason it can't just be left alone. Project owner's own
-        # explicit call: "if the logs are going to get a unique ID then
-        # they shouldn't get deleted on subsequent runs." A per-run
-        # accumulation toggle (keep every run's own file vs. the old
-        # append-to-one-file behavior) is tracked separately in Todo.md -
-        # this fix only stops the unwanted auto-deletion, it doesn't
-        # change the one-file-per-run design itself.
+        # No old-log cleanup in this branch on purpose - sweeping every
+        # OTHER "Conversion Log - * - <pathHash>.log" file for the same
+        # target into the Recycle Bin on every run would Recycle-Bin the
+        # PREVIOUS run's own file (the one the user might be actively
+        # looking at) the moment the next run against the same target
+        # started. A fixed-name file has to be cleared or it can't tell
+        # this run's own errors from a stale previous run's, but a
+        # uniquely-timestamped file never has that ambiguity, so there's
+        # no reason it can't just be left alone. Project owner's own call:
+        # "if the logs are going to get a unique ID then they shouldn't
+        # get deleted on subsequent runs." A per-run accumulation toggle
+        # (keep every run's own file vs. the old append-to-one-file
+        # behavior) is tracked separately in Todo.md.
     } else {
         $script:logFile            = $null
         $script:SummaryFileEnabled = -not $DisableSummaryFile
@@ -218,28 +211,26 @@ function Initialize-LogPaths {
         $script:logErrorFile       = Join-Path $ScriptDir ("Conversion Log - Errors - "   + $pathHashShort + ".log")
         $script:logWarnFile        = Join-Path $ScriptDir ("Conversion Log - Warnings - " + $pathHashShort + ".log")
 
-        # No clearing here (2026-09-03 fix, project owner's own explicit
-        # call: split-log mode's Errors/Warnings/Summary files should all
-        # ACCUMULATE across runs, newest run on top - matching
-        # Write-SummaryLog's own already-existing prepend-block behavior,
-        # not just Summary's). Previously this block sent both files to
-        # the Recycle Bin at the start of every run so a clean run's
-        # absence of new content wasn't confused with a stale previous
-        # run's - now that distinction is made by the run-separator
-        # header instead of by deleting anything.
+        # No clearing here on purpose - split-log mode's
+        # Errors/Warnings/Summary files should all accumulate across
+        # runs, newest run on top, matching Write-SummaryLog's own
+        # prepend-block behavior. Sending both files to the Recycle Bin
+        # at the start of every run would only have been needed to keep a
+        # clean run's absence of new content from being confused with a
+        # stale previous run's - that distinction is made by the
+        # run-separator header instead.
         #
         # The header write + prior-content capture themselves do NOT
-        # happen here (2026-09-03 fix, real bug caught by a same-session
-        # /code-review pass: this function only runs once at bootstrap
-        # and again only when FullLogging/DisableSummaryFile actually
-        # changes - Invoke-MainLoop's own re-sync gates it on that - but
-        # Complete-LogRun runs after EVERY run. A session with 2+ runs
-        # between one Initialize-LogPaths call left every run after the
-        # first with no header and a stale $logErrorPriorContent, so
-        # Complete-LogRun's own StartsWith check silently failed and
-        # those runs' content was never promoted to the top - live-
-        # reproduced during that review). Start-LogRun (below) now owns
-        # both, called once per run from Invoke-MainLoop, paired with
+        # happen here - this function only runs once at bootstrap and
+        # again only when FullLogging/DisableSummaryFile actually
+        # changes (Invoke-MainLoop's own re-sync gates it on that), but
+        # Complete-LogRun runs after every run. Doing the header/capture
+        # here would leave every run after the first in a session (when
+        # nothing had toggled) with no header and a stale
+        # $logErrorPriorContent, so Complete-LogRun's own StartsWith
+        # check would silently fail and that run's content would never
+        # get promoted to the top. Start-LogRun (below) owns both
+        # instead, called once per run from Invoke-MainLoop, paired with
         # Complete-LogRun at the end of that same run.
     }
 }
@@ -255,21 +246,19 @@ function Start-LogRun {
         in full-logging mode (nothing to do - one fresh file per run,
         already handled by Initialize-LogPaths).
     .DESCRIPTION
-        Deliberately separate from Initialize-LogPaths (2026-09-03 fix,
-        real bug - see Complete-LogRun's own header for the full story):
-        Initialize-LogPaths computes log file PATHS, which only need
+        Deliberately separate from Initialize-LogPaths - see
+        Complete-LogRun's own header for the full story.
+        Initialize-LogPaths computes log file paths, which only need
         recomputing when FullLogging/DisableSummaryFile actually changes
-        or at bootstrap - but a run's own header/prior-content capture
-        needs to happen at the start of EVERY run regardless. Conflating
-        the two meant every run after the first in a session (when
-        nothing had toggled) got no header and a stale prior-content
+        or at bootstrap, but a run's own header/prior-content capture
+        needs to happen at the start of every run regardless. Conflating
+        the two would leave every run after the first in a session (when
+        nothing had toggled) with no header and a stale prior-content
         snapshot.
 
-        Errors/Warnings I/O is wrapped in try/catch (2026-09-03 fix,
-        same review pass) - a locked/AV-held log file used to have this
-        exact failure handled gracefully by the old stale-log-clearing
-        code this design replaced; the read/write calls below had lost
-        that protection. A failure here degrades to "this run's content
+        Errors/Warnings I/O is wrapped in try/catch - without it, a
+        locked/AV-held log file would throw uncaught here instead of
+        being handled gracefully. A failure here degrades to "this run's content
         won't get a header/won't be reorderable" (logged as a Warn) -
         Complete-LogRun's own StartsWith guard already treats a missing/
         mismatched Prior as "leave the file alone", so this fails safe.
@@ -322,14 +311,11 @@ function Complete-LogRun {
         this never runs for that run - its content stays appended at the
         BOTTOM of the file instead of moved to the top; nothing is lost.
 
-        Wrapped in try/catch per file (2026-09-03 fix, real bug caught by
-        a same-session /code-review pass) - a locked/AV-held file used to
-        be handled gracefully by the old stale-log-clearing code this
-        design replaced; this rewrite's own ReadAllText/WriteAllText had
-        no such protection, so a locked Errors/Warnings file could throw
-        uncaught out of Invoke-MainLoop (this function's real call site),
-        killing the whole run loop for a run that had otherwise already
-        finished successfully. A failed reorder now just logs a Warn and
+        Wrapped in try/catch per file - without it, a locked/AV-held
+        file's ReadAllText/WriteAllText would throw uncaught out of
+        Invoke-MainLoop (this function's real call site), killing the
+        whole run loop for a run that had otherwise already finished
+        successfully. A failed reorder just logs a Warn and
         leaves this run's content appended at the bottom, same as the
         "shouldn't happen" fallback below already does deliberately.
         StartsWith/Substring use Ordinal comparison, not the culture-
@@ -390,8 +376,8 @@ function Initialize-LogMutex {
         state, not inherited from the caller.
     .NOTES
         Deliberately does NOT dispose whatever mutex was already at
-        $script:logMutex before overwriting it (2026-08-31, confirmed by a
-        same-day /code-review) - ZipParallelProcessing.ps1's own caller
+        $script:logMutex before overwriting it -
+        ZipParallelProcessing.ps1's own caller
         contract depends on that OLD reference staying valid: it saves it
         before calling this function specifically so it can restore it
         afterward once its own local mutex is no longer needed. Adding an
@@ -521,12 +507,12 @@ function Write-LogLineToFile {
 function Write-Log {
     <#
     .PARAMETER ForceConsole
-        Bypasses the Clean Console Output console-echo gate below
-        (2026-09-03 fix - real bug, live-reported: mode 5/Cover Deletion
-        has no CCR live-progress display of its own to replace the
-        suppressed lines with, so with CCO on it reported nothing to the
-        console at all, silently, while still working and file-logging
-        normally). Only meant for a pipeline like Cover Deletion that
+        Bypasses the Clean Console Output console-echo gate below -
+        mode 5/Cover Deletion has no CCR live-progress display of its own
+        to replace the suppressed lines with, so without this, with CCO
+        on it would report nothing to the console at all, silently,
+        while still working and file-logging normally. Only meant for a
+        pipeline like Cover Deletion that
         never starts a CCR live-redraw region - still routes through the
         same $script:workerConsoleQueue check as the normal path, so it
         stays cross-thread-safe if a future caller ever uses it from
@@ -651,11 +637,9 @@ function Get-LoggingSharedFunctionNames {
         The function names a caller must add to its own -SharedFunctionNames
         list (Invoke-ZipParallelProcessing) to safely call Write-Log from
         inside a runspace worker. Single source of truth for this group -
-        added specifically so a future new Write-Log dependency only needs
-        updating HERE, not at every one of Controller.ps1/RezipPipeline.ps1/
-        ZipPipeline.ps1's own call sites by hand (the exact bug pattern that
-        bit this project four times in one session - see CHANGELOG.md
-        2026-08-29). Callers concatenate this with whatever other groups
+        so a future new Write-Log dependency only needs updating here,
+        not at every one of Controller.ps1/ZipPipeline.ps1's own call
+        sites by hand. Callers concatenate this with whatever other groups
         (FileDeletion, image/animated conversion, zip creation) they need.
     #>
     return @('Write-Log', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile')
