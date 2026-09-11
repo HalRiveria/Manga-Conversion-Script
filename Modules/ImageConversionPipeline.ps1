@@ -23,7 +23,7 @@
         own worker - already the same shared function, nothing to change.
       - Mode 3 doesn't convert anything, not involved.
 
-    CLEAN CONSOLE OUTPUT REWORK (2026-08-26): PART 2 now walks the library
+    CLEAN CONSOLE OUTPUT REWORK: PART 2 walks the library
     two-tier - New-SeriesProvider (lazy, one series at a time) then
     Get-SeriesChapters (eager, one series' worth of chapters) - and always
     batches per chapter, series by series. This replaced the old
@@ -83,8 +83,8 @@
         takes the toggle as an explicit param rather than reading
         $script:CleanConsoleOutputEnabled itself (CleanConsoleRendering.ps1
         has no forward references of its own) - this call site supplies it.
-      - Test-AvifAnimated (AnimatedConversionPipeline.ps1) - NEW
-        2026-08-28, for the static-AVIF conversion path in
+      - Test-AvifAnimated (AnimatedConversionPipeline.ps1) - for the
+        static-AVIF conversion path in
         Convert-ImageBatch (see "STATIC AVIF -> JXL" below). Spawns a
         real magick identify process - not a cheap byte read like the
         WebP animation check - so this module now genuinely depends on
@@ -93,7 +93,7 @@
     Modules\_Harness\ImageConversionPipeline.Harness.ps1 dot-sources the
     real Logging.ps1/FileDeletion.ps1/AbortPipeline.ps1/
     LeafDirectoryDiscovery.ps1/CleanConsoleRendering.ps1/
-    AnimatedConversionPipeline.ps1 (the last one added 2026-08-28, for
+    AnimatedConversionPipeline.ps1 (the last one for
     Test-AvifAnimated), and compiles a small real stand-in executable
     (via Add-Type -OutputType ConsoleApplication) to serve as
     $CjxlExe/$MagickExe - Convert-ImageBatch spawns real OS processes via
@@ -117,8 +117,7 @@
     value instead of waiting out a real 60s drain, matching the same
     fix already applied to AbortPipeline.ps1's Invoke-GracefulDrain.
 
-    STATIC AVIF -> JXL (2026-08-28, Phase 2 of the main-script-rewrite
-    build plan, Todo.md): decided unconditionally, no toggle - convert
+    STATIC AVIF -> JXL: decided unconditionally, no toggle - convert
     static AVIF the same as everything else, for consistency with the
     rest of the library. Lives HERE, not AnimatedConversionPipeline.ps1,
     since it's a static-image concern - reuses the exact same "transcode
@@ -137,12 +136,9 @@
     FailedCount or SkippedCount - see the new InspectFailedCount field,
     matching Convert-AnimatedBatch's own field of the same name for the
     identical failure mode (this project's own "give it its own field,
-    don't fold it into Fail" call, see Todo.md's Summary.ps1 decision -
-    applied here preemptively for consistency, not just in Summary.ps1
-    itself, ahead of the project owner's own requested cross-codebase
-    naming/consistency review, Todo.md Phase 4).
+    don't fold it into Fail" call, see Todo.md's Summary.ps1 decision).
 
-    -ZIPSTEPCALLBACK (2026-08-28, Phase 2): mode 8's ("Image Conversion +
+    -ZIPSTEPCALLBACK: mode 8's ("Image Conversion +
     Zip") decided CCR-fold mechanism - see .PARAMETER ZipStepCallback on
     Invoke-LooseImageConversionPipeline below and Docs/menu-design.md.
     Delays Complete-ChapterProgress until after the callback returns (if
@@ -171,15 +167,11 @@ function Get-LooseImageExtensions {
     .SYNOPSIS
         The canonical "loose image" extension list - single source of
         truth for what this project treats as a convertible/zip-blocking
-        image file. 2026-08-31 fix: this exact 7-element array was
-        hardcoded independently as a default parameter value in 7 places
-        across ImageConversionPipeline.ps1, Controller.ps1, and
-        AnimatedConversionPipeline.ps1, with no shared getter - unlike the
+        image file, so a future edit doesn't silently desync which files
+        get converted vs. left as unconverted loose files (the risk if it
+        were hardcoded independently in multiple places, matching the
         established Get-XSharedFunctionNames pattern this project already
-        uses for exactly this kind of problem. All 7 agreed with each
-        other at the time this was found (no live drift), but a future
-        edit to only some of them would silently desync which files get
-        converted vs. left as unconverted loose files.
+        uses for exactly this kind of problem).
     .DESCRIPTION
         Used as a default parameter value elsewhere in this module and in
         Controller.ps1 (which already dot-sources this module, in both
@@ -191,19 +183,18 @@ function Get-LooseImageExtensions {
         default-value dependency would break that. That module keeps its
         own literal, commented as matching this canonical list.
 
-        ".gif"/".bmp"/".heic"/".heif" added 2026-09-02 (project owner's
-        own decision - these formats were previously silently invisible
-        to chapter discovery entirely; the owner's call was they should
-        count as unconverted content instead, the same as any other
-        format on this list). ".gif" is included here for that reason
+        ".gif"/".bmp"/".heic"/".heif" are on this list per the project
+        owner's own decision - these formats would otherwise be silently
+        invisible to chapter discovery entirely, and the owner's call was
+        they should count as unconverted content instead, the same as any
+        other format on this list. ".gif" is included here for that reason
         ONLY - it still counts as unconverted/zip-blocking content, but
         Convert-ImageBatch always SKIPS it rather than actually
         converting it (project owner's own real-world experience: GIF
-        conversion caused real problems in older script versions - a
-        live-reproduced instance the same day, an animated GIF reaching
-        the ICC-strip retry path left orphaned numbered temp PNGs behind
-        that no cleanup regex in this project catches, confirmed the
-        concern). ".bmp"/".heic"/".heif" DO actually convert, through
+        conversion caused real problems in older script versions - an
+        animated GIF reaching
+        the ICC-strip retry path leaves orphaned numbered temp PNGs behind
+        that no cleanup regex in this project catches). ".bmp"/".heic"/".heif" DO actually convert, through
         cjxl's existing WebP/AVIF magick-detour (transcode to a temp PNG
         first) - confirmed live, cjxl.exe cannot read any of the three
         directly, but `magick -list format` confirms BMP is read/write
@@ -225,14 +216,11 @@ function Test-OrphanedScratchFileName {
         "_tmp_overwrite.webp" (AnimatedConversionPipeline.ps1's own
         -DoAnimatedOverwrite staging file).
     .DESCRIPTION
-        Single source of truth (2026-09-03 cleanup, Todo.md item) for a
-        3-line regex trio that used to be hand-duplicated across this
+        Single source of truth for a
+        3-line regex trio that would otherwise be hand-duplicated across this
         module's own Get-LooseImageCandidates, Controller.ps1's
         Invoke-FullPipelineChapter, and ZipPipeline.ps1's
-        Invoke-LooseFolderZip - all three widened together 2026-09-02 for
-        the BMP/HEIC/HEIF detour and a defensive numbered-output backstop,
-        confirmed in sync at the time but with no shared getter to keep
-        them that way, matching the exact problem Get-LooseImageExtensions
+        Invoke-LooseFolderZip, matching the exact problem Get-LooseImageExtensions
         (immediately above) already solved for this project's loose-image
         extension list.
 
@@ -258,16 +246,16 @@ function Get-NeverConvertedExtensions {
     .SYNOPSIS
         Extensions on Get-LooseImageExtensions()'s own list that this
         project deliberately never actually converts - currently just
-        ".gif" (2026-09-02, project owner's own decision from real-world
-        experience with older script versions). Single source of truth
+        ".gif", per the project owner's own decision from real-world
+        experience with older script versions. Single source of truth
         for that fact, used by BOTH Convert-ImageBatch's own skip check
-        AND Get-LooseImageCandidates's staleness classification - a real,
-        live-confirmed bug (2026-09-02 review) came from those two
-        agreeing only by accident: Convert-ImageBatch skipped GIF and
-        left it untouched with a "File left untouched" promise, but
-        Get-LooseImageCandidates had no matching exclusion, so a GIF
-        older than an unrelated same-basename .jxl got classified as a
-        stale leftover and deleted on the very next run - breaking that
+        AND Get-LooseImageCandidates's staleness classification - without
+        a shared getter, those two could agree only by accident:
+        Convert-ImageBatch skips GIF and
+        leaves it untouched with a "File left untouched" promise, but if
+        Get-LooseImageCandidates had no matching exclusion, a GIF
+        older than an unrelated same-basename .jxl would get classified as a
+        stale leftover and deleted on the very next run, breaking that
         promise one run later. Same species as this project's other
         divergent-list bugs (Get-LooseImageExtensions itself, the
         orphaned-scratch-file regex trio) - a fact that has to stay true
@@ -299,8 +287,7 @@ function Invoke-IccStripRetryOrFail {
         [Parameter(Mandatory)]
         [string]$MagickExe,
         # $null default = unchanged behavior for Convert-ImageBatch's own
-        # call site (2026-09-09 addition, mode 2's ChapterDispatch.ps1
-        # migration) - Invoke-ChapterDispatch identifies a chapter by the
+        # call site - Invoke-ChapterDispatch identifies a chapter by the
         # exact ChapterKey value tagged onto each of its own jobs (see
         # that module's own header), and has no other way to know a
         # requeued retry job belongs to the same chapter as the job that
