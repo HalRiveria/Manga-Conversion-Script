@@ -242,15 +242,12 @@ function Get-OptionsMenuSchema {
         exactly - see that module for defaults/validation.
     #>
     return @(
-        # 2026-09-09 reorganization (see CHANGELOG.md): a new top-level
-        # submenu for Full-Pipeline-specific settings, freeing the old
-        # bare top-level "Full Pipeline Max Concurrent Processes" item
-        # (originally added 2026-09-03, see that item's own history
-        # below) into a real home instead of sitting alone. Everything
-        # else shifted down by one to make room.
+        # A top-level submenu for Full-Pipeline-specific settings, so
+        # "Max Concurrent Processes" has a real home instead of sitting
+        # alone at the top level.
         @{ Key = '1'; Label = 'Full Pipeline Settings'; Type = 'Submenu'; Items = @(
             @{ Key = '1'; Label = 'Max Concurrent Processes'; Type = 'Int'; SettingsKey = 'FullPipelineMaxConcurrentProcs'; Min = 1; Max = [int]::MaxValue; Description = 'shared cjxl+magick process budget (independent of CJXL Processes/Animated Threads)' }
-            # Placeholder (2026-09-09) - RunCoverDeletionBeforeConversion
+            # Placeholder - RunCoverDeletionBeforeConversion
             # (Config.ps1) is a real, persisted setting, but nothing reads
             # it yet; toggling this currently has no effect on a real run.
             # See Todo.md's "Run Cover Deletion automatically before Full
@@ -276,14 +273,10 @@ function Get-OptionsMenuSchema {
         ) }
         @{ Key = '5'; Label = 'Logging'; Type = 'Submenu'; Items = @(
             @{ Key = '1'; Label = 'Full Logging';          Type = 'Bool'; SettingsKey = 'FullLogging';               Description = 'log every action, not just errors/summary' }
-            # Label renamed from "Toggle Summary File" (2026-09-09,
-            # project owner's own catch) - the settings key is
-            # DisableSummaryFile, so [On] meant the summary file was
-            # OFF; the old label gave no indication which direction "On"
-            # pointed. Renamed to match the key's own sense instead of
-            # flipping the underlying setting (safer - an existing
-            # settings.json's stored value keeps meaning exactly what it
-            # already meant, only the menu's own label text changed).
+            # Labeled "Disable Summary File" to match the settings key's
+            # own sense (DisableSummaryFile), not "Toggle Summary File" -
+            # with that label, [On] meant the summary file was off, which
+            # gave no indication which direction "On" pointed.
             @{ Key = '2'; Label = 'Disable Summary File';  Type = 'Bool'; SettingsKey = 'DisableSummaryFile';        Description = 'only matters when Full Logging is off' }
             @{ Key = '3'; Label = 'Clean Console Output';  Type = 'Bool'; SettingsKey = 'CleanConsoleOutputEnabled'; Description = 'live per-series progress instead of per-file lines' }
         ) }
@@ -421,12 +414,12 @@ function Show-OptionsMenuLevel {
 
         switch ($match.Type) {
             'Submenu' {
-                # $null = (2026-09-03 fix, same species as Show-ModeMenu's
-                # Show-CoverDeletionMenu leak) - defensive: this recursion
-                # never returns non-$null today (every path ends in a bare
-                # `return` with no value), but suppressing here means a
-                # future -ActionHandler/nested change can't silently corrupt
-                # every caller up the chain the way the Cover Deletion one did.
+                # $null = is defensive here: this recursion never returns
+                # non-$null today (every path ends in a bare `return` with
+                # no value), but suppressing here means a future
+                # -ActionHandler/nested change can't silently corrupt
+                # every caller up the chain, the same species of bug
+                # Show-ModeMenu's Show-CoverDeletionMenu call had.
                 $null = Show-OptionsMenuLevel -Items $match.Items -Settings $Settings -SettingsPath $SettingsPath -Title $match.Label -PromptFunc $PromptFunc -ActionHandler $ActionHandler
             }
             'Bool' {
@@ -448,7 +441,7 @@ function Show-OptionsMenuLevel {
                 }
             }
             'Action' {
-                # $null = (2026-09-03 fix, same reason as the Submenu branch above)
+                # $null = for the same reason as the Submenu branch above
                 $null = & $ActionHandler $match.Action $Settings $SettingsPath
             }
         }
@@ -496,9 +489,8 @@ function Get-PathWithDefault {
     <#
     .SYNOPSIS
         Shared prompt-with-remembered-default logic for
-        Invoke-CoverDeletionRun and Invoke-TrailingZeroAuditRun
-        (2026-09-09 extraction - a /code-review finding caught this
-        copy-pasted identically in both). Prompts via -PromptFunc,
+        Invoke-CoverDeletionRun and Invoke-TrailingZeroAuditRun -
+        extracted after both had it copy-pasted identically. Prompts via -PromptFunc,
         offering -DefaultPath as a reusable default (shown in the
         message, used when input is blank).
     .OUTPUTS
@@ -530,10 +522,10 @@ function Invoke-CoverDeletionRun {
         The "1 - Run" item's real behavior: prompts for a folder to scan
         (same drag-and-drop-or-paste convention as
         Show-AddUnwantedImageProfileFlow's path prompt), confirms before
-        actually deleting anything (2026-09-03 fix, Todo.md finding - this
-        used to go straight from path validation into the real,
-        permanent-deletion-capable scan with no confirmation and no
-        reachable dry-run), then runs Invoke-UnwantedImageScan against it
+        actually deleting anything - without that confirmation, this
+        would go straight from path validation into the real,
+        permanent-deletion-capable scan with no reachable dry-run - then
+        runs Invoke-UnwantedImageScan against it
         using every known profile (built-in + persisted). A blank path,
         one that doesn't exist, or a declined confirmation all cancel
         without scanning - no silent no-op against an empty $Path, and no
@@ -574,11 +566,10 @@ function Invoke-CoverDeletionRun {
         Write-Host "No path entered - cancelled." -ForegroundColor Yellow
         return @{ Ran = $false; Reason = "No path entered."; ResolvedPath = $null; AllScannedFiles = $null }
     }
-    # -PathType Container (2026-08-31 fix, caught by a same-day
-    # /code-review full-codebase pass): a bare Test-Path matches a FILE
+    # -PathType Container matters here - a bare Test-Path matches a FILE
     # too, so dropping a file on this prompt (instead of the folder it
-    # asks for) silently became a one-file scan target instead of being
-    # rejected with a clear message.
+    # asks for) would otherwise silently become a one-file scan target
+    # instead of being rejected with a clear message.
     if (-not (Test-Path -LiteralPath $path -PathType Container)) {
         Write-Host ("Folder not found: '" + $path + "'") -ForegroundColor Red
         return @{ Ran = $false; Reason = "Folder not found."; ResolvedPath = $null; AllScannedFiles = $null }
@@ -605,9 +596,9 @@ function Invoke-CoverDeletionRun {
 function Invoke-TrailingZeroAuditRun {
     <#
     .SYNOPSIS
-        Cover Deletion submenu item 5's real behavior (2026-08-31
-        addition - project owner's own decision: since item 4 opens the
-        profile location, item 5 opens the trailing-zero report). Prompts
+        Cover Deletion submenu item 5's real behavior - since item 4
+        opens the profile location, item 5 opens the trailing-zero
+        report. Prompts
         for a folder to scan (same convention as Invoke-CoverDeletionRun's
         own prompt), runs Invoke-TrailingZeroAudit against it, then opens
         the resulting report in the default text-file handler - but only
@@ -619,10 +610,9 @@ function Invoke-TrailingZeroAuditRun {
         Optional (default "" - matches original behavior, always
         prompts). When supplied, skips the prompt entirely and scans
         this path directly - used by Show-CoverDeletionMenu's '1' branch
-        to auto-run this report against item 1's own just-scanned folder
-        (2026-09-02 approved-but-not-built feature: item 5 running
-        automatically right after item 1, instead of a separate manual
-        step). Still re-validated with the same -PathType Container
+        to auto-run this report against item 1's own just-scanned folder,
+        right after item 1, instead of a separate manual step. Still
+        re-validated with the same -PathType Container
         check as the prompted path, even though a caller like item 1's
         own resolved path should already be valid - cheap, and this is a
         real function boundary.
@@ -631,8 +621,7 @@ function Invoke-TrailingZeroAuditRun {
         [string]$ReportPath = (Get-TrailingZeroReportPath),
         [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
         [string]$Path = "",
-        # Start-Process -FilePath (2026-08-31 fix, caught by verifying a
-        # same-day /code-review pass) - NOT Open-FolderInExplorer, which
+        # Start-Process -FilePath, not Open-FolderInExplorer, which
         # opens $Path's PARENT FOLDER, not $Path itself. Every piece of
         # this feature's own documentation (this function's docstring,
         # Get-CoverDeletionMenuLines' menu text, Docs/menu-design.md)
@@ -699,11 +688,10 @@ function Save-LastCoverDeletionPath {
     <#
     .SYNOPSIS
         Shared persist step for Show-CoverDeletionMenu's '1'/'5'
-        branches (2026-09-09 extraction - a /code-review finding caught
-        this duplicated in both, AND caught the duplicate's own bare,
-        unassigned Export-ScriptSettings-wrapper call as a real
-        reintroduction of the 2026-09-03 output-stream-leak bug this
-        module's own switch statement was fixed for). No-ops when
+        branches - extracted after both had it duplicated, including a
+        bare, unassigned Export-ScriptSettings-wrapper call in each that
+        was a real reintroduction of the output-stream-leak bug this
+        module's own switch statement is fixed for. No-ops when
         -Settings is $null - every existing caller/test that doesn't
         pass it. Calls Export-ScriptSettings directly, same convention
         Show-OptionsMenuLevel already uses elsewhere in this file - no
@@ -728,8 +716,7 @@ function Show-CoverDeletionMenu {
         both return to THIS submenu when they finish (not the main
         prompt), matching Options' own "stay until you back out" shape;
         "4 - Open Profile Location" and "0 - Back" are one-shot. "5 -
-        Trailing-Zero Report" (2026-08-31 addition, project owner's own
-        decision) also returns to this submenu when it finishes, same
+        Trailing-Zero Report" also returns to this submenu when it finishes, same
         shape as "1"/"2" - it's a real, potentially lengthy scan, not a
         one-shot action like "4". Design settled with the project owner
         (see Todo.md's Menu section) - this function is pure wiring
@@ -752,10 +739,9 @@ function Show-CoverDeletionMenu {
     .PARAMETER AutoTrailingZeroHandler
         Defaults to a real Invoke-TrailingZeroAuditRun -Path call (the
         -Path bypass, not -PromptFunc - no second prompt). Fired once,
-        automatically, right after item 1 resolves a real path -
-        approved-but-not-built feature (2026-09-02): item 5's report used
-        to be a separate manual step, now runs unprompted against
-        whatever item 1 just scanned. Injectable so a harness can verify
+        automatically, right after item 1 resolves a real path - item 5's
+        report used to be a separate manual step, now runs unprompted
+        against whatever item 1 just scanned. Injectable so a harness can verify
         it fired (and with which path) without a real scan.
     .PARAMETER Settings
         Optional (default $null - matches original behavior exactly,
@@ -795,10 +781,8 @@ function Show-CoverDeletionMenu {
 
         # Captured into a real variable (not bare/unsuppressed) so
         # -RunHandler/-TrailingZeroHandler's ResolvedPath can be read
-        # below - still never left bare, so the 2026-09-03 leak fix (see
-        # the comment this replaced) still holds: a NAMED assignment
-        # doesn't add anything to this function's own output stream,
-        # only an unassigned bare call does.
+        # below - a named assignment doesn't add anything to this
+        # function's own output stream, only an unassigned bare call does.
         switch ($choice) {
             '0' { return }
             '1' {
