@@ -1,128 +1,5 @@
-<#
-.SYNOPSIS
-    Standalone module: the Ctrl+C / window-close abort pipeline shared by
-    every pipeline mode.
+# See Docs/module-descriptions.md for this module's full description.
 
-.DESCRIPTION
-    Wired into Conversion Script Main.ps1 (Register-AbortHandler at
-    bootstrap; Reset-AbortState called once per loop iteration by
-    Controller.ps1's Invoke-MainLoop) - built and verified standalone
-    first, per this repo's development process (see CLAUDE.md). Usage:
-
-      1. Call Register-AbortHandler once, near script startup, to install
-         the native Ctrl+C / window-close handler.
-      2. Whenever a pipeline creates a CancellationTokenSource it wants
-         cancelled on abort, call Register-AbortCancellationSource. Call
-         Unregister-AbortCancellationSource when that CTS is disposed, so
-         the registry doesn't hold a reference to a disposed object.
-      3. Poll Test-AbortSignal wherever a pipeline's dispatch loop currently
-         polls the equivalent inline check. It cancels every registered CTS
-         exactly once and prints a one-time "[ABORT] ..." message.
-      4. Once a pipeline has stopped dispatching new work and wants to wait
-         for in-flight jobs before force-stopping stragglers, call
-         Invoke-GracefulDrain. It ALWAYS signals DrainComplete when it
-         returns (success or force-stop) - the caller does not need to call
-         Complete-AbortDrain itself in that case. Complete-AbortDrain is
-         exposed separately for paths that need to unblock the handler
-         without going through a drain (e.g. abort detected before any job
-         was ever dispatched).
-      5. In the script's own top-level catch block, call
-         Invoke-AbortOrFatalHandler -ErrorRecord $_ - disambiguates
-         PowerShell's own internal Ctrl+C handling firing early (a
-         PipelineStoppedException/OperationCanceledException thrown before
-         step 1's handler suppresses it) from a genuine, unrelated crash.
-         Extracted from the main script's own catch block - see
-         Modules\_Reference\AbortPipeline.reference.ps1.
-
-    What this module deliberately does NOT own: per-pipeline dispatch loops
-    (job scanning/throttling), per-mode abort summaries (stats formatting,
-    "last completed" tracking), and resume-state writes. Those stay in each
-    pipeline/module, using -ResultHandler on Invoke-GracefulDrain (same
-    pattern as Invoke-ParallelFolderJobs's -ResultHandler) to fold results
-    into whatever shape the caller needs.
-
-    Clean Console Output touch point: Test-AbortSignal's abort message
-    and Invoke-GracefulDrain's wait/force-stop messages route through
-    CleanConsoleRendering.ps1's Write-GatedConsoleMessage instead of a
-    raw Write-Host, when the toggle is on - a raw Write-Host firing while
-    CCR's live region is mid-redraw would land wherever the cursor
-    happens to be and get mangled by the next redraw.
-    Write-GatedConsoleMessage centralizes the gate itself, so each of
-    this module's 3 call sites just calls it and passes the toggle in,
-    rather than branching between Write-CleanConsoleMessage/raw
-    Write-Host by hand. Two forward references this requires, both FROM
-    Logging.ps1/CleanConsoleRendering.ps1 (both already built and tested,
-    so both are confirmed against real signatures now, not stubbed-
-    forward like Logging.ps1's original Move-ToRecycleBin reference was):
-      - $script:CleanConsoleOutputEnabled - owned by Logging.ps1, NOT
-        redeclared here. Read directly via the shared script scope every
-        dot-sourced module lives in (the same pattern ZipCreation.ps1
-        already uses for FileDeletion.ps1's $script:PermanentDelete) -
-        deliberately not a second parallel toggle, so there's only ever
-        one on/off switch to keep in sync. Defaults to $null/falsy (same
-        as "off") if Logging.ps1 was never dot-sourced at all - this half
-        of the toggle degrades gracefully on its own.
-      - Write-GatedConsoleMessage - owned by CleanConsoleRendering.ps1,
-        and NOT optional the way the toggle variable above is:
-        Test-AbortSignal calls it unconditionally the first time it
-        detects a real abort (see below), so CleanConsoleRendering.ps1
-        must actually be dot-sourced (or the function stubbed, as this
-        module's own harness does) for that to resolve - dot-sourcing
-        only THIS module and polling Test-AbortSignal without either
-        throws CommandNotFoundException. Takes the toggle as an explicit
-        -CleanConsoleOutputEnabled
-        parameter rather than reading $script:CleanConsoleOutputEnabled
-        itself, since CleanConsoleRendering.ps1 documents itself as
-        having NO forward references - this call site is what supplies
-        that value, not the callee. Write-GatedConsoleMessage only does
-        real CCR work (calling Write-CleanConsoleMessage) when the
-        toggle passed in is true, so a caller that leaves the toggle off
-        never needs CleanConsoleRendering.ps1 dot-sourced at all.
-    Core abort mechanics (CTS registry, drain loop, force-kill) are
-    unchanged by any of this - only the console-output call sites.
-    Complete-AbortDrain also finalizes the CCR display (force-resolving
-    any still-active series via Complete-AllActiveSeriesProgress) before
-    signalling DrainComplete, but ONLY for a CTRL_CLOSE_EVENT (see that
-    function's own header for why a plain Ctrl+C must NOT do this too) -
-    so a still-live progress region isn't left stuck forever when the
-    process might be force-killed moments after a window close.
-
-.NOTES
-    Extracted from Conversion Script Main.ps1's ConsoleCtrl type, script-scope
-    abort state, Test-AbortSignal, and the graceful-drain loop that was
-    previously duplicated (with minor variations) inside both
-    Invoke-ParallelFolderJobs and the ZIP-extraction pipeline's own inline
-    dispatch loop. See CLAUDE.md for the history of what's been fixed here
-    relative to those originals:
-      - DrainComplete is now always signalled by Invoke-GracefulDrain itself,
-        closing a gap where Invoke-ParallelFolderJobs's callers (mode 3)
-        never signalled it near the call site and instead relied on a
-        catch-all far later in the script - risky given CTRL_CLOSE_EVENT
-        gives the native handler only ~5s before Windows force-kills the
-        process, and a drain can take up to the configured timeout (60s).
-      - The drain loop now does one final completion-check pass after its
-        timeout expires and before declaring stragglers force-stopped,
-        closing the race documented in CLAUDE.md's "Known gaps" (a job that
-        finishes in the ~250ms window between the last poll and the timeout
-        firing was previously discarded and miscounted as force-stopped).
-#>
-
-# ==============================================================================
-#  ConsoleCtrl - native Win32 console-control handler (P/Invoke)
-#
-#  SetConsoleCtrlHandler lets us intercept CTRL_CLOSE_EVENT (the X button)
-#  synchronously - unlike AppDomain.ProcessExit which fires after PowerShell
-#  has already begun its teardown and can no longer run script code reliably.
-#
-#  The handler is also used for CTRL_C_EVENT so both abort paths share one
-#  implementation and we are no longer reliant on [Console]::CancelKeyPress
-#  (which can be swallowed by PowerShell's own Ctrl+C handling).
-#
-#  The handler BLOCKS (via the drain event) until the main thread has finished
-#  its graceful drain, then returns $true so the OS does not immediately kill
-#  the process. For CTRL_CLOSE_EVENT Windows gives the handler ~5s before a
-#  forced kill; for CTRL_C_EVENT there is no hard deadline.
-# ==============================================================================
 if (-not ([System.Management.Automation.PSTypeName]'ConsoleCtrl').Type) {
     Add-Type -TypeDefinition @'
 using System;
@@ -140,24 +17,9 @@ public static class ConsoleCtrl
     public static volatile bool AbortRequested = false;
     public static volatile bool IsCloseEvent   = false;   // true = X button, false = Ctrl+C
 
-    // Whether a real pipeline run is currently dispatched - set by
-    // Set-AbortHandlerRunActive, called by Controller.ps1's
-    // Invoke-MainLoop around its own InvokeModeHandler call. Ctrl+C/
-    // Ctrl+Break is the dedicated abort key for an active run, but at
-    // the menu, between runs, there is nothing to abort: setting
-    // AbortRequested there would leak into the very next run dispatched
-    // in the same loop iteration (Reset-AbortState only runs at the top
-    // of each iteration, before the menu, not after it), and the handler
-    // thread would block on DrainComplete.Wait(65000) for a drain that
-    // was never going to happen, since no pipeline was running to call
-    // Invoke-GracefulDrain/Complete-AbortDrain at all. So Ctrl+C at the
-    // menu falls through to the OS's own default CTRL_C action
-    // (immediate process termination, same as if this handler were
-    // never registered) instead of being caught and somehow resumed -
-    // there is nothing in-flight to drain or clean up at the menu, so an
-    // abrupt exit there is safe, and it avoids a third state ("caught
-    // but ignored, keep running") this module would have to keep
-    // correct forever.
+    // Whether a real pipeline run is currently dispatched - see
+    // Docs/function-notes.md's AbortPipeline.ps1 section for the full
+    // RunActive reasoning.
     public static volatile bool RunActive = false;
 
     // The handler signals this when abort is requested; the main thread calls
@@ -177,19 +39,12 @@ public static class ConsoleCtrl
         // ctrlType: 0=CTRL_C, 1=CTRL_BREAK, 2=CTRL_CLOSE, 5=CTRL_LOGOFF, 6=CTRL_SHUTDOWN
         if ((ctrlType == 0 || ctrlType == 1) && !RunActive)
         {
-            // Idle at the menu - let the OS apply its own default CTRL_C/
-            // CTRL_BREAK action (immediate termination) instead of
-            // catching it here. Window-close/logoff/shutdown (below) are
-            // unaffected either way - those remain real termination
-            // requests regardless of RunActive.
             return false;
         }
         if (ctrlType == 0 || ctrlType == 1 || ctrlType == 2 || ctrlType == 5 || ctrlType == 6)
         {
             AbortRequested = true;
             IsCloseEvent   = (ctrlType == 2 || ctrlType == 5 || ctrlType == 6);
-            // Block until the PowerShell main thread finishes the graceful drain
-            // (or until Windows force-kills us after its timeout).
             DrainComplete.Wait(65000);   // 65 s > our default 60 s drain timeout
             return true;   // suppress default OS action
         }
@@ -199,25 +54,8 @@ public static class ConsoleCtrl
 '@ -Language CSharp
 }
 
-# ==============================================================================
-#  ConsoleQuickEdit - native Win32 console-mode toggle (P/Invoke)
-#
-#  Windows Console's QuickEdit mode (click-drag to select text) pauses ALL
-#  console output from this process for as long as a selection is held, and
-#  auto-copies the selection to the clipboard the moment the mouse button is
-#  released - a right-click with no NEW selection pending then pastes that
-#  clipboard content back in as simulated keystrokes. Both are real
-#  problems for a run in progress: an accidental highlight looks exactly
-#  like a hang, and an accidental right-click after one floods the
-#  eventual input prompt with garbage. Neither matters once a run has
-#  finished - highlighting to
-#  copy real output is genuinely useful then - so this is toggled off only
-#  around an actual run, not disabled permanently. See Set-ConsoleQuickEditEnabled.
-#
-#  ENABLE_EXTENDED_FLAGS must be set alongside ENABLE_QUICK_EDIT_MODE in the
-#  same SetConsoleMode call, or the QuickEdit bit is silently ignored - a
-#  documented Win32 quirk, not an oversight here.
-# ==============================================================================
+# See Docs/function-notes.md's AbortPipeline.ps1 section for the full
+# QuickEdit-mode reasoning.
 if (-not ([System.Management.Automation.PSTypeName]'ConsoleQuickEdit').Type) {
     Add-Type -TypeDefinition @'
 using System;
@@ -238,11 +76,6 @@ public static class ConsoleQuickEdit
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
 
-    // Returns false (not an error - callers must treat it as "nothing to
-    // do here") when stdin isn't a real interactive console, e.g. a
-    // redirected/piped invocation - this project's own harness tests and
-    // automated runs. Real callers only need this to work when a human is
-    // actually looking at a real console window.
     public static bool SetEnabled(bool enabled)
     {
         IntPtr handle = GetStdHandle(STD_INPUT_HANDLE);
@@ -257,72 +90,26 @@ public static class ConsoleQuickEdit
 '@ -Language CSharp
 }
 
-# ==============================================================================
-#  Abort state
-# ==============================================================================
-$script:abortRequested = $false   # set once, by the first Test-AbortSignal call after abort
-$script:ctrlCloseAbort  = $false  # set only when the X button (CTRL_CLOSE_EVENT) triggered the abort
+$script:abortRequested = $false
+$script:ctrlCloseAbort  = $false
 
-# Registry of CancellationTokenSources to cancel on abort. Generalizes the
-# hardcoded per-pipeline CTS list this replaced (one named variable per
-# mode) so a future mode just registers its own CTS instead of editing
-# Test-AbortSignal.
 $script:abortCancellationSources = [System.Collections.Generic.List[System.Threading.CancellationTokenSource]]::new()
 
 function Register-AbortHandler {
-    <#
-    .SYNOPSIS
-        Installs the native Ctrl+C / window-close handler. Call once, near
-        script startup, before any pipeline runs.
-    #>
     [ConsoleCtrl]::Register()
 }
 
 function Set-AbortHandlerRunActive {
-    <#
-    .SYNOPSIS
-        Tells the native handler whether a real pipeline run is currently
-        dispatched - see [ConsoleCtrl]'s own RunActive comment for the
-        full reasoning. Call with $true right before dispatching a run, $false
-        right after it returns (in a try/finally, so a crash doesn't leave
-        it stuck $true) - Controller.ps1's Invoke-MainLoop is the one real
-        caller. While $false (idle at the menu, between runs), Ctrl+C/
-        Ctrl+Break falls through to the OS's own default action (immediate
-        termination) instead of being caught - there is nothing running to
-        abort or drain at the menu, and catching it there used to leak
-        AbortRequested into the very next run dispatched in the same loop
-        iteration.
-    #>
     param([Parameter(Mandatory)][bool]$Active)
     [ConsoleCtrl]::RunActive = $Active
 }
 
 function Set-ConsoleQuickEditEnabled {
-    <#
-    .SYNOPSIS
-        Enables/disables Windows Console QuickEdit mode - see
-        [ConsoleQuickEdit]'s own header for what that actually does and
-        why it matters. Call with $false right before dispatching a run,
-        $true right after it returns (in a try/finally, so a crash
-        doesn't leave it stuck disabled) - Controller.ps1's Invoke-MainLoop
-        is the one real caller, same bracketing pattern as
-        Set-AbortHandlerRunActive.
-    .OUTPUTS
-        $true if the mode was actually changed, $false if this isn't a
-        real console (nothing to do) - callers should not treat $false as
-        an error.
-    #>
     param([Parameter(Mandatory)][bool]$Enabled)
     return [ConsoleQuickEdit]::SetEnabled($Enabled)
 }
 
 function Register-AbortCancellationSource {
-    <#
-    .SYNOPSIS
-        Adds a CancellationTokenSource to the set Test-AbortSignal cancels
-        when an abort is detected. Call once per pipeline phase, right after
-        creating that phase's CTS.
-    #>
     param(
         [Parameter(Mandatory)]
         [System.Threading.CancellationTokenSource]$Cts
@@ -331,12 +118,6 @@ function Register-AbortCancellationSource {
 }
 
 function Unregister-AbortCancellationSource {
-    <#
-    .SYNOPSIS
-        Removes a CancellationTokenSource from the abort registry. Call
-        before/when disposing a phase's CTS, so the registry doesn't hold a
-        reference to (and later try to .Cancel()) a disposed object.
-    #>
     param(
         [Parameter(Mandatory)]
         [System.Threading.CancellationTokenSource]$Cts
@@ -345,52 +126,6 @@ function Unregister-AbortCancellationSource {
 }
 
 function Reset-AbortState {
-    <#
-    .SYNOPSIS
-        Clears every piece of abort state back to "no abort has happened" -
-        $script:abortRequested/$script:ctrlCloseAbort, the native handler's
-        own [ConsoleCtrl]::AbortRequested/IsCloseEvent flags, and
-        [ConsoleCtrl]::DrainComplete (a ManualResetEventSlim, reset back to
-        unsignalled). Call once per real dispatched run, before that run's
-        own Test-AbortSignal polling could ever see stale state from a
-        PREVIOUS run in the same process.
-    .DESCRIPTION
-        Without this, none of this state was ever reset anywhere in
-        production code - only harness test setup reset it. Since
-        Invoke-MainLoop (Controller.ps1) runs multiple mode selections in
-        the same process (that's the whole point of "press any key to
-        return to the main menu" after a run), a single Ctrl+C, even one
-        that happened while idle at the menu before any pipeline was even
-        running, would leave $script:abortRequested stuck $true for the
-        rest of the process's lifetime. Every subsequent run's very first
-        Test-AbortSignal poll would then see an abort already "in
-        progress" and abort immediately, doing no real work, with no new
-        Ctrl+C from the user, until the whole script was closed and
-        reopened.
-
-        Does not touch $script:abortCancellationSources - that registry's
-        lifecycle is already handled per pipeline phase by
-        Register-/Unregister-AbortCancellationSource and has nothing to
-        do with whether a past abort happened.
-
-        Also resets [ConsoleCtrl]::RunActive to $false - defensive
-        belt-and-suspenders alongside Set-AbortHandlerRunActive's own
-        try/finally at its real call site (Controller.ps1's
-        Invoke-MainLoop): this runs once per loop iteration, before the
-        menu, so it's never correct for RunActive to still be $true here.
-        If it somehow were (a caller that forgot its own try/finally),
-        the very next Ctrl+C at the menu would be wrongly caught and
-        blocked on a drain that will never happen.
-
-        Also re-enables Console QuickEdit mode - same defensive
-        belt-and-suspenders reasoning as RunActive above, alongside
-        Set-ConsoleQuickEditEnabled's own try/finally at its real call
-        site: this runs once per loop iteration, before the menu, so
-        QuickEdit should never still be disabled here. If it somehow were
-        (a caller that forgot its own try/finally), the user would be
-        stuck unable to highlight/copy anything at the menu until the
-        whole script restarted.
-    #>
     $script:abortRequested = $false
     $script:ctrlCloseAbort = $false
     [ConsoleCtrl]::AbortRequested = $false
@@ -401,15 +136,6 @@ function Reset-AbortState {
 }
 
 function Test-AbortSignal {
-    <#
-    .SYNOPSIS
-        Polls for an abort request. Idempotent - only acts the first time it
-        observes the native handler's flag set. Cancels every registered
-        CancellationTokenSource and prints a one-time "[ABORT] ..." message.
-    .OUTPUTS
-        $true once an abort has been detected (on this and every subsequent
-        call); $false until then.
-    #>
     if ([ConsoleCtrl]::AbortRequested -and -not $script:abortRequested) {
         $script:abortRequested = $true
         $script:ctrlCloseAbort = [ConsoleCtrl]::IsCloseEvent
@@ -427,54 +153,11 @@ function Test-AbortSignal {
 }
 
 function Get-AbortTriggerLabel {
-    <#
-    .SYNOPSIS
-        Returns the human-readable abort trigger for summary text -
-        "window close (X button)" or "Ctrl+C" - matching what every
-        per-mode abort summary previously computed independently.
-    #>
     if ($script:ctrlCloseAbort) { return "window close (X button)" }
     return "Ctrl+C"
 }
 
 function Complete-AbortDrain {
-    <#
-    .SYNOPSIS
-        Signals the native handler that draining is complete, unblocking it
-        so the OS can proceed (process exit for CTRL_CLOSE_EVENT, continued
-        execution for CTRL_C_EVENT). Safe to call more than once - callers
-        that already called Invoke-GracefulDrain do not need to call this
-        too; it's for paths that need to unblock the handler without going
-        through a drain (e.g. abort detected before any job was dispatched).
-    .DESCRIPTION
-        When Clean Console Output is on AND this is a CTRL_CLOSE_EVENT
-        (window close), also finalizes CCR's display
-        (Complete-AllActiveSeriesProgress) BEFORE signalling DrainComplete -
-        deliberately in that order, since a close event gives the OS
-        license to force-kill the process shortly after DrainComplete
-        unblocks the native handler, and a still-live progress region left
-        stuck would otherwise never get finalized. No-ops cleanly (via
-        Complete-AllActiveSeriesProgress's own no-active-series no-op) when
-        there's nothing to finalize.
-
-        Gated on IsCloseEvent, not called for a plain Ctrl+C - a Ctrl+C
-        doesn't kill the process, and every real pipeline (Controller.ps1's
-        Invoke-FullPipeline,
-        ImageConversionPipeline.ps1, AnimatedConversionPipeline.ps1,
-        ZipPipeline.ps1) keeps running its own normal per-chapter/per-run
-        completion code afterward, including its OWN
-        Complete-ChapterProgress/Complete-AllActiveSeriesProgress calls in
-        an outer try/finally that fires no matter how the function exits.
-        Finalizing every active series HERE, mid-drain, for a Ctrl+C meant
-        that later, legitimate call found the series already resolved and
-        threw "not an active series" - a real FATAL ERROR that killed an
-        otherwise-successful run (the chapter's own files had already
-        converted correctly via the abort drain; only the CCR bookkeeping
-        call failed). A close event has no such later call to protect -
-        Windows can force-kill the process before any of it runs - so this
-        function is still the only chance CCR gets to finalize in that
-        case, and stays unconditional there.
-    #>
     if ($script:CleanConsoleOutputEnabled -and [ConsoleCtrl]::IsCloseEvent) {
         try { Complete-AllActiveSeriesProgress } catch { }
     }
@@ -482,39 +165,6 @@ function Complete-AbortDrain {
 }
 
 function Test-OwnAbortException {
-    <#
-    .SYNOPSIS
-        True only if $ErrorRecord looks like our own abort mechanism
-        firing early - PowerShell's internal Ctrl+C handling throwing a
-        PipelineStoppedException/OperationCanceledException before our
-        SetConsoleCtrlHandler-based handler suppresses it - rather than a
-        genuine, unrelated crash. Requires BOTH conditions: an abort must
-        already be in progress ($script:abortRequested) AND the exception
-        type must match - an exception of either type that fires with NO
-        abort in progress is a real crash that merely resembles one (e.g.
-        an unrelated cancellation from some other source), not our own
-        abort.
-    .PARAMETER ErrorRecord
-        The caught error - pass $_ from a catch block.
-    .DESCRIPTION
-        Calls Test-AbortSignal itself first, rather than reading
-        $script:abortRequested directly - a Ctrl+C/window-close that lands
-        during a stretch where nothing happens to be polling
-        Test-AbortSignal (chapter discovery, Compress-FolderToZip,
-        Test-ZipArchive, summary writing) left [ConsoleCtrl]::AbortRequested
-        (the native handler's own flag, set immediately and independent of
-        polling) true while $script:abortRequested (only ever set BY a
-        Test-AbortSignal call) stayed false - so PowerShell's own
-        PipelineStoppedException from that same Ctrl+C looked like a
-        genuine, unrelated crash instead of our own abort firing early:
-        logged as a FATAL ERROR, and Complete-AbortDrain never called,
-        leaking the native handler thread (parked in
-        DrainComplete.Wait(65000)). Calling Test-AbortSignal here brings
-        $script:abortRequested (and its one-time side effects - CTS
-        cancellation, the "[ABORT] ..." message) up to date from the native
-        flag before this check runs, regardless of whether anything else
-        polled first.
-    #>
     param(
         [Parameter(Mandatory)]
         [System.Management.Automation.ErrorRecord]$ErrorRecord
@@ -524,35 +174,6 @@ function Test-OwnAbortException {
 }
 
 function Invoke-AbortOrFatalHandler {
-    <#
-    .SYNOPSIS
-        Ported from the real main script's top-level catch block (see
-        Modules\_Reference\AbortPipeline.reference.ps1 for the verbatim
-        extraction this was built from, and CLAUDE.md's Known gaps for
-        the full history): if $ErrorRecord is our own abort firing early
-        (Test-OwnAbortException), finalizes the drain via
-        Complete-AbortDrain and does nothing else - this is a graceful
-        abort, not an error, so nothing gets logged as one. Otherwise
-        it's a genuine crash: builds a "FATAL ERROR: ..." message
-        (exception text + stack trace) and hands it to -LogHandler.
-    .PARAMETER LogHandler
-        Scriptblock taking a single message string. Defaults to a raw
-        Write-Host in red, matching Invoke-GracefulDrain's own
-        -ErrorHandler default - this module has no hard dependency on
-        the caller's Write-Log. A real caller with Logging.ps1 dot-
-        sourced should pass `{ param($m) Write-Log $m -Level Error }`
-        instead - Write-Log already handles mutex-guarded writes and
-        FullLogging-aware file routing, which the original main-script
-        snippet's raw (unguarded) Out-File call never did. The original
-        snippet's ASCII-stripping (for a legacy `-Encoding ASCII` Out-File
-        call) is deliberately NOT ported - Logging.ps1's real Write-Log
-        already writes UTF-8, making that workaround dead code, not a
-        behavior worth preserving.
-    .OUTPUTS
-        $true if this was our own abort (already handled, nothing more
-        to do); $false if it was a genuine fatal error (already handed
-        to -LogHandler).
-    #>
     param(
         [Parameter(Mandatory)]
         [System.Management.Automation.ErrorRecord]$ErrorRecord,
@@ -570,14 +191,6 @@ function Invoke-AbortOrFatalHandler {
 }
 
 function Receive-CompletedHandles {
-    <#
-    .SYNOPSIS
-        Internal helper: collects results from any completed handle in
-        -Handles, invoking -ResultHandler for each, and returns the handles
-        that are still running. Shared by Invoke-GracefulDrain's polling
-        loop and its final post-timeout pass so both use the exact same
-        collection logic.
-    #>
     param(
         [System.Collections.Generic.List[hashtable]]$Handles,
         [scriptblock]$ResultHandler,
@@ -596,14 +209,6 @@ function Receive-CompletedHandles {
             } finally {
                 $h.PS.Dispose()
             }
-            # -ResultHandler runs outside the try/catch above on purpose -
-            # a bug in the caller's own -ResultHandler would otherwise be
-            # caught by the same catch as a real EndInvoke() failure,
-            # mislabeled as "Error collecting runspace result during
-            # abort drain" and silently dropping any remaining results
-            # from this same job. Letting it propagate
-            # uncaught surfaces the real exception with its own message/
-            # stack instead - $h.PS is already disposed above either way.
             if ($null -ne $ResultHandler -and $null -ne $results) {
                 foreach ($r in $results) { & $ResultHandler $r }
             }
@@ -611,55 +216,10 @@ function Receive-CompletedHandles {
             $stillActive.Add($h)
         }
     }
-    # The leading comma prevents PowerShell's pipeline output from enumerating
-    # the list - without it, a 1-element list collapses to its bare element
-    # (and a 0-element list to $null) instead of staying a List[hashtable],
-    # corrupting the caller's -Handles on the next call. Live-caught: see
-    # AbortPipeline.Harness.ps1 Scenario D/E, which failed with a confusing
-    # "cannot convert Hashtable to List[hashtable]" error the very first time
-    # this path was exercised with 1 remaining handle.
     return ,$stillActive
 }
 
 function Invoke-GracefulDrain {
-    <#
-    .SYNOPSIS
-        Waits for in-flight PowerShell runspace jobs to finish naturally
-        after an abort, then force-stops anything still running past the
-        timeout. Always signals DrainComplete before returning, whether the
-        drain finished cleanly or had to force-stop stragglers.
-    .PARAMETER Handles
-        A List[hashtable] of @{ PS = <PowerShell>; Handle = <IAsyncResult> }
-        pairs - the same shape Invoke-ParallelFolderJobs and the
-        ZIP-extraction pipeline's dispatch loop already build. Jobs not yet
-        dispatched are the caller's concern (simply don't dispatch them once
-        abort is detected) - this function only drains what's already
-        running.
-    .PARAMETER ResultHandler
-        Scriptblock invoked once per completed job's result object, same
-        pattern as Invoke-ParallelFolderJobs's -ResultHandler - a closure
-        over the caller's own stats/tracking so this function doesn't need
-        to know their shape.
-    .PARAMETER ConsoleQueue
-        Optional. If supplied, flushed via Flush-ConsoleQueue after each
-        poll, matching the existing cross-thread console-logging pattern.
-        Flush-ConsoleQueue must already be defined in the caller's scope
-        (this module does not define its own copy).
-    .PARAMETER ErrorHandler
-        Optional scriptblock taking a single message string, invoked when a
-        job's result collection throws. Defaults to Write-Host in red so
-        this module has no hard dependency on the caller's Write-Log.
-    .PARAMETER TimeoutSeconds
-        How long to wait for in-flight jobs before force-stopping. Defaults
-        to 60 (matching every existing call site) - overridable so tests can
-        use a small value instead of waiting out a real 60s drain.
-    .PARAMETER AbortWaitMessage
-        Console message printed once when the drain begins. Pass an empty
-        string to suppress it.
-    .OUTPUTS
-        @{ ForceStoppedCount = <int> } - 0 if every in-flight job finished
-        within the timeout.
-    #>
     param(
         [Parameter(Mandatory)]
         [AllowEmptyCollection()]
@@ -676,22 +236,6 @@ function Invoke-GracefulDrain {
         return @{ ForceStoppedCount = 0 }
     }
 
-    # A caller that never passes -AbortWaitMessage at all should get the
-    # default message; a caller that explicitly passes "" should get
-    # silence (per this parameter's own docs). Those are NOT the same
-    # thing PowerShell hands back for an unbound [string] parameter - an
-    # omitted [string] binds to "" (empty string), not $null, so the
-    # original "if ($null -eq $AbortWaitMessage)" check below never
-    # actually fired for any caller, ever: $AbortWaitMessage was already
-    # "" by the time this ran, so the default message was built and
-    # printed for nobody, silently, since the day this module was
-    # written - live-caught (not hypothetical) via Scenario J's stricter
-    # message-count assertions, which is the first test this module ever
-    # had that actually checked the WAIT message's content, not just
-    # that -TimeoutSeconds/force-stop counted correctly. Fixed by
-    # checking $PSBoundParameters instead of the value itself, which
-    # correctly distinguishes "never passed" from "passed empty on
-    # purpose".
     if (-not $PSBoundParameters.ContainsKey('AbortWaitMessage')) {
         $AbortWaitMessage = "[ABORT] Waiting for current jobs to finish (up to " + $TimeoutSeconds + "s)..."
     }
@@ -703,41 +247,13 @@ function Invoke-GracefulDrain {
     $abortDeadline = [System.Diagnostics.Stopwatch]::StartNew()
     $forceStoppedCount = 0
 
-    # try/finally around the whole drain body - this function's own
-    # docstring promises it "always signals DrainComplete before
-    # returning," and without this wrapper nothing enforced that:
-    # anything throwing between here and the Complete-AbortDrain call
-    # below (a -ResultHandler/-ErrorHandler that throws, Flush-ConsoleQueue
-    # on a bad queue, Write-GatedConsoleMessage not resolving) would skip
-    # the signal entirely, leaving the native Ctrl+C/window-close handler
-    # parked in DrainComplete.Wait(65000) for up to 65s instead of
-    # returning promptly.
     try {
-        # -not [ConsoleCtrl]::IsCloseEvent: Windows force-kills the whole
-        # process ~5s after a CTRL_CLOSE_EVENT (the X button) regardless
-        # of what this drain does - confirmed via this machine's
-        # WaitToKillAppTimeout registry value and a live test (force-
-        # killing the parent mid-run left cjxl/magick child processes
-        # running as orphans). Waiting out any
-        # part of -TimeoutSeconds (default 60s) can never fit in that ~5s
-        # window, so a close event skips straight to force-stopping every
-        # handle below instead of wasting any of it - this returns control
-        # to the native handler (via Complete-AbortDrain in the finally)
-        # as fast as possible, and each engine's OWN straggler drain
-        # (ImageConversionPipeline.ps1/AnimatedConversionPipeline.ps1, same
-        # fix) is what actually kills the real cjxl/magick child processes
-        # this function's own $h.PS.Stop() below does not reach.
         while ($localHandles.Count -gt 0 -and -not [ConsoleCtrl]::IsCloseEvent -and $abortDeadline.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
             $localHandles = Receive-CompletedHandles -Handles $localHandles -ResultHandler $ResultHandler -ErrorHandler $ErrorHandler
             if ($null -ne $ConsoleQueue) { Flush-ConsoleQueue -Queue $ConsoleQueue }
             if ($localHandles.Count -gt 0) { Start-Sleep -Milliseconds 250 }
         }
 
-        # One final completion-check pass before declaring anything force-stopped.
-        # Closes the race where a job finishes in the gap between the last poll
-        # and the timeout firing - without this, that job's real result is
-        # silently discarded and it's miscounted as force-stopped (see
-        # CLAUDE.md "Known gaps" for the history of this exact bug).
         if ($localHandles.Count -gt 0) {
             $localHandles = Receive-CompletedHandles -Handles $localHandles -ResultHandler $ResultHandler -ErrorHandler $ErrorHandler
             if ($null -ne $ConsoleQueue) { Flush-ConsoleQueue -Queue $ConsoleQueue }
