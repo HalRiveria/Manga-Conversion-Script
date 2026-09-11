@@ -1107,7 +1107,7 @@ $script:fullPipelineEngineWorker = {
                     $magickStdoutTask = $magickProc.StandardOutput.ReadToEndAsync()
                     $magickStderrTask = $magickProc.StandardError.ReadToEndAsync()
                     # Raw OS handle wait, not WaitForExit (same race as
-                    # Test-AvifAnimated — see
+                    # Test-AvifAnimated - see
                     # full-pipeline-hang-investigation.md). This is the
                     # image engine's own inline magick pre-conversion for
                     # WebP/AVIF/BMP/HEIC/HEIF, running inside a fresh

@@ -211,7 +211,7 @@ function Test-AvifAnimated {
     # Raw OS handle wait for exit detection, ReadToEndAsync kept for pipe
     # draining (round 6 fix). Both HasExited and WaitForExit(int) were
     # confirmed to hang indefinitely under concurrent first-use from two
-    # fresh PS 5.1 runspaces — see full-pipeline-hang-investigation.md.
+    # fresh PS 5.1 runspaces - see full-pipeline-hang-investigation.md.
     # This approach wraps the native process handle in a WaitHandle and
     # calls WaitOne (a direct kernel WaitForSingleObject), bypassing all
     # of Process's .NET-level exit-tracking state. ReadToEndAsync is kept:
@@ -220,7 +220,7 @@ function Test-AvifAnimated {
     # can't drain if nothing reads from it during execution).
     # DOCUMENTED DUPLICATE: Invoke-IccStripRetryOrFail in
     # ImageConversionPipeline.ps1 uses the identical raw-handle-wait
-    # pattern — keep both in sync.
+    # pattern - keep both in sync.
     if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated before Process.Start " + $AvifPath) } # TEMP-TRACE
     $proc = [System.Diagnostics.Process]::Start($psi)
     if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated after Process.Start, pid=" + $proc.Id) } # TEMP-TRACE
@@ -264,7 +264,7 @@ function Test-AvifAnimated {
     }
 
     # Raw .NET, not Where-Object | Select-Object (cmdlets race on first
-    # invocation across fresh concurrent runspaces — same bug class as
+    # invocation across fresh concurrent runspaces - same bug class as
     # Test-Path/Get-ChildItem, already fixed everywhere else in this
     # concurrent-runspace code path).
     $firstLine = $null

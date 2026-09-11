@@ -31,10 +31,8 @@
          PowerShell's own internal Ctrl+C handling firing early (a
          PipelineStoppedException/OperationCanceledException thrown before
          step 1's handler suppresses it) from a genuine, unrelated crash.
-         Built 2026-08-28 from a real extraction of the main script's own
-         catch block that sat unmerged since this module was first built -
-         see Modules\_Reference\AbortPipeline.reference.ps1 and CLAUDE.md's
-         Known gaps for the full history.
+         Extracted from the main script's own catch block - see
+         Modules\_Reference\AbortPipeline.reference.ps1.
 
     What this module deliberately does NOT own: per-pipeline dispatch loops
     (job scanning/throttling), per-mode abort summaries (stats formatting,
@@ -43,17 +41,16 @@
     pattern as Invoke-ParallelFolderJobs's -ResultHandler) to fold results
     into whatever shape the caller needs.
 
-    Clean Console Output touch point (2026-08-18): Test-AbortSignal's
-    abort message and Invoke-GracefulDrain's wait/force-stop messages
-    now route through CleanConsoleRendering.ps1's Write-GatedConsoleMessage
-    instead of a raw Write-Host, when the toggle is on - a raw Write-Host
-    firing while CCR's live region is mid-redraw would land wherever the
-    cursor happens to be and get mangled by the next redraw.
-    Write-GatedConsoleMessage (2026-08-29) centralizes the gate itself
-    (this module used to check the toggle and branch between
-    Write-CleanConsoleMessage/raw Write-Host at each of its 3 call sites
-    by hand - now each just calls Write-GatedConsoleMessage and passes
-    the toggle in). Two forward references this requires, both FROM
+    Clean Console Output touch point: Test-AbortSignal's abort message
+    and Invoke-GracefulDrain's wait/force-stop messages route through
+    CleanConsoleRendering.ps1's Write-GatedConsoleMessage instead of a
+    raw Write-Host, when the toggle is on - a raw Write-Host firing while
+    CCR's live region is mid-redraw would land wherever the cursor
+    happens to be and get mangled by the next redraw.
+    Write-GatedConsoleMessage centralizes the gate itself, so each of
+    this module's 3 call sites just calls it and passes the toggle in,
+    rather than branching between Write-CleanConsoleMessage/raw
+    Write-Host by hand. Two forward references this requires, both FROM
     Logging.ps1/CleanConsoleRendering.ps1 (both already built and tested,
     so both are confirmed against real signatures now, not stubbed-
     forward like Logging.ps1's original Move-ToRecycleBin reference was):
@@ -143,24 +140,23 @@ public static class ConsoleCtrl
     public static volatile bool AbortRequested = false;
     public static volatile bool IsCloseEvent   = false;   // true = X button, false = Ctrl+C
 
-    // Whether a real pipeline run is currently dispatched (2026-08-31
-    // addition - set by Set-AbortHandlerRunActive, called by
-    // Controller.ps1's Invoke-MainLoop around its own InvokeModeHandler
-    // call). Ctrl+C/Ctrl+Break IS the dedicated abort key for an active
-    // run - but at the menu, between runs, there is nothing to abort:
-    // setting AbortRequested there used to leak into the very next run
-    // dispatched in the SAME loop iteration (Reset-AbortState only runs
-    // at the TOP of each iteration, before the menu, not after it), and
-    // the handler thread would block on DrainComplete.Wait(65000) for a
-    // drain that was never going to happen, since no pipeline was
-    // running to call Invoke-GracefulDrain/Complete-AbortDrain at all.
-    // Decided explicitly (not a guess): Ctrl+C at the menu now falls
-    // through to the OS's own default CTRL_C action (immediate process
-    // termination, the same as if this handler were never registered at
-    // all) rather than being caught and somehow "resumed" - there is
-    // nothing in-flight to drain or clean up at the menu, so an abrupt
-    // exit there is safe, and it avoids inventing a third state ("caught
-    // but ignored, keep running") this module would then have to keep
+    // Whether a real pipeline run is currently dispatched - set by
+    // Set-AbortHandlerRunActive, called by Controller.ps1's
+    // Invoke-MainLoop around its own InvokeModeHandler call. Ctrl+C/
+    // Ctrl+Break is the dedicated abort key for an active run, but at
+    // the menu, between runs, there is nothing to abort: setting
+    // AbortRequested there would leak into the very next run dispatched
+    // in the same loop iteration (Reset-AbortState only runs at the top
+    // of each iteration, before the menu, not after it), and the handler
+    // thread would block on DrainComplete.Wait(65000) for a drain that
+    // was never going to happen, since no pipeline was running to call
+    // Invoke-GracefulDrain/Complete-AbortDrain at all. So Ctrl+C at the
+    // menu falls through to the OS's own default CTRL_C action
+    // (immediate process termination, same as if this handler were
+    // never registered) instead of being caught and somehow resumed -
+    // there is nothing in-flight to drain or clean up at the menu, so an
+    // abrupt exit there is safe, and it avoids a third state ("caught
+    // but ignored, keep running") this module would have to keep
     // correct forever.
     public static volatile bool RunActive = false;
 
@@ -210,11 +206,11 @@ public static class ConsoleCtrl
 #  console output from this process for as long as a selection is held, and
 #  auto-copies the selection to the clipboard the moment the mouse button is
 #  released - a right-click with no NEW selection pending then pastes that
-#  clipboard content back in as simulated keystrokes. Both are real,
-#  live-reported problems for a run in progress (project owner's own
-#  report, 2026-09-08): an accidental highlight looks exactly like a hang,
-#  and an accidental right-click after one floods the eventual input prompt
-#  with garbage. Neither matters once a run has finished - highlighting to
+#  clipboard content back in as simulated keystrokes. Both are real
+#  problems for a run in progress: an accidental highlight looks exactly
+#  like a hang, and an accidental right-click after one floods the
+#  eventual input prompt with garbage. Neither matters once a run has
+#  finished - highlighting to
 #  copy real output is genuinely useful then - so this is toggled off only
 #  around an actual run, not disabled permanently. See Set-ConsoleQuickEditEnabled.
 #
@@ -286,9 +282,8 @@ function Set-AbortHandlerRunActive {
     <#
     .SYNOPSIS
         Tells the native handler whether a real pipeline run is currently
-        dispatched (2026-08-31 addition, project owner's own explicit
-        decision - see [ConsoleCtrl]'s own RunActive comment for the full
-        reasoning). Call with $true right before dispatching a run, $false
+        dispatched - see [ConsoleCtrl]'s own RunActive comment for the
+        full reasoning. Call with $true right before dispatching a run, $false
         right after it returns (in a try/finally, so a crash doesn't leave
         it stuck $true) - Controller.ps1's Invoke-MainLoop is the one real
         caller. While $false (idle at the menu, between runs), Ctrl+C/
@@ -360,45 +355,41 @@ function Reset-AbortState {
         own Test-AbortSignal polling could ever see stale state from a
         PREVIOUS run in the same process.
     .DESCRIPTION
-        Real bug this closes (found and verified live during a code
-        review, see Todo.md/CHANGELOG.md): none of this state was EVER
-        reset anywhere in production code before this function existed -
-        only harness test setup ever reset it. Since Invoke-MainLoop
-        (Controller.ps1) runs multiple mode selections in the same
-        process (that's the whole point of "press any key to return to
-        the main menu" after a run), a single Ctrl+C - even one that
-        happened while idle at the menu, before any pipeline was even
-        running - left $script:abortRequested stuck $true for the rest
-        of the process's lifetime. Every subsequent run's very first
-        Test-AbortSignal poll then saw an abort already "in progress" and
-        aborted immediately, doing no real work, with no new Ctrl+C from
-        the user - until the whole script was closed and reopened.
-        Verified live: dot-source this module, trigger one abort, poll
-        Test-AbortSignal again with no new Ctrl+C (still $true), call
-        this function, poll again (now $false).
+        Without this, none of this state was ever reset anywhere in
+        production code - only harness test setup reset it. Since
+        Invoke-MainLoop (Controller.ps1) runs multiple mode selections in
+        the same process (that's the whole point of "press any key to
+        return to the main menu" after a run), a single Ctrl+C, even one
+        that happened while idle at the menu before any pipeline was even
+        running, would leave $script:abortRequested stuck $true for the
+        rest of the process's lifetime. Every subsequent run's very first
+        Test-AbortSignal poll would then see an abort already "in
+        progress" and abort immediately, doing no real work, with no new
+        Ctrl+C from the user, until the whole script was closed and
+        reopened.
 
-        Does NOT touch $script:abortCancellationSources - that registry's
+        Does not touch $script:abortCancellationSources - that registry's
         lifecycle is already handled per pipeline phase by
         Register-/Unregister-AbortCancellationSource and has nothing to
-        do with whether a PAST abort happened.
+        do with whether a past abort happened.
 
-        Also resets [ConsoleCtrl]::RunActive to $false (2026-08-31
-        addition) - defensive belt-and-suspenders alongside
-        Set-AbortHandlerRunActive's own try/finally at its real call site
-        (Controller.ps1's Invoke-MainLoop): this runs once per loop
-        iteration, BEFORE the menu, so it's never correct for RunActive
-        to still be $true here - if it somehow were (a caller that forgot
-        its own try/finally), the very NEXT Ctrl+C at the menu would be
-        wrongly caught and blocked on a drain that will never happen.
+        Also resets [ConsoleCtrl]::RunActive to $false - defensive
+        belt-and-suspenders alongside Set-AbortHandlerRunActive's own
+        try/finally at its real call site (Controller.ps1's
+        Invoke-MainLoop): this runs once per loop iteration, before the
+        menu, so it's never correct for RunActive to still be $true here.
+        If it somehow were (a caller that forgot its own try/finally),
+        the very next Ctrl+C at the menu would be wrongly caught and
+        blocked on a drain that will never happen.
 
-        Also re-enables Console QuickEdit mode (2026-09-08 addition) -
-        same defensive belt-and-suspenders reasoning as RunActive above,
-        alongside Set-ConsoleQuickEditEnabled's own try/finally at its
-        real call site: this runs once per loop iteration, BEFORE the
-        menu, so QuickEdit should never still be disabled here - if it
-        somehow were (a caller that forgot its own try/finally), the user
-        would be stuck unable to highlight/copy anything at the menu
-        until the whole script restarted.
+        Also re-enables Console QuickEdit mode - same defensive
+        belt-and-suspenders reasoning as RunActive above, alongside
+        Set-ConsoleQuickEditEnabled's own try/finally at its real call
+        site: this runs once per loop iteration, before the menu, so
+        QuickEdit should never still be disabled here. If it somehow were
+        (a caller that forgot its own try/finally), the user would be
+        stuck unable to highlight/copy anything at the menu until the
+        whole script restarted.
     #>
     $script:abortRequested = $false
     $script:ctrlCloseAbort = $false
@@ -466,9 +457,9 @@ function Complete-AbortDrain {
         Complete-AllActiveSeriesProgress's own no-active-series no-op) when
         there's nothing to finalize.
 
-        Gated on IsCloseEvent, NOT called for a plain Ctrl+C (2026-09-08
-        fix, real bug, live-reported): a Ctrl+C doesn't kill the process -
-        every real pipeline (Controller.ps1's Invoke-FullPipeline,
+        Gated on IsCloseEvent, not called for a plain Ctrl+C - a Ctrl+C
+        doesn't kill the process, and every real pipeline (Controller.ps1's
+        Invoke-FullPipeline,
         ImageConversionPipeline.ps1, AnimatedConversionPipeline.ps1,
         ZipPipeline.ps1) keeps running its own normal per-chapter/per-run
         completion code afterward, including its OWN
@@ -605,12 +596,12 @@ function Receive-CompletedHandles {
             } finally {
                 $h.PS.Dispose()
             }
-            # -ResultHandler runs OUTSIDE the try/catch above (2026-09-03
-            # fix, Todo.md finding) - a bug in the CALLER's own
-            # -ResultHandler used to be caught by the same catch as a real
-            # EndInvoke() failure, mislabeled as "Error collecting runspace
-            # result during abort drain" and silently dropping any
-            # remaining results from this same job. Letting it propagate
+            # -ResultHandler runs outside the try/catch above on purpose -
+            # a bug in the caller's own -ResultHandler would otherwise be
+            # caught by the same catch as a real EndInvoke() failure,
+            # mislabeled as "Error collecting runspace result during
+            # abort drain" and silently dropping any remaining results
+            # from this same job. Letting it propagate
             # uncaught surfaces the real exception with its own message/
             # stack instead - $h.PS is already disposed above either way.
             if ($null -ne $ResultHandler -and $null -ne $results) {
@@ -712,26 +703,22 @@ function Invoke-GracefulDrain {
     $abortDeadline = [System.Diagnostics.Stopwatch]::StartNew()
     $forceStoppedCount = 0
 
-    # try/finally around the whole drain body (2026-08-31 fix, caught by a
-    # same-day /code-review full-codebase pass) - this function's own
-    # docstring promises it "ALWAYS signals DrainComplete before
-    # returning", but nothing enforced that: anything throwing between
-    # here and the old unconditional Complete-AbortDrain call below (a
-    # -ResultHandler/-ErrorHandler that throws, Flush-ConsoleQueue on a
-    # bad queue, Write-GatedConsoleMessage not resolving - a documented
-    # hard dependency) skipped the signal entirely, leaving the native
-    # Ctrl+C/window-close handler parked in DrainComplete.Wait(65000) for
-    # up to 65s instead of returning promptly. Same species of gap
-    # ZipParallelProcessing.ps1's own mutex-leak fix closed earlier the
-    # same day (move the risky work inside the try so the finally can't
-    # be skipped).
+    # try/finally around the whole drain body - this function's own
+    # docstring promises it "always signals DrainComplete before
+    # returning," and without this wrapper nothing enforced that:
+    # anything throwing between here and the Complete-AbortDrain call
+    # below (a -ResultHandler/-ErrorHandler that throws, Flush-ConsoleQueue
+    # on a bad queue, Write-GatedConsoleMessage not resolving) would skip
+    # the signal entirely, leaving the native Ctrl+C/window-close handler
+    # parked in DrainComplete.Wait(65000) for up to 65s instead of
+    # returning promptly.
     try {
-        # -not [ConsoleCtrl]::IsCloseEvent (2026-09-03 fix, real bug, live-
-        # tested): Windows force-kills the whole process ~5s after a
-        # CTRL_CLOSE_EVENT (the X button) regardless of what this drain
-        # does - confirmed via this machine's WaitToKillAppTimeout registry
-        # value AND a live test (force-killing the parent mid-run left
-        # cjxl/magick child processes running as orphans). Waiting out any
+        # -not [ConsoleCtrl]::IsCloseEvent: Windows force-kills the whole
+        # process ~5s after a CTRL_CLOSE_EVENT (the X button) regardless
+        # of what this drain does - confirmed via this machine's
+        # WaitToKillAppTimeout registry value and a live test (force-
+        # killing the parent mid-run left cjxl/magick child processes
+        # running as orphans). Waiting out any
         # part of -TimeoutSeconds (default 60s) can never fit in that ~5s
         # window, so a close event skips straight to force-stopping every
         # handle below instead of wasting any of it - this returns control

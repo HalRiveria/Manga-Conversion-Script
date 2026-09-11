@@ -35,8 +35,8 @@
         reaches TotalChapters. Multiple series can be active/live at
         once; each gets its own block. Only cleanly-successful chapters
         ever actually disappear from the display.
-      - Write-CleanConsoleMessage (2026-08-18): a 5th public function,
-        for one-off status lines from OTHER modules (currently
+      - Write-CleanConsoleMessage is a 5th public function, for one-off
+        status lines from OTHER modules (currently
         AbortPipeline.ps1's abort/drain messages) that aren't part of
         the series/chapter model at all - printed as permanent content
         above the live region without corrupting it, the same
@@ -47,17 +47,14 @@
     RENDERING: tries real in-place redraw via [Console]::SetCursorPosition
     (erase the previous live region, reprint - the actual "clean" part of
     Clean Console Output), but this requires a real attached interactive
-    console. Verified live (2026-08-17) that [Console]::CursorTop/
-    SetCursorPosition throws System.IO.IOException ("The handle is
-    invalid") when output is redirected/non-interactive - a real,
-    confirmed failure mode, not a hypothetical - so cursor support is
-    probed ONCE (Test-CleanConsoleCursorAvailable, cached) and everything
-    falls back to simple sequential Write-Host (no erase, accepting
-    scrollback duplication) if unavailable, rather than throwing an
-    exception into the middle of a conversion run. This fallback is
-    exactly the "simple periodic snapshot" alternative already discussed
-    and accepted as reasonable during scoping - it's not an afterthought,
-    it's the deliberately-designed degradation path.
+    console. [Console]::CursorTop/SetCursorPosition throws a real
+    System.IO.IOException ("The handle is invalid") when output is
+    redirected or non-interactive, so cursor support is probed once
+    (Test-CleanConsoleCursorAvailable, cached) and everything falls back
+    to simple sequential Write-Host (no erase, accepting scrollback
+    duplication) if unavailable, rather than throwing an exception into
+    the middle of a conversion run. This fallback is the deliberately-
+    designed degradation path, not an afterthought.
 
     Content generation (Get-ProgressBarString, Split-TextToWidth,
     Format-SeriesLines) is fully separated from the actual console I/O
@@ -76,8 +73,7 @@
     this module MUST be called from the main/orchestrating thread only -
     NEVER from within a runspace worker script. $script:ccrActiveSeries is
     per-runspace state, exactly like every other $script:-prefixed module
-    state in this project (verified live for Logging.ps1 in its own
-    harness, Scenario J) - a worker calling these functions would be
+    state in this project - a worker calling these functions would be
     mutating its OWN isolated copy, invisible to the main thread's actual
     live display. This is a silent failure mode (nothing crashes, nothing
     errors, the display just never updates for that chapter) rather than
@@ -187,11 +183,10 @@ function Get-DisplayWidth {
         (Test-WideCharacter), 1 per everything else. $Text.Length is a
         .NET UTF-16 code-unit count, not a column count - the two only
         diverge for wide characters, but that divergence is exactly what
-        the CJK CCR redraw desync (2026-09-03 fix, Todo.md finding) traced
-        back to: a chunk sized in CHARACTERS could still be wider than
-        the console in actual COLUMNS, so the terminal's own automatic
-        wrap kicked in and desynced this module's row-count math for
-        every line drawn after it.
+        caused a real CJK redraw desync: a chunk sized in characters
+        could still be wider than the console in actual columns, so the
+        terminal's own automatic wrap kicked in and desynced this
+        module's row-count math for every line drawn after it.
     #>
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
     $width = 0
@@ -232,10 +227,10 @@ function Split-TextToWidth {
         the terminal's automatic wrap - needed because the redraw
         algorithm must know exactly how many physical rows each logical
         line will occupy to move the cursor correctly. Chunking by
-        character count alone (pre-2026-09-03) let a CJK-heavy chunk
-        render wider than $Width columns despite fitting within $Width
-        characters, triggering the terminal's own wrap and desyncing the
-        row-count math for every row after it (Todo.md finding).
+        character count alone let a CJK-heavy chunk render wider than
+        $Width columns despite fitting within $Width characters,
+        triggering the terminal's own wrap and desyncing the row-count
+        math for every row after it.
     .OUTPUTS
         string[] - always at least one element, even for empty input.
     #>
@@ -443,12 +438,12 @@ function Update-CleanConsoleDisplay {
             if ($oldCount -gt 0) {
                 [Console]::SetCursorPosition(0, [Console]::CursorTop - $oldCount)
             }
-            # Set-PadToDisplayWidth, not .PadRight (2026-09-03 fix, Todo.md
-            # finding) - .PadRight pads by character COUNT, so a CJK row
-            # already at $effectiveWidth characters (but narrower than
-            # that in actual columns) got padded to the WRONG on-screen
-            # width, leaving stale characters from a longer previous row
-            # visible past the end of the new one.
+            # Set-PadToDisplayWidth, not .PadRight - .PadRight pads by
+            # character count, so a CJK row already at $effectiveWidth
+            # characters (but narrower than that in actual columns) would
+            # get padded to the wrong on-screen width, leaving stale
+            # characters from a longer previous row visible past the end
+            # of the new one.
             foreach ($row in $newContentRows) { Write-ColoredConsoleRow -Text (Set-PadToDisplayWidth -Text $row.Text -Width $effectiveWidth) -Color $row.Color }
             if ($newContentRows.Count -lt $oldCount) {
                 $blankRowsNeeded = $oldCount - $newContentRows.Count
@@ -616,9 +611,9 @@ function Write-CleanConsoleMessage {
         drain messages) as permanent console content without corrupting
         the live progress region - the region is erased, the message
         printed above it, then the live region is reprinted below,
-        exactly like a series freezing into permanent content. Added
-        (2026-08-18) specifically so out-of-band messages from other
-        modules have somewhere safe to land instead of a raw Write-Host
+        exactly like a series freezing into permanent content. Exists so
+        out-of-band messages from other modules have somewhere safe to
+        land instead of a raw Write-Host
         landing wherever the cursor happens to be mid-redraw (see
         CLAUDE.md's "Clean Console Output" section, AbortPipeline touch
         point).

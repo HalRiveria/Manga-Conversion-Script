@@ -42,7 +42,7 @@
     reproduction and confirmation that the guard works, not just
     reasoning about it.
 
-    INCREMENTAL SCANNING (2026-08-17): Get-ZippableLeafDirs itself scans
+    INCREMENTAL SCANNING: Get-ZippableLeafDirs itself scans
     the ENTIRE tree before returning anything - a caller building
     -JobParams from its full result has to wait out the whole scan before
     any work can start, which is slow and looks like a hang on a large
@@ -59,10 +59,9 @@
     Test-ZippableLeafDirCandidate helper below, so the incremental path can never
     silently drift from the batch path's LEAF-QUALIFYING behavior.
 
-    TRAVERSAL-ERROR PARITY (2026-08-28, real bug fix - see
-    Todo.md/CHANGELOG.md): the guard-logic parity above did NOT originally
-    extend to how the two paths handled an inaccessible directory -
-    verified live, a single permission-denied folder anywhere in the tree
+    TRAVERSAL-ERROR PARITY: the guard-logic parity above did not
+    originally extend to how the two paths handled an inaccessible
+    directory. A single permission-denied folder anywhere in the tree
     made the old incremental provider (a single flat
     [System.IO.Directory]::EnumerateDirectories(...,
     SearchOption.AllDirectories) enumerator, which throws on the first
@@ -77,7 +76,7 @@
     existing, already-tested surface - ZipPipeline.ps1's current use of
     New-ZippableLeafDirProvider is untouched by any of this.
 
-    TWO-TIER SERIES/CHAPTER DISCOVERY (2026-08-18, for Clean Console
+    TWO-TIER SERIES/CHAPTER DISCOVERY (for Clean Console
     Output - see CLAUDE.md's section of that name): under the FIXED
     Library > Series > Chapter > Images layout (decided, not a
     heuristic), a series' chapter COUNT needs to be known before
@@ -117,10 +116,10 @@ function Test-ZippableLeafDirCandidate {
         @{ Dir; ZipOut } if $Dir qualifies; $null if it doesn't.
     .NOTES
         Uses $Dir's own .EnumerateDirectories()/.EnumerateFiles() (raw
-        .NET), not Get-ChildItem, as of 2026-09-10 - same reasoning as
-        Get-ZippableLeafDirs's own NOTES (real hang, not just slowness,
-        live-reproduced when two runspaces both make their first-ever
-        Get-ChildItem/provider-layer call at close to the same moment).
+        .NET), not Get-ChildItem - same reasoning as Get-ZippableLeafDirs's
+        own NOTES: a real hang, not just slowness, reproduced when two
+        runspaces both make their first-ever Get-ChildItem/provider-layer
+        call at close to the same moment.
         This function is the SECOND real Get-ChildItem call site that
         needed the same fix - New-ZippableLeafDirProvider's own
         "already proven" stack-based walk calls into this exact function,
@@ -163,11 +162,11 @@ function Test-ZippableLeafDirCandidate {
 
     # Former-container guard: any .zip directly inside means this is very
     # likely a now-empty container, not a genuine content leaf. Skip hard.
-    # Plain foreach, not Where-Object (2026-09-10) - Where-Object is ALSO
-    # a real hang risk under this same race, not just filesystem cmdlets
-    # like Get-ChildItem - live-reproduced with a stack-based .NET walk
-    # already in place, hanging at a bare Where-Object call over an
-    # in-memory List. See this function's own NOTES above.
+    # Plain foreach, not Where-Object - Where-Object is also a real hang
+    # risk under this same race, not just filesystem cmdlets like
+    # Get-ChildItem. Reproduced with a stack-based .NET walk already in
+    # place, hanging at a bare Where-Object call over an in-memory List.
+    # See this function's own NOTES above.
     $existingZipsHere = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
     foreach ($f in $allFiles) { if ($f.Extension -ieq ".zip") { $existingZipsHere.Add($f) } }
     if ($existingZipsHere.Count -gt 0) {
@@ -179,7 +178,7 @@ function Test-ZippableLeafDirCandidate {
     foreach ($f in $allFiles) { if ($QualifyingExtensions -icontains $f.Extension) { $qualifyingFiles.Add($f) } }
     if ($qualifyingFiles.Count -eq 0) { return $null }   # empty, or nothing recognized
 
-    # [System.IO.Path]::Combine, not Join-Path (2026-09-10) - Join-Path is
+    # [System.IO.Path]::Combine, not Join-Path - Join-Path is
     # provider-aware (resolves against whatever provider owns the path),
     # same reasoning as this function's own NOTES above.
     $zipOut = [System.IO.Path]::Combine($Dir.Parent.FullName, $Dir.Name + ".zip")
@@ -210,15 +209,14 @@ function Get-FilesRecursiveSafe {
         anywhere in the tree - that subtree is skipped (logged as a
         Warn), the rest of the scan continues. Same "silently continue
         past an inaccessible subtree" guarantee every real caller of this
-        function used to get from Get-ChildItem -Recurse -File
-        -ErrorAction SilentlyContinue directly, before 2026-09-10 (see
-        this module's own header/CHANGELOG.md) - Get-ChildItem/the
-        PowerShell FileSystem provider can HANG, not just run slowly,
-        when two runspaces both make their first-ever provider-layer call
-        at close to the same moment (real, live-reproduced bug, only
-        reachable once Full Pipeline's dispatch redesign gave this
-        codebase its first two runspaces that both walk the filesystem
-        concurrently). Reuses the same stack-based per-directory .NET
+        function used to get directly from Get-ChildItem -Recurse -File
+        -ErrorAction SilentlyContinue - Get-ChildItem and the PowerShell
+        FileSystem provider can hang, not just run slowly, when two
+        runspaces both make their first-ever provider-layer call at close
+        to the same moment (a real bug, only reachable once Full
+        Pipeline's dispatch redesign gave this codebase its first two
+        runspaces that both walk the filesystem concurrently). Reuses the
+        same stack-based per-directory .NET
         walk Get-ZippableLeafDirs/New-ZippableLeafDirProvider/
         Test-ZippableLeafDirCandidate already use.
     .OUTPUTS
@@ -288,12 +286,11 @@ function Get-ZippableLeafDirs {
         found" result as a genuinely empty, valid directory, with no way
         to tell the two apart from the caller's side.
 
-        MANUAL STACK-BASED .NET WALK (2026-09-10, real bug fix - see
-        CHANGELOG.md), not Get-ChildItem -Recurse like this function used
-        before. Live-reproduced: Get-ChildItem -Recurse (going through
-        PowerShell's FileSystem provider) can hang indefinitely - not just
-        run slowly - when two runspaces both make their first-ever
-        filesystem-provider call at close to the same moment, a real
+        MANUAL STACK-BASED .NET WALK, not Get-ChildItem -Recurse like
+        this function used before. Get-ChildItem -Recurse (going through
+        PowerShell's FileSystem provider) can hang indefinitely, not just
+        run slowly, when two runspaces both make their first-ever
+        filesystem-provider call at close to the same moment - a real
         engine-level thread-safety gap in the provider's own
         drive/provider initialization on this PS 5.1 install. Full
         Pipeline's dispatch-redesign migration is the first caller in this
@@ -302,19 +299,19 @@ function Get-ZippableLeafDirs {
         every other caller of this function runs main-thread-only, so the
         race was never reachable before. New-SeriesProvider (below), which
         already used raw [System.IO.Directory]::EnumerateDirectories
-        instead of Get-ChildItem, was NOT affected under the exact same
-        concurrent conditions - confirms the provider layer itself, not
-        general filesystem concurrency, is what's unsafe here. This walk
-        reuses New-ZippableLeafDirProvider's own already-proven
+        instead of Get-ChildItem, was not affected under the exact same
+        concurrent conditions, which confirms the provider layer itself,
+        not general filesystem concurrency, is what's unsafe here. This
+        walk reuses New-ZippableLeafDirProvider's own already-proven
         stack-based approach (see that function's own NOTES for why a
         single flat EnumerateDirectories(..., AllDirectories) enumerator
         isn't used instead - a permission error anywhere in the tree kills
         a flat enumerator's MoveNext() for good) rather than reintroducing
         that already-fixed bug, just collecting into a list instead of
         yielding one candidate per call. Get-FilesRecursiveSafe (below)
-        is a THIRD sibling of this same stack-based-walk shape, one level
-        up in this file - collecting every FILE instead of qualifying
-        leaf directories - added the same day for the same reason.
+        is a third sibling of this same stack-based-walk shape, one level
+        up in this file, collecting every file instead of qualifying leaf
+        directories.
     #>
     param(
         [Parameter(Mandatory)]
@@ -325,9 +322,9 @@ function Get-ZippableLeafDirs {
         [bool]$ForceRezip = $false
     )
 
-    # [System.IO.Directory]::Exists, not Test-Path (2026-09-10) - same
-    # reasoning as this function's own NOTES above. Called once per
-    # SERIES (via Get-SeriesChapters), by both racing engines, many times
+    # [System.IO.Directory]::Exists, not Test-Path - same reasoning as
+    # this function's own NOTES above. Called once per SERIES (via
+    # Get-SeriesChapters), by both racing engines, many times
     # over a real run - not just once at startup.
     if (-not [System.IO.Directory]::Exists($ScanPath)) {
         throw ("Get-ZippableLeafDirs: -ScanPath does not exist or is not a directory: '" + $ScanPath + "'")
@@ -405,8 +402,7 @@ function New-ZippableLeafDirProvider {
     .OUTPUTS
         [scriptblock] - pass directly as -NextJobProvider.
     .NOTES
-        MANUAL STACK-BASED WALK (2026-08-28, real bug fix - see
-        Todo.md/CHANGELOG.md), not a single flat
+        MANUAL STACK-BASED WALK, not a single flat
         [System.IO.Directory]::EnumerateDirectories(...,
         SearchOption.AllDirectories) enumerator like an earlier version of
         this function used. That flat enumerator is genuinely lazy (unlike
@@ -517,8 +513,7 @@ function New-ZippableLeafDirProvider {
                 -ExcludeStagingDirs $ExcludeStagingDirs -ForceRezip $ForceRezip
             if ($null -ne $candidate) { return $candidate }
 
-            # Only push a NON-candidate onto the stack (2026-08-31 fix,
-            # caught by a same-day /code-review full-codebase pass) - a
+            # Only push a NON-candidate onto the stack - a
             # directory that qualifies as a candidate is, by
             # Test-ZippableLeafDirCandidate's own definition, a true LEAF
             # (it returns $null the moment it finds a subdirectory), so
@@ -579,7 +574,7 @@ function New-SeriesProvider {
         [Parameter(Mandatory)]
         [string]$LibraryPath
     )
-    # [System.IO.Directory]::Exists, not Test-Path (2026-09-10) - same
+    # [System.IO.Directory]::Exists, not Test-Path - same
     # reasoning as Get-ZippableLeafDirs's own NOTES. Called once per
     # runspace, very early in Full Pipeline's two engine workers (right
     # after Add-Type, before anything else) - both racing runspaces make
@@ -597,10 +592,9 @@ function New-SeriesProvider {
             }
         } catch {
             Write-Log ("Series scan stopped early: " + $_) -Level Error
-            # Real bug fix (2026-08-28, see Todo.md/CHANGELOG.md): this
-            # enumerator's underlying native search handle implements
-            # IDisposable and was never disposed anywhere - confirmed live
-            # that [System.IO.Directory]::EnumerateDirectories(...).GetEnumerator()'s
+            # This enumerator's underlying native search handle implements
+            # IDisposable, so it needs disposing here - confirmed that
+            # [System.IO.Directory]::EnumerateDirectories(...).GetEnumerator()'s
             # return type (FileSystemEnumerableIterator) really does
             # implement it. $enumerator is never reassigned in this
             # function (unlike New-ZippableLeafDirProvider's per-directory
@@ -663,8 +657,8 @@ function Get-LeafDirectoryDiscoverySharedFunctionNames {
         list (Invoke-ZipParallelProcessing) to safely call New-SeriesProvider/
         Get-SeriesChapters from inside a runspace worker - single source of
         truth for this group (see Logging.ps1's Get-LoggingSharedFunctionNames
-        for why this exists). First real consumer (2026-09-09): Full
-        Pipeline's dispatch-redesign migration (step 4) - each of its two
+        for why this exists). First real consumer: Full Pipeline's
+        dispatch-redesign migration (step 4) - each of its two
         concurrent engine workers walks the library itself, inside its own
         runspace, unlike every other caller of these two functions today
         (all main-thread-only). Includes Get-ZippableLeafDirs and
@@ -681,7 +675,7 @@ function Get-LeafDirectoryDiscoverySharedFunctionNames {
         New-ZippableLeafDirProvider is NOT included - nothing in this
         group's own call graph (New-SeriesProvider/Get-SeriesChapters/
         Get-ZippableLeafDirs/Test-ZippableLeafDirCandidate) calls it.
-        Get-FilesRecursiveSafe IS included (2026-09-10) even though
+        Get-FilesRecursiveSafe IS included even though
         nothing in THIS module's own call graph calls it - Controller.ps1's
         own $engineWorkerSharedFunctionNames concatenates this getter's
         return value, and ImageConversionPipeline.ps1's Get-LooseImageCandidates/

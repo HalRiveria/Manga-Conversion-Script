@@ -389,7 +389,7 @@ function Invoke-IccStripRetryOrFail {
     # Raw OS handle wait for exit detection (round 6 fix).
     # DOCUMENTED DUPLICATE: Test-AvifAnimated in
     # AnimatedConversionPipeline.ps1 uses the identical pattern and has
-    # the full reasoning — keep both in sync.
+    # the full reasoning - keep both in sync.
     try {
         $stripStdoutTask = $stripProc.StandardOutput.ReadToEndAsync()
         $stripStderrTask = $stripProc.StandardError.ReadToEndAsync()
@@ -581,7 +581,7 @@ function Complete-ImageConversionJob {
         }
         # [System.IO.File]::Exists / [System.IO.FileInfo]::new, not
         # Test-Path / Get-Item (same cmdlet-first-invocation-in-a-fresh-
-        # runspace race as Test-AvifAnimated's Where-Object — this function
+        # runspace race as Test-AvifAnimated's Where-Object - this function
         # runs as Full Pipeline's image engine JobFinalize, inside a fresh
         # worker runspace racing the animated engine's own first cmdlet
         # call). Complete-AnimatedDispatchJob's own copy already uses raw
@@ -817,7 +817,7 @@ function Test-WebPAnimated {
     )
 
     # [byte[]]::new, not New-Object (cmdlet-first-invocation race in a
-    # fresh runspace — called from Controller.ps1's image-engine
+    # fresh runspace - called from Controller.ps1's image-engine
     # $jobBuilder, inside a worker runspace racing the animated engine).
     $bytes = [byte[]]::new(24)
     $bytesRead = 0
