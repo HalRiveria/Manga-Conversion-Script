@@ -1520,8 +1520,8 @@ function Get-LooseImageCandidates {
     }
 
     # Get-FilesRecursiveSafe (LeafDirectoryDiscovery.ps1), not
-    # Get-ChildItem -Recurse, as of 2026-09-10 - real, live-reproduced
-    # hang (not just slowness) when two runspaces both make their
+    # Get-ChildItem -Recurse - can hang, not just run slowly, when two
+    # runspaces both make their
     # first-ever PowerShell FileSystem-provider call at close to the same
     # moment - see that function's own header for the full story. A real
     # `foreach` statement here, not `| Where-Object` - Get-FilesRecursiveSafe
@@ -1530,25 +1530,24 @@ function Get-LooseImageCandidates {
     # receives the WHOLE List as one pipeline object, not one item per
     # element (that per-item unrolling only happens for a cmdlet emitting
     # items individually, e.g. Get-ChildItem, not a function returning a
-    # single comma-protected collection) - confirmed live, Where-Object's
-    # own $_ was the List itself, not a FileInfo, throwing deep inside the
+    # single comma-protected collection) - Where-Object's
+    # own $_ would be the List itself, not a FileInfo, throwing deep inside the
     # filter body. `foreach` over the returned List enumerates its real
     # elements correctly either way.
     $allCandidates = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
     foreach ($file in (Get-FilesRecursiveSafe -ScanPath $ScanPath)) {
         if ($LooseImageExtensions -inotcontains $file.Extension) { continue }
         # Orphaned scratch files - Test-OrphanedScratchFileName (this
-        # module, single source of truth, 2026-09-03 cleanup - see its
+        # module, single source of truth - see its
         # own header for the full reasoning, also used by
         # Controller.ps1/ZipPipeline.ps1's matching sweeps).
         if (Test-OrphanedScratchFileName -Name $file.Name) { continue }
-        # Never-converted extensions (2026-09-02 fix, from a same-day
-        # review, live-confirmed) - excluded here for the same reason
+        # Never-converted extensions are excluded here for the same reason
         # orphaned scratch files are excluded above: without this, a
         # GIF (Convert-ImageBatch's own pre-pass always skips it,
         # leaving it untouched with a "File left untouched" promise -
         # see Get-NeverConvertedExtensions's own header) that happens
-        # to be OLDER than an unrelated same-basename .jxl gets
+        # to be OLDER than an unrelated same-basename .jxl would get
         # classified as a stale leftover below and DELETED on the
         # very next run, breaking that promise. Excluding it here
         # means it's never even a NeedsConversion/StaleSources/
@@ -1556,20 +1555,19 @@ function Get-LooseImageCandidates {
         # visible to a folder-qualifying-extension check (so a
         # chapter holding one is still discovered/walked, not
         # invisible), permanently untouched by this function
-        # specifically. It does NOT keep blocking zip forever
-        # (2026-09-02 correction, caught by a second same-day
-        # review) - Controller.ps1's own mode-8 zip-blocking list
-        # also subtracts Get-NeverConvertedExtensions now, for
+        # specifically. It does NOT keep blocking zip forever -
+        # Controller.ps1's own mode-8 zip-blocking list
+        # also subtracts Get-NeverConvertedExtensions, for
         # exactly this reason: a never-converted file can never
         # produce the "conversion failure resolved" state a
         # blocking check like that expects, so leaving it as a
-        # permanent blocker there meant mode 8 could never zip that
-        # chapter, ever, on any run - live-confirmed. Full Pipeline
+        # permanent blocker there would mean mode 8 could never zip that
+        # chapter, ever, on any run. Full Pipeline
         # has no such gate at all and simply sweeps it into the zip;
-        # mode 8 now matches that already-validated behavior.
+        # mode 8 matches that already-validated behavior.
         if ((Get-NeverConvertedExtensions) -icontains $file.Extension) {
             # Logged here, not just left silent like the scratch-file
-            # exclusion above (2026-09-02 fix) - a never-converted file
+            # exclusion above - a never-converted file
             # is real user content, not internal debris, and this
             # exclusion means Convert-ImageBatch's own matching
             # "SKIPPING..." message (its pre-pass) can no longer fire
@@ -1606,10 +1604,9 @@ function Get-LooseImageCandidates {
                 Write-Log ("Existing .jxl counterpart for '" + $img.FullName + "' is 0 bytes - treating as incomplete and re-converting source.") -Level Warn
                 $needsConversion.Add($img)
             } elseif ($img.LastWriteTimeUtc -ge $jxlItem.LastWriteTimeUtc) {
-                # -ge, not -gt (2026-08-31 fix, found by a same-day
-                # /code-review): a source whose LastWriteTimeUtc is
-                # EXACTLY EQUAL to its .jxl's fell through to the stale
-                # branch below and got permanently deleted without ever
+                # -ge, not -gt: a source whose LastWriteTimeUtc is
+                # EXACTLY EQUAL to its .jxl's would otherwise fall through to the stale
+                # branch below and get permanently deleted without ever
                 # being converted - a real risk in this project's domain,
                 # since ZIP extraction commonly produces coarse (or
                 # identical) timestamps, letting an unrelated same-basename
@@ -1630,20 +1627,19 @@ function Get-LooseImageCandidates {
                 # it's the latter case - the .jxl a real conversion of THIS
                 # file would produce can't predate the file itself.
                 #
-                # 2026-08-31 correction: an EARLIER version of this fix
-                # routed this case to $needsConversion instead, reasoning
+                # Routing this case to $needsConversion instead (an earlier
+                # approach, reasoning
                 # that Convert-ImageBatch's own output-path-collision guard
-                # (two sources in the same batch mapping to the same .jxl)
-                # would cover it. It doesn't - that guard only compares
+                # would cover it) doesn't work - that guard only compares
                 # sources against EACH OTHER within one batch; it never
-                # checks an existing .jxl already on disk. Routing here to
-                # NeedsConversion meant cjxl's own output silently
-                # OVERWROTE the pre-existing .jxl in place - a plain file
-                # write, not a delete, so not even Recycle-Bin-recoverable.
-                # That trade one data-loss direction (an unconverted
+                # checks an existing .jxl already on disk. Routing to
+                # NeedsConversion would mean cjxl's own output silently
+                # OVERWRITES the pre-existing .jxl in place - a plain file
+                # write, not a delete, so not even Recycle-Bin-recoverable -
+                # trading one data-loss direction (an unconverted
                 # source wrongly deleted, at least Recycle-Bin-recoverable)
                 # for a worse one (a converted output silently, permanently
-                # destroyed - live-caught by /code-review). This is a
+                # destroyed). This is a
                 # genuine, unresolvable naming collision this function
                 # cannot safely act on either way - excluded from BOTH
                 # lists (no delete, no conversion, no overwrite) and logged
