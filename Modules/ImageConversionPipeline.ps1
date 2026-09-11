@@ -780,15 +780,14 @@ function Test-WebPAnimated {
         plain/simple WebP, no extended features) is never animated.
         Throws on a real I/O failure - same "let the caller decide"
         contract as Test-AvifAnimated, for consistency between this
-        project's two animated-format classification checks (2026-09-09,
-        architecture-consistency only - see Todo.md's matching entry.
+        project's two animated-format classification checks.
         This is byte-for-byte the same logic Convert-ImageBatch's own
         pre-pass used inline before, just extracted into a named,
         independently-testable function so both formats' "is this file
         animated" answer comes from the same kind of place - NOT a
         behavior change, and NOT the start of an animated-WebP
         conversion pipeline, which this project has no plans to ever
-        build).
+        build.
     #>
     param(
         [Parameter(Mandatory)]
@@ -837,17 +836,17 @@ function Convert-ImageBatch {
         [string]$CjxlExe,
         [string]$MagickExe,
         [bool]$DoJpegLossless,
-        # = 90 (2026-09-02 review fix), matching Convert-AnimatedBatch's
+        # = 90, matching Convert-AnimatedBatch's
         # own -AnimatedQuality default: unlike DoJpegLossless ($false) or
         # every other bool/int this batch engine takes, 0 is NOT a safe
         # fallback for a cjxl quality value - it means maximum-loss
         # encoding, silently. Both real call sites (Controller.ps1's
         # worker, Invoke-LooseImageConversionPipeline) already pass this
-        # explicitly, so this was latent, not live - but Controller.ps1's
+        # explicitly, but Controller.ps1's
         # own worker-param hashtable is deliberately built so an omitted
         # key falls back to the worker's own default (see that file's
-        # header comment on $baseJobParams), and an omitted DoJpegQuality
-        # was the one field where that fallback was actively wrong.
+        # header comment on $baseJobParams), so this default matters if
+        # DoJpegQuality is ever the omitted key.
         [int]$DoJpegQuality = 90,
         [Parameter(Mandatory)]
         [int]$MaxCjxlProcs,
@@ -883,12 +882,11 @@ function Convert-ImageBatch {
     # silently overwrite the other's output while both sources get deleted).
     #
     # Animated WebP/AVIF are classified HERE, before the collision count
-    # below, not later inside the dispatch loop where the per-job animated
-    # checks used to live (2026-08-31 fix, caught by a same-day /code-review
-    # 4th pass). The collision pre-pass only knows extensions, not animation
+    # below, not later inside the dispatch loop, since the collision
+    # pre-pass only knows extensions, not animation
     # status - an animated file sitting next to a same-basename convertible
-    # source (e.g. animated "foo.avif" + "foo.jpg") was being counted as a
-    # real collision and BOTH sources failed with "Resolve the name clash
+    # source (e.g. animated "foo.avif" + "foo.jpg") would otherwise be counted as a
+    # real collision and BOTH sources would fail with "Resolve the name clash
     # manually", even though the animated file was never actually a
     # candidate for "foo.jxl" in the first place. Classifying animation
     # status first and excluding animated files from $allJobs entirely means
@@ -899,28 +897,26 @@ function Convert-ImageBatch {
     $allJobs = [System.Collections.Generic.List[hashtable]]::new()
     foreach ($img in $ImageFiles) {
         $srcPath = $img.FullName
-        # Cancellation check (2026-08-31 fix, caught by verifying this same
-        # day's /code-review 4th pass): without this, cancelling mid-run
-        # left this pre-pass running unabated - every remaining .avif in
-        # the batch still got a real `magick identify` spawn before the
-        # (now-pointless) dispatch loop below declined to run, since
-        # $CancelToken was never checked here. Matches the same
+        # Cancellation check matters here: without it, cancelling mid-run
+        # would leave this pre-pass running unabated - every remaining .avif in
+        # the batch would still get a real `magick identify` spawn before the
+        # (now-pointless) dispatch loop below declined to run. Matches the same
         # already-pending reporting the drain path below uses.
         if ($CancelToken.IsCancellationRequested) {
             $batchResult.PendingPaths.Add($srcPath)
             continue
         }
         if ((Get-NeverConvertedExtensions) -icontains [System.IO.Path]::GetExtension($srcPath)) {
-            # Reads Get-NeverConvertedExtensions (2026-09-02 fix, from a
-            # same-day review) rather than a literal '\.gif$' match - that
-            # literal was the ONLY place this fact was recorded, and
-            # Get-LooseImageCandidates's own staleness classification
-            # (below) had no matching exclusion, so a GIF older than an
-            # unrelated same-basename .jxl got deleted as a "stale
-            # leftover" on the very next run - live-confirmed, breaking
-            # this exact skip message's own "File left untouched" promise
-            # one run later. See Get-NeverConvertedExtensions's own header
-            # for the full story. GIF is always skipped, never actually
+            # Reads Get-NeverConvertedExtensions rather than a literal
+            # '\.gif$' match - a literal here would be the only place this
+            # fact was recorded, and Get-LooseImageCandidates's own
+            # staleness classification (below) would have no matching
+            # exclusion, so a GIF older than an unrelated same-basename
+            # .jxl would get deleted as a "stale leftover" on the very
+            # next run, breaking this exact skip message's own "File left
+            # untouched" promise one run later. See
+            # Get-NeverConvertedExtensions's own header for the full
+            # story. GIF is always skipped, never actually
             # converted (project owner's own decision from real-world
             # experience with older script versions - GIF conversion
             # caused real problems before). Still counts as unconverted
@@ -928,9 +924,9 @@ function Convert-ImageBatch {
             # (Get-LooseImageExtensions includes ".gif"), same treatment
             # as animated WebP/AVIF - just unconditional here rather than
             # gated on an animation check, since the trouble wasn't
-            # specific to animated GIFs. Confirmed live: a real animated
+            # specific to animated GIFs. A real animated
             # GIF reaching cjxl via the ICC-strip retry path
-            # (Invoke-IccStripRetryOrFail, below) left orphaned numbered
+            # (Invoke-IccStripRetryOrFail, below) leaves orphaned numbered
             # temp PNGs behind (magick auto-numbers its output when a
             # multi-frame source has no frame selector and the
             # destination is a single filename) that don't match the
@@ -943,17 +939,13 @@ function Convert-ImageBatch {
             continue
         }
         if ($MagickExe -and $srcPath -imatch '\.webp$') {
-            # Test-WebPAnimated (2026-09-09 extraction, see its own header) -
+            # Test-WebPAnimated (see its own header) -
             # same cheap VP8X-chunk read as before, now a named function so
             # both animated-format checks (WebP here, AVIF just below) share
             # the same "ask a dedicated classifier, throw on failure" shape.
-            # try/catch (2026-08-31 fix, caught by verifying this same day's
-            # /code-review 4th pass): this read used to sit INSIDE the
-            # dispatch loop's own per-job try/catch (added earlier the same
-            # day for Process.Start failures) - hoisting it into this
-            # pre-pass without its own guard meant a locked/deleted/
-            # inaccessible .webp threw straight out of Convert-ImageBatch
-            # and ended the whole run, instead of failing just that one
+            # try/catch matters here: without it, a locked/deleted/
+            # inaccessible .webp would throw straight out of Convert-ImageBatch
+            # and end the whole run, instead of failing just that one
             # file the way every other per-file I/O error in this function
             # does.
             $isAnimatedWebp = $false
