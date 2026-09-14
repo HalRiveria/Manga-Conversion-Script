@@ -388,9 +388,16 @@ New-Item -ItemType Directory -Path $rootE -Force | Out-Null
 $imgE = New-RealImage -Name "scenario-e\match.png" -Width 60 -Height 40
 $profileE = New-ProfileFromRealFile -File $imgE -Width 60 -Height 40
 
+$script:logCalls.Clear()
 $resultE = Invoke-UnwantedImageScan -Path $rootE -Profiles @($profileE) -DryRun $true
-Test-Assert ($resultE.DeletedCount -eq 1) "counted as deleted"
+# 2026-09-14 fix, real bug: a dry run used to increment the SAME
+# DeletedCount a real run uses, so the log-file summary line reported a
+# real-looking "N deleted" count for a run that deleted nothing. It now
+# has its own counter, and DeletedCount correctly stays 0.
+Test-Assert ($resultE.WouldDeleteCount -eq 1) "counted in its own WouldDeleteCount, not DeletedCount"
+Test-Assert ($resultE.DeletedCount -eq 0) "DeletedCount itself stays 0 - nothing was actually deleted"
 Test-Assert (Test-Path -LiteralPath $imgE.FullName) "but the file was NOT actually touched"
+Test-Assert (@($script:logCalls | Where-Object { $_ -like "Summary:*dry run*would delete*" }).Count -eq 1) "the log-file summary line itself says 'would delete', not a real-looking deleted count"
 Write-Host ""
 
 # ==============================================================================

@@ -26,14 +26,25 @@ function Import-UnwantedImageProfiles {
 
     if (-not (Test-Path -LiteralPath $ProfilesPath)) { return @() }
 
+    # DOCUMENTED DUPLICATE: this backup-timestamp / $backupOk-gated
+    # repair-or-leave-alone recovery block is a near-verbatim copy of
+    # Config.ps1's Import-ScriptSettings corrupt-file recovery (its
+    # parse-failure branch) - keep both in sync if this logic changes.
     try {
         $raw = [System.IO.File]::ReadAllText($ProfilesPath) | ConvertFrom-Json -ErrorAction Stop
     } catch {
         Write-Log ("Could not read unwanted-image profiles file '" + $ProfilesPath + "' - starting with none. (" + $_ + ")") -Level Warn
         $backupPath = $ProfilesPath + ".corrupt-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".bak"
         $backupOk = $false
+        # Swallowed deliberately - a transient failure (lock, full disk,
+        # ACL) shouldn't stop the fallback-to-empty-array below; the
+        # repair attempt right below is gated on $backupOk instead.
         try { Copy-Item -LiteralPath $ProfilesPath -Destination $backupPath -Force -ErrorAction Stop; $backupOk = $true } catch { }
         if ($backupOk) {
+            # Best-effort repair - if the write itself fails, the corrupt
+            # file just gets re-detected (and re-backed-up) on the next
+            # scan; the function still returns a usable empty array
+            # either way.
             try { Export-UnwantedImageProfiles -Profiles @() -ProfilesPath $ProfilesPath } catch { }
         } else {
             Write-Log ("Could not back up the corrupt profiles file '" + $ProfilesPath + "' - leaving it untouched rather than risk overwriting it with no backup. It will be re-detected as corrupt on the next scan.") -Level Warn
@@ -315,6 +326,7 @@ function Invoke-UnwantedImageScan {
     $totals = @{
         ScannedCount      = 0
         DeletedCount      = 0
+        WouldDeleteCount  = 0
         DeleteFailedCount = 0
         HashMismatchCount = 0
         HashFailureCount  = 0
@@ -343,7 +355,13 @@ function Invoke-UnwantedImageScan {
 
         if ($DryRun) {
             Write-Log ("WOULD DELETE: [" + $matchResult.Profile.Label + "] '" + $file.FullName + "' | " + $file.Length + " bytes | " + $matchResult.Width + "x" + $matchResult.Height) -ForceConsole
-            $totals.DeletedCount++
+            # Own counter, not DeletedCount (2026-09-14 fix, Todo.md
+            # finding) - a dry run deletes nothing, but used to increment
+            # DeletedCount anyway, so the summary line below (which DOES
+            # write to the log file, not just console) logged a
+            # real-looking "N deleted" count for a run that deleted
+            # nothing.
+            $totals.WouldDeleteCount++
             continue
         }
 
@@ -363,7 +381,11 @@ function Invoke-UnwantedImageScan {
         }
     }
 
-    Write-Log ("Unwanted-image scan complete: " + $totals.DeletedCount + " deleted, " + $totals.HashMismatchCount + " hash mismatch(es), " + $totals.ScannedCount + " image(s) scanned.") -Level Summary -ForceConsole
+    if ($DryRun) {
+        Write-Log ("Unwanted-image scan complete (dry run): " + $totals.WouldDeleteCount + " would delete, " + $totals.HashMismatchCount + " hash mismatch(es), " + $totals.ScannedCount + " image(s) scanned.") -Level Summary -ForceConsole
+    } else {
+        Write-Log ("Unwanted-image scan complete: " + $totals.DeletedCount + " deleted, " + $totals.HashMismatchCount + " hash mismatch(es), " + $totals.ScannedCount + " image(s) scanned.") -Level Summary -ForceConsole
+    }
     $totals.AllScannedFiles = $allScannedFiles
     return $totals
 }

@@ -314,6 +314,9 @@ function Import-ScriptSettings {
     }
 
     $parsed = $null
+    # DOCUMENTED DUPLICATE: UnwantedImage.ps1's Import-UnwantedImageProfiles
+    # has a near-verbatim copy of this backup-timestamp / $backupOk-gated
+    # repair-or-leave-alone recovery block - keep both in sync.
     try {
         $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
     } catch {
