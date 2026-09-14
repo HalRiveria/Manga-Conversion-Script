@@ -490,6 +490,174 @@ Test-Assert ($budget9.CurrentCount -eq 1) ("the shared budget is back to its ful
 Write-Host ""
 
 # ==============================================================================
+#  Scenario 10 (2026-09-14, dead-code-removal triage - see Todo.md's
+#  matching entry): an unrelated exception from INSIDE the main dispatch
+#  loop (here, -AbortPollCallback throwing on its second pass, once a job
+#  is genuinely still running - NOT a caught -JobStarter failure, that's
+#  Scenario 6's own case) must still release the still-running job via
+#  -JobAbortCleanup and the shared budget before rethrowing. Same bug
+#  species ImageConversionPipeline.Harness.ps1's Scenario AB and
+#  AnimatedConversionPipeline.Harness.ps1's Scenario X used to prove
+#  against Convert-ImageBatch/Convert-AnimatedBatch's own now-deleted
+#  copy of this same try/catch shape - this is the one, shared copy that
+#  replaced both.
+# ==============================================================================
+Write-Host "=== Scenario 10: an unrelated throw mid-dispatch still releases a genuinely-running job ===" -ForegroundColor Cyan
+$budget10 = [System.Threading.SemaphoreSlim]::new(2, 2)
+$job10 = New-FakeJob -Id "J10"
+$feed10 = New-ManualChapterFeed -Chapters @(@{ ChapterInfo = "Chapter10"; Jobs = @($job10) })
+$cts10 = [System.Threading.CancellationTokenSource]::new()
+$jobStarter10 = { param($job) $job.Started = $true; return $job }
+$jobPollCompleted10 = { param($job) return $false }   # never finishes - stays genuinely "running"
+$abortCleanupIds10 = [System.Collections.Generic.List[string]]::new()
+$jobAbortCleanup10 = { param($job) $abortCleanupIds10.Add($job.Id) }.GetNewClosure()
+$script:pollPassCount10 = 0
+$abortPollCallback10 = {
+    param($runningJobs)
+    $script:pollPassCount10++
+    if ($script:pollPassCount10 -ge 2) { throw "simulated unrelated AbortPollCallback failure" }
+}
+$threw10 = $false
+try {
+    $null = Invoke-ChapterDispatch -ChapterProvider $feed10.ChapterProvider -JobBuilder $feed10.JobBuilder `
+        -JobStarter $jobStarter10 -JobPollCompleted $jobPollCompleted10 -JobFinalize { param($job, $pendingQueue) return @{ Success = $true } } `
+        -JobAbortCleanup $jobAbortCleanup10 -ChapterCompleteCallback { param($chapterInfo) } `
+        -MaxConcurrent $budget10 -AbortPollCallback $abortPollCallback10 -CancelToken $cts10.Token
+} catch {
+    $threw10 = $true
+}
+
+Test-Assert $threw10 "the injected failure propagated out of Invoke-ChapterDispatch, not silently swallowed"
+Test-Assert ($abortCleanupIds10.Count -eq 1 -and $abortCleanupIds10[0] -eq "J10") ("the genuinely-still-running job was released via JobAbortCleanup before the rethrow (got count=" + $abortCleanupIds10.Count + ", ids=" + ($abortCleanupIds10 -join ",") + ")")
+Test-Assert ($budget10.CurrentCount -eq 2) ("the running job's budget slot was released too - semaphore back to full count of 2 (got " + $budget10.CurrentCount + ")")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario 11 (2026-09-14, dead-code-removal triage): a same-pass throw
+#  (here, -JobFinalize throwing for the SECOND job in this poll pass) must
+#  not double-clean an EARLIER job in the same pass that already finished
+#  normally (SlotReleased already true) - the outer catch's own
+#  -JobAbortCleanup call is gated on "not SlotReleased" for exactly this
+#  reason. Same bug species ImageConversionPipeline.Harness.ps1's Scenario
+#  AF and AnimatedConversionPipeline.Harness.ps1's Scenario Y used to prove
+#  against Convert-ImageBatch/Convert-AnimatedBatch's own now-deleted copy
+#  of this same try/catch shape.
+# ==============================================================================
+Write-Host "=== Scenario 11: a same-pass throw does not double-clean an earlier job that already finished normally ===" -ForegroundColor Cyan
+$budget11 = [System.Threading.SemaphoreSlim]::new(2, 2)
+$jobA11 = New-FakeJob -Id "A11"
+$jobB11 = New-FakeJob -Id "B11"
+$feed11 = New-ManualChapterFeed -Chapters @(@{ ChapterInfo = "Chapter11"; Jobs = @($jobA11, $jobB11) })
+$cts11 = [System.Threading.CancellationTokenSource]::new()
+$jobStarter11 = { param($job) $job.Started = $true; return $job }
+$jobPollCompleted11 = { param($job) return $job.Started }
+$normalFinalizeIds11 = [System.Collections.Generic.List[string]]::new()
+$jobFinalize11 = {
+    param($job, $pendingQueue)
+    if ($job.Id -eq "B11") { throw "simulated JobFinalize failure for B11" }
+    $normalFinalizeIds11.Add($job.Id)
+    return @{ Success = $true }
+}.GetNewClosure()
+$abortCleanupIds11 = [System.Collections.Generic.List[string]]::new()
+$jobAbortCleanup11 = { param($job) $abortCleanupIds11.Add($job.Id) }.GetNewClosure()
+$threw11 = $false
+try {
+    $null = Invoke-ChapterDispatch -ChapterProvider $feed11.ChapterProvider -JobBuilder $feed11.JobBuilder `
+        -JobStarter $jobStarter11 -JobPollCompleted $jobPollCompleted11 -JobFinalize $jobFinalize11 `
+        -JobAbortCleanup $jobAbortCleanup11 -ChapterCompleteCallback { param($chapterInfo) } `
+        -MaxConcurrent $budget11 -CancelToken $cts11.Token
+} catch {
+    $threw11 = $true
+}
+
+Test-Assert $threw11 "the injected JobFinalize failure propagated out of Invoke-ChapterDispatch"
+Test-Assert ($normalFinalizeIds11.Count -eq 1 -and $normalFinalizeIds11[0] -eq "A11") "sanity check: A11 finalized normally before B11's throw"
+Test-Assert ($abortCleanupIds11.Count -eq 1 -and $abortCleanupIds11[0] -eq "B11") ("only B11 (the one that threw mid-finalize) was released via JobAbortCleanup - A11 (already finalized normally, SlotReleased) was NOT double-cleaned (got count=" + $abortCleanupIds11.Count + ", ids=" + ($abortCleanupIds11 -join ",") + ")")
+Test-Assert ($budget11.CurrentCount -eq 2) ("both jobs' budget slots were released exactly once each despite the throw - semaphore back to full count of 2 (got " + $budget11.CurrentCount + ")")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario 12 (2026-09-14, dead-code-removal triage): [ConsoleCtrl]::IsCloseEvent
+#  skips the graceful-wait drain loop entirely and goes straight to
+#  force-kill - a window-close abort force-kills the whole process ~5s
+#  later regardless, so waiting out any part of -AbortTimeoutSeconds can
+#  never fit. Same bug species ImageConversionPipeline.Harness.ps1's
+#  Scenario AK and AnimatedConversionPipeline.Harness.ps1's Scenario AB
+#  used to prove against Convert-ImageBatch/Convert-AnimatedBatch's own
+#  now-deleted copy of this same drain-loop shape.
+# ==============================================================================
+Write-Host "=== Scenario 12: IsCloseEvent skips the graceful drain wait entirely, force-kills immediately ===" -ForegroundColor Cyan
+$job12 = New-FakeJob -Id "J12"
+$feed12 = New-ManualChapterFeed -Chapters @(@{ ChapterInfo = "Chapter12"; Jobs = @($job12) })
+$cts12 = [System.Threading.CancellationTokenSource]::new()
+$jobStarter12 = { param($job) $job.Started = $true; return $job }
+$jobPollCompleted12 = { param($job) return $false }   # never finishes
+$script:abortCleanupCount12 = 0
+$jobAbortCleanup12 = { param($job) $script:abortCleanupCount12++ }
+$abortPollCallback12 = { param($runningJobs) if ($runningJobs.Count -gt 0) { $cts12.Cancel() } }.GetNewClosure()
+
+[ConsoleCtrl]::IsCloseEvent = $true
+$sw12 = [System.Diagnostics.Stopwatch]::StartNew()
+try {
+    $result12 = Invoke-ChapterDispatch -ChapterProvider $feed12.ChapterProvider -JobBuilder $feed12.JobBuilder `
+        -JobStarter $jobStarter12 -JobPollCompleted $jobPollCompleted12 -JobFinalize { param($job, $pendingQueue) return @{ Success = $true } } `
+        -JobAbortCleanup $jobAbortCleanup12 -ChapterCompleteCallback { param($chapterInfo) } `
+        -MaxConcurrent 4 -AbortPollCallback $abortPollCallback12 -AbortTimeoutSeconds 30 -CancelToken $cts12.Token
+} finally {
+    $sw12.Stop()
+    [ConsoleCtrl]::IsCloseEvent = $false
+}
+
+Test-Assert ($sw12.Elapsed.TotalSeconds -lt 5) ("returned in under 5s despite a 30s -AbortTimeoutSeconds (took " + [int]$sw12.Elapsed.TotalSeconds + "s)")
+Test-Assert ($result12.ForceKilledCount -eq 1) ("the never-finishing job was force-killed, not waited for (got ForceKilledCount=" + $result12.ForceKilledCount + ")")
+Test-Assert ($script:abortCleanupCount12 -eq 1) ("JobAbortCleanup fired once for the force-killed job (got " + $script:abortCleanupCount12 + ")")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario 13 (2026-09-14, dead-code-removal triage): an unrelated
+#  exception from INSIDE the drain's own force-kill step (here, the
+#  "force-stopping N job(s)..." Write-Log call itself, which sits OUTSIDE
+#  each job's own per-job try/catch in that loop) must still kill/dispose/
+#  JobAbortCleanup every job still in $running via that block's own catch,
+#  not leave them dangling. Same bug species
+#  ImageConversionPipeline.Harness.ps1's Scenario AH and
+#  AnimatedConversionPipeline.Harness.ps1's Scenario AA used to prove
+#  against Convert-ImageBatch/Convert-AnimatedBatch's own now-deleted
+#  copy of this same drain-loop shape.
+# ==============================================================================
+Write-Host "=== Scenario 13: an unrelated throw during the drain's force-stop logging still cleans up every remaining job ===" -ForegroundColor Cyan
+$job13a = New-FakeJob -Id "A13"
+$job13b = New-FakeJob -Id "B13"
+$feed13 = New-ManualChapterFeed -Chapters @(@{ ChapterInfo = "Chapter13"; Jobs = @($job13a, $job13b) })
+$cts13 = [System.Threading.CancellationTokenSource]::new()
+$jobStarter13 = { param($job) $job.Started = $true; return $job }
+$jobPollCompleted13 = { param($job) return $false }   # neither ever finishes
+$abortCleanupIds13 = [System.Collections.Generic.List[string]]::new()
+$jobAbortCleanup13 = { param($job) $abortCleanupIds13.Add($job.Id) }.GetNewClosure()
+$abortPollCallback13 = { param($runningJobs) if ($runningJobs.Count -gt 0) { $cts13.Cancel() } }.GetNewClosure()
+
+$realWriteLogFn13 = ${function:Write-Log}
+function Write-Log {
+    param([string]$Message, [string]$Level = "Info")
+    if ($Message -like "*force-stopping*") { throw "simulated Write-Log failure during the drain's own force-stop logging" }
+}
+$threw13 = $false
+try {
+    $null = Invoke-ChapterDispatch -ChapterProvider $feed13.ChapterProvider -JobBuilder $feed13.JobBuilder `
+        -JobStarter $jobStarter13 -JobPollCompleted $jobPollCompleted13 -JobFinalize { param($job, $pendingQueue) return @{ Success = $true } } `
+        -JobAbortCleanup $jobAbortCleanup13 -ChapterCompleteCallback { param($chapterInfo) } `
+        -MaxConcurrent 4 -AbortPollCallback $abortPollCallback13 -AbortTimeoutSeconds 0 -CancelToken $cts13.Token
+} catch {
+    $threw13 = $true
+} finally {
+    ${function:Write-Log} = $realWriteLogFn13
+}
+
+Test-Assert $threw13 "the injected Write-Log failure propagated out of Invoke-ChapterDispatch"
+Test-Assert ($abortCleanupIds13.Count -eq 2 -and $abortCleanupIds13.Contains("A13") -and $abortCleanupIds13.Contains("B13")) ("both jobs still in `$running were cleaned up via the outer catch despite the throw happening before either could be individually processed (got: " + ($abortCleanupIds13 -join ", ") + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario P: New-LibraryChapterProvider flattens New-SeriesProvider +
 #  Get-SeriesChapters (both real, unchanged) into one continuous lazy feed
 #  over a real folder structure - two series, several chapters each.
