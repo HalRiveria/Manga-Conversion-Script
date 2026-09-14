@@ -37,8 +37,11 @@ function Flush-ConsoleQueue {
 # by CleanConsoleRendering.ps1, which itself calls
 # Write-CleanConsoleMessage when its own -CleanConsoleOutputEnabled param
 # is true). Write-GatedConsoleMessage is NOT optional the way the toggle
-# variable is: Test-AbortSignal calls it unconditionally on a real abort,
-# so it must resolve to SOMETHING - real CleanConsoleRendering.ps1 is
+# variable is: Test-AbortSignal calls it on a real abort whenever
+# $script:workerConsoleQueue is unset (i.e. every scenario below, since
+# none of them set it - see the queue-routing scenario further down for
+# the case where it IS set), so it must resolve to SOMETHING - real
+# CleanConsoleRendering.ps1 is
 # deliberately never dot-sourced here, and this stub is what satisfies
 # that hard dependency instead (dot-sourcing only AbortPipeline.ps1 with
 # NEITHER the real module nor this stub throws CommandNotFoundException
@@ -152,6 +155,33 @@ Test-Assert ($ctsKeep.IsCancellationRequested -eq $true) "a registered CTS is ca
 Test-Assert ($ctsRemove.IsCancellationRequested -eq $false) "an unregistered CTS is NOT cancelled"
 Test-Assert ($script:ctrlCloseAbort -eq $false) "ctrlCloseAbort is false for a Ctrl+C-style abort"
 $ctsKeep.Dispose(); $ctsDrop.Dispose(); $ctsRemove.Dispose()
+Write-Host ""
+
+# ==============================================================================
+#  Scenario A2: inside a runspace worker ($script:workerConsoleQueue set),
+#  Test-AbortSignal must queue the abort message instead of calling
+#  Write-GatedConsoleMessage directly - that function isn't in every
+#  worker's -SharedFunctionNames list and would throw "term not
+#  recognized" there (2026-09-14 fix).
+# ==============================================================================
+Write-Host "=== Scenario A2: Test-AbortSignal queues its message inside a worker ===" -ForegroundColor Cyan
+Reset-HarnessScenarioState
+
+$fakeQueue = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+$script:workerConsoleQueue = $fakeQueue
+[ConsoleCtrl]::AbortRequested = $true
+[ConsoleCtrl]::IsCloseEvent   = $false
+$queuedResult = Test-AbortSignal
+
+Test-Assert ($queuedResult -eq $true) "Test-AbortSignal still returns true when routing through the queue"
+Test-Assert ($fakeQueue.Count -eq 1) "exactly one item was queued instead of calling Write-GatedConsoleMessage"
+$queuedItem = $null
+$null = $fakeQueue.TryDequeue([ref]$queuedItem)
+Test-Assert ($queuedItem.Level -eq "Warn") "queued abort message uses Level=Warn, matching Flush-ConsoleQueue's expected shape"
+Test-Assert ($queuedItem.Message -like "*Ctrl+C detected*") "queued abort message has the expected text"
+Test-Assert ($script:cleanConsoleMessageCalls.Count -eq 0) "Write-GatedConsoleMessage/Write-CleanConsoleMessage was NOT called while the worker queue was set"
+
+$script:workerConsoleQueue = $null
 Write-Host ""
 
 # ==============================================================================

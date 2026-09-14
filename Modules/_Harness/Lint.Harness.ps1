@@ -36,7 +36,7 @@ $script:LintKnownExceptions = @(
     @{ File  = 'Controller.ps1'
        Rule  = 'shared-function-names'
        Names = @('Write-GatedConsoleMessage')
-       Why   = 'Neither of Controller.ps1''s two engine-worker closures ever passes -AbortWaitMessage into anything that calls Write-GatedConsoleMessage internally (they route every CCR-adjacent moment through the main-thread event-queue drain instead, see the DISPATCH-REDESIGN STEP 4 header) - propagating it would be actively unsafe (CleanConsoleRendering.ps1 state is never initialized inside a worker runspace) if that ever changed without a real fix. See CLAUDE.md Known-gaps history / CHANGELOG.md 2026-08-29.' }
+       Why   = 'Test-AbortSignal (AbortPipeline.ps1) is in this worker''s -SharedFunctionNames and its source still references Write-GatedConsoleMessage, which Rule 5''s call-graph walk correctly finds - but Test-AbortSignal only calls it when $script:workerConsoleQueue is unset (main thread); inside a worker it queues the abort message instead (same pattern as Write-Log), so Write-GatedConsoleMessage - which really would be unsafe to call inside a worker, CCR state is never initialized there - is never actually reached at runtime. Propagating it would just be dead weight. See CHANGELOG.md 2026-09-14.' }
 )
 
 $script:passCount = 0

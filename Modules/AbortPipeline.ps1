@@ -147,7 +147,15 @@ function Test-AbortSignal {
         } else {
             "`n[ABORT] Window close detected - finishing current jobs, please wait..."
         }
-        Write-GatedConsoleMessage -Text $abortMessage -Color Yellow -CleanConsoleOutputEnabled ([bool]$script:CleanConsoleOutputEnabled)
+        if ($null -ne $script:workerConsoleQueue) {
+            # Inside a runspace worker: Write-GatedConsoleMessage isn't in
+            # every worker's -SharedFunctionNames list and CCR state doesn't
+            # exist here anyway, so queue for the main thread to print -
+            # same pattern Write-Log uses (Logging.ps1's $script:workerConsoleQueue).
+            $script:workerConsoleQueue.Enqueue(@{ Message = $abortMessage; Level = "Warn" })
+        } else {
+            Write-GatedConsoleMessage -Text $abortMessage -Color Yellow -CleanConsoleOutputEnabled ([bool]$script:CleanConsoleOutputEnabled)
+        }
     }
     return $script:abortRequested
 }

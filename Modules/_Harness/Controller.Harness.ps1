@@ -364,6 +364,7 @@ Test-Assert ($totalsC2.ZipCreatedSuccess -eq 0 -and $totalsC2.ZipSkippedDueToErr
 Test-Assert (Test-Path -LiteralPath $chC2) "the chapter folder still exists - never zipped, never deleted, despite the engine crash"
 Write-Host ""
 
+
 # ==============================================================================
 #  Scenario C3 (2026-08-31 fix): AVIF classification used to only look at
 #  $imageCandidates.NeedsConversion, never .StaleSources - Get-LooseImageCandidates

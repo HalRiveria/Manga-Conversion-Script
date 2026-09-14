@@ -638,21 +638,38 @@ $script:fullPipelineEngineWorker = {
 
         $jobStarter = {
             param($job)
-            $psi = [System.Diagnostics.ProcessStartInfo]::new()
-            $psi.FileName = $MagickExe
-            $qualityArg = if ($DoAnimatedLossless) { "-define webp:lossless=true" } else { "-quality " + $AnimatedQuality }
-            $psi.Arguments = "`"" + $job.SrcPath + "`" -coalesce -loop 0 " + $qualityArg + " `"" + $job.MagickOutputPath + "`""
-            $psi.UseShellExecute        = $false
-            $psi.RedirectStandardOutput = $true
-            $psi.RedirectStandardError  = $true
-            $psi.CreateNoWindow         = $true
+            $cr = $chapterResults[$job.ChapterKey]
+            try {
+                $psi = [System.Diagnostics.ProcessStartInfo]::new()
+                $psi.FileName = $MagickExe
+                $qualityArg = if ($DoAnimatedLossless) { "-define webp:lossless=true" } else { "-quality " + $AnimatedQuality }
+                $psi.Arguments = "`"" + $job.SrcPath + "`" -coalesce -loop 0 " + $qualityArg + " `"" + $job.MagickOutputPath + "`""
+                $psi.UseShellExecute        = $false
+                $psi.RedirectStandardOutput = $true
+                $psi.RedirectStandardError  = $true
+                $psi.CreateNoWindow         = $true
 
-            Write-Log ("Converting animated: '" + $job.SrcPath + "'")
+                Write-Log ("Converting animated: '" + $job.SrcPath + "'")
 
-            $job.Proc       = [System.Diagnostics.Process]::Start($psi)
-            $job.StdoutTask = $job.Proc.StandardOutput.ReadToEndAsync()
-            $job.StderrTask = $job.Proc.StandardError.ReadToEndAsync()
-            return $job
+                $job.Proc       = [System.Diagnostics.Process]::Start($psi)
+                $job.StdoutTask = $job.Proc.StandardOutput.ReadToEndAsync()
+                $job.StderrTask = $job.Proc.StandardError.ReadToEndAsync()
+                return $job
+            } catch {
+                # Bare Process.Start() throws a NON-terminating error when
+                # uncaught (Docs/lessons-learned.md's 7th entry) - without
+                # this try/catch, $job.Proc stays $null and $job.Proc.HasExited
+                # (jobPollCompleted below) is falsy forever, hanging the whole
+                # engine. Rethrow so ChapterDispatch's own JobStarter catch
+                # accounts for it and moves on, same shape as the image
+                # engine's jobStarter above. DOCUMENTED DUPLICATE:
+                # AnimatedConversionPipeline.ps1's Invoke-LooseAnimatedConversionPipeline
+                # (mode 3) has the same try/catch around the same call -
+                # keep both in sync.
+                Write-Log ("FAILED to start animated conversion process for '" + $job.SrcPath + "': " + $_) -Level Error
+                $cr.FailedCount++
+                throw
+            }
         }.GetNewClosure()
 
         $jobPollCompleted = { param($job) return $job.Proc.HasExited }

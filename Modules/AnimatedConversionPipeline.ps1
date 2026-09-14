@@ -681,23 +681,38 @@ function Invoke-LooseAnimatedConversionPipeline {
 
         $jobStarter = {
             param($job)
-            $psi = [System.Diagnostics.ProcessStartInfo]::new()
-            $psi.FileName = $MagickExe
-            $qualityArg = if ($AnimatedLossless) { "-define webp:lossless=true" } else { "-quality " + $AnimatedQuality }
-            $psi.Arguments = "`"" + $job.SrcPath + "`" -coalesce -loop 0 " + $qualityArg + " `"" + $job.MagickOutputPath + "`""
-            $psi.UseShellExecute        = $false
-            $psi.RedirectStandardOutput = $true
-            $psi.RedirectStandardError  = $true
-            $psi.CreateNoWindow         = $true
+            $cr = $chapterResults[$job.ChapterKey]
+            try {
+                $psi = [System.Diagnostics.ProcessStartInfo]::new()
+                $psi.FileName = $MagickExe
+                $qualityArg = if ($AnimatedLossless) { "-define webp:lossless=true" } else { "-quality " + $AnimatedQuality }
+                $psi.Arguments = "`"" + $job.SrcPath + "`" -coalesce -loop 0 " + $qualityArg + " `"" + $job.MagickOutputPath + "`""
+                $psi.UseShellExecute        = $false
+                $psi.RedirectStandardOutput = $true
+                $psi.RedirectStandardError  = $true
+                $psi.CreateNoWindow         = $true
 
-            Write-Log ("Converting animated: '" + $job.SrcPath + "'")
+                Write-Log ("Converting animated: '" + $job.SrcPath + "'")
 
-            $job.Proc          = [System.Diagnostics.Process]::Start($psi)
-            $job.StdoutTask    = $job.Proc.StandardOutput.ReadToEndAsync()
-            $job.StderrTask    = $job.Proc.StandardError.ReadToEndAsync()
-            $job.StartTime     = [System.Diagnostics.Stopwatch]::StartNew()
-            $job.LastHeartbeat = [timespan]::Zero
-            return $job
+                $job.Proc          = [System.Diagnostics.Process]::Start($psi)
+                $job.StdoutTask    = $job.Proc.StandardOutput.ReadToEndAsync()
+                $job.StderrTask    = $job.Proc.StandardError.ReadToEndAsync()
+                $job.StartTime     = [System.Diagnostics.Stopwatch]::StartNew()
+                $job.LastHeartbeat = [timespan]::Zero
+                return $job
+            } catch {
+                # Bare Process.Start() throws a NON-terminating error when
+                # uncaught (Docs/lessons-learned.md's 7th entry) - without
+                # this try/catch, $job.Proc stays $null and jobPollCompleted's
+                # $job.Proc.HasExited is falsy forever, hanging the whole
+                # dispatch loop. Rethrow so ChapterDispatch's own JobStarter
+                # catch accounts for it and moves on. DOCUMENTED DUPLICATE:
+                # Controller.ps1's animated-engine jobStarter has the same
+                # try/catch around the same call - keep both in sync.
+                Write-Log ("FAILED to start animated conversion process for '" + $job.SrcPath + "': " + $_) -Level Error
+                $cr.FailedCount++
+                throw
+            }
         }.GetNewClosure()
 
         $jobPollCompleted = {
