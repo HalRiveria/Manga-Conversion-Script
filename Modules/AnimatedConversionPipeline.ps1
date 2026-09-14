@@ -11,7 +11,6 @@ function Test-AvifAnimated {
         [Parameter(Mandatory)]
         [string]$MagickExe
     )
-    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated ENTER " + $AvifPath) } # TEMP-TRACE
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName               = $MagickExe
@@ -24,14 +23,10 @@ function Test-AvifAnimated {
     # DOCUMENTED DUPLICATE: Invoke-IccStripRetryOrFail in
     # ImageConversionPipeline.ps1 uses the identical raw-handle-wait
     # pattern below - keep both in sync.
-    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated before Process.Start " + $AvifPath) } # TEMP-TRACE
     $proc = [System.Diagnostics.Process]::Start($psi)
-    if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated after Process.Start, pid=" + $proc.Id) } # TEMP-TRACE
     try {
-        if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated before ReadToEndAsync") } # TEMP-TRACE
         $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
         $stderrTask = $proc.StandardError.ReadToEndAsync()
-        if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated before handle-wait") } # TEMP-TRACE
         $procWaitHandle = [System.Threading.ManualResetEvent]::new($false)
         $origSafeHandle = $procWaitHandle.SafeWaitHandle
         $procWaitHandle.SafeWaitHandle = (
@@ -45,7 +40,6 @@ function Test-AvifAnimated {
             $procWaitHandle.SafeWaitHandle = $origSafeHandle
             $procWaitHandle.Dispose()
         }
-        if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated handle-wait returned, exited=$exited") } # TEMP-TRACE
 
         if (-not $exited) {
             try { $proc.Kill() } catch { }
@@ -53,11 +47,9 @@ function Test-AvifAnimated {
             throw "magick identify did not exit within 30s - killed"
         }
 
-        if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated before GetResult") } # TEMP-TRACE
         $stdout = $stdoutTask.GetAwaiter().GetResult()
         $stderr = $stderrTask.GetAwaiter().GetResult()
         $code = $proc.ExitCode
-        if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)] Test-AvifAnimated done, exitCode=$code") } # TEMP-TRACE
     } finally {
         $proc.Dispose()
     }
