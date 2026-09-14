@@ -697,7 +697,7 @@ $script:fullPipelineEngineWorker = {
             Dir = $chapterInfo.Dir; ZipOut = $chapterInfo.ZipOut; IsZippable = $chapterInfo.IsZippable
             Result = $resultForCallback
         })
-        $chapterResults.Remove($chapterInfo)
+        $null = $chapterResults.Remove($chapterInfo)
     }.GetNewClosure()
 
     $abortMessagePrinted = $false

@@ -1091,7 +1091,7 @@ function Invoke-LooseImageConversionPipeline {
             if ($null -ne $PostChapterCallback) {
                 & $PostChapterCallback @{ SeriesName = $chapterInfo.SeriesName; ChapterName = $chapterInfo.ChapterName; Dir = $chapterInfo.Dir; ChapterResult = $chapterResultForCallback; ZipOut = $chapterInfo.ZipOut; IsZippable = $chapterInfo.IsZippable }
             }
-            $chapterResults.Remove($chapterInfo)
+            $null = $chapterResults.Remove($chapterInfo)
         }.GetNewClosure()
 
         $abortMessagePrinted = $false

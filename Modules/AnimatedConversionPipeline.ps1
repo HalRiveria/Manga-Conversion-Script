@@ -762,7 +762,7 @@ function Invoke-LooseAnimatedConversionPipeline {
             if ($null -ne $PostChapterCallback) {
                 & $PostChapterCallback @{ SeriesName = $chapterInfo.SeriesName; ChapterName = $chapterInfo.ChapterName; Dir = $chapterInfo.Dir; ChapterResult = $chapterResultForCallback }
             }
-            $chapterResults.Remove($chapterInfo)
+            $null = $chapterResults.Remove($chapterInfo)
         }.GetNewClosure()
 
         $abortMessagePrinted = $false
