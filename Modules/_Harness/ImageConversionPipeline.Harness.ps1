@@ -1114,40 +1114,41 @@ Write-Host ""
 #  ICC-strip retry path left orphaned numbered temp PNGs behind that no
 #  cleanup regex in this project catches).
 #
-#  Convert-ImageBatch's own skip-check is exercised DIRECTLY here, not
-#  through Invoke-LooseImageConversionPipeline (2026-09-02 follow-up fix):
-#  Get-LooseImageCandidates now excludes .gif entirely (Scenario AC2,
-#  above) so it never reaches Convert-ImageBatch through either real
-#  caller (this one, or Controller.ps1's Full Pipeline) any more - the
-#  check below is a defensive backstop for anything that calls
-#  Convert-ImageBatch directly, not a live production code path.
+#  2026-09-14 (dead-code-removal, Todo.md's matching entry): this
+#  scenario used to also exercise Convert-ImageBatch's own skip-check
+#  DIRECTLY (a defensive backstop, since Get-LooseImageCandidates already
+#  excludes .gif entirely at discovery time - Scenario AC2, above - so it
+#  never reached Convert-ImageBatch through either real caller). That
+#  direct call was removed along with Convert-ImageBatch itself; the
+#  live end-to-end check below (which already proved the real governing
+#  behavior - discovery-level exclusion, not a skip inside the batch
+#  function) is the only assertion this scenario needs.
 # ==============================================================================
 Write-Host "=== Scenario Q2: .gif is always skipped, never actually converted ===" -ForegroundColor Cyan
 $chQ2 = New-Dir "scenario-q2\Series\Chapter 1"
 $gifQ2 = New-FakeImage -DirPath $chQ2 -Name "cover.gif"
 
-$resultQ2 = Convert-ImageBatch -ImageFiles @(Get-Item -LiteralPath $gifQ2) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -DoFullLogging $false -CancelToken ([System.Threading.CancellationToken]::None)
-
-Test-Assert ($resultQ2.SkippedCount -eq 1 -and $resultQ2.ConvertedCount -eq 0 -and $resultQ2.FailedCount -eq 0) ("GIF counted as skipped, not converted or failed, with no -MagickExe configured at all (got SkippedCount=" + $resultQ2.SkippedCount + ", ConvertedCount=" + $resultQ2.ConvertedCount + ", FailedCount=" + $resultQ2.FailedCount + ")")
-Test-Assert (Test-Path -LiteralPath $gifQ2) "the GIF source was left untouched, not deleted"
-Test-Assert (-not (Test-Path -LiteralPath (Join-Path $chQ2 "cover.jxl"))) "no .jxl was created for a skipped GIF"
-
-# Confirms Get-LooseImageCandidates's own exclusion (not this function's
-# check) is what actually governs the real, end-to-end pipeline now -
-# a chapter with only a .gif reports zero candidates of any kind and
-# never even reaches Convert-ImageBatch.
+# Confirms Get-LooseImageCandidates's own exclusion is what actually
+# governs the real, end-to-end pipeline - a chapter with only a .gif
+# reports zero candidates of any kind and never reaches conversion.
 $totalsQ2 = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-q2") -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
-Test-Assert ($totalsQ2.ConvertedSuccess -eq 0 -and $totalsQ2.ConvertedFail -eq 0 -and $totalsQ2.ConvertedSkipped -eq 0) ("through the real end-to-end pipeline, the .gif is invisible before ever reaching Convert-ImageBatch - not skipped there, just never a candidate at all (got Success=" + $totalsQ2.ConvertedSuccess + ", Fail=" + $totalsQ2.ConvertedFail + ", Skipped=" + $totalsQ2.ConvertedSkipped + ")")
-Test-Assert (Test-Path -LiteralPath $gifQ2) "the GIF source is still untouched after the real end-to-end pipeline run too"
+Test-Assert ($totalsQ2.ConvertedSuccess -eq 0 -and $totalsQ2.ConvertedFail -eq 0 -and $totalsQ2.ConvertedSkipped -eq 0) ("through the real end-to-end pipeline, the .gif is invisible - not skipped during conversion, just never a candidate at all (got Success=" + $totalsQ2.ConvertedSuccess + ", Fail=" + $totalsQ2.ConvertedFail + ", Skipped=" + $totalsQ2.ConvertedSkipped + ")")
+Test-Assert (Test-Path -LiteralPath $gifQ2) "the GIF source is still untouched after the real end-to-end pipeline run"
 Write-Host ""
 
 # ==============================================================================
 #  Scenario Q2b (2026-09-08 fix, real bug caught by a full-codebase audit,
 #  same species as this project's other Remove-Source call sites):
 #  Remove-Source's $false return (the source already vanished before
-#  deletion - a real TOCTOU gap) was discarded in
-#  Complete-ImageConversionJob, reporting a successful delete regardless.
+#  deletion - a real TOCTOU gap) was discarded in the conversion-job
+#  finalizer, reporting a successful delete regardless.
 #  Remove-Source shadowed to return $false unconditionally.
+#
+#  2026-09-14 (dead-code-removal, Todo.md's matching entry): ported from a
+#  direct Convert-ImageBatch call to the live Invoke-LooseImageConversionPipeline
+#  path - Complete-ImageDispatchJob (the live twin) has the identical
+#  $removed check, but nothing previously proved it through the real
+#  pipeline.
 # ==============================================================================
 Write-Host "=== Scenario Q2b: an already-gone source is not miscounted as deleted ===" -ForegroundColor Cyan
 $chQ2b = New-Dir "scenario-q2b\Series\Chapter 1"
@@ -1159,13 +1160,13 @@ function Remove-Source {
     return $false
 }
 try {
-    $resultQ2b = Convert-ImageBatch -ImageFiles @(Get-Item -LiteralPath $imgQ2b) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -DoFullLogging $false -CancelToken ([System.Threading.CancellationToken]::None)
+    $totalsQ2b = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-q2b") -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
 } finally {
     ${function:Remove-Source} = $realRemoveSourceQ2b
 }
 
-Test-Assert ($resultQ2b.ConvertedCount -eq 1) "sanity check: the conversion itself still succeeded"
-Test-Assert ($resultQ2b.DeletedCount -eq 0) ("DeletedCount stays 0, not falsely incremented, when Remove-Source reports the source already gone (got " + $resultQ2b.DeletedCount + ")")
+Test-Assert ($totalsQ2b.ConvertedSuccess -eq 1) "sanity check: the conversion itself still succeeded"
+Test-Assert ($totalsQ2b.DeletedSuccess -eq 0) ("DeletedSuccess stays 0, not falsely incremented, when Remove-Source reports the source already gone (got " + $totalsQ2b.DeletedSuccess + ")")
 Write-Host ""
 
 Write-Host "=== Scenario Q3: .bmp/.heic/.heif each convert through the WebP-style temp-PNG detour ===" -ForegroundColor Cyan
@@ -1487,35 +1488,6 @@ Test-Assert (Test-Path -LiteralPath $avifAA) "the animated foo.avif source was l
 Write-Host ""
 
 # ==============================================================================
-#  Scenario AB (2026-08-31 fix, caught by a same-day /code-review 4th pass):
-#  an unexpected throw from INSIDE the dispatch loop (here, -AbortPollCallback
-#  throwing on its second pass, once a job is genuinely in flight) used to
-#  propagate straight out of Convert-ImageBatch with the still-running job's
-#  process handle undisposed. The dispatch loop's own try/catch now
-#  force-kills/disposes anything left in $running before rethrowing.
-# ==============================================================================
-Write-Host "=== Scenario AB: an unexpected throw mid-dispatch still releases the running job's process handle ===" -ForegroundColor Cyan
-$chAB = New-Dir "scenario-ab\Series\Chapter 1"
-$fileAB = Get-Item -LiteralPath (New-FakeImage -DirPath $chAB -Name "page1.jpg" -SleepMs 300)
-$script:pollCountAB = 0
-$pollAB = {
-    param($inFlight)
-    $script:pollCountAB++
-    if ($script:pollCountAB -ge 2) { throw "simulated AbortPollCallback failure" }
-}
-
-$threwAB = $false
-try {
-    $null = Convert-ImageBatch -ImageFiles @($fileAB) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 5 -DoFullLogging $false `
-        -CancelToken ([System.Threading.CancellationToken]::None) -AbortPollCallback $pollAB
-} catch {
-    $threwAB = $true
-}
-
-Test-Assert $threwAB "the injected failure propagated out of Convert-ImageBatch, not silently swallowed"
-Write-Host ""
-
-# ==============================================================================
 #  Scenario AC (2026-08-31 fix, caught by a same-day /code-review 4th pass):
 #  a leaked "_tmp_*" scratch file (one whose owning cleanup path couldn't
 #  run - force-killed process, locked file swallowed by a bare catch) used
@@ -1579,8 +1551,14 @@ Write-Host ""
 #  collision-guard pre-pass (fix 1, Scenario AA above) lost the try/catch it
 #  had inside the dispatch loop's own per-job error handling - an
 #  inaccessible .webp (locked by another process, here) used to throw
-#  straight out of Convert-ImageBatch and end the whole run, instead of
-#  failing just that one file like every other per-file I/O error here.
+#  straight out and end the whole run, instead of failing just that one
+#  file like every other per-file I/O error here.
+#
+#  2026-09-14 (dead-code-removal, Todo.md's matching entry): ported from a
+#  direct Convert-ImageBatch call to the live Invoke-LooseImageConversionPipeline
+#  path - jobBuilder (the live twin) has the identical try/catch around
+#  Test-WebPAnimated, but nothing previously proved it through the real
+#  pipeline.
 # ==============================================================================
 Write-Host "=== Scenario AD: a locked/unreadable .webp fails just that file, not the whole batch ===" -ForegroundColor Cyan
 $chAD = New-Dir "scenario-ad\Series\Chapter 1"
@@ -1588,30 +1566,32 @@ $webpAD = Join-Path $chAD "locked.webp"
 [System.IO.File]::WriteAllText($webpAD, "fake webp bytes")
 $lockAD = [System.IO.File]::Open($webpAD, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
 $threwAD = $false
-$resultAD = $null
+$totalsAD = $null
 try {
-    $resultAD = Convert-ImageBatch -ImageFiles @(Get-Item -LiteralPath $webpAD) -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -MaxCjxlProcs 2 -DoFullLogging $false `
-        -CancelToken ([System.Threading.CancellationToken]::None)
+    $totalsAD = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-ad") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -MaxCjxlProcs 2 -FullLogging $false
 } catch {
     $threwAD = $true
 } finally {
     $lockAD.Dispose()
 }
 
-Test-Assert (-not $threwAD) "did NOT throw out of Convert-ImageBatch - the batch survives one unreadable file"
-Test-Assert ($null -ne $resultAD -and $resultAD.FailedCount -eq 1) ("the locked file was counted as a real failure, not silently dropped (got FailedCount=" + $(if ($resultAD) { $resultAD.FailedCount } else { "<null>" }) + ")")
+Test-Assert (-not $threwAD) "did NOT throw - the pipeline survives one unreadable file"
+Test-Assert ($null -ne $totalsAD -and $totalsAD.ConvertedFail -eq 1) ("the locked file was counted as a real failure, not silently dropped (got ConvertedFail=" + $(if ($totalsAD) { $totalsAD.ConvertedFail } else { "<null>" }) + ")")
 Write-Host ""
 
 # ==============================================================================
 #  Scenario AD2 (2026-09-09, architecture-consistency extraction - see
 #  Todo.md's matching entry and Test-WebPAnimated's own header): direct
 #  coverage of Test-WebPAnimated itself (previously untestable in
-#  isolation, inline in Convert-ImageBatch's own pre-pass) and of
-#  Convert-ImageBatch actually skipping a real animated WebP - a real,
-#  pre-existing gap (only the locked-file/error path above had coverage,
-#  never the actual animation-flag-detected/skip path).
+#  isolation) and of the pipeline actually skipping a real animated WebP -
+#  a real, pre-existing gap (only the locked-file/error path above had
+#  coverage, never the actual animation-flag-detected/skip path).
+#
+#  2026-09-14 (dead-code-removal, Todo.md's matching entry): the skip
+#  proof was ported from a direct Convert-ImageBatch call to the live
+#  Invoke-LooseImageConversionPipeline path.
 # ==============================================================================
-Write-Host "=== Scenario AD2: Test-WebPAnimated direct coverage + Convert-ImageBatch skips a real animated WebP ===" -ForegroundColor Cyan
+Write-Host "=== Scenario AD2: Test-WebPAnimated direct coverage + the pipeline skips a real animated WebP ===" -ForegroundColor Cyan
 function New-FakeWebp {
     <#
     .SYNOPSIS
@@ -1632,7 +1612,11 @@ function New-FakeWebp {
 $chAD2 = New-Dir "scenario-ad2\Series\Chapter 1"
 $animatedWebpAD2 = Join-Path $chAD2 "animated.webp"
 $staticWebpAD2 = Join-Path $chAD2 "static.webp"
-$noVp8xWebpAD2 = Join-Path $chAD2 "no-vp8x.webp"
+# Deliberately OUTSIDE $chAD2 (2026-09-14) - this fixture is only for the
+# direct Test-WebPAnimated unit check below, not the live-pipeline check
+# further down, which now scans $chAD2's real directory contents and
+# would otherwise pick this up as a third file to convert.
+$noVp8xWebpAD2 = Join-Path $scratchDir "scenario-ad2-no-vp8x.webp"
 New-FakeWebp -Path $animatedWebpAD2 -Animated $true
 New-FakeWebp -Path $staticWebpAD2 -Animated $false
 [System.IO.File]::WriteAllBytes($noVp8xWebpAD2, [System.Text.Encoding]::ASCII.GetBytes("not a real webp at all"))
@@ -1641,43 +1625,10 @@ Test-Assert ((Test-WebPAnimated -WebPPath $animatedWebpAD2) -eq $true) "Test-Web
 Test-Assert ((Test-WebPAnimated -WebPPath $staticWebpAD2) -eq $false) "Test-WebPAnimated reports false for a VP8X chunk with the animation bit clear"
 Test-Assert ((Test-WebPAnimated -WebPPath $noVp8xWebpAD2) -eq $false) "Test-WebPAnimated reports false (not a throw) for a file with no VP8X chunk at all"
 
-$resultAD2 = Convert-ImageBatch -ImageFiles @((Get-Item -LiteralPath $animatedWebpAD2), (Get-Item -LiteralPath $staticWebpAD2)) `
-    -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -MaxCjxlProcs 2 -DoFullLogging $false -CancelToken ([System.Threading.CancellationToken]::None)
-Test-Assert ($resultAD2.SkippedCount -eq 1 -and $resultAD2.SkippedPaths -contains $animatedWebpAD2) "Convert-ImageBatch actually skips a real animated WebP (not converted, not counted as failed)"
-Test-Assert ($resultAD2.ConvertedCount -eq 1) "the real static WebP in the same batch still converts normally"
-Write-Host ""
-
-# ==============================================================================
-#  Scenario AE (2026-08-31 fix, caught by verifying this same day's
-#  /code-review 4th pass): the collision-guard pre-pass (fix 1) never
-#  checked $CancelToken, so cancelling mid-run still ran a real `magick
-#  identify` spawn for every remaining .avif before the (by-then pointless)
-#  dispatch loop declined to run - potentially thousands of spawns after
-#  the user asked the run to stop. A token already cancelled BEFORE the
-#  call is the simplest deterministic repro of "cancelled mid-batch."
-# ==============================================================================
-Write-Host "=== Scenario AE: an already-cancelled token short-circuits the pre-pass - no classification work, everything reported pending ===" -ForegroundColor Cyan
-$chAE = New-Dir "scenario-ae\Series\Chapter 1"
-$avifAE = New-FakeAvif -DirPath $chAE -Name "cover.avif" -Content "FRAMES:1"
-$identifyLogAE = Join-Path $scratchDir "scenario-ae-identify.log"
-[System.IO.File]::WriteAllText($identifyLogAE, "")
-$env:HARNESS_IDENTIFY_LOG = $identifyLogAE
-$ctsAE = [System.Threading.CancellationTokenSource]::new()
-$ctsAE.Cancel()
-
-try {
-    $resultAE = Convert-ImageBatch -ImageFiles @(Get-Item -LiteralPath $avifAE) -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -MaxCjxlProcs 2 -DoFullLogging $false `
-        -CancelToken $ctsAE.Token
-} finally {
-    $env:HARNESS_IDENTIFY_LOG = $null
-    $ctsAE.Dispose()
-}
-
-$identifyCallsAE = @(Get-Content -LiteralPath $identifyLogAE | Where-Object { $_ -like "*cover.avif" })
-Test-Assert ($identifyCallsAE.Count -eq 0) ("the cancelled token stopped the pre-pass BEFORE it ever spawned magick identify for classification (got " + $identifyCallsAE.Count + " identify call(s))")
-Test-Assert ($resultAE.PendingPaths.Count -eq 1 -and $resultAE.PendingPaths[0] -eq $avifAE) ("the AVIF was reported pending, not classified or converted (got PendingPaths=[" + ($resultAE.PendingPaths -join ", ") + "])")
-Test-Assert ($resultAE.ConvertedCount -eq 0 -and $resultAE.FailedCount -eq 0 -and $resultAE.SkippedCount -eq 0 -and $resultAE.InspectFailedCount -eq 0) "no classification or conversion work happened at all"
-Test-Assert (Test-Path -LiteralPath $avifAE) "the source was left untouched"
+$totalsAD2 = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-ad2") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -MaxCjxlProcs 2 -FullLogging $false
+Test-Assert ($totalsAD2.ConvertedSkipped -eq 1) ("the pipeline actually skips a real animated WebP, not converted or counted as failed (got ConvertedSkipped=" + $totalsAD2.ConvertedSkipped + ")")
+Test-Assert (Test-Path -LiteralPath $animatedWebpAD2) "the real animated WebP source was left untouched, not deleted"
+Test-Assert ($totalsAD2.ConvertedSuccess -eq 1) "the real static WebP in the same chapter still converts normally"
 Write-Host ""
 
 # ==============================================================================
@@ -1693,118 +1644,53 @@ Write-Host ""
 #  .jxl output as if it belonged to a genuinely still-running, force-killed
 #  job - a real data-loss bug.
 # ==============================================================================
-Write-Host "=== Scenario AF: a same-pass throw does not delete an EARLIER job's already-converted output ===" -ForegroundColor Cyan
-$chAF = New-Dir "scenario-af\Series\Chapter 1"
-$fileAF1 = Get-Item -LiteralPath (New-FakeImage -DirPath $chAF -Name "jobA_af.jpg")
-$expectedJxlAF = Join-Path $chAF "jobA_af.jxl"
-$fileAF2 = Get-Item -LiteralPath (New-FakeImage -DirPath $chAF -Name "jobB_af.jpg" -SleepMs 0)
-[System.IO.File]::WriteAllText($fileAF2.FullName, "STDOUT_MARKER")
-
-$realWriteLogFnAF = ${function:Write-Log}
-function Write-Log {
-    param([string]$Message, [ValidateSet("Info", "Warn", "Error", "Summary")][string]$Level = "Info")
-    if ($Message -like "*cjxl stdout for*jobB_af.jpg*") { throw "simulated Write-Log failure on jobB's own UNGUARDED stdout-log call" }
-    & $script:realWriteLogFnAF -Message $Message -Level $Level
-}
-$script:realWriteLogFnAF = $realWriteLogFnAF
-
-$threwAF = $false
-try {
-    $null = Convert-ImageBatch -ImageFiles @($fileAF1, $fileAF2) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 5 -DoFullLogging $true `
-        -CancelToken ([System.Threading.CancellationToken]::None)
-} catch {
-    $threwAF = $true
-} finally {
-    ${function:Write-Log} = $realWriteLogFnAF
-}
-
-Test-Assert $threwAF "the injected Write-Log failure propagated out of Convert-ImageBatch"
-Test-Assert (Test-Path -LiteralPath $expectedJxlAF) "jobA's already-converted .jxl survived - the outer catch's force-cleanup must not touch a job that already completed successfully earlier in the same poll pass (a real data-loss bug found and fixed by a third verification pass: the SAME stale-$running condition that causes the double-release also let the outer catch delete a completed job's real output)"
-Write-Host ""
-
-# ==============================================================================
 #  Scenario AG (2026-08-31 fix, caught by verifying this same day's
-#  /code-review 4th pass): the outer dispatch-loop catch's own force-kill
-#  cleanup (fix 3, Scenario AB above) claimed to mirror the force-kill
-#  block below but dropped ONE step - deleting a partial/corrupt .jxl a
-#  killed cjxl process may have already written. Left behind, that's a
-#  non-zero-byte .jxl NEWER than its source - the NEXT run's
-#  Get-LooseImageCandidates classifies the source as stale and deletes it,
-#  keeping only the garbage output (same species Scenario B2 already
-#  covers for the ORDINARY failure path).
+#  /code-review 4th pass): the dispatch loop's own force-kill cleanup
+#  dropped ONE step - deleting a partial/corrupt .jxl a killed cjxl
+#  process may have already written. Left behind, that's a non-zero-byte
+#  .jxl NEWER than its source - the NEXT run's Get-LooseImageCandidates
+#  classifies the source as stale and deletes it, keeping only the
+#  garbage output (same species Scenario B2 already covers for the
+#  ORDINARY failure path).
+#
+#  2026-09-14 (dead-code-removal, Todo.md's matching entry): the original
+#  version of this scenario proved the fix against Convert-ImageBatch's
+#  own now-deleted outer catch, using a synthetic Write-Log throw to
+#  trigger it. That catch no longer exists in this module - the
+#  equivalent generic force-kill cleanup now lives in ChapterDispatch.ps1's
+#  Invoke-ChapterDispatch (its own drain-loop force-kill block, proven
+#  generically by ChapterDispatch.Harness.ps1's Scenarios 12/13). What's
+#  still THIS pipeline's own responsibility, and wasn't otherwise proven
+#  through the real pipeline, is that its own -JobAbortCleanup closure
+#  (the thing that block calls per job) actually deletes a force-killed
+#  job's partial .jxl - rewritten here as a real end-to-end abort/
+#  force-kill instead of a synthetic throw, using the same
+#  Test-AbortSignal call-count trigger as Scenario H above.
 # ==============================================================================
-Write-Host "=== Scenario AG: the outer catch deletes a partial .jxl left by a force-killed job, not just the temp PNG ===" -ForegroundColor Cyan
+Write-Host "=== Scenario AG: a force-killed job's partial .jxl is cleaned up by the pipeline's own JobAbortCleanup ===" -ForegroundColor Cyan
+Reset-AbortState
 $chAG = New-Dir "scenario-ag\Series\Chapter 1"
-$fileAG1 = Get-Item -LiteralPath (New-FakeImage -DirPath $chAG -Name "stillrunning_ag.jpg" -SleepMs 0)
-[System.IO.File]::WriteAllText($fileAG1.FullName, "PARTIAL_THEN_SLEEP:5000")
-$fileAG2 = Get-Item -LiteralPath (New-FakeImage -DirPath $chAG -Name "throws_ag.jpg" -SleepMs 0)
-[System.IO.File]::WriteAllText($fileAG2.FullName, "STDOUT_MARKER")
+$fileAG = Get-Item -LiteralPath (New-FakeImage -DirPath $chAG -Name "stillrunning_ag.jpg")
+[System.IO.File]::WriteAllText($fileAG.FullName, "PARTIAL_THEN_SLEEP:5000")
 $expectedJxlAG = Join-Path $chAG "stillrunning_ag.jxl"
 
-$realWriteLogFnAG = ${function:Write-Log}
-function Write-Log {
-    param([string]$Message, [ValidateSet("Info", "Warn", "Error", "Summary")][string]$Level = "Info")
-    if ($Message -like "*cjxl stdout for*throws_ag.jpg*") { throw "simulated Write-Log failure on the second job's UNGUARDED stdout-log call" }
-    & $script:realWriteLogFnAG -Message $Message -Level $Level
+function Test-AbortSignal {
+    $script:testAbortSignalCallCount++
+    if ($script:testAbortSignalCallCount -eq $script:testAbortSignalTriggerAt) {
+        [ConsoleCtrl]::AbortRequested = $true
+    }
+    & $originalTestAbortSignal
 }
-$script:realWriteLogFnAG = $realWriteLogFnAG
+$script:testAbortSignalTriggerAt = 4
 
-$threwAG = $false
-try {
-    $null = Convert-ImageBatch -ImageFiles @($fileAG1, $fileAG2) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 5 -DoFullLogging $true `
-        -CancelToken ([System.Threading.CancellationToken]::None)
-} catch {
-    $threwAG = $true
-} finally {
-    ${function:Write-Log} = $realWriteLogFnAG
-}
+$totalsAG = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-ag") -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false -AbortTimeoutSeconds 1
 
-Test-Assert $threwAG "the injected failure propagated out of Convert-ImageBatch"
-Test-Assert (-not (Test-Path -LiteralPath $expectedJxlAG)) "the partial .jxl left by the force-killed still-running job was deleted, not left as a future stale-source trap"
-Write-Host ""
+${function:Test-AbortSignal} = $originalTestAbortSignal
+Reset-AbortState
 
-# ==============================================================================
-#  Scenario AH (2026-08-31 addition, project owner approved as an easy
-#  fix mirroring the main dispatch loop's own try/catch): the straggler-
-#  drain block (only reached after a real cancel, when $running.Count -gt 0)
-#  had no equivalent guard. The force-kill sub-block's own "Force-stopping
-#  N job(s)..." Write-Log call is the realistic trigger - unlike every
-#  Write-Log call inside Complete-ImageConversionJob (all guarded by that
-#  function's own try/catch, confirmed by trying the success-path "Conversion
-#  OK (abort drain)" line first: it's swallowed and miscounted as a normal
-#  failure, not a genuine propagating throw), this one sits directly in the
-#  drain block's own body, unguarded. A job that never finishes within
-#  -AbortTimeoutSeconds (so it's still genuinely running, SlotReleased
-#  never set) must still be force-killed/disposed/released by the new catch.
-# ==============================================================================
-Write-Host "=== Scenario AH: an unexpected throw during the straggler-drain's force-kill step still cleans up correctly ===" -ForegroundColor Cyan
-$chAH = New-Dir "scenario-ah\Series\Chapter 1"
-$fileAH = Get-Item -LiteralPath (New-FakeImage -DirPath $chAH -Name "neverfinishes_ah.jpg" -SleepMs 30000)
-$expectedJxlAH = Join-Path $chAH "neverfinishes_ah.jxl"
-$ctsAH = [System.Threading.CancellationTokenSource]::new()
-$pollAH = { param($inFlight) if ($inFlight.Count -gt 0) { $ctsAH.Cancel() } }
-
-$realWriteLogFnAH = ${function:Write-Log}
-function Write-Log {
-    param([string]$Message, [ValidateSet("Info", "Warn", "Error", "Summary")][string]$Level = "Info")
-    if ($Message -like "*Force-stopping*") { throw "simulated Write-Log failure during the straggler-drain's own force-kill logging" }
-    & $script:realWriteLogFnAH -Message $Message -Level $Level
-}
-$script:realWriteLogFnAH = $realWriteLogFnAH
-
-$threwAH = $false
-try {
-    $null = Convert-ImageBatch -ImageFiles @($fileAH) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 5 -DoFullLogging $false `
-        -CancelToken $ctsAH.Token -AbortPollCallback $pollAH -AbortTimeoutSeconds 1
-} catch {
-    $threwAH = $true
-} finally {
-    ${function:Write-Log} = $realWriteLogFnAH
-    $ctsAH.Dispose()
-}
-
-Test-Assert $threwAH "the injected failure propagated out of Convert-ImageBatch during the straggler-drain, not silently swallowed"
-Test-Assert (-not (Test-Path -LiteralPath $expectedJxlAH)) "no .jxl was ever created for a job that was force-killed mid-sleep (sanity check - fake cjxl only writes output AFTER its SLEEP_MS completes)"
+Test-Assert ($totalsAG.Aborted) "sanity check: the run was actually aborted"
+Test-Assert ($totalsAG.ForceKilledCount -eq 1) ("sanity check: the still-running job was actually force-killed, not drained gracefully (got ForceKilledCount=" + $totalsAG.ForceKilledCount + ")")
+Test-Assert (-not (Test-Path -LiteralPath $expectedJxlAG)) "the partial .jxl left by the force-killed job was deleted, not left as a future stale-source trap"
 Write-Host ""
 
 # ==============================================================================
@@ -1819,19 +1705,24 @@ Write-Host ""
 #  Reads back the fake cjxl.exe's own real argument string (via the new
 #  ARGS_MARKER trigger) to prove --quality=90 was actually received, not
 #  just that some default value exists somewhere unverified.
+#
+#  2026-09-14 (dead-code-removal, Todo.md's matching entry): ported from a
+#  direct Convert-ImageBatch call to the live Invoke-LooseImageConversionPipeline
+#  path - jobStarter (the live twin) has the identical arg-construction
+#  branches, but nothing previously proved the omitted-key default through
+#  the real pipeline.
 # ==============================================================================
-Write-Host "=== Scenario AI: Convert-ImageBatch's -DoJpegQuality defaults to 90 when omitted ===" -ForegroundColor Cyan
+Write-Host "=== Scenario AI: -JpegQuality defaults to 90 when omitted ===" -ForegroundColor Cyan
 $chAI = New-Dir "scenario-ai\Series\Chapter 1"
 $fileAI = Join-Path $chAI "page1.jpg"
 [System.IO.File]::WriteAllText($fileAI, "ARGS_MARKER")
 
-$resultAI = Convert-ImageBatch -ImageFiles @(Get-Item -LiteralPath $fileAI) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -DoFullLogging $false `
-    -CancelToken ([System.Threading.CancellationToken]::None)
+$totalsAI = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-ai") -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
 
 $expectedJxlAI = Join-Path $chAI "page1.jxl"
-Test-Assert ($resultAI.ConvertedCount -eq 1 -and $resultAI.FailedCount -eq 0) "sanity check: the conversion itself succeeded"
+Test-Assert ($totalsAI.ConvertedSuccess -eq 1 -and $totalsAI.ConvertedFail -eq 0) "sanity check: the conversion itself succeeded"
 $argsTextAI = Get-Content -LiteralPath $expectedJxlAI -Raw
-Test-Assert ($argsTextAI -match "--quality=90(\s|$)") ("omitting -DoJpegQuality produced --quality=90, not --quality=0 (got: '" + $argsTextAI.Trim() + "')")
+Test-Assert ($argsTextAI -match "--quality=90(\s|$)") ("omitting -JpegQuality produced --quality=90, not --quality=0 (got: '" + $argsTextAI.Trim() + "')")
 Write-Host ""
 
 # ==============================================================================
@@ -1843,71 +1734,54 @@ Write-Host ""
 #  pool independently of -MaxCjxlProcs - confirmed live (4 configured
 #  processes saturated far more than 4 real threads). Same ARGS_MARKER
 #  technique as Scenario AI, one file per branch.
+#
+#  2026-09-14 (dead-code-removal, Todo.md's matching entry): ported from
+#  three direct Convert-ImageBatch calls to three live
+#  Invoke-LooseImageConversionPipeline runs (one per branch, since
+#  -JpegLossless/-JpegQuality are pipeline-level, not per-file) - jobStarter
+#  (the live twin) has the identical three arg-construction branches, but
+#  nothing previously proved --num_threads=1 through the real pipeline.
 # ==============================================================================
 Write-Host "=== Scenario AJ: every cjxl invocation pins --num_threads=1 ===" -ForegroundColor Cyan
-$chAJ = New-Dir "scenario-aj\Series\Chapter 1"
+$chAJLossless = New-Dir "scenario-aj-lossless\Series\Chapter 1"
+$chAJLossy    = New-Dir "scenario-aj-lossy\Series\Chapter 1"
+$chAJPng      = New-Dir "scenario-aj-png\Series\Chapter 1"
 
-$fileAJLosslessJpeg = Join-Path $chAJ "lossless.jpg"
+$fileAJLosslessJpeg = Join-Path $chAJLossless "lossless.jpg"
 [System.IO.File]::WriteAllText($fileAJLosslessJpeg, "ARGS_MARKER")
-$fileAJLossyJpeg = Join-Path $chAJ "lossy.jpg"
+$fileAJLossyJpeg = Join-Path $chAJLossy "lossy.jpg"
 [System.IO.File]::WriteAllText($fileAJLossyJpeg, "ARGS_MARKER")
-$fileAJPng = Join-Path $chAJ "plain.png"
+$fileAJPng = Join-Path $chAJPng "plain.png"
 [System.IO.File]::WriteAllText($fileAJPng, "ARGS_MARKER")
 
-$null = Convert-ImageBatch -ImageFiles @(Get-Item -LiteralPath $fileAJLosslessJpeg) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -DoFullLogging $false -DoJpegLossless $true -CancelToken ([System.Threading.CancellationToken]::None)
-$null = Convert-ImageBatch -ImageFiles @(Get-Item -LiteralPath $fileAJLossyJpeg) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -DoFullLogging $false -DoJpegLossless $false -DoJpegQuality 80 -CancelToken ([System.Threading.CancellationToken]::None)
-$null = Convert-ImageBatch -ImageFiles @(Get-Item -LiteralPath $fileAJPng) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -DoFullLogging $false -CancelToken ([System.Threading.CancellationToken]::None)
+$null = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-aj-lossless") -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false -JpegLossless $true
+$null = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-aj-lossy") -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false -JpegLossless $false -JpegQuality 80
+$null = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-aj-png") -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
 
-$argsLosslessAJ = Get-Content -LiteralPath (Join-Path $chAJ "lossless.jxl") -Raw
-$argsLossyAJ    = Get-Content -LiteralPath (Join-Path $chAJ "lossy.jxl") -Raw
-$argsPngAJ      = Get-Content -LiteralPath (Join-Path $chAJ "plain.jxl") -Raw
+$argsLosslessAJ = Get-Content -LiteralPath (Join-Path $chAJLossless "lossless.jxl") -Raw
+$argsLossyAJ    = Get-Content -LiteralPath (Join-Path $chAJLossy "lossy.jxl") -Raw
+$argsPngAJ      = Get-Content -LiteralPath (Join-Path $chAJPng "plain.jxl") -Raw
 Test-Assert ($argsLosslessAJ -match "--num_threads=1(\s|$)") ("lossless-JPEG branch pins --num_threads=1 (got: '" + $argsLosslessAJ.Trim() + "')")
 Test-Assert ($argsLossyAJ -match "--num_threads=1(\s|$)") ("lossy-JPEG branch pins --num_threads=1 (got: '" + $argsLossyAJ.Trim() + "')")
 Test-Assert ($argsPngAJ -match "--num_threads=1(\s|$)") ("non-JPEG branch pins --num_threads=1 (got: '" + $argsPngAJ.Trim() + "')")
 Write-Host ""
 
 # ==============================================================================
-#  Scenario AK (2026-09-03 fix, real bug, live-reported and live-tested):
-#  the straggler-drain's wait-for-natural-completion loop must be skipped
-#  entirely when [ConsoleCtrl]::IsCloseEvent is true (a window-close abort),
-#  going straight to the force-kill block instead. Windows force-kills the
-#  whole process ~5s after a close event regardless, so waiting out any
-#  part of -AbortTimeoutSeconds can never fit. Same pattern as Scenario AH
-#  (a real still-sleeping fake cjxl process, cancelled via -AbortPollCallback)
-#  but with a LONG -AbortTimeoutSeconds (30s) that would normally still be
-#  waiting - timed with a Stopwatch to prove the whole call returns almost
-#  immediately instead of anywhere near that.
-# ==============================================================================
-Write-Host "=== Scenario AK: IsCloseEvent skips the straggler-drain wait entirely, force-kills immediately ===" -ForegroundColor Cyan
-$chAK = New-Dir "scenario-ak\Series\Chapter 1"
-$fileAK = Get-Item -LiteralPath (New-FakeImage -DirPath $chAK -Name "neverfinishes_ak.jpg" -SleepMs 30000)
-$ctsAK = [System.Threading.CancellationTokenSource]::new()
-$pollAK = { param($inFlight) if ($inFlight.Count -gt 0) { $ctsAK.Cancel() } }
-
-[ConsoleCtrl]::IsCloseEvent = $true
-$swAK = [System.Diagnostics.Stopwatch]::StartNew()
-try {
-    $resultAK = Convert-ImageBatch -ImageFiles @($fileAK) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 5 -DoFullLogging $false -CancelToken $ctsAK.Token -AbortPollCallback $pollAK -AbortTimeoutSeconds 30
-} finally {
-    $swAK.Stop()
-    [ConsoleCtrl]::IsCloseEvent = $false
-    $ctsAK.Dispose()
-}
-
-Test-Assert ($swAK.Elapsed.TotalSeconds -lt 5) ("returned in under 5s despite a 30s -AbortTimeoutSeconds and a 30s-sleeping job (took " + [int]$swAK.Elapsed.TotalSeconds + "s)")
-Test-Assert ($resultAK.ForceKilledCount -eq 1) ("the still-sleeping job was force-killed, not waited for (got ForceKilledCount=" + $resultAK.ForceKilledCount + ")")
-Write-Host ""
-
-# ==============================================================================
-#  Scenario AL (2026-09-04 fix, real bug): the cjxl job in Convert-ImageBatch's
-#  async dispatch loop is polled via HasExited, not read synchronously
-#  inline - both redirected streams must be drained as soon as the process
-#  starts (not only once it's found HasExited), or a cjxl that writes more
-#  than the OS pipe buffer to stderr before exiting would block on that
-#  write forever, hanging the whole batch with no error and no timeout.
+#  Scenario AL (2026-09-04 fix, real bug): the cjxl job in the dispatch
+#  loop is polled via HasExited, not read synchronously inline - both
+#  redirected streams must be drained as soon as the process starts (not
+#  only once it's found HasExited), or a cjxl that writes more than the
+#  OS pipe buffer to stderr before exiting would block on that write
+#  forever, hanging the whole batch with no error and no timeout.
 #  Run on a background runspace with a bounded wait, NOT called directly -
 #  a real regression here would hang forever, and this proves it fails
 #  the assertion instead of hanging the whole harness process.
+#
+#  2026-09-14 (dead-code-removal, Todo.md's matching entry): ported from a
+#  direct Convert-ImageBatch call (inside the runspace) to the live
+#  Invoke-LooseImageConversionPipeline path - jobStarter (the live twin)
+#  has the identical async stdout/stderr-drain pattern, but nothing
+#  previously proved it survives a stderr flood through the real pipeline.
 # ==============================================================================
 Write-Host "=== Scenario AL: a cjxl job with a stderr flood does not deadlock the dispatch loop ===" -ForegroundColor Cyan
 $chAL = New-Dir "scenario-al\Series\Chapter 1"
@@ -1919,19 +1793,24 @@ $runspaceAL.Open()
 $psAL = [PowerShell]::Create()
 $psAL.Runspace = $runspaceAL
 $null = $psAL.AddScript({
-    param($ModulesDir, $CjxlExe, $FilePath)
+    param($ModulesDir, $CjxlExe, $LibraryPath)
     . (Join-Path $ModulesDir "FileDeletion.ps1")
     . (Join-Path $ModulesDir "AbortPipeline.ps1")
+    . (Join-Path $ModulesDir "LeafDirectoryDiscovery.ps1")
+    . (Join-Path $ModulesDir "CleanConsoleRendering.ps1")
     . (Join-Path $ModulesDir "Logging.ps1")
+    . (Join-Path $ModulesDir "ChapterDispatch.ps1")
     . (Join-Path $ModulesDir "AnimatedConversionPipeline.ps1")
     . (Join-Path $ModulesDir "ImageConversionPipeline.ps1")
-    Convert-ImageBatch -ImageFiles @((Get-Item -LiteralPath $FilePath)) -CjxlExe $CjxlExe -MaxCjxlProcs 2 -DoFullLogging $false -CancelToken ([System.Threading.CancellationToken]::None)
-}).AddArgument($modulesDir).AddArgument($fakeCjxlExe).AddArgument($fileAL)
+    Initialize-FileDeletion -PermanentDelete $true
+    Initialize-LogPaths -TargetPath $LibraryPath -FullLogging $false -ScriptDir $LibraryPath
+    Invoke-LooseImageConversionPipeline -Path $LibraryPath -CjxlExe $CjxlExe -MaxCjxlProcs 2 -FullLogging $false
+}).AddArgument($modulesDir).AddArgument($fakeCjxlExe).AddArgument((Join-Path $scratchDir "scenario-al"))
 
 $handleAL = $psAL.BeginInvoke()
 $completedAL = $handleAL.AsyncWaitHandle.WaitOne(15000)
 if ($completedAL) {
-    $resultAL = $psAL.EndInvoke($handleAL)[0]
+    $totalsAL = $psAL.EndInvoke($handleAL)[0]
 } else {
     $psAL.Stop()
 }
@@ -1939,9 +1818,9 @@ $psAL.Dispose()
 $runspaceAL.Close()
 $runspaceAL.Dispose()
 
-Test-Assert $completedAL "Convert-ImageBatch returned within 15s instead of hanging on the stderr flood"
+Test-Assert $completedAL "the pipeline returned within 15s instead of hanging on the stderr flood"
 if ($completedAL) {
-    Test-Assert ($resultAL.ConvertedCount -eq 1) ("the file still converted successfully despite the stderr flood (got ConvertedCount=" + $resultAL.ConvertedCount + ")")
+    Test-Assert ($totalsAL.ConvertedSuccess -eq 1) ("the file still converted successfully despite the stderr flood (got ConvertedSuccess=" + $totalsAL.ConvertedSuccess + ")")
 }
 Write-Host ""
 
