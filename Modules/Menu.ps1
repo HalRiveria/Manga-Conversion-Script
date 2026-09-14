@@ -34,8 +34,12 @@ function Show-ModeMenu {
         [hashtable]$Settings,
         [Parameter(Mandatory)]
         [string]$SettingsPath,
-        [scriptblock]$PromptFunc = { param($Message) Read-Host $Message }
+        [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
+        [scriptblock]$ReinitLogPathsHandler = $null
     )
+
+    $lastFullLogging        = [bool]$Settings.FullLogging
+    $lastDisableSummaryFile = [bool]$Settings.DisableSummaryFile
 
     while ($true) {
         foreach ($line in (Get-ModeMenuLines)) { Write-Host $line }
@@ -48,6 +52,24 @@ function Show-ModeMenu {
         }
 
         if ($choice -eq '5') {
+            # Re-init log paths BEFORE running Cover Deletion if Full
+            # Logging/Disable Summary File was just toggled via option 0
+            # in this same menu visit (2026-09-14 fix, Todo.md finding) -
+            # option 5 never returns to Invoke-MainLoop's own equivalent
+            # check, it loops right back here, so without this Cover
+            # Deletion's Write-Log calls landed in the pre-toggle
+            # Errors/Warnings files instead of the log the user just asked
+            # for. $ReinitLogPathsHandler is $null for any caller that
+            # doesn't wire one up (e.g. a harness) - skip silently then,
+            # same as never detecting a change.
+            $currentFullLogging        = [bool]$Settings.FullLogging
+            $currentDisableSummaryFile = [bool]$Settings.DisableSummaryFile
+            if ($null -ne $ReinitLogPathsHandler -and
+                ($currentFullLogging -ne $lastFullLogging -or $currentDisableSummaryFile -ne $lastDisableSummaryFile)) {
+                & $ReinitLogPathsHandler
+                $lastFullLogging        = $currentFullLogging
+                $lastDisableSummaryFile = $currentDisableSummaryFile
+            }
             Initialize-CleanConsoleOutput -Enabled ([bool]$Settings.CleanConsoleOutputEnabled)
             Initialize-FileDeletion -PermanentDelete ([bool]$Settings.PermanentDelete)
             Start-LogRun
@@ -72,10 +94,11 @@ function Get-SelectedMode {
         [hashtable]$Settings,
         [Parameter(Mandatory)]
         [string]$SettingsPath,
-        [scriptblock]$PromptFunc = { param($Message) Read-Host $Message }
+        [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
+        [scriptblock]$ReinitLogPathsHandler = $null
     )
 
-    $resolved = Show-ModeMenu -Settings $Settings -SettingsPath $SettingsPath -PromptFunc $PromptFunc
+    $resolved = Show-ModeMenu -Settings $Settings -SettingsPath $SettingsPath -PromptFunc $PromptFunc -ReinitLogPathsHandler $ReinitLogPathsHandler
     Write-Log ("Mode selected: " + $resolved.Mode)
     return $resolved
 }

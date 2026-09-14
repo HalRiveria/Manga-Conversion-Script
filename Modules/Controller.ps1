@@ -1120,12 +1120,28 @@ function Invoke-MainLoop {
     $lastFullLogging        = [bool]$Settings.FullLogging
     $lastDisableSummaryFile = [bool]$Settings.DisableSummaryFile
 
+    # Passed into Get-SelectedMode/Show-ModeMenu so Cover Deletion (menu
+    # option 5, which runs BEFORE this loop's own re-init check below ever
+    # sees a Full Logging/Disable Summary File toggle made in the SAME menu
+    # visit) can re-init log paths itself instead of logging into stale
+    # Errors/Warnings files (2026-09-14 fix, Todo.md finding). Reading
+    # $Settings live (closure, not params) means this loop's own check
+    # below will see the same already-current values and just no-op its
+    # own re-init - redundant but harmless, not worth threading state back
+    # across the Get-SelectedMode call boundary to avoid.
+    $reinitLogPathsHandler = {
+        & $InitializeLogPathsHandler -TargetPath $TargetPath -FullLogging ([bool]$Settings.FullLogging) -DisableSummaryFile ([bool]$Settings.DisableSummaryFile) -ScriptDir $ScriptDir
+        $previousLogMutexForDispose = $script:logMutex
+        & $InitializeLogMutexHandler
+        if ($null -ne $previousLogMutexForDispose) { try { $previousLogMutexForDispose.Dispose() } catch { } }
+    }.GetNewClosure()
+
     while ($true) {
         & $ResetAbortHandler
 
         $resolved = $null
         try {
-            $resolved = & $GetModeHandler -Settings $Settings -SettingsPath $SettingsPath
+            $resolved = & $GetModeHandler -Settings $Settings -SettingsPath $SettingsPath -ReinitLogPathsHandler $reinitLogPathsHandler
         } catch {
             $null = Invoke-AbortOrFatalHandler -ErrorRecord $_ -LogHandler $LogHandler
         }

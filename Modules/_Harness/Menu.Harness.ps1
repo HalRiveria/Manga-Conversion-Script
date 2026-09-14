@@ -458,6 +458,64 @@ Test-Assert ($resultQ3.Mode -eq 'ImageConversion') "the loop still resolved a mo
 Write-Host ""
 
 # ==============================================================================
+#  Scenario Q4 (2026-09-14 fix, real bug, same species as Q2/Q3 above):
+#  toggling Full Logging via Options, THEN picking Cover Deletion in the
+#  SAME menu visit, must have Show-ModeMenu's '5' branch re-init log paths
+#  BEFORE Show-CoverDeletionMenu runs, via the injected
+#  -ReinitLogPathsHandler - Invoke-MainLoop's own equivalent re-init check
+#  only runs AFTER Get-SelectedMode returns, too late for option 5's own
+#  real work done INSIDE that same call. Before the fix, Cover Deletion's
+#  Write-Log calls landed in the pre-toggle log files. Full Logging is
+#  nested under the Options schema's 'Logging' submenu (key '5', item
+#  '1'), so the navigation needs an extra level of '0' to back all the
+#  way out before reaching '5' at the main prompt.
+# ==============================================================================
+Write-Host "=== Scenario Q4: toggling Full Logging then picking Cover Deletion re-inits log paths BEFORE the submenu runs ===" -ForegroundColor Cyan
+$settingsQ4 = Get-DefaultScriptSettings
+$settingsQ4.FullLogging = $false
+$pathQ4 = New-ScratchSettingsPath "scenario-q4"
+# '0' -> Options, '5' -> Logging submenu, '1' -> toggle Full Logging on
+# (submenu redisplays), '0' -> back out of Logging submenu, '0' -> back
+# out of Options to the main prompt, '5' -> Cover Deletion (re-init should
+# fire here, BEFORE the stubbed submenu below runs), '2' -> resolve a mode.
+$promptQ4 = New-ScriptedPrompt -Responses @('0', '5', '1', '0', '0', '5', '2')
+$script:reinitCallCountQ4 = 0
+# NOT .GetNewClosure()'d - it only touches a $script:-scoped variable,
+# which resolves correctly on its own; .GetNewClosure() is the fix for a
+# DIFFERENT trap (a local variable read across a function boundary) and
+# actively breaks $script:-prefixed reads/writes inside the closure it
+# wraps (Docs/lessons-learned.md's 7th/8th entries) - confirmed live
+# while writing this scenario, the increment silently went to the wrong
+# scope and $script:reinitCallCountQ4 never moved.
+$reinitHandlerQ4 = { $script:reinitCallCountQ4++ }
+$stubCoverMenuQ4 = { param($PromptFunc) $script:reinitCallCountAtCoverQ4 = $script:reinitCallCountQ4 }
+$realShowCoverDeletionMenuQ4 = ${function:Show-CoverDeletionMenu}
+${function:Show-CoverDeletionMenu} = $stubCoverMenuQ4
+try {
+    $resultQ4 = Show-ModeMenu -Settings $settingsQ4 -SettingsPath $pathQ4 -PromptFunc $promptQ4 -ReinitLogPathsHandler $reinitHandlerQ4
+} finally {
+    ${function:Show-CoverDeletionMenu} = $realShowCoverDeletionMenuQ4
+}
+
+Test-Assert ($settingsQ4.FullLogging -eq $true) "sanity check: the Options toggle actually flipped FullLogging to true in `$Settings"
+Test-Assert ($script:reinitCallCountAtCoverQ4 -eq 1) ("the log-path re-init handler had already fired exactly once BEFORE Cover Deletion ran (got " + $script:reinitCallCountAtCoverQ4 + ")")
+Test-Assert ($resultQ4.Mode -eq 'ImageConversion') "the loop still resolved a mode normally afterward"
+
+# Second visit to Cover Deletion in the SAME call, nothing changed since -
+# must NOT re-init again (no-op when the tracked values haven't moved).
+$promptQ4b = New-ScriptedPrompt -Responses @('5', '5', '2')
+$script:reinitCallCountQ4b = 0
+$reinitHandlerQ4b = { $script:reinitCallCountQ4b++ }
+${function:Show-CoverDeletionMenu} = { param($PromptFunc) $script:reinitCallCountAtCoverQ4b = $script:reinitCallCountQ4b }
+try {
+    $null = Show-ModeMenu -Settings (Get-DefaultScriptSettings) -SettingsPath (New-ScratchSettingsPath "scenario-q4b") -PromptFunc $promptQ4b -ReinitLogPathsHandler $reinitHandlerQ4b
+} finally {
+    ${function:Show-CoverDeletionMenu} = $realShowCoverDeletionMenuQ4
+}
+Test-Assert ($script:reinitCallCountAtCoverQ4b -eq 0) "visiting Cover Deletion twice with no settings change in between does not re-init log paths either time"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario R: Show-CoverDeletionMenu - Run, Add, and Trailing-Zero (5,
 #  2026-08-31 addition) all dispatch through their injected handlers and
 #  return to the SAME submenu (not the caller) until Back is chosen
