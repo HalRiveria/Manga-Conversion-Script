@@ -123,7 +123,7 @@ try {
                     $persistedModulesPath = $rawSettings.ModulesPath
                 }
             }
-        } catch { }
+        } catch { }   # missing/corrupt/unreadable settings file is fine here - just means no persisted Modules path to try; Resolve-ModulesPath below still has -DefaultPath and, failing that, an interactive prompt
         $resolvedModules = Resolve-ModulesPath -DefaultPath $defaultModulesPath -PersistedPath $persistedModulesPath
     }
 
@@ -212,7 +212,7 @@ try {
         Write-Host "The script has stopped due to the error above." -ForegroundColor Red
         if (-not [Console]::IsInputRedirected) {
             Write-Host "Press any key to exit..." -ForegroundColor Red
-            try { $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") } catch { }
+            try { $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") } catch { }   # some hosts (ISE, certain terminals) don't support ReadKey - fine to just fall through to exit below
         }
         exit 1
     }

@@ -263,6 +263,9 @@ function Complete-MergedFullPipelineChapter {
         } catch {
             Write-Log ("FAILED to zip '" + $ChapterDir + "': " + $_) -Level Error
             $zipResult.Status = 'Fail'
+            # Swallowed deliberately - best-effort cleanup of a zip that
+            # failed to build; a failure to delete it shouldn't mask the
+            # real zip error already logged above.
             try {
                 if (Test-Path -LiteralPath $ZipOut) { [System.IO.File]::Delete($ZipOut) }
             } catch { }
@@ -522,7 +525,7 @@ $script:fullPipelineEngineWorker = {
                         $preConvWaitHandle.Dispose()
                     }
                     if (-not $preConvExited) {
-                        try { $magickProc.Kill() } catch { }
+                        try { $magickProc.Kill() } catch { }   # already-exited/access-denied races are fine to ignore - Dispose() right below runs regardless
                         [System.Threading.Thread]::Sleep(200)
                         $magickProc.Dispose()
                         $magickProcLocal = $null
@@ -537,7 +540,7 @@ $script:fullPipelineEngineWorker = {
                         Write-Log ("FAILED " + $formatLabel + "->PNG pre-conversion for '" + $job.SrcPath + "': magick exited " + $magickExitCode) -Level Error
                         $cr.FailedCount++
                         $failureAlreadyAccounted = $true
-                        if ([System.IO.File]::Exists($tempPng)) { try { [System.IO.File]::Delete($tempPng) } catch { } }
+                        if ([System.IO.File]::Exists($tempPng)) { try { [System.IO.File]::Delete($tempPng) } catch { } }   # best-effort cleanup of the failed temp PNG - a delete failure shouldn't mask the real pre-conversion error thrown right below
                         throw ($formatLabel + "->PNG pre-conversion failed")
                     }
                     $job.TempPng = $tempPng
@@ -567,6 +570,9 @@ $script:fullPipelineEngineWorker = {
                     Write-Log ("FAILED to start conversion process for '" + $job.SrcPath + "': " + $_) -Level Error
                     $cr.FailedCount++
                 }
+                # Best-effort cleanup on the way out - a process kill/dispose or
+                # temp-file delete failing here shouldn't mask the real error
+                # already logged above and being rethrown right below.
                 if ($magickProcLocal) { try { if (-not $magickProcLocal.HasExited) { $magickProcLocal.Kill() }; $magickProcLocal.Dispose() } catch { } }
                 if ($job.TempPng -and [System.IO.File]::Exists($job.TempPng)) { try { [System.IO.File]::Delete($job.TempPng) } catch { } }
                 elseif ($tempPngLocal -and [System.IO.File]::Exists($tempPngLocal)) { try { [System.IO.File]::Delete($tempPngLocal) } catch { } }
@@ -1145,6 +1151,8 @@ function Invoke-MainLoop {
         & $InitializeLogPathsHandler -TargetPath $TargetPath -FullLogging ([bool]$Settings.FullLogging) -DisableSummaryFile ([bool]$Settings.DisableSummaryFile) -ScriptDir $ScriptDir
         $previousLogMutexForDispose = $script:logMutex
         & $InitializeLogMutexHandler
+        # A failed Dispose() on the OLD mutex is harmless - a fresh one was
+        # just created above, and .NET will finalize the old handle eventually.
         if ($null -ne $previousLogMutexForDispose) { try { $previousLogMutexForDispose.Dispose() } catch { } }
     }.GetNewClosure()
 
@@ -1171,6 +1179,7 @@ function Invoke-MainLoop {
             & $InitializeLogPathsHandler -TargetPath $TargetPath -FullLogging $currentFullLogging -DisableSummaryFile $currentDisableSummaryFile -ScriptDir $ScriptDir
             $previousLogMutexForDispose = $script:logMutex
             & $InitializeLogMutexHandler
+            # A failed Dispose() on the OLD mutex is harmless - see $reinitLogPathsHandler above for the same pattern/reasoning.
             if ($null -ne $previousLogMutexForDispose) { try { $previousLogMutexForDispose.Dispose() } catch { } }
             $LogFile        = $script:logFile
             $LogErrorFile   = $script:logErrorFile

@@ -44,7 +44,7 @@ function Invoke-ZipParallelProcessing {
         $localIss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
         foreach ($sharedFn in $SharedFunctionNames) {
             try {
-                $fnDef = (Get-Item ("Function:\" + $sharedFn)).Definition
+                $fnDef = (Get-Item ("Function:\" + $sharedFn) -ErrorAction Stop).Definition
             } catch {
                 throw ("Invoke-ZipParallelProcessing: -SharedFunctionNames entry '" + $sharedFn + "' does not resolve to a defined function - check for a typo, or that the module defining it was dot-sourced before this call. Original error: " + $_)
             }

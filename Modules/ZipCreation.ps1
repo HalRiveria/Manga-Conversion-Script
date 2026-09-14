@@ -35,6 +35,10 @@ function Compress-FolderToZip {
         return $zipSize
     } catch {
         if (Test-Path -LiteralPath $ZipOut) {
+            # Swallowed deliberately - this is best-effort cleanup of a
+            # zip that failed its own validation above; a failure to
+            # delete it shouldn't mask the real error being rethrown
+            # right below.
             try { $null = Remove-ItemPermanently -ItemPath $ZipOut } catch { }
         }
         throw
