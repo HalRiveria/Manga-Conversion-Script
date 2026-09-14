@@ -107,6 +107,13 @@ function Complete-AnimatedConversionJob {
     }
 
     $convOk = $false
+    # DOCUMENTED DUPLICATE (2026-09-14 fix, Todo.md finding): this
+    # explicit-$null initialization was missing here while
+    # Complete-AnimatedDispatchJob's own copy had it - harmless in
+    # practice (an undeclared PowerShell variable just reads as $null),
+    # but a real drift in a pair of functions under an explicit
+    # keep-in-sync contract. Keep both in sync if this changes again.
+    $webpReplaceBackup = $null
     try {
         if ($code -ne 0) { throw ("magick exited with code " + $code + ". Stderr: " + $stderr) }
         $webpItem = [System.IO.FileInfo]::new($Job.MagickOutputPath)
@@ -467,6 +474,9 @@ function Complete-AnimatedDispatchJob {
     }
 
     $convOk = $false
+    # DOCUMENTED DUPLICATE: Complete-AnimatedConversionJob's own copy of
+    # this function has the identical $webpReplaceBackup init - keep both
+    # in sync.
     $webpReplaceBackup = $null
     try {
         if ($code -ne 0) { throw ("magick exited with code " + $code + ". Stderr: " + $stderr) }
