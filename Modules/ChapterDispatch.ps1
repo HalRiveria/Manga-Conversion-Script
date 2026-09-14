@@ -117,9 +117,11 @@ function Invoke-ChapterDispatch {
             }
         }
 
-        # Poll for finished jobs. Same poll/finalize/completion-callback
-        # sequence as the straggler drain below (lines ~389-410 and
-        # ~422-443) - keep all three in sync if this one changes.
+        # ---- BLOCK: main dispatch loop's poll pass ----
+        # Same poll/finalize/completion-callback sequence as the
+        # graceful-wait loop and the mandatory final pass below (both in
+        # the straggler-drain section further down this function) - keep
+        # all three in sync if this one changes.
         $stillRunning = [System.Collections.Generic.List[hashtable]]::new()
         foreach ($job in $running) {
             if (& $JobPollCompleted $job) {
@@ -165,10 +167,11 @@ function Invoke-ChapterDispatch {
         try {
             $abortDeadline = [System.Diagnostics.Stopwatch]::StartNew()
             while ($running.Count -gt 0 -and -not [ConsoleCtrl]::IsCloseEvent -and $abortDeadline.Elapsed.TotalSeconds -lt $AbortTimeoutSeconds) {
+                # ---- BLOCK: graceful-wait loop ----
                 # Same poll/finalize/completion-callback sequence as the
-                # main dispatch loop above (lines ~334-360) and the
-                # mandatory final pass below (lines ~422-443) - keep all
-                # three in sync if this one changes.
+                # main dispatch loop's poll pass above and the mandatory
+                # final pass just below - keep all three in sync if this
+                # one changes.
                 $stillWaiting = [System.Collections.Generic.List[hashtable]]::new()
                 foreach ($job in $running) {
                     if (& $JobPollCompleted $job) {
@@ -197,13 +200,13 @@ function Invoke-ChapterDispatch {
                 if ($running.Count -gt 0) { [System.Threading.Thread]::Sleep(250) }
             }
 
-            # Mandatory final completion-check pass - [ConsoleCtrl]::IsCloseEvent
-            # can exit the while loop above on its very first condition
-            # check, before even one poll of $running has happened. Same
-            # poll/finalize/completion-callback sequence as the main
-            # dispatch loop (lines ~334-360) and the graceful-wait loop
-            # just above (lines ~389-410) - keep all three in sync if this
-            # one changes.
+            # ---- BLOCK: mandatory final completion-check pass ----
+            # [ConsoleCtrl]::IsCloseEvent can exit the while loop above on
+            # its very first condition check, before even one poll of
+            # $running has happened. Same poll/finalize/completion-callback
+            # sequence as the main dispatch loop's poll pass and the
+            # graceful-wait loop just above - keep all three in sync if
+            # this one changes.
             if ($running.Count -gt 0) {
                 $stillWaiting = [System.Collections.Generic.List[hashtable]]::new()
                 foreach ($job in $running) {
