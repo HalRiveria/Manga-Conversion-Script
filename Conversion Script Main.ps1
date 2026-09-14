@@ -75,6 +75,17 @@ function Resolve-ModulesPath {
     }
 
     while ($true) {
+        # A non-interactive launch (scheduled task, CI, piped/redirected
+        # stdin) can't answer this prompt - Read-Host against redirected/
+        # EOF stdin returns "" rather than throwing, so without this guard
+        # a bad -or-missing Modules\ path spins here forever printing "No
+        # path entered." (2026-09-14 fix, Todo.md finding). Same
+        # [Console]::IsInputRedirected check the exit-keypress prompt
+        # further down this file already uses.
+        if ([Console]::IsInputRedirected) {
+            throw "Could not find the Modules folder, and this session's input is redirected/non-interactive - can't prompt for a path. Pass -ModulesPathOverride explicitly instead."
+        }
+
         $entered = (& $PromptFunc "Could not find the Modules folder. Enter its full path (drag & drop the folder in, or paste the path)")
         if ($null -ne $entered) { $entered = $entered.Trim().Trim('"') }
         if ([string]::IsNullOrWhiteSpace($entered)) {
