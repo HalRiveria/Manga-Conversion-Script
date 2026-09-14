@@ -422,11 +422,10 @@ $script:fullPipelineEngineWorker = {
                     }
                 }
                 # DOCUMENTED DUPLICATE: this same format-label switch is
-                # copied at job-build time in Convert-ImageBatch's own
-                # pre-pass and Invoke-LooseImageConversionPipeline's own
-                # JobBuilder (both ImageConversionPipeline.ps1) - keep all
-                # three in sync if the set of magick-detour formats ever
-                # changes.
+                # also copied at job-build time in
+                # Invoke-LooseImageConversionPipeline's own JobBuilder
+                # (ImageConversionPipeline.ps1) - keep both in sync if the
+                # set of magick-detour formats ever changes.
                 $formatLabel = switch -Regex ($srcPath) {
                     '\.avif$' { "AVIF"; break }
                     '\.webp$' { "WebP"; break }

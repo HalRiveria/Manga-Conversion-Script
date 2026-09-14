@@ -40,12 +40,12 @@ decisions made, bugs found and fixed, forward references - lives in
 | `Modules\ZipParallelProcessing.ps1` | `Invoke-ZipParallelProcessing` - the shared runspace-pool dispatcher used by `ZipPipeline.ps1` and `Controller.ps1`. |
 | `Modules\CleanConsoleRendering.ps1` | The Clean Console Output renderer - live per-series/chapter progress display replacing per-file console spam (log files unaffected). |
 | `Modules\ZipPipeline.ps1` | `Invoke-ZipOnlyPipeline` (mode "Zip Folders") and `Invoke-LooseFolderZip` (mode "Image Conversion + Zip"'s zip step) - zip-domain orchestration. |
-| `Modules\ImageConversionPipeline.ps1` | `Convert-ImageBatch` (shared batch conversion engine) and `Invoke-LooseImageConversionPipeline` (mode "Image Conversion" end to end, Clean Console Output-integrated). |
+| `Modules\ImageConversionPipeline.ps1` | `Invoke-LooseImageConversionPipeline` (mode "Image Conversion" end to end, Clean Console Output-integrated). |
 | `Modules\Config.ps1` | Settings schema + `Import-/Export-ScriptSettings` at `%LOCALAPPDATA%\ConversionScript\settings.json`, with per-key validation and corrupt-file recovery. |
 | `Modules\Menu.ps1` | `Get-SelectedMode`/`Show-ModeMenu` (mode-selection prompt, including the Cover Deletion submenu) and `Show-OptionsMenuLevel` (data-driven options-menu renderer). |
 | `Modules\Summary.ps1` | The clean-run summary report - `New-StatsTracker`, `Format-ElapsedTime`, `Get-SummaryLines`/`Write-SummaryReport`. |
 | `Modules\ChapterDispatch.ps1` | `Invoke-ChapterDispatch` - the generalized process-dispatch/abort/drain primitive all three real conversion entry points (modes 1, 2, 3) now run on, letting idle concurrency pick up the next chapter's work instead of blocking. |
-| `Modules\AnimatedConversionPipeline.ps1` | `Convert-AnimatedBatch` (AVIF→WebP batch conversion engine) plus `Invoke-LooseAnimatedConversionPipeline` (mode "Animated Conversion" end to end). |
+| `Modules\AnimatedConversionPipeline.ps1` | `Invoke-LooseAnimatedConversionPipeline` (AVIF→WebP conversion, mode "Animated Conversion" end to end). |
 | `Modules\UnwantedImage.ps1` | Detects/deletes known unwanted images by size+dimensions+hash match, a trailing-zero-filename audit, and profile persistence (`Add-UnwantedImageProfileFromFile`). |
 | `Modules\Controller.ps1` | Full Pipeline's two-engine dispatch (image + animated conversion each running their own chapter walk concurrently, sharing one process budget, zips only when both succeed) plus the real top-level dispatcher (`Invoke-Mode`/`Invoke-MainLoop`). |
 | `Modules\_Harness\*.Harness.ps1` | Standalone test harness per module - dot-sources the real module from `..\`. |

@@ -26,7 +26,7 @@
     match the -Param names of the real Initialize-* functions that
     consume them (Initialize-FileDeletion -PermanentDelete,
     Initialize-LogPaths -FullLogging/-DisableSummaryFile,
-    Initialize-CleanConsoleOutput -Enabled, Convert-ImageBatch
+    Initialize-CleanConsoleOutput -Enabled, Invoke-LooseImageConversionPipeline
     -MaxCjxlProcs/-JpegLossless/-JpegQuality) so a future caller can
     splat the loaded hashtable straight in without a translation layer.
     The five Animated* keys (AnimatedThreads/AnimatedQuality/
