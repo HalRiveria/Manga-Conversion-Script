@@ -579,12 +579,19 @@ $loadedM2b = Import-UnwantedImageProfiles -ProfilesPath $corruptPathM
 Test-Assert (@($loadedM2b).Count -eq 0) "the repaired file loads cleanly as an empty array on the next call"
 Test-Assert ((@(Get-ChildItem -LiteralPath (Split-Path $corruptPathM -Parent) -Filter "*.corrupt-*.bak").Count) -eq $bakCountBeforeM) "no NEW backup was dropped on the next call - the file is genuinely repaired, not still corrupt"
 
-# 2026-09-02 review fix: valid JSON (so the parse step above never
-# catches it), but a non-numeric value in one of the [int]/[int64]-cast
-# fields - the per-field cast used to run outside the try/catch entirely.
-# Real trigger: a user hand-editing the plain-JSON profiles file and
-# fat-fingering a dimension. Same recovery contract as a parse failure -
-# Warn + .bak + empty array, not a throw.
+# 2026-09-02 review fix, REVISED 2026-09-14: valid JSON (so the parse step
+# above never catches it), but a non-numeric value in one of the
+# [int]/[int64]-cast fields - the per-field cast used to run outside the
+# try/catch entirely. Real trigger: a user hand-editing the plain-JSON
+# profiles file and fat-fingering a dimension.
+#
+# 2026-09-14 fix: this used to share the parse failure's recovery contract
+# (Warn + .bak + empty array) - treating one bad entry exactly like the
+# whole file being corrupt JSON, which silently discarded every OTHER
+# profile too when there was more than one. Now a bad entry is skipped
+# and warned about individually (matching Config.ps1's Import-ScriptSettings
+# per-key fallback) - the file itself is untouched, since it's not
+# actually corrupt.
 $badFieldPathM = Join-Path $scratchDir "profiles-m-badfield\unwanted-image-profiles.json"
 New-Item -ItemType Directory -Path (Split-Path $badFieldPathM -Parent) -Force | Out-Null
 '[{"Label":"Test A","Width":"3OOO","Height":20,"SizeBytes":100,"SizeTolerance":5,"Hash":"AAA"}]' | Set-Content -LiteralPath $badFieldPathM -Encoding UTF8
@@ -592,9 +599,24 @@ $script:logCalls.Clear()
 $threwM2 = $false
 $loadedM3 = $null
 try { $loadedM3 = Import-UnwantedImageProfiles -ProfilesPath $badFieldPathM } catch { $threwM2 = $true }
-Test-Assert (-not $threwM2 -and @($loadedM3).Count -eq 0) "a valid-JSON profiles file with a bad field value returns an empty array, does not throw"
+Test-Assert (-not $threwM2 -and @($loadedM3).Count -eq 0) "a valid-JSON profiles file with a bad field value returns an empty array (the only entry was invalid), does not throw"
 Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*" }).Count -ge 1) "a Warn was logged for the bad field value"
-Test-Assert (@(Get-ChildItem -LiteralPath (Split-Path $badFieldPathM -Parent) -Filter "*.corrupt-*.bak").Count -eq 1) "the bad-field file was backed up too, same as a parse failure"
+Test-Assert (@(Get-ChildItem -LiteralPath (Split-Path $badFieldPathM -Parent) -Filter "*.corrupt-*.bak").Count -eq 0) "the file was NOT backed up/repaired - it's not corrupt, just one bad entry"
+Test-Assert ((Get-Content -LiteralPath $badFieldPathM -Raw) -like "*3OOO*") "the file itself was left untouched, not overwritten with an empty array"
+
+# 2026-09-14 fix, the actual bug this closes: a file with SEVERAL profiles
+# where only ONE has a bad field must keep the good ones, not wipe the
+# whole file the way the old shared-try/catch behavior did.
+$mixedPathM = Join-Path $scratchDir "profiles-m-mixed\unwanted-image-profiles.json"
+New-Item -ItemType Directory -Path (Split-Path $mixedPathM -Parent) -Force | Out-Null
+'[{"Label":"Good A","Width":10,"Height":20,"SizeBytes":100,"SizeTolerance":5,"Hash":"AAA"},{"Label":"Bad B","Width":"NOT_A_NUMBER","Height":20,"SizeBytes":100,"SizeTolerance":5,"Hash":"BBB"},{"Label":"Good C","Width":30,"Height":40,"SizeBytes":300,"SizeTolerance":5,"Hash":"CCC"}]' | Set-Content -LiteralPath $mixedPathM -Encoding UTF8
+$script:logCalls.Clear()
+$loadedMMixed = Import-UnwantedImageProfiles -ProfilesPath $mixedPathM
+Test-Assert (@($loadedMMixed).Count -eq 2) "the two good profiles both survived a bad entry elsewhere in the same file"
+Test-Assert (@($loadedMMixed | Where-Object { $_.Label -eq "Good A" }).Count -eq 1) "'Good A' (before the bad entry) survived"
+Test-Assert (@($loadedMMixed | Where-Object { $_.Label -eq "Good C" }).Count -eq 1) "'Good C' (after the bad entry) survived"
+Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*Bad B*" }).Count -ge 1) "a Warn naming the bad entry's Label was logged"
+Test-Assert (@(Get-ChildItem -LiteralPath (Split-Path $mixedPathM -Parent) -Filter "*.corrupt-*.bak").Count -eq 0) "no backup was made - the file isn't corrupt, one entry was just skipped"
 Write-Host ""
 
 # ==============================================================================

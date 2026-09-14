@@ -27,17 +27,7 @@ function Import-UnwantedImageProfiles {
     if (-not (Test-Path -LiteralPath $ProfilesPath)) { return @() }
 
     try {
-        $raw = [System.IO.File]::ReadAllText($ProfilesPath) | ConvertFrom-Json
-        $profiles = @(foreach ($p in $raw) {
-            @{
-                Label         = $p.Label
-                Width         = [int]$p.Width
-                Height        = [int]$p.Height
-                SizeBytes     = [int64]$p.SizeBytes
-                SizeTolerance = [int]$p.SizeTolerance
-                Hash          = $p.Hash
-            }
-        })
+        $raw = [System.IO.File]::ReadAllText($ProfilesPath) | ConvertFrom-Json -ErrorAction Stop
     } catch {
         Write-Log ("Could not read unwanted-image profiles file '" + $ProfilesPath + "' - starting with none. (" + $_ + ")") -Level Warn
         $backupPath = $ProfilesPath + ".corrupt-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".bak"
@@ -50,7 +40,31 @@ function Import-UnwantedImageProfiles {
         }
         return @()
     }
-    return ,$profiles
+
+    # Per-entry casts run in their OWN try/catch (2026-09-14 fix) - they
+    # used to share the parse try/catch above, so one hand-edited bad
+    # field (e.g. a fat-fingered dimension) in ANY entry was indistinguishable
+    # from the whole file being corrupt JSON: backed up and rewritten as
+    # `[]`, silently discarding every OTHER, perfectly good profile too.
+    # Now a bad entry is skipped and warned about individually, matching
+    # Config.ps1's Import-ScriptSettings per-key fallback - the file itself
+    # is untouched, since it's not actually corrupt.
+    $profiles = [System.Collections.Generic.List[hashtable]]::new()
+    foreach ($p in $raw) {
+        try {
+            $profiles.Add(@{
+                Label         = $p.Label
+                Width         = [int]$p.Width
+                Height        = [int]$p.Height
+                SizeBytes     = [int64]$p.SizeBytes
+                SizeTolerance = [int]$p.SizeTolerance
+                Hash          = $p.Hash
+            })
+        } catch {
+            Write-Log ("Ignoring an invalid unwanted-image profile entry (Label='" + $p.Label + "') in '" + $ProfilesPath + "': " + $_) -Level Warn
+        }
+    }
+    return ,@($profiles)
 }
 
 function Export-UnwantedImageProfiles {
