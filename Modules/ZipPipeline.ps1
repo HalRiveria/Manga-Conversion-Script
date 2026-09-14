@@ -290,23 +290,30 @@ function Invoke-LooseFolderZip {
         # ImageConversionPipeline.ps1's Test-OrphanedScratchFileName since
         # this module's own harness deliberately doesn't dot-source that
         # module - see Docs/function-notes.md.
-        $orphanedScratchFiles = @(Get-ChildItem -LiteralPath $FolderPath -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object {
-                $_.Name -imatch '_tmp_iccstrip(-\d+)?\.png$' -or
-                $_.Name -imatch '_tmp_(webp|avif|bmp|heic|heif)2png\.png$' -or
-                $_.Name -imatch '_tmp_overwrite\.webp$'
-            })
-        foreach ($orphan in $orphanedScratchFiles) {
-            try {
-                [System.IO.File]::Delete($orphan.FullName)
-                Write-Log ("Deleted orphaned scratch file (its owning cleanup could not run earlier): '" + $orphan.FullName + "'") -Level Warn
-            } catch {
-                Write-Log ("Could not delete orphaned scratch file '" + $orphan.FullName + "' - it may still block this chapter's zip: " + $_) -Level Warn
+        #
+        # One walk, not two: each file is classified as it's seen - an
+        # orphan gets deleted and skipped; a failed delete falls through
+        # to the same extension check an ordinary file gets, so a scratch
+        # file that couldn't be removed still blocks the zip exactly like
+        # it did when this was two separate passes (delete-failure is the
+        # real, intended reason a leftover keeps blocking - see the Warn
+        # text below).
+        $remainingSrcImages = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+        foreach ($f in (Get-ChildItem -LiteralPath $FolderPath -Recurse -File -ErrorAction SilentlyContinue)) {
+            $isOrphan = $f.Name -imatch '_tmp_iccstrip(-\d+)?\.png$' -or
+                $f.Name -imatch '_tmp_(webp|avif|bmp|heic|heif)2png\.png$' -or
+                $f.Name -imatch '_tmp_overwrite\.webp$'
+            if ($isOrphan) {
+                try {
+                    [System.IO.File]::Delete($f.FullName)
+                    Write-Log ("Deleted orphaned scratch file (its owning cleanup could not run earlier): '" + $f.FullName + "'") -Level Warn
+                    continue
+                } catch {
+                    Write-Log ("Could not delete orphaned scratch file '" + $f.FullName + "' - it may still block this chapter's zip: " + $_) -Level Warn
+                }
             }
+            if ($LooseImageExtensions -icontains $f.Extension) { $remainingSrcImages.Add($f) }
         }
-
-        $remainingSrcImages = @(Get-ChildItem -LiteralPath $FolderPath -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object { $LooseImageExtensions -icontains $_.Extension })
 
         if ($remainingSrcImages.Count -gt 0) {
             $nameList = ($remainingSrcImages | Select-Object -First 5 | ForEach-Object { $_.Name }) -join ", "
