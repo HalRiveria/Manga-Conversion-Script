@@ -164,22 +164,28 @@ function Write-Log {
         [switch]$ForceConsole
     )
 
-    $line = Format-LogLine -Message $Message -Level $Level
+    $writesToFile = $script:FullLogging -or $Level -eq "Error" -or $Level -eq "Warn"
+    $suppressConsole = $script:CleanConsoleOutputEnabled -and -not $ForceConsole
+    $echoesToHostDirectly = (-not $suppressConsole) -and ($null -eq $script:workerConsoleQueue)
 
-    if ($script:FullLogging) {
-        Write-LogLineToFile -FilePath $script:logFile -Line $line
-    } else {
-        if ($Level -eq "Error") {
+    if ($writesToFile -or $echoesToHostDirectly) {
+        $line = Format-LogLine -Message $Message -Level $Level
+    }
+
+    if ($writesToFile) {
+        if ($script:FullLogging) {
+            Write-LogLineToFile -FilePath $script:logFile -Line $line
+        } elseif ($Level -eq "Error") {
             Write-LogLineToFile -FilePath $script:logErrorFile -Line $line
-        } elseif ($Level -eq "Warn") {
+        } else {
             Write-LogLineToFile -FilePath $script:logWarnFile -Line $line
         }
     }
 
-    if ($script:CleanConsoleOutputEnabled -and -not $ForceConsole) { return }
+    if ($suppressConsole) { return }
 
     if ($null -ne $script:workerConsoleQueue) {
-        $script:workerConsoleQueue.Enqueue([pscustomobject]@{ Message = $Message; Level = $Level })
+        $script:workerConsoleQueue.Enqueue(@{ Message = $Message; Level = $Level })
     } else {
         Write-LogLineToHost -Line $line -Level $Level
     }

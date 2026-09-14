@@ -50,7 +50,6 @@ function Move-ToRecycleBin {
     $resolvedItemPath = Resolve-ItemPathOrNull -ItemPath $ItemPath
     if ($null -eq $resolvedItemPath) { return $false }
     $ItemPath = $resolvedItemPath
-    if (-not ([System.IO.File]::Exists($ItemPath) -or [System.IO.Directory]::Exists($ItemPath))) { return $false }
 
     return Invoke-DeleteTreatingVanishedAsFalse -Action {
         $attr = [System.IO.File]::GetAttributes($ItemPath)
@@ -78,7 +77,6 @@ function Remove-ItemPermanently {
     $resolvedItemPath = Resolve-ItemPathOrNull -ItemPath $ItemPath
     if ($null -eq $resolvedItemPath) { return $false }
     $ItemPath = $resolvedItemPath
-    if (-not ([System.IO.File]::Exists($ItemPath) -or [System.IO.Directory]::Exists($ItemPath))) { return $false }
 
     return Invoke-DeleteTreatingVanishedAsFalse -Action {
         $attr           = [System.IO.File]::GetAttributes($ItemPath)

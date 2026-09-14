@@ -27,18 +27,19 @@ function Test-ZippableLeafDirCandidate {
         }
     }
 
-    $allFiles = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-    try { foreach ($f in $Dir.EnumerateFiles()) { $allFiles.Add($f) } } catch { }
-
     $existingZipsHere = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-    foreach ($f in $allFiles) { if ($f.Extension -ieq ".zip") { $existingZipsHere.Add($f) } }
+    $qualifyingFiles  = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+    try {
+        foreach ($f in $Dir.EnumerateFiles()) {
+            if ($f.Extension -ieq ".zip") { $existingZipsHere.Add($f) }
+            elseif ($QualifyingExtensions -icontains $f.Extension) { $qualifyingFiles.Add($f) }
+        }
+    } catch { }
+
     if ($existingZipsHere.Count -gt 0) {
         Write-Log ("SKIPPING '" + $Dir.FullName + "' as a zip candidate: contains " + $existingZipsHere.Count + " existing .zip file(s) directly inside it - likely a container folder left behind after its subfolders were individually zipped, not a genuine leaf. Not zipping to avoid archiving those .zip files into a wrapper.") -Level Warn
         return $null
     }
-
-    $qualifyingFiles = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-    foreach ($f in $allFiles) { if ($QualifyingExtensions -icontains $f.Extension) { $qualifyingFiles.Add($f) } }
     if ($qualifyingFiles.Count -eq 0) { return $null }
 
     $zipOut = [System.IO.Path]::Combine($Dir.Parent.FullName, $Dir.Name + ".zip")

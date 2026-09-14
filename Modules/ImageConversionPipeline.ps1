@@ -362,11 +362,25 @@ function Convert-ImageBatch {
                 }
             }
         }
+        # DOCUMENTED DUPLICATE: this same format-label switch is copied at
+        # job-build time in Invoke-LooseImageConversionPipeline's own
+        # JobBuilder (ImageConversionPipeline.ps1) and in Controller.ps1's
+        # image-engine JobBuilder - keep all three in sync if the set of
+        # magick-detour formats ever changes.
+        $formatLabel = switch -Regex ($srcPath) {
+            '\.avif$' { "AVIF"; break }
+            '\.webp$' { "WebP"; break }
+            '\.bmp$'  { "BMP";  break }
+            '\.heic$' { "HEIC"; break }
+            '\.heif$' { "HEIF"; break }
+            default   { $null }
+        }
         $allJobs.Add(@{
-            SrcPath = $srcPath
-            JxlPath = [System.IO.Path]::ChangeExtension($srcPath, ".jxl")
-            Proc    = $null
-            TempPng = $null
+            SrcPath     = $srcPath
+            JxlPath     = [System.IO.Path]::ChangeExtension($srcPath, ".jxl")
+            Proc        = $null
+            TempPng     = $null
+            FormatLabel = $formatLabel
         })
     }
     $jxlPathCounts = [System.Collections.Generic.Dictionary[string,int]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -409,15 +423,10 @@ function Convert-ImageBatch {
             $psi.RedirectStandardError  = $true
             $psi.CreateNoWindow         = $true
 
-            $isWebp = ($j.SrcPath -imatch '\.webp$')
-            $isAvif = ($j.SrcPath -imatch '\.avif$')
-            $isBmp  = ($j.SrcPath -imatch '\.bmp$')
-            $isHeic = ($j.SrcPath -imatch '\.heic$')
-            $isHeif = ($j.SrcPath -imatch '\.heif$')
             if ($j.TempPng) {
                 $cjxlSrc = $j.TempPng
-            } elseif ($isWebp -or $isAvif -or $isBmp -or $isHeic -or $isHeif) {
-                $formatLabel = if ($isAvif) { "AVIF" } elseif ($isWebp) { "WebP" } elseif ($isBmp) { "BMP" } elseif ($isHeic) { "HEIC" } else { "HEIF" }
+            } elseif ($j.FormatLabel) {
+                $formatLabel = $j.FormatLabel
                 if (-not $MagickExe) {
                     Write-Log ("SKIPPING " + $formatLabel + " '" + $j.SrcPath + "': ImageMagick not found. Install ImageMagick or pass -MagickPath.") -Level Error
                     $batchResult.FailedCount++
@@ -902,11 +911,26 @@ function Invoke-LooseImageConversionPipeline {
                         continue
                     }
                 }
+                # DOCUMENTED DUPLICATE: this same format-label switch is
+                # copied at job-build time in Convert-ImageBatch's own
+                # pre-pass (ImageConversionPipeline.ps1) and in
+                # Controller.ps1's image-engine JobBuilder - keep all
+                # three in sync if the set of magick-detour formats ever
+                # changes.
+                $formatLabel = switch -Regex ($srcPath) {
+                    '\.avif$' { "AVIF"; break }
+                    '\.webp$' { "WebP"; break }
+                    '\.bmp$'  { "BMP";  break }
+                    '\.heic$' { "HEIC"; break }
+                    '\.heif$' { "HEIF"; break }
+                    default   { $null }
+                }
                 $allJobs.Add(@{
-                    SrcPath = $srcPath
-                    JxlPath = [System.IO.Path]::ChangeExtension($srcPath, ".jxl")
-                    Proc    = $null
-                    TempPng = $null
+                    SrcPath     = $srcPath
+                    JxlPath     = [System.IO.Path]::ChangeExtension($srcPath, ".jxl")
+                    Proc        = $null
+                    TempPng     = $null
+                    FormatLabel = $formatLabel
                 })
             }
 
@@ -940,15 +964,10 @@ function Invoke-LooseImageConversionPipeline {
                 $psi.RedirectStandardError  = $true
                 $psi.CreateNoWindow         = $true
 
-                $isWebp = ($job.SrcPath -imatch '\.webp$')
-                $isAvif = ($job.SrcPath -imatch '\.avif$')
-                $isBmp  = ($job.SrcPath -imatch '\.bmp$')
-                $isHeic = ($job.SrcPath -imatch '\.heic$')
-                $isHeif = ($job.SrcPath -imatch '\.heif$')
                 if ($job.TempPng) {
                     $cjxlSrc = $job.TempPng
-                } elseif ($isWebp -or $isAvif -or $isBmp -or $isHeic -or $isHeif) {
-                    $formatLabel = if ($isAvif) { "AVIF" } elseif ($isWebp) { "WebP" } elseif ($isBmp) { "BMP" } elseif ($isHeic) { "HEIC" } else { "HEIF" }
+                } elseif ($job.FormatLabel) {
+                    $formatLabel = $job.FormatLabel
                     if (-not $MagickExe) {
                         Write-Log ("SKIPPING " + $formatLabel + " '" + $job.SrcPath + "': ImageMagick not found. Install ImageMagick or pass -MagickPath.") -Level Error
                         $cr.FailedCount++

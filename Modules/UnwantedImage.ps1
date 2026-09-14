@@ -409,15 +409,18 @@ function Get-TrailingZeroGroups {
         $thisDir = $file.DirectoryName
         if ($seen.ContainsKey($fileHash)) {
             $entry = $seen[$fileHash]
-            if ($entry.Locations -notcontains $thisDir) { $entry.Locations.Add($thisDir) }
+            if ($entry.LocationSet.Add($thisDir)) { $entry.Locations.Add($thisDir) }
         } else {
+            $locationSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $null = $locationSet.Add($thisDir)
             $seen[$fileHash] = @{
-                FileName  = $file.Name
-                Locations = [System.Collections.Generic.List[string]]@($thisDir)
-                SizeBytes = $file.Length
-                Width     = $width
-                Height    = $height
-                Hash      = $fileHash
+                FileName    = $file.Name
+                Locations   = [System.Collections.Generic.List[string]]@($thisDir)
+                LocationSet = $locationSet
+                SizeBytes   = $file.Length
+                Width       = $width
+                Height      = $height
+                Hash        = $fileHash
             }
             $orderedHashes.Add($fileHash)
         }
