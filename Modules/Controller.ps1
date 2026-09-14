@@ -353,13 +353,17 @@ $script:fullPipelineEngineWorker = {
 
     $seriesProvider  = New-SeriesProvider -LibraryPath $Path
     $chapterQueue    = [System.Collections.Generic.Queue[hashtable]]::new()
-    $seriesExhausted = $false
+    # Hashtable, not a plain scalar (2026-09-14 fix, Todo.md finding) - see
+    # ChapterDispatch.ps1's New-LibraryChapterProvider for why a plain
+    # scalar assigned inside this .GetNewClosure()'d scriptblock doesn't
+    # latch across invocations.
+    $chapterProviderState = @{ SeriesExhausted = $false }
 
     $chapterProvider = {
-        while ($chapterQueue.Count -eq 0 -and -not $seriesExhausted) {
-            if (Test-AbortSignal) { $seriesExhausted = $true; break }
+        while ($chapterQueue.Count -eq 0 -and -not $chapterProviderState.SeriesExhausted) {
+            if (Test-AbortSignal) { $chapterProviderState.SeriesExhausted = $true; break }
             $series = & $seriesProvider
-            if ($null -eq $series) { $seriesExhausted = $true; break }
+            if ($null -eq $series) { $chapterProviderState.SeriesExhausted = $true; break }
 
             if ($env:FP_DISPATCH_TRACE) { [Console]::Error.WriteLine("[TRACE $([DateTime]::Now.ToString('HH:mm:ss.fff')) tid=$([System.Threading.Thread]::CurrentThread.ManagedThreadId) engine=$EngineType] before Get-OrCreateFullPipelineSeriesBundle " + $series.Name) } # TEMP-TRACE
             $bundle = Get-OrCreateFullPipelineSeriesBundle -Cache $SeriesBundleCache -Series $series -MagickExe $MagickExe `
@@ -700,12 +704,20 @@ $script:fullPipelineEngineWorker = {
         $null = $chapterResults.Remove($chapterInfo)
     }.GetNewClosure()
 
-    $abortMessagePrinted = $false
+    # Hashtable, not a plain scalar (2026-09-14 fix, Todo.md finding) - a
+    # plain $abortMessagePrinted assigned inside this .GetNewClosure()'d
+    # scriptblock resets to $false on every invocation instead of
+    # latching, confirmed live - the once-only guard below never actually
+    # held. Currently harmless (the dispatch loop stops polling within an
+    # iteration or two of Test-AbortSignal first returning true), but a
+    # real bug if this poll callback is ever invoked more times after an
+    # abort than it is today.
+    $abortState = @{ MessagePrinted = $false }
     $abortPollCallback = {
         param($runningJobs)
         $aborted = Test-AbortSignal
-        if ($aborted -and -not $abortMessagePrinted) {
-            $abortMessagePrinted = $true
+        if ($aborted -and -not $abortState.MessagePrinted) {
+            $abortState.MessagePrinted = $true
             if ($runningJobs.Count -gt 0) {
                 $EventQueue.Enqueue(@{ Kind = 'AbortMessage'; EngineType = $EngineType; AbortTimeoutSeconds = $AbortTimeoutSeconds })
             }

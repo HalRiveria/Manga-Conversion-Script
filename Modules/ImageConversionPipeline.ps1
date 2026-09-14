@@ -1094,12 +1094,21 @@ function Invoke-LooseImageConversionPipeline {
             $null = $chapterResults.Remove($chapterInfo)
         }.GetNewClosure()
 
-        $abortMessagePrinted = $false
+        # Hashtable, not a plain scalar (2026-09-14 fix, Todo.md finding) -
+        # a plain $abortMessagePrinted assigned inside this
+        # .GetNewClosure()'d scriptblock resets to $false on every
+        # invocation instead of latching, confirmed live - the once-only
+        # guard below never actually held. Currently harmless (the
+        # dispatch loop stops polling within an iteration or two of
+        # Test-AbortSignal first returning true), but a real bug if this
+        # poll callback is ever invoked more times after an abort than it
+        # is today.
+        $abortState = @{ MessagePrinted = $false }
         $abortPollCallback = {
             param($runningJobs)
             $aborted = Test-AbortSignal
-            if ($aborted -and -not $abortMessagePrinted) {
-                $abortMessagePrinted = $true
+            if ($aborted -and -not $abortState.MessagePrinted) {
+                $abortState.MessagePrinted = $true
                 if ($runningJobs.Count -gt 0) {
                     Write-GatedConsoleMessage -Text ("[ABORT] Waiting for current loose-image jobs to finish (up to " + $AbortTimeoutSeconds + "s)...") -Color Yellow -CleanConsoleOutputEnabled $cleanConsoleOutputEnabled
                 }

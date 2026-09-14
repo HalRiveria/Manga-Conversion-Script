@@ -11,12 +11,20 @@ function New-LibraryChapterProvider {
     )
     $seriesProvider = New-SeriesProvider -LibraryPath $LibraryPath
     $chapterQueue   = [System.Collections.Generic.Queue[hashtable]]::new()
-    $seriesExhausted = $false
+    # Hashtable, not a plain scalar (2026-09-14 fix, Todo.md finding) - a
+    # plain $seriesExhausted assigned inside this .GetNewClosure()'d
+    # scriptblock resets to $false on every invocation instead of
+    # latching, confirmed live. Currently harmless here (the caller stops
+    # polling once this returns $null anyway), but it read as working
+    # protection that wasn't. Matches LeafDirectoryDiscovery.ps1's
+    # New-ZippableLeafDirProvider, which uses the same pattern for the
+    # same reason.
+    $state = @{ SeriesExhausted = $false }
 
     return {
-        while ($chapterQueue.Count -eq 0 -and -not $seriesExhausted) {
+        while ($chapterQueue.Count -eq 0 -and -not $state.SeriesExhausted) {
             $series = & $seriesProvider
-            if ($null -eq $series) { $seriesExhausted = $true; break }
+            if ($null -eq $series) { $state.SeriesExhausted = $true; break }
             $chapters = Get-SeriesChapters -SeriesPath $series.FullName -QualifyingExtensions $QualifyingExtensions `
                 -ExcludeStagingDirs $ExcludeStagingDirs -ForceRezip $ForceRezip
             foreach ($ch in $chapters) {
