@@ -116,6 +116,15 @@ function Initialize-LogMutex {
     $script:logMutex = [System.Threading.Mutex]::new($false, ("JxlLogMutex_" + $PathHash))
 }
 
+function Get-LogMutex {
+    # Plain accessor, not a closure - a .GetNewClosure()'d caller can't read
+    # $script:logMutex directly (confirmed live: it resolves to $null inside
+    # such a closure, not the real value - Docs/lessons-learned.md's 9th
+    # entry). Invoke via a function reference (& ${function:Get-LogMutex})
+    # from inside a closure instead of reading $script:logMutex there.
+    return $script:logMutex
+}
+
 function Initialize-CleanConsoleOutput {
     param([Parameter(Mandatory)][bool]$Enabled)
     $script:CleanConsoleOutputEnabled = $Enabled

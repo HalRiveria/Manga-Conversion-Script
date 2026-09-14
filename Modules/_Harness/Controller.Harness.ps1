@@ -1475,6 +1475,55 @@ Test-Assert $newMutexUsableU2c "the NEW mutex is still genuinely usable (disposi
 Write-Host ""
 
 # ==============================================================================
+#  Scenario U2c2 (2026-09-14 code-review finding, real bug in THIS session's
+#  own -ReinitLogPathsHandler fix): unlike U2c above (Invoke-MainLoop's own
+#  POST-Get-SelectedMode re-init, a plain function call, not a closure), the
+#  -ReinitLogPathsHandler passed INTO Get-SelectedMode/Show-ModeMenu (so
+#  Cover Deletion can re-init log paths BEFORE it runs, in the SAME menu
+#  visit) is a .GetNewClosure()'d scriptblock. A $script:logMutex read
+#  directly inside such a closure doesn't see the real value (confirmed
+#  live - Docs/lessons-learned.md's 9th entry) - $previousLogMutexForDispose
+#  was always $null there, so the OLD mutex was never disposed on this path
+#  specifically, even though U2c's own path (not a closure) worked fine.
+#  Fixed via a $GetLogMutexHandler indirection (Get-LogMutex, Logging.ps1) -
+#  this scenario simulates Show-ModeMenu invoking -ReinitLogPathsHandler by
+#  having the fake -GetModeHandler call it directly. Uses the REAL
+#  Initialize-LogPaths/Initialize-LogMutex/Get-LogMutex (not fakes) so a
+#  real Mutex's Dispose state can actually be observed, same as U2c.
+# ==============================================================================
+Write-Host "=== Scenario U2c2: -ReinitLogPathsHandler (Cover Deletion's own re-init path) also disposes the previous mutex ===" -ForegroundColor Cyan
+$scratchDirU2c2 = Join-Path ([System.IO.Path]::GetTempPath()) ("controller-u2c2-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $scratchDirU2c2 -Force | Out-Null
+$fakeSettingsU2c2 = @{ PermanentDelete = $false; CleanConsoleOutputEnabled = $false; FullLogging = $false; DisableSummaryFile = $false }
+Initialize-LogPaths -TargetPath $scratchDirU2c2 -FullLogging $false -ScriptDir $scratchDirU2c2
+Initialize-LogMutex
+$mutexBeforeU2c2 = $script:logMutex
+
+$script:reinitInvokedU2c2 = $false
+$fakeGetModeU2c2 = {
+    param($Settings, $SettingsPath, $ReinitLogPathsHandler)
+    # Simulates Show-ModeMenu's option-5 branch: a Full Logging toggle
+    # happened via Options, THEN Cover Deletion (re-init) runs, all inside
+    # this one Get-SelectedMode call - before Invoke-MainLoop's own
+    # post-return re-init check ever sees the change.
+    $Settings.FullLogging = $true
+    if ($null -ne $ReinitLogPathsHandler) { & $ReinitLogPathsHandler; $script:reinitInvokedU2c2 = $true }
+    return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false }
+}
+$fakeInvokeModeU2c2 = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) return New-StatsTracker }
+$fakePostRunU2c2 = { return 'Exit' }
+
+Invoke-MainLoop -TargetPath $scratchDirU2c2 -Settings $fakeSettingsU2c2 -SettingsPath "C:\fake\settings.json" -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ScriptDir $scratchDirU2c2 `
+    -GetModeHandler $fakeGetModeU2c2 -InvokeModeHandler $fakeInvokeModeU2c2 -PostRunPromptHandler $fakePostRunU2c2
+
+Test-Assert $script:reinitInvokedU2c2 "sanity check: the fake -GetModeHandler actually invoked -ReinitLogPathsHandler, exercising the closure path"
+Test-Assert (-not [object]::ReferenceEquals($script:logMutex, $mutexBeforeU2c2)) "sanity check: the re-init via the closure path really did create a NEW mutex object"
+$disposedU2c2 = $false
+try { $null = $mutexBeforeU2c2.WaitOne(0) } catch [System.ObjectDisposedException] { $disposedU2c2 = $true } catch { }
+Test-Assert $disposedU2c2 "the PREVIOUS mutex was disposed via the -ReinitLogPathsHandler closure path too, not leaked"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario U2d (2026-09-04 fix, real bug): when $InvokeModeHandler returns
 #  $null (a crashed/aborted run), the "Run did not complete" Warn used to
 #  be logged AFTER CompleteLogRunHandler had already run - in split-log

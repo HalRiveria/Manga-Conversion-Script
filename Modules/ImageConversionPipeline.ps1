@@ -781,13 +781,18 @@ function Invoke-LooseImageConversionPipeline {
 
         $seriesProvider  = New-SeriesProvider -LibraryPath $Path
         $chapterQueue    = [System.Collections.Generic.Queue[hashtable]]::new()
-        $seriesExhausted = $false
+        # Hashtable, not a plain scalar (2026-09-14 code-review finding - a
+        # second, unfixed instance of the same closure-latch bug this
+        # session's audit already fixed in 5 other places; see
+        # ChapterDispatch.ps1's New-LibraryChapterProvider for the full
+        # explanation of why a plain scalar doesn't latch here).
+        $chapterProviderState = @{ SeriesExhausted = $false }
         $chapterProvider = {
-            while ($chapterQueue.Count -eq 0 -and -not $seriesExhausted) {
-                if (Test-AbortSignal) { $seriesExhausted = $true; break }
+            while ($chapterQueue.Count -eq 0 -and -not $chapterProviderState.SeriesExhausted) {
+                if (Test-AbortSignal) { $chapterProviderState.SeriesExhausted = $true; break }
 
                 $series = & $seriesProvider
-                if ($null -eq $series) { $seriesExhausted = $true; break }
+                if ($null -eq $series) { $chapterProviderState.SeriesExhausted = $true; break }
                 $totals.SeriesCount++
 
                 $chapters = Get-SeriesChapters -SeriesPath $series.FullName -QualifyingExtensions $FolderQualifyingExtensions `
@@ -1102,7 +1107,10 @@ function Invoke-LooseImageConversionPipeline {
         # dispatch loop stops polling within an iteration or two of
         # Test-AbortSignal first returning true), but a real bug if this
         # poll callback is ever invoked more times after an abort than it
-        # is today.
+        # is today. DOCUMENTED DUPLICATE: the identical pattern (same
+        # fields, same reasoning) also appears in Controller.ps1's and
+        # AnimatedConversionPipeline.ps1's own abort-poll callbacks - keep
+        # all three in sync.
         $abortState = @{ MessagePrinted = $false }
         $abortPollCallback = {
             param($runningJobs)

@@ -705,7 +705,10 @@ $script:fullPipelineEngineWorker = {
     # held. Currently harmless (the dispatch loop stops polling within an
     # iteration or two of Test-AbortSignal first returning true), but a
     # real bug if this poll callback is ever invoked more times after an
-    # abort than it is today.
+    # abort than it is today. DOCUMENTED DUPLICATE: the identical pattern
+    # (same fields, same reasoning) also appears in
+    # ImageConversionPipeline.ps1's and AnimatedConversionPipeline.ps1's own
+    # abort-poll callbacks - keep all three in sync.
     $abortState = @{ MessagePrinted = $false }
     $abortPollCallback = {
         param($runningJobs)
@@ -1120,7 +1123,8 @@ function Invoke-MainLoop {
         [scriptblock]$CompleteLogRunHandler = ${function:Complete-LogRun},
         [scriptblock]$StartLogRunHandler = ${function:Start-LogRun},
         [scriptblock]$InitializeLogPathsHandler = ${function:Initialize-LogPaths},
-        [scriptblock]$InitializeLogMutexHandler = ${function:Initialize-LogMutex}
+        [scriptblock]$InitializeLogMutexHandler = ${function:Initialize-LogMutex},
+        [scriptblock]$GetLogMutexHandler = ${function:Get-LogMutex}
     )
 
     $lastFullLogging        = [bool]$Settings.FullLogging
@@ -1137,7 +1141,17 @@ function Invoke-MainLoop {
     # across the Get-SelectedMode call boundary to avoid.
     $reinitLogPathsHandler = {
         & $InitializeLogPathsHandler -TargetPath $TargetPath -FullLogging ([bool]$Settings.FullLogging) -DisableSummaryFile ([bool]$Settings.DisableSummaryFile) -ScriptDir $ScriptDir
-        $previousLogMutexForDispose = $script:logMutex
+        # Read via $GetLogMutexHandler, NOT a direct $script:logMutex read -
+        # this scriptblock is .GetNewClosure()'d (needed so $TargetPath/
+        # $Settings/etc. resolve correctly once passed into Show-ModeMenu),
+        # and a $script:-prefixed read inside a .GetNewClosure()'d block
+        # doesn't see the real script-scope value (confirmed live - resolves
+        # to $null, not the current mutex - Docs/lessons-learned.md's 9th
+        # entry). Without this indirection, $previousLogMutexForDispose was
+        # always $null and the old mutex was never disposed, leaking a
+        # handle on every Full-Logging-toggle-then-Cover-Deletion cycle
+        # (2026-09-14 code-review finding).
+        $previousLogMutexForDispose = & $GetLogMutexHandler
         & $InitializeLogMutexHandler
         # A failed Dispose() on the OLD mutex is harmless - a fresh one was
         # just created above, and .NET will finalize the old handle eventually.
