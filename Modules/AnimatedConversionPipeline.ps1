@@ -1,7 +1,7 @@
 # See Docs/module-descriptions.md for this module's full description.
 
 # ==============================================================================
-#  PART 1 - Convert-AnimatedBatch, the per-batch conversion engine
+#  PART 1 - shared helpers used by PART 2's live conversion engine
 # ==============================================================================
 
 function Test-AvifAnimated {
@@ -71,312 +71,6 @@ function Test-AvifAnimated {
     return ($delay -gt 0)
 }
 
-function Complete-AnimatedConversionJob {
-    # DOCUMENTED DUPLICATE: everything below the try/finally is copied,
-    # not shared, into PART 2's Complete-AnimatedDispatchJob - see that
-    # function's own header for why. Keep both in sync if either changes.
-    param(
-        [Parameter(Mandatory)]
-        [hashtable]$Job,
-        [Parameter(Mandatory)]
-        [hashtable]$BatchResult,
-        [bool]$DoFullLogging,
-        [bool]$DoAnimatedDeleteSource,
-        [bool]$IsAbortDrain = $false
-    )
-
-    try {
-        $stdout = if ($Job.StdoutTask) { $Job.StdoutTask.GetAwaiter().GetResult() } else { $Job.Proc.StandardOutput.ReadToEnd() }
-        $stderr = if ($Job.StderrTask) { $Job.StderrTask.GetAwaiter().GetResult() } else { $Job.Proc.StandardError.ReadToEnd() }
-        $code   = $Job.Proc.ExitCode
-    } finally {
-        $Job.Proc.Dispose()
-        $Job.SlotReleased = $true
-    }
-
-    if (-not $IsAbortDrain -and $DoFullLogging -and -not [string]::IsNullOrWhiteSpace($stdout)) {
-        Write-Log ("magick stdout for '" + $Job.SrcPath + "': " + $stdout.Trim())
-    }
-
-    $convOk = $false
-    # DOCUMENTED DUPLICATE (2026-09-14 fix, Todo.md finding): this
-    # explicit-$null initialization was missing here while
-    # Complete-AnimatedDispatchJob's own copy had it - harmless in
-    # practice (an undeclared PowerShell variable just reads as $null),
-    # but a real drift in a pair of functions under an explicit
-    # keep-in-sync contract. Keep both in sync if this changes again.
-    $webpReplaceBackup = $null
-    try {
-        if ($code -ne 0) { throw ("magick exited with code " + $code + ". Stderr: " + $stderr) }
-        $webpItem = [System.IO.FileInfo]::new($Job.MagickOutputPath)
-        if (-not $webpItem.Exists) { throw ("Output .webp was not created: '" + $Job.MagickOutputPath + "'") }
-        $webpSize = $webpItem.Length
-        if ($webpSize -eq 0) { throw ("Output .webp is 0 bytes: '" + $Job.MagickOutputPath + "'") }
-        if ($Job.MagickOutputPath -ne $Job.WebpPath) {
-            $webpReplaceBackup = $Job.WebpPath + "_replace_backup.tmp"
-            [System.IO.File]::Replace($Job.MagickOutputPath, $Job.WebpPath, $webpReplaceBackup)
-            try { [System.IO.File]::Delete($webpReplaceBackup) } catch { }
-        }
-        if ($IsAbortDrain) {
-            Write-Log ("Conversion OK (abort drain): '" + $Job.WebpPath + "'")
-        } else {
-            Write-Log ("Conversion OK: '" + $Job.WebpPath + "' (" + $webpSize + " bytes)")
-        }
-        $BatchResult.ConvertedCount++
-        $BatchResult.ConvertedPaths.Add($Job.SrcPath)
-        $convOk = $true
-    } catch {
-        Write-Log ("FAILED conversion of animated AVIF '" + $Job.SrcPath + "': " + $_) -Level Error
-        $BatchResult.FailedCount++
-        try { [System.IO.File]::Delete($Job.MagickOutputPath) } catch { }
-        if ($webpReplaceBackup) { try { [System.IO.File]::Delete($webpReplaceBackup) } catch { } }
-    }
-
-    if ($convOk -and $DoAnimatedDeleteSource) {
-        try {
-            $removed = Remove-Source -ItemPath $Job.SrcPath
-            if ($removed) {
-                $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
-                Write-Log ("Deleted source (" + $deleteDesc + "): '" + $Job.SrcPath + "'")
-                $BatchResult.DeletedCount++
-            } else {
-                Write-Log ("Source already gone before deletion (not counted as deleted): '" + $Job.SrcPath + "'") -Level Warn
-            }
-        } catch {
-            Write-Log ("FAILED to delete source '" + $Job.SrcPath + "': " + $_) -Level Error
-            $BatchResult.DeleteFailedCount++
-        }
-    }
-}
-
-function Convert-AnimatedBatch {
-    param(
-        [System.IO.FileInfo[]]$AnimatedFiles,
-        [Parameter(Mandatory)]
-        [string]$MagickExe,
-        [bool]$DoAnimatedLossless,
-        [int]$AnimatedQuality = 90,
-        [Parameter(Mandatory)]
-        [int]$AnimatedThreads,
-        [bool]$DoAnimatedOverwrite,
-        [bool]$DoAnimatedDeleteSource = $true,
-        [bool]$DoFullLogging,
-        [Parameter(Mandatory)]
-        [System.Threading.CancellationToken]$CancelToken,
-        [string]$BatchLabel             = $null,
-        [string]$AbortWaitMessage       = $null,
-        [scriptblock]$AbortPollCallback = $null,
-        [int]$AbortTimeoutSeconds       = 60,
-        [int]$HeartbeatIntervalSeconds  = 30,
-        [System.Collections.Generic.HashSet[string]]$KnownAnimatedPaths = $null
-    )
-
-    $batchResult = @{
-        ConvertedCount      = 0
-        FailedCount         = 0
-        SkippedCount        = 0
-        StaticSkippedCount  = 0
-        InspectFailedCount  = 0
-        DeletedCount        = 0
-        DeleteFailedCount   = 0
-        ConvertedPaths      = [System.Collections.Generic.List[string]]::new()
-        SkippedPaths        = [System.Collections.Generic.List[string]]::new()
-        StaticSkippedPaths  = [System.Collections.Generic.List[string]]::new()
-        PendingPaths        = [System.Collections.Generic.List[string]]::new()
-        ForceKilledCount    = 0
-    }
-
-    if (-not $AnimatedFiles -or $AnimatedFiles.Count -eq 0) { return $batchResult }
-
-    $totalFiles = $AnimatedFiles.Count
-
-    $pending = [System.Collections.Queue]::new()
-    foreach ($f in $AnimatedFiles) {
-        $pending.Enqueue(@{
-            SrcPath       = $f.FullName
-            WebpPath      = [System.IO.Path]::ChangeExtension($f.FullName, ".webp")
-            Proc          = $null
-            StartTime     = $null
-            LastHeartbeat = $null
-        })
-    }
-    $running = [System.Collections.Generic.List[hashtable]]::new()
-
-    try {
-    while (($pending.Count -gt 0 -or $running.Count -gt 0) -and (-not $CancelToken.IsCancellationRequested)) {
-
-        if ($AbortPollCallback) {
-            $inFlightList = [System.Collections.Generic.List[string]]::new()
-            foreach ($r in $running) { $inFlightList.Add($r.SrcPath) }
-            $inFlight = @($inFlightList)
-            & $AbortPollCallback $inFlight
-        }
-
-        while ($pending.Count -gt 0 -and (-not $CancelToken.IsCancellationRequested) -and `
-               $running.Count -lt $AnimatedThreads) {
-            $j = $pending.Dequeue()
-            try {
-
-            $webpPathExists = [System.IO.File]::Exists($j.WebpPath)
-            if ($webpPathExists -and -not $DoAnimatedOverwrite) {
-                Write-Log ("SKIPPING '" + $j.SrcPath + "': output '" + $j.WebpPath + "' already exists (Overwrite is off).")
-                $batchResult.SkippedCount++
-                $batchResult.SkippedPaths.Add($j.SrcPath)
-                continue
-            }
-
-            $isAnimated = $false
-            if ($KnownAnimatedPaths -and $KnownAnimatedPaths.Contains($j.SrcPath)) {
-                $isAnimated = $true
-            } else {
-                try {
-                    $isAnimated = Test-AvifAnimated -AvifPath $j.SrcPath -MagickExe $MagickExe
-                } catch {
-                    Write-Log ("Could not determine if '" + $j.SrcPath + "' is animated - skipping: " + $_) -Level Warn
-                    $batchResult.InspectFailedCount++
-                    continue
-                }
-            }
-
-            if (-not $isAnimated) {
-                Write-Log ("'" + $j.SrcPath + "' is a static AVIF (not animated) - left unconverted.")
-                $batchResult.StaticSkippedCount++
-                $batchResult.StaticSkippedPaths.Add($j.SrcPath)
-                continue
-            }
-
-            $j.TempOverwritePath = if ($webpPathExists) {
-                [System.IO.Path]::Combine(
-                    [System.IO.Path]::GetDirectoryName($j.WebpPath),
-                    [System.IO.Path]::GetFileNameWithoutExtension($j.WebpPath) + "_tmp_overwrite.webp"
-                )
-            } else {
-                $null
-            }
-            $j.MagickOutputPath = if ($j.TempOverwritePath) { $j.TempOverwritePath } else { $j.WebpPath }
-
-            $psi = [System.Diagnostics.ProcessStartInfo]::new()
-            $psi.FileName = $MagickExe
-            $qualityArg = if ($DoAnimatedLossless) { "-define webp:lossless=true" } else { "-quality " + $AnimatedQuality }
-            $psi.Arguments = "`"" + $j.SrcPath + "`" -coalesce -loop 0 " + $qualityArg + " `"" + $j.MagickOutputPath + "`""
-            $psi.UseShellExecute        = $false
-            $psi.RedirectStandardOutput = $true
-            $psi.RedirectStandardError  = $true
-            $psi.CreateNoWindow         = $true
-
-            Write-Log ("Converting animated: '" + $j.SrcPath + "'")
-
-            $j.Proc          = [System.Diagnostics.Process]::Start($psi)
-            $j.StdoutTask    = $j.Proc.StandardOutput.ReadToEndAsync()
-            $j.StderrTask    = $j.Proc.StandardError.ReadToEndAsync()
-            $j.StartTime     = [System.Diagnostics.Stopwatch]::StartNew()
-            $j.LastHeartbeat = [timespan]::Zero
-            $running.Add($j)
-            } catch {
-                Write-Log ("FAILED to start conversion process for '" + $j.SrcPath + "': " + $_) -Level Error
-                $batchResult.FailedCount++
-            }
-        }
-
-        $stillRunning = [System.Collections.Generic.List[hashtable]]::new()
-        foreach ($j in $running) {
-            if ($j.Proc.HasExited) {
-                Complete-AnimatedConversionJob -Job $j -BatchResult $batchResult -DoFullLogging $DoFullLogging -DoAnimatedDeleteSource $DoAnimatedDeleteSource
-            } else {
-                if ($HeartbeatIntervalSeconds -gt 0 -and
-                    ($j.StartTime.Elapsed - $j.LastHeartbeat).TotalSeconds -ge $HeartbeatIntervalSeconds) {
-                    $doneSoFar = $batchResult.ConvertedCount + $batchResult.FailedCount + $batchResult.SkippedCount + $batchResult.StaticSkippedCount + $batchResult.InspectFailedCount
-                    $labelSuffix = if ($BatchLabel) { " in '" + $BatchLabel + "'" } else { "" }
-                    Write-Log ("Still converting '" + $j.SrcPath + "'" + $labelSuffix + " (" + [int]$j.StartTime.Elapsed.TotalSeconds + "s elapsed) - batch progress: " + $doneSoFar + "/" + $totalFiles + " done.")
-                    $j.LastHeartbeat = $j.StartTime.Elapsed
-                }
-                $stillRunning.Add($j)
-            }
-        }
-        $running = $stillRunning
-
-        [System.Threading.Thread]::Sleep(50)
-    }
-    } catch {
-        foreach ($j in $running) {
-            try { if ($j.Proc -and -not $j.Proc.HasExited) { $j.Proc.Kill() } } catch { }
-            try { if ($j.Proc) { $j.Proc.WaitForExit(5000) } } catch { }
-            if ($j.TempOverwritePath) {
-                try { [System.IO.File]::Delete($j.TempOverwritePath) } catch { }
-            }
-            if (-not $j.SlotReleased) {
-                try { [System.IO.File]::Delete($j.MagickOutputPath) } catch { }
-            }
-            try { if ($j.Proc) { $j.Proc.Dispose() } } catch { }
-        }
-        throw
-    }
-
-    if ($CancelToken.IsCancellationRequested -and $running.Count -gt 0) {
-        if ($AbortWaitMessage) {
-            Write-GatedConsoleMessage -Text $AbortWaitMessage -Color Yellow -CleanConsoleOutputEnabled ([bool]$script:CleanConsoleOutputEnabled)
-        }
-        $abortDeadline = [System.Diagnostics.Stopwatch]::StartNew()
-
-        try {
-            while ($running.Count -gt 0 -and -not [ConsoleCtrl]::IsCloseEvent -and $abortDeadline.Elapsed.TotalSeconds -lt $AbortTimeoutSeconds) {
-                $stillWaiting = [System.Collections.Generic.List[hashtable]]::new()
-                foreach ($j in $running) {
-                    if ($j.Proc.HasExited) {
-                        Complete-AnimatedConversionJob -Job $j -BatchResult $batchResult -DoFullLogging $DoFullLogging -DoAnimatedDeleteSource $DoAnimatedDeleteSource -IsAbortDrain $true
-                    } else {
-                        $stillWaiting.Add($j)
-                    }
-                }
-                $running = $stillWaiting
-                if ($running.Count -gt 0) { [System.Threading.Thread]::Sleep(250) }
-            }
-
-            if ($running.Count -gt 0) {
-                $stillWaiting = [System.Collections.Generic.List[hashtable]]::new()
-                foreach ($j in $running) {
-                    if ($j.Proc.HasExited) {
-                        Complete-AnimatedConversionJob -Job $j -BatchResult $batchResult -DoFullLogging $DoFullLogging -DoAnimatedDeleteSource $DoAnimatedDeleteSource -IsAbortDrain $true
-                    } else {
-                        $stillWaiting.Add($j)
-                    }
-                }
-                $running = $stillWaiting
-            }
-
-            if ($running.Count -gt 0) {
-                $batchResult.ForceKilledCount = $running.Count
-                $labelSuffix = if ($BatchLabel) { " in '" + $BatchLabel + "'" } else { "" }
-                Write-Log ("Force-stopping " + $running.Count + " job(s) that did not finish within " + $AbortTimeoutSeconds + "s" + $labelSuffix + ".") -Level Warn
-                foreach ($j in $running) {
-                    try { if (-not $j.Proc.HasExited) { $j.Proc.Kill() } } catch { }
-                    try { $j.Proc.WaitForExit(5000) } catch { }
-                    try { [System.IO.File]::Delete($j.MagickOutputPath) } catch { }
-                    $j.Proc.Dispose()
-                    $j.SlotReleased = $true
-                }
-            }
-        } catch {
-            foreach ($j in $running) {
-                try { if ($j.Proc -and -not $j.Proc.HasExited) { $j.Proc.Kill() } } catch { }
-                try { if ($j.Proc) { $j.Proc.WaitForExit(5000) } } catch { }
-                if ($j.TempOverwritePath) {
-                    try { [System.IO.File]::Delete($j.TempOverwritePath) } catch { }
-                }
-                if ((-not $j.SlotReleased) -and $j.MagickOutputPath) {
-                    try { [System.IO.File]::Delete($j.MagickOutputPath) } catch { }
-                }
-                try { if ($j.Proc) { $j.Proc.Dispose() } } catch { }
-            }
-            throw
-        }
-    }
-
-    foreach ($j in $pending.ToArray()) { $batchResult.PendingPaths.Add($j.SrcPath) }
-
-    return $batchResult
-}
-
 # ==============================================================================
 #  PART 2 - mode 3 orchestration
 # ==============================================================================
@@ -444,10 +138,6 @@ function Get-ChapterAnimatedStatus {
 }
 
 function Complete-AnimatedDispatchJob {
-    # DOCUMENTED DUPLICATE, not a call-through, of
-    # Complete-AnimatedConversionJob's own exit-code/File.Replace/
-    # delete-source logic - see that function's own header. Keep both
-    # in sync if either changes.
     param(
         [Parameter(Mandatory)]
         [hashtable]$Job,
@@ -466,9 +156,6 @@ function Complete-AnimatedDispatchJob {
     }
 
     $convOk = $false
-    # DOCUMENTED DUPLICATE: Complete-AnimatedConversionJob's own copy of
-    # this function has the identical $webpReplaceBackup init - keep both
-    # in sync.
     $webpReplaceBackup = $null
     try {
         if ($code -ne 0) { throw ("magick exited with code " + $code + ". Stderr: " + $stderr) }
@@ -818,5 +505,5 @@ function Invoke-LooseAnimatedConversionPipeline {
 }
 
 function Get-AnimatedConversionSharedFunctionNames {
-    return @('Convert-AnimatedBatch', 'Complete-AnimatedConversionJob', 'Test-AvifAnimated')
+    return @('Test-AvifAnimated')
 }

@@ -3,30 +3,34 @@
     Standalone test harness for Modules\AnimatedConversionPipeline.ps1.
 
 .DESCRIPTION
-    PART 1 (Scenarios A-M): dot-sources the real module and stubs
-    Write-Log/Remove-Source/$script:PermanentDelete (same pattern as
-    ImageConversionPipeline.Harness.ps1) so this module doesn't need
-    Logging.ps1/FileDeletion.ps1 built/working to be tested. A compiled
-    fake magick.exe (same technique as that harness's fake cjxl.exe)
-    handles both "identify -format %n <path>" (animation-frame-count
-    detection) and the real conversion call, so real OS processes
-    actually run end to end - the fake's conversion branch writes the
-    exact argument string it received into the output file so a scenario
-    can assert which flags (lossless vs quality) were actually passed.
+    Scenario A: direct unit coverage of Test-AvifAnimated (a standalone
+    exported function, not part of the dead Convert-AnimatedBatch that
+    used to anchor a "PART 1"). Dot-sources the real module and stubs
+    Write-Log/Remove-Source/$script:PermanentDelete so this module doesn't
+    need Logging.ps1/FileDeletion.ps1 built/working to be tested.
 
-    PART 2 (Scenarios N onward, added 2026-08-28): also dot-sources the
-    REAL AbortPipeline.ps1/LeafDirectoryDiscovery.ps1/
-    CleanConsoleRendering.ps1 - same integration-style choice
-    ImageConversionPipeline.Harness.ps1 made for its own PART 2, since
-    Invoke-LooseAnimatedConversionPipeline is an orchestration-tier
-    function whose real value is in proving the two-tier walk/coverage-
-    completeness/CCR wiring actually work against real directory trees,
-    not in mocking that machinery away. Write-Log/Remove-Source stay the
-    lightweight local stubs from PART 1 - AbortPipeline.ps1 and
-    LeafDirectoryDiscovery.ps1 both only need Write-Log stubbed (verified
-    against each module's own FORWARD REFERENCE header text), not the
-    real Logging.ps1/FileDeletion.ps1 modules, so PART 1's existing
-    scenarios needed no changes at all.
+    Every other scenario (B onward, 2026-09-14: originally split into a
+    lightweight "PART 1" against the now-deleted Convert-AnimatedBatch and
+    an integration-style "PART 2" against the live
+    Invoke-LooseAnimatedConversionPipeline - collapsed into one style once
+    PART 1's direct-call scenarios were ported to the live pipeline, see
+    Todo.md's matching entry) dot-sources the REAL
+    AbortPipeline.ps1/LeafDirectoryDiscovery.ps1/CleanConsoleRendering.ps1/
+    ChapterDispatch.ps1 too, since Invoke-LooseAnimatedConversionPipeline
+    is an orchestration-tier function whose real value is in proving the
+    two-tier walk/coverage-completeness/CCR wiring actually work against
+    real directory trees, not in mocking that machinery away.
+    Write-Log/Remove-Source stay the lightweight local stubs declared once
+    at the top of this file - AbortPipeline.ps1 and LeafDirectoryDiscovery.ps1
+    both only need Write-Log stubbed (verified against each module's own
+    FORWARD REFERENCE header text), not the real Logging.ps1/FileDeletion.ps1
+    modules. A compiled fake magick.exe (same technique as
+    ImageConversionPipeline.Harness.ps1's own fake cjxl.exe) handles both
+    "identify -format %n <path>" (animation-frame-count detection) and the
+    real conversion call, so real OS processes actually run end to end -
+    the fake's conversion branch writes the exact argument string it
+    received into the output file so a scenario can assert which flags
+    (lossless vs quality) were actually passed.
 
 .EXAMPLE
     .\Modules\_Harness\AnimatedConversionPipeline.Harness.ps1
@@ -328,15 +332,24 @@ Test-Assert ($swA.Elapsed.TotalSeconds -lt 15) ("returned promptly instead of de
 Write-Host ""
 
 # ==============================================================================
-#  Scenario B: Convert-AnimatedBatch end-to-end success - converts,
-#  deletes source (default DoAnimatedDeleteSource)
+#  Scenarios B through L2 (2026-09-14, dead-code-removal, Todo.md's
+#  matching entry): ported from direct Convert-AnimatedBatch calls to the
+#  live Invoke-LooseAnimatedConversionPipeline path - jobBuilder/
+#  jobStarter/jobPollCompleted/Complete-AnimatedDispatchJob (PART 2's live
+#  twins) have the identical logic these scenarios exercise, but nothing
+#  previously proved most of it through the real pipeline. Scenario M
+#  (empty-batch input) was dropped outright rather than ported - every
+#  other scenario in this file already exercises a chapter with zero
+#  qualifying animated files as a side effect of its own setup, so there's
+#  no real gap to close by adding a scenario for it explicitly.
 # ==============================================================================
 Write-Host "=== Scenario B: end-to-end success ===" -ForegroundColor Cyan
-$fileB = New-FakeAvif -Name "chapter-b\page1.avif" -Content "FRAMES:8"
-$resultB = Convert-AnimatedBatch -AnimatedFiles @($fileB) -MagickExe $fakeMagickExe -AnimatedThreads 2 -CancelToken ([System.Threading.CancellationToken]::None)
+$chB = New-Dir "scenario-b\Series\Chapter 1"
+$fileB = Get-Item -LiteralPath (New-FakeAvifIn -DirPath $chB -Name "page1.avif" -Frames 8)
+$totalsB = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-b") -MagickExe $fakeMagickExe -AnimatedThreads 2 -FullLogging $false
 
-Test-Assert ($resultB.ConvertedCount -eq 1 -and $resultB.FailedCount -eq 0) "1 converted, 0 failed"
-Test-Assert ($resultB.DeletedCount -eq 1) "source deleted (DoAnimatedDeleteSource defaults true)"
+Test-Assert ($totalsB.ConvertedSuccess -eq 1 -and $totalsB.ConvertedFail -eq 0) "1 converted, 0 failed"
+Test-Assert ($totalsB.DeletedSuccess -eq 1) "source deleted (AnimatedDeleteSource defaults true)"
 Test-Assert (-not (Test-Path -LiteralPath $fileB.FullName)) "source file is actually gone"
 $webpB = [System.IO.Path]::ChangeExtension($fileB.FullName, ".webp")
 Test-Assert (Test-Path -LiteralPath $webpB) "output .webp was created"
@@ -344,26 +357,32 @@ Write-Host ""
 
 # ==============================================================================
 #  Scenario B2 (2026-09-08 fix, real bug, live-reproduced): the magick
-#  conversion job in Convert-AnimatedBatch's async dispatch loop is polled
-#  via HasExited, not read synchronously inline - both redirected streams
-#  must be drained as soon as the process starts (not only once it's found
-#  HasExited), or a magick that writes more than the OS pipe buffer to
-#  stderr before exiting would block on that write forever, hanging the
-#  whole batch with no error and no timeout - the exact species already
-#  fixed in ImageConversionPipeline.ps1's Convert-ImageBatch, missed here.
+#  conversion job in the dispatch loop is polled via HasExited, not read
+#  synchronously inline - both redirected streams must be drained as soon
+#  as the process starts (not only once it's found HasExited), or a
+#  magick that writes more than the OS pipe buffer to stderr before
+#  exiting would block on that write forever, hanging the whole batch
+#  with no error and no timeout - the exact species already fixed in
+#  ImageConversionPipeline.ps1's cjxl dispatch, missed here.
 #  Run on a background runspace with a bounded wait, NOT called directly -
 #  a real regression here would hang forever, and this proves it fails the
 #  assertion instead of hanging the whole harness process.
 # ==============================================================================
 Write-Host "=== Scenario B2: a magick job with a stderr flood does not deadlock the dispatch loop ===" -ForegroundColor Cyan
-$fileB2 = New-FakeAvif -Name "chapter-b2\flood.avif" -Content "FRAMES:5 STDERR_FLOOD"
+$chB2 = New-Dir "scenario-b2\Series\Chapter 1"
+New-FakeAvifIn -DirPath $chB2 -Name "flood.avif" -Frames 5 | Out-Null
+[System.IO.File]::AppendAllText((Join-Path $chB2 "flood.avif"), "`nSTDERR_FLOOD")
 
 $runspaceB2 = [runspacefactory]::CreateRunspace()
 $runspaceB2.Open()
 $psB2 = [PowerShell]::Create()
 $psB2.Runspace = $runspaceB2
 $null = $psB2.AddScript({
-    param($ModulesDir, $MagickExe, $FilePath)
+    param($ModulesDir, $MagickExe, $LibraryPath)
+    . (Join-Path $ModulesDir "AbortPipeline.ps1")
+    . (Join-Path $ModulesDir "LeafDirectoryDiscovery.ps1")
+    . (Join-Path $ModulesDir "CleanConsoleRendering.ps1")
+    . (Join-Path $ModulesDir "ChapterDispatch.ps1")
     . (Join-Path $ModulesDir "AnimatedConversionPipeline.ps1")
     function Write-Log { param([string]$Message, [string]$Level = "Info") }
     function Remove-Source {
@@ -372,13 +391,13 @@ $null = $psB2.AddScript({
         return $true
     }
     $script:PermanentDelete = $true
-    Convert-AnimatedBatch -AnimatedFiles @((Get-Item -LiteralPath $FilePath)) -MagickExe $MagickExe -AnimatedThreads 2 -CancelToken ([System.Threading.CancellationToken]::None)
-}).AddArgument($modulesDirAC).AddArgument($fakeMagickExe).AddArgument($fileB2.FullName)
+    Invoke-LooseAnimatedConversionPipeline -Path $LibraryPath -MagickExe $MagickExe -AnimatedThreads 2 -FullLogging $false
+}).AddArgument($modulesDirAC).AddArgument($fakeMagickExe).AddArgument((Join-Path $scratchDir "scenario-b2"))
 
 $handleB2 = $psB2.BeginInvoke()
 $completedB2 = $handleB2.AsyncWaitHandle.WaitOne(15000)
 if ($completedB2) {
-    $resultB2 = $psB2.EndInvoke($handleB2)[0]
+    $totalsB2 = $psB2.EndInvoke($handleB2)[0]
 } else {
     $psB2.Stop()
 }
@@ -386,9 +405,9 @@ $psB2.Dispose()
 $runspaceB2.Close()
 $runspaceB2.Dispose()
 
-Test-Assert $completedB2 "Convert-AnimatedBatch returned within 15s instead of hanging on the stderr flood"
+Test-Assert $completedB2 "the pipeline returned within 15s instead of hanging on the stderr flood"
 if ($completedB2) {
-    Test-Assert ($resultB2.ConvertedCount -eq 1) ("the file still converted successfully despite the stderr flood (got ConvertedCount=" + $resultB2.ConvertedCount + ")")
+    Test-Assert ($totalsB2.ConvertedSuccess -eq 1) ("the file still converted successfully despite the stderr flood (got ConvertedSuccess=" + $totalsB2.ConvertedSuccess + ")")
 }
 Write-Host ""
 
@@ -401,7 +420,8 @@ Write-Host ""
 #  unconditionally.
 # ==============================================================================
 Write-Host "=== Scenario B3: an already-gone source is not miscounted as deleted ===" -ForegroundColor Cyan
-$fileB3 = New-FakeAvif -Name "chapter-b3\page1.avif" -Content "FRAMES:8"
+$chB3 = New-Dir "scenario-b3\Series\Chapter 1"
+New-FakeAvifIn -DirPath $chB3 -Name "page1.avif" -Frames 8 | Out-Null
 
 $realRemoveSourceB3 = ${function:Remove-Source}
 function Remove-Source {
@@ -409,56 +429,59 @@ function Remove-Source {
     return $false
 }
 try {
-    $resultB3 = Convert-AnimatedBatch -AnimatedFiles @($fileB3) -MagickExe $fakeMagickExe -AnimatedThreads 2 -CancelToken ([System.Threading.CancellationToken]::None)
+    $totalsB3 = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-b3") -MagickExe $fakeMagickExe -AnimatedThreads 2 -FullLogging $false
 } finally {
     ${function:Remove-Source} = $realRemoveSourceB3
 }
 
-Test-Assert ($resultB3.ConvertedCount -eq 1) "sanity check: the conversion itself still succeeded"
-Test-Assert ($resultB3.DeletedCount -eq 0) ("DeletedCount stays 0, not falsely incremented, when Remove-Source reports the source already gone (got " + $resultB3.DeletedCount + ")")
+Test-Assert ($totalsB3.ConvertedSuccess -eq 1) "sanity check: the conversion itself still succeeded"
+Test-Assert ($totalsB3.DeletedSuccess -eq 0) ("DeletedSuccess stays 0, not falsely incremented, when Remove-Source reports the source already gone (got " + $totalsB3.DeletedSuccess + ")")
 Write-Host ""
 
 # ==============================================================================
 #  Scenario C: static AVIF is left entirely untouched
 # ==============================================================================
 Write-Host "=== Scenario C: static AVIF left untouched ===" -ForegroundColor Cyan
-$fileC = New-FakeAvif -Name "static-c.avif" -Content "FRAMES:1"
-$resultC = Convert-AnimatedBatch -AnimatedFiles @($fileC) -MagickExe $fakeMagickExe -AnimatedThreads 2 -CancelToken ([System.Threading.CancellationToken]::None)
+$chC = New-Dir "scenario-c\Series\Chapter 1"
+$fileC = Get-Item -LiteralPath (New-FakeAvifIn -DirPath $chC -Name "static.avif" -Frames 1)
+$totalsC = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-c") -MagickExe $fakeMagickExe -AnimatedThreads 2 -FullLogging $false
 
-Test-Assert ($resultC.StaticSkippedCount -eq 1 -and $resultC.ConvertedCount -eq 0) "counted as StaticSkipped, not converted"
+Test-Assert ($totalsC.StaticSkippedCount -eq 1 -and $totalsC.ConvertedSuccess -eq 0) "counted as StaticSkipped, not converted"
 Test-Assert (Test-Path -LiteralPath $fileC.FullName) "the static source file was NOT deleted"
 $webpC = [System.IO.Path]::ChangeExtension($fileC.FullName, ".webp")
 Test-Assert (-not (Test-Path -LiteralPath $webpC)) "no .webp was ever created for a static AVIF"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario D: -DoAnimatedOverwrite $false skips a file whose output
+#  Scenario D: -AnimatedOverwrite $false skips a file whose output
 #  already exists, without even inspecting it
 # ==============================================================================
 Write-Host "=== Scenario D: skip when output exists and Overwrite is off ===" -ForegroundColor Cyan
-$fileD = New-FakeAvif -Name "chapter-d\page1.avif" -Content "FRAMES:8"
+$chD = New-Dir "scenario-d\Series\Chapter 1"
+$fileD = Get-Item -LiteralPath (New-FakeAvifIn -DirPath $chD -Name "page1.avif" -Frames 8)
 $webpD = [System.IO.Path]::ChangeExtension($fileD.FullName, ".webp")
 Set-Content -LiteralPath $webpD -Value "pre-existing webp" -Encoding UTF8 -NoNewline
 
-$resultD = Convert-AnimatedBatch -AnimatedFiles @($fileD) -MagickExe $fakeMagickExe -AnimatedThreads 2 -DoAnimatedOverwrite $false -CancelToken ([System.Threading.CancellationToken]::None)
+$totalsD = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-d") -MagickExe $fakeMagickExe -AnimatedThreads 2 -AnimatedOverwrite $false -FullLogging $false
 
-Test-Assert ($resultD.SkippedCount -eq 1 -and $resultD.ConvertedCount -eq 0) "counted as Skipped, not converted"
+Test-Assert ($totalsD.ConvertedSkipped -eq 1 -and $totalsD.ConvertedSuccess -eq 0) "counted as Skipped, not converted"
 Test-Assert ((Get-Content -LiteralPath $webpD -Raw) -eq "pre-existing webp") "the existing output was left untouched"
 Test-Assert (Test-Path -LiteralPath $fileD.FullName) "the source file was NOT deleted (never dispatched)"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario E: -DoAnimatedOverwrite $true reconverts even when the
+#  Scenario E: -AnimatedOverwrite $true reconverts even when the
 #  output already exists
 # ==============================================================================
 Write-Host "=== Scenario E: Overwrite `$true reconverts an existing output ===" -ForegroundColor Cyan
-$fileE = New-FakeAvif -Name "chapter-e\page1.avif" -Content "FRAMES:8"
+$chE = New-Dir "scenario-e\Series\Chapter 1"
+$fileE = Get-Item -LiteralPath (New-FakeAvifIn -DirPath $chE -Name "page1.avif" -Frames 8)
 $webpE = [System.IO.Path]::ChangeExtension($fileE.FullName, ".webp")
 Set-Content -LiteralPath $webpE -Value "stale webp" -Encoding UTF8
 
-$resultE = Convert-AnimatedBatch -AnimatedFiles @($fileE) -MagickExe $fakeMagickExe -AnimatedThreads 2 -DoAnimatedOverwrite $true -CancelToken ([System.Threading.CancellationToken]::None)
+$totalsE = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-e") -MagickExe $fakeMagickExe -AnimatedThreads 2 -AnimatedOverwrite $true -FullLogging $false
 
-Test-Assert ($resultE.ConvertedCount -eq 1) "reconverted despite the existing output"
+Test-Assert ($totalsE.ConvertedSuccess -eq 1) "reconverted despite the existing output"
 Test-Assert ((Get-Content -LiteralPath $webpE -Raw) -ne "stale webp") "the output file's content actually changed"
 Write-Host ""
 
@@ -466,17 +489,18 @@ Write-Host ""
 #  Scenario F: conversion failure - not deleted, no leftover partial webp
 # ==============================================================================
 Write-Host "=== Scenario F: conversion failure ===" -ForegroundColor Cyan
-$fileF = New-FakeAvif -Name "chapter-f\page1.avif" -Content "FRAMES:8`nFAIL_MAGICK"
-$resultF = Convert-AnimatedBatch -AnimatedFiles @($fileF) -MagickExe $fakeMagickExe -AnimatedThreads 2 -CancelToken ([System.Threading.CancellationToken]::None)
+$chF = New-Dir "scenario-f\Series\Chapter 1"
+$fileF = Get-Item -LiteralPath (New-FakeAvifIn -DirPath $chF -Name "page1.avif" -Frames 8 -Fail $true)
+$totalsF = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-f") -MagickExe $fakeMagickExe -AnimatedThreads 2 -FullLogging $false
 
-Test-Assert ($resultF.FailedCount -eq 1 -and $resultF.ConvertedCount -eq 0) "counted as failed"
+Test-Assert ($totalsF.ConvertedFail -eq 1 -and $totalsF.ConvertedSuccess -eq 0) "counted as failed"
 Test-Assert (Test-Path -LiteralPath $fileF.FullName) "the source was NOT deleted after a failure"
 $webpF = [System.IO.Path]::ChangeExtension($fileF.FullName, ".webp")
 Test-Assert (-not (Test-Path -LiteralPath $webpF)) "no leftover partial .webp"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario F2 (2026-08-31 fix): -DoAnimatedOverwrite $true points a
+#  Scenario F2 (2026-08-31 fix): -AnimatedOverwrite $true points a
 #  (now-failing) re-conversion at an already-existing, good .webp from a
 #  prior successful run - the failure must NOT delete that pre-existing
 #  file. Before the fix, the failure catch deleted $Job.WebpPath
@@ -484,19 +508,20 @@ Write-Host ""
 #  output over an unrelated later failure.
 # ==============================================================================
 Write-Host "=== Scenario F2: a failed re-conversion does NOT delete the pre-existing good .webp it was overwriting ===" -ForegroundColor Cyan
-$fileF2 = New-FakeAvif -Name "chapter-f2\page1.avif" -Content "FRAMES:8`nFAIL_MAGICK"
+$chF2 = New-Dir "scenario-f2\Series\Chapter 1"
+$fileF2 = Get-Item -LiteralPath (New-FakeAvifIn -DirPath $chF2 -Name "page1.avif" -Frames 8 -Fail $true)
 $webpF2 = [System.IO.Path]::ChangeExtension($fileF2.FullName, ".webp")
 "pre-existing good webp bytes from a prior successful run" | Set-Content -LiteralPath $webpF2 -Encoding UTF8 -NoNewline
 
-$resultF2 = Convert-AnimatedBatch -AnimatedFiles @($fileF2) -MagickExe $fakeMagickExe -AnimatedThreads 2 -DoAnimatedOverwrite $true -CancelToken ([System.Threading.CancellationToken]::None)
+$totalsF2 = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-f2") -MagickExe $fakeMagickExe -AnimatedThreads 2 -AnimatedOverwrite $true -FullLogging $false
 
-Test-Assert ($resultF2.FailedCount -eq 1 -and $resultF2.ConvertedCount -eq 0) "counted as failed"
+Test-Assert ($totalsF2.ConvertedFail -eq 1 -and $totalsF2.ConvertedSuccess -eq 0) "counted as failed"
 Test-Assert (Test-Path -LiteralPath $webpF2) "the pre-existing .webp still exists - NOT deleted by the failed re-conversion attempt"
 Test-Assert ((Get-Content -LiteralPath $webpF2 -Raw) -eq "pre-existing good webp bytes from a prior successful run") "the pre-existing .webp's own content survives untouched"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario F3 (2026-08-31 fix): -DoAnimatedOverwrite $true points a
+#  Scenario F3 (2026-08-31 fix): -AnimatedOverwrite $true points a
 #  re-conversion at an already-existing, good .webp - the conversion
 #  attempt actually WRITES PARTIAL GARBAGE to its output path before
 #  crashing (unlike F2's FAIL_MAGICK, which fails before writing
@@ -507,16 +532,18 @@ Write-Host ""
 #  existing file, only replacing the real path after a verified success.
 # ==============================================================================
 Write-Host "=== Scenario F3: a crash mid-write does NOT corrupt the pre-existing good .webp (magick targets a temp path, not the original) ===" -ForegroundColor Cyan
-$fileF3 = New-FakeAvif -Name "chapter-f3\page1.avif" -Content "FRAMES:8`nFAIL_MAGICK_AFTER_PARTIAL_WRITE"
-$webpF3 = [System.IO.Path]::ChangeExtension($fileF3.FullName, ".webp")
+$chF3 = New-Dir "scenario-f3\Series\Chapter 1"
+$fileF3 = Join-Path $chF3 "page1.avif"
+[System.IO.File]::WriteAllText($fileF3, "FRAMES:8`nFAIL_MAGICK_AFTER_PARTIAL_WRITE")
+$webpF3 = [System.IO.Path]::ChangeExtension($fileF3, ".webp")
 "pre-existing good webp bytes from a prior successful run" | Set-Content -LiteralPath $webpF3 -Encoding UTF8 -NoNewline
 
-$resultF3 = Convert-AnimatedBatch -AnimatedFiles @($fileF3) -MagickExe $fakeMagickExe -AnimatedThreads 2 -DoAnimatedOverwrite $true -CancelToken ([System.Threading.CancellationToken]::None)
+$totalsF3 = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-f3") -MagickExe $fakeMagickExe -AnimatedThreads 2 -AnimatedOverwrite $true -FullLogging $false
 
-Test-Assert ($resultF3.FailedCount -eq 1 -and $resultF3.ConvertedCount -eq 0) "counted as failed"
+Test-Assert ($totalsF3.ConvertedFail -eq 1 -and $totalsF3.ConvertedSuccess -eq 0) "counted as failed"
 Test-Assert (Test-Path -LiteralPath $webpF3) "the pre-existing .webp still exists"
 Test-Assert ((Get-Content -LiteralPath $webpF3 -Raw) -eq "pre-existing good webp bytes from a prior successful run") "the pre-existing .webp's own content survives BYTE-FOR-BYTE untouched - magick's crash-mid-write landed on a temp file, never the original"
-$leftoverTempF3 = @(Get-ChildItem -LiteralPath (Split-Path -Path $webpF3 -Parent) -Filter "*_tmp_overwrite.webp" -File -ErrorAction SilentlyContinue)
+$leftoverTempF3 = @(Get-ChildItem -LiteralPath $chF3 -Filter "*_tmp_overwrite.webp" -File -ErrorAction SilentlyContinue)
 Test-Assert (@($leftoverTempF3).Count -eq 0) "the temp file magick actually wrote garbage to was cleaned up, not left behind"
 Write-Host ""
 
@@ -525,36 +552,41 @@ Write-Host ""
 #  conversion attempted, source untouched
 # ==============================================================================
 Write-Host "=== Scenario G: inspection failure ===" -ForegroundColor Cyan
-$fileG = New-FakeAvif -Name "chapter-g\page1.avif" -Content "FAIL_IDENTIFY"
-$resultG = Convert-AnimatedBatch -AnimatedFiles @($fileG) -MagickExe $fakeMagickExe -AnimatedThreads 2 -CancelToken ([System.Threading.CancellationToken]::None)
+$chG = New-Dir "scenario-g\Series\Chapter 1"
+$fileG = Join-Path $chG "page1.avif"
+[System.IO.File]::WriteAllText($fileG, "FAIL_IDENTIFY")
+$totalsG = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-g") -MagickExe $fakeMagickExe -AnimatedThreads 2 -FullLogging $false
 
-Test-Assert ($resultG.InspectFailedCount -eq 1 -and $resultG.ConvertedCount -eq 0 -and $resultG.FailedCount -eq 0) "counted distinctly as InspectFailed, not a conversion failure"
-Test-Assert (Test-Path -LiteralPath $fileG.FullName) "the source was untouched"
+Test-Assert ($totalsG.InspectFailedCount -eq 1 -and $totalsG.ConvertedSuccess -eq 0 -and $totalsG.ConvertedFail -eq 0) "counted distinctly as InspectFailed, not a conversion failure"
+Test-Assert (Test-Path -LiteralPath $fileG) "the source was untouched"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario H: -DoAnimatedDeleteSource $false keeps the source after a
+#  Scenario H: -AnimatedDeleteSource $false keeps the source after a
 #  successful conversion
 # ==============================================================================
-Write-Host "=== Scenario H: DoAnimatedDeleteSource `$false keeps the source ===" -ForegroundColor Cyan
-$fileH = New-FakeAvif -Name "chapter-h\page1.avif" -Content "FRAMES:8"
-$resultH = Convert-AnimatedBatch -AnimatedFiles @($fileH) -MagickExe $fakeMagickExe -AnimatedThreads 2 -DoAnimatedDeleteSource $false -CancelToken ([System.Threading.CancellationToken]::None)
+Write-Host "=== Scenario H: AnimatedDeleteSource `$false keeps the source ===" -ForegroundColor Cyan
+$chH = New-Dir "scenario-h\Series\Chapter 1"
+$fileH = Get-Item -LiteralPath (New-FakeAvifIn -DirPath $chH -Name "page1.avif" -Frames 8)
+$totalsH = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-h") -MagickExe $fakeMagickExe -AnimatedThreads 2 -AnimatedDeleteSource $false -FullLogging $false
 
-Test-Assert ($resultH.ConvertedCount -eq 1 -and $resultH.DeletedCount -eq 0) "converted but not deleted"
+Test-Assert ($totalsH.ConvertedSuccess -eq 1 -and $totalsH.DeletedSuccess -eq 0) "converted but not deleted"
 Test-Assert (Test-Path -LiteralPath $fileH.FullName) "the source file is still there"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario I: -DoAnimatedLossless controls the actual magick args passed
+#  Scenario I: -AnimatedLossless controls the actual magick args passed
 # ==============================================================================
 Write-Host "=== Scenario I: Lossless vs Quality args ===" -ForegroundColor Cyan
-$fileI1 = New-FakeAvif -Name "chapter-i\lossless.avif" -Content "FRAMES:8"
-Convert-AnimatedBatch -AnimatedFiles @($fileI1) -MagickExe $fakeMagickExe -AnimatedThreads 2 -DoAnimatedLossless $true -CancelToken ([System.Threading.CancellationToken]::None) | Out-Null
+$chI1 = New-Dir "scenario-i-lossless\Series\Chapter 1"
+$fileI1 = Get-Item -LiteralPath (New-FakeAvifIn -DirPath $chI1 -Name "lossless.avif" -Frames 8)
+$null = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-i-lossless") -MagickExe $fakeMagickExe -AnimatedThreads 2 -AnimatedLossless $true -FullLogging $false
 $argsI1 = Get-Content -LiteralPath ([System.IO.Path]::ChangeExtension($fileI1.FullName, ".webp")) -Raw
 Test-Assert ($argsI1 -match "webp:lossless=true") "lossless mode passed the lossless define"
 
-$fileI2 = New-FakeAvif -Name "chapter-i\quality.avif" -Content "FRAMES:8"
-Convert-AnimatedBatch -AnimatedFiles @($fileI2) -MagickExe $fakeMagickExe -AnimatedThreads 2 -DoAnimatedLossless $false -AnimatedQuality 77 -CancelToken ([System.Threading.CancellationToken]::None) | Out-Null
+$chI2 = New-Dir "scenario-i-quality\Series\Chapter 1"
+$fileI2 = Get-Item -LiteralPath (New-FakeAvifIn -DirPath $chI2 -Name "quality.avif" -Frames 8)
+$null = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-i-quality") -MagickExe $fakeMagickExe -AnimatedThreads 2 -AnimatedLossless $false -AnimatedQuality 77 -FullLogging $false
 $argsI2 = Get-Content -LiteralPath ([System.IO.Path]::ChangeExtension($fileI2.FullName, ".webp")) -Raw
 Test-Assert ($argsI2 -match "-quality 77") "lossy mode passed the configured quality value"
 Write-Host ""
@@ -563,9 +595,10 @@ Write-Host ""
 #  Scenario J: multiple files convert together (AnimatedThreads > 1)
 # ==============================================================================
 Write-Host "=== Scenario J: multiple files convert together ===" -ForegroundColor Cyan
-$filesJ = 1..4 | ForEach-Object { New-FakeAvif -Name ("chapter-j\page" + $_ + ".avif") -Content "FRAMES:6" }
-$resultJ = Convert-AnimatedBatch -AnimatedFiles $filesJ -MagickExe $fakeMagickExe -AnimatedThreads 4 -CancelToken ([System.Threading.CancellationToken]::None)
-Test-Assert ($resultJ.ConvertedCount -eq 4 -and $resultJ.FailedCount -eq 0) ("all 4 converted (got " + $resultJ.ConvertedCount + ")")
+$chJ = New-Dir "scenario-j\Series\Chapter 1"
+1..4 | ForEach-Object { New-FakeAvifIn -DirPath $chJ -Name ("page" + $_ + ".avif") -Frames 6 | Out-Null }
+$totalsJ = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-j") -MagickExe $fakeMagickExe -AnimatedThreads 4 -FullLogging $false
+Test-Assert ($totalsJ.ConvertedSuccess -eq 4 -and $totalsJ.ConvertedFail -eq 0) ("all 4 converted (got " + $totalsJ.ConvertedSuccess + ")")
 Write-Host ""
 
 # ==============================================================================
@@ -573,10 +606,12 @@ Write-Host ""
 #  batch progress once it exceeds -HeartbeatIntervalSeconds
 # ==============================================================================
 Write-Host "=== Scenario K: heartbeat logging ===" -ForegroundColor Cyan
-$fileK = New-FakeAvif -Name "chapter-k\slow.avif" -Content "FRAMES:6`nSLEEP_MS:1500"
+$chK = New-Dir "scenario-k\Series\Chapter 1"
+$fileK = Join-Path $chK "slow.avif"
+[System.IO.File]::WriteAllText($fileK, "FRAMES:6`nSLEEP_MS:1500")
 $script:logCalls.Clear()
-$resultK = Convert-AnimatedBatch -AnimatedFiles @($fileK) -MagickExe $fakeMagickExe -AnimatedThreads 1 -HeartbeatIntervalSeconds 1 -CancelToken ([System.Threading.CancellationToken]::None)
-Test-Assert ($resultK.ConvertedCount -eq 1) "the slow job still completed successfully"
+$totalsK = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-k") -MagickExe $fakeMagickExe -AnimatedThreads 1 -HeartbeatIntervalSeconds 1 -FullLogging $false
+Test-Assert ($totalsK.ConvertedSuccess -eq 1) "the slow job still completed successfully"
 $heartbeatLines = @($script:logCalls | Where-Object { $_ -like "*Still converting*" })
 Test-Assert ($heartbeatLines.Count -ge 1) "at least one heartbeat line was logged for the slow job"
 Test-Assert (($heartbeatLines -join "`n") -match "batch progress: \d+/1 done") "the heartbeat line includes batch-level progress"
@@ -584,25 +619,24 @@ Write-Host ""
 
 # ==============================================================================
 #  Scenario L: cancellation mid-batch - graceful drain lets an in-flight
-#  job finish, force-kill triggers only past -AbortTimeoutSeconds
+#  job finish, force-kill triggers only past -AbortTimeoutSeconds. Uses
+#  the same Test-AbortSignal call-count trigger as Scenario U further
+#  down (a real still-sleeping fake magick process, cancelled via a
+#  deterministic call count rather than a wall-clock race) - see that
+#  scenario's own header for why call 4 lands once the job is genuinely
+#  in flight.
 # ==============================================================================
 Write-Host "=== Scenario L: cancellation mid-batch (graceful drain) ===" -ForegroundColor Cyan
-$fileL = New-FakeAvif -Name "chapter-l\slow.avif" -Content "FRAMES:6`nSLEEP_MS:500"
-$ctsL = New-Object System.Threading.CancellationTokenSource
-$pollCallbackL = {
-    param($inFlight)
-    # Cancel only once the slow job is actually dispatched and in flight -
-    # the poll callback also fires once BEFORE the very first dispatch
-    # (nothing running yet), and cancelling there would prevent the job
-    # from ever starting at all, which isn't what this scenario tests.
-    if ($inFlight.Count -gt 0) { $ctsL.Cancel() }
-}.GetNewClosure()
+Reset-AbortState
+$chL = New-Dir "scenario-l\Series\Chapter 1"
+$fileL = Join-Path $chL "slow.avif"
+[System.IO.File]::WriteAllText($fileL, "FRAMES:6`nSLEEP_MS:500")
 
-$resultL = Convert-AnimatedBatch -AnimatedFiles @($fileL) -MagickExe $fakeMagickExe -AnimatedThreads 1 `
-    -CancelToken $ctsL.Token -AbortPollCallback $pollCallbackL -AbortTimeoutSeconds 10
+$script:testAbortSignalTriggerAt = 4
+$totalsL = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-l") -MagickExe $fakeMagickExe -AnimatedThreads 1 -FullLogging $false -AbortTimeoutSeconds 10
+Reset-AbortState
 
-Test-Assert ($resultL.ConvertedCount -eq 1 -and $resultL.ForceKilledCount -eq 0) "the in-flight job was allowed to finish naturally during the graceful drain, not force-killed"
-$ctsL.Dispose()
+Test-Assert ($totalsL.ConvertedSuccess -eq 1 -and $totalsL.ForceKilledCount -eq 0) "the in-flight job was allowed to finish naturally during the graceful drain, not force-killed"
 Write-Host ""
 
 # ==============================================================================
@@ -610,36 +644,25 @@ Write-Host ""
 #  NOT the graceful-drain-lets-it-finish path Scenario L covers) must not
 #  delete a pre-existing good .webp it was overwriting. Before the fix,
 #  this separate cleanup site deleted $j.WebpPath unconditionally whenever
-#  it existed - the same bug Scenario F2 (Convert-AnimatedBatch's own
-#  failure catch) already covers, left open on this different code path.
-#  SLEEP_MS deliberately exceeds -AbortTimeoutSeconds so the job is still
-#  running when the drain gives up and force-kills it.
+#  it existed - the same bug Scenario F2 already covers, left open on this
+#  different code path. SLEEP_MS deliberately exceeds -AbortTimeoutSeconds
+#  so the job is still running when the drain gives up and force-kills it.
 # ==============================================================================
 Write-Host "=== Scenario L2: a force-killed job does NOT delete the pre-existing good .webp it was overwriting ===" -ForegroundColor Cyan
-$fileL2 = New-FakeAvif -Name "chapter-l2\slow.avif" -Content "FRAMES:6`nSLEEP_MS:3000"
-$webpL2 = [System.IO.Path]::ChangeExtension($fileL2.FullName, ".webp")
+Reset-AbortState
+$chL2 = New-Dir "scenario-l2\Series\Chapter 1"
+$fileL2 = Join-Path $chL2 "slow.avif"
+[System.IO.File]::WriteAllText($fileL2, "FRAMES:6`nSLEEP_MS:3000")
+$webpL2 = [System.IO.Path]::ChangeExtension($fileL2, ".webp")
 "pre-existing good webp bytes from a prior successful run" | Set-Content -LiteralPath $webpL2 -Encoding UTF8 -NoNewline
-$ctsL2 = New-Object System.Threading.CancellationTokenSource
-$pollCallbackL2 = {
-    param($inFlight)
-    if ($inFlight.Count -gt 0) { $ctsL2.Cancel() }
-}.GetNewClosure()
 
-$resultL2 = Convert-AnimatedBatch -AnimatedFiles @($fileL2) -MagickExe $fakeMagickExe -AnimatedThreads 1 -DoAnimatedOverwrite $true `
-    -CancelToken $ctsL2.Token -AbortPollCallback $pollCallbackL2 -AbortTimeoutSeconds 1
-$ctsL2.Dispose()
+$script:testAbortSignalTriggerAt = 4
+$totalsL2 = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-l2") -MagickExe $fakeMagickExe -AnimatedThreads 1 -AnimatedOverwrite $true -FullLogging $false -AbortTimeoutSeconds 1
+Reset-AbortState
 
-Test-Assert ($resultL2.ForceKilledCount -eq 1) ("sanity check: the job was actually force-killed, not allowed to finish (got ForceKilledCount=" + $resultL2.ForceKilledCount + ")")
+Test-Assert ($totalsL2.ForceKilledCount -eq 1) ("sanity check: the job was actually force-killed, not allowed to finish (got ForceKilledCount=" + $totalsL2.ForceKilledCount + ")")
 Test-Assert (Test-Path -LiteralPath $webpL2) "the pre-existing .webp still exists - NOT deleted by the force-kill cleanup"
 Test-Assert ((Get-Content -LiteralPath $webpL2 -Raw) -eq "pre-existing good webp bytes from a prior successful run") "the pre-existing .webp's own content survives untouched"
-Write-Host ""
-
-# ==============================================================================
-#  Scenario M: empty input returns a clean zeroed result, no error
-# ==============================================================================
-Write-Host "=== Scenario M: empty input ===" -ForegroundColor Cyan
-$resultM = Convert-AnimatedBatch -AnimatedFiles @() -MagickExe $fakeMagickExe -AnimatedThreads 2 -CancelToken ([System.Threading.CancellationToken]::None)
-Test-Assert ($resultM.ConvertedCount -eq 0 -and $resultM.FailedCount -eq 0) "no work, no error, for an empty batch"
 Write-Host ""
 
 # ==============================================================================
@@ -906,220 +929,55 @@ Test-Assert $disposedW "the Cts was disposed via the finally block despite the t
 Write-Host ""
 
 # ==============================================================================
-#  Scenario X (2026-08-31 fix, mirrors ImageConversionPipeline.ps1's own
-#  Scenario AF, including the data-loss correction found there): the outer
-#  dispatch-loop catch's own bulk cleanup iterates a $running list that
-#  can be STALE if Complete-AnimatedConversionJob throws partway through
-#  the poll loop's per-pass foreach - it may still list a job that ALREADY
-#  completed successfully earlier in the SAME pass (source deleted, real
-#  .webp on disk) alongside the job that throws.
+#  Scenarios X/Z/AA/AB (2026-09-14, dead-code-removal, Todo.md's matching
+#  entry) removed outright rather than ported: X/AA/AB proved generic
+#  dispatch-loop mechanics (stale-list SlotReleased guard, straggler-drain
+#  throw cleanup, IsCloseEvent force-kill) that now live in the SHARED
+#  Invoke-ChapterDispatch, not this module - that coverage now lives in
+#  ChapterDispatch.Harness.ps1's Scenarios 11/13/12. Z proved a bug shape
+#  specific to Complete-AnimatedConversionJob's own internal structure (it
+#  set SlotReleased in its OWN try/finally, before its success/failure
+#  logic could throw) - the live twin, Complete-AnimatedDispatchJob, has
+#  no such internal try/finally; SlotReleased is now set by
+#  Invoke-ChapterDispatch itself, only after JobFinalize returns without
+#  throwing, so the specific "already-SlotReleased-but-still-orphaned-temp-
+#  file" condition Z exercised can no longer occur - nothing to port.
+#
+#  Scenario Y ported to the live pipeline below, analogous to
+#  ImageConversionPipeline.Harness.ps1's own ported Scenario AG: what's
+#  still THIS pipeline's own responsibility, and wasn't otherwise proven
+#  through the real pipeline, is that its own -JobAbortCleanup closure
+#  actually deletes a force-killed job's partial output - proven here as a
+#  real end-to-end abort/force-kill using the same Test-AbortSignal
+#  call-count trigger as Scenario L above and Scenario U below.
 # ==============================================================================
-Write-Host "=== Scenario X: a same-pass throw does not delete an EARLIER job's already-converted output ===" -ForegroundColor Cyan
-$chX = New-Dir "scenario-x\Series\Chapter 1"
-# Both jobs get a small, MATCHING SLEEP_MS (2026-08-31 tuning) - each AVIF
-# job spawns its own `identify` classification call SEQUENTIALLY before
-# its real conversion process starts, so without this, jobA (dispatched
-# first, less overhead ahead of it) reliably finishes and gets swept out
-# of $running via the poll loop's own reassignment in an EARLIER pass than
-# jobB's - by the time jobB throws, $running no longer contains jobA at
-# all, so the intended stale-list condition (BOTH jobs still in $running
-# when the throw hits) never actually happens (confirmed empirically: a
-# 0ms sleep on neither job showed this exact miss; a 150ms sleep on ONLY
-# jobA overshot the other way - jobA was still genuinely mid-sleep, not
-# yet exited, when jobB's near-instant conversion had already finished
-# and thrown). A short, equal sleep on both keeps neither exited at the
-# very first (~0ms-elapsed) poll check, but both are reliably exited by
-# the second (50ms-elapsed) poll check, so the SAME foreach pass processes
-# jobA's completion and jobB's throw together - the real condition being
-# tested.
-$fileX1Path = Join-Path $chX "jobA_x.avif"
-[System.IO.File]::WriteAllText($fileX1Path, "FRAMES:5`nSLEEP_MS:20")
-$fileX1 = Get-Item -LiteralPath $fileX1Path
-$expectedWebpX = Join-Path $chX "jobA_x.webp"
-$fileX2Path = Join-Path $chX "jobB_x.avif"
-[System.IO.File]::WriteAllText($fileX2Path, "FRAMES:5`nSLEEP_MS:20`nSTDOUT_MARKER")
-$fileX2 = Get-Item -LiteralPath $fileX2Path
-
-$realWriteLogFnX = ${function:Write-Log}
-function Write-Log {
-    param([string]$Message, [ValidateSet("Info", "Warn", "Error", "Summary")][string]$Level = "Info")
-    if ($Message -like "*magick stdout for*jobB_x.avif*") { throw "simulated Write-Log failure on jobB's own UNGUARDED stdout-log call" }
-    & $script:realWriteLogFnX -Message $Message -Level $Level
-}
-$script:realWriteLogFnX = $realWriteLogFnX
-
-$threwX = $false
-try {
-    $null = Convert-AnimatedBatch -AnimatedFiles @($fileX1, $fileX2) -MagickExe $fakeMagickExe -AnimatedThreads 5 -DoFullLogging $true `
-        -CancelToken ([System.Threading.CancellationToken]::None)
-} catch {
-    $threwX = $true
-} finally {
-    ${function:Write-Log} = $realWriteLogFnX
-}
-
-Test-Assert $threwX "the injected Write-Log failure propagated out of Convert-AnimatedBatch"
-Test-Assert (Test-Path -LiteralPath $expectedWebpX) "jobA's already-converted .webp survived - the outer catch's force-cleanup must not touch a job that already completed successfully earlier in the same poll pass"
-Write-Host ""
-
-# ==============================================================================
-#  Scenario Y (2026-08-31 fix, mirrors ImageConversionPipeline.ps1's own
-#  Scenario AG): the outer catch must still delete a partial output left
-#  by a job that's genuinely still running (force-killed) when the catch
-#  fires - a non-zero-byte, incomplete .webp left behind would otherwise
-#  sit on disk as debris (this engine has no "stale source" reconciliation
-#  concept the way the image engine does, but leaving a partial/corrupt
-#  .webp behind is still real debris a future scan could pick up).
-# ==============================================================================
-Write-Host "=== Scenario Y: the outer catch deletes a partial output left by a force-killed still-running job ===" -ForegroundColor Cyan
+Write-Host "=== Scenario Y: a force-killed job's partial output is cleaned up by the pipeline's own JobAbortCleanup ===" -ForegroundColor Cyan
+Reset-AbortState
 $chY = New-Dir "scenario-y\Series\Chapter 1"
-$fileY1Path = Join-Path $chY "stillrunning_y.avif"
-[System.IO.File]::WriteAllText($fileY1Path, "FRAMES:5`nPARTIAL_THEN_SLEEP:5000")
-$fileY1 = Get-Item -LiteralPath $fileY1Path
-$fileY2Path = Join-Path $chY "throws_y.avif"
-[System.IO.File]::WriteAllText($fileY2Path, "FRAMES:5`nSTDOUT_MARKER")
-$fileY2 = Get-Item -LiteralPath $fileY2Path
+$fileY = Join-Path $chY "stillrunning_y.avif"
+[System.IO.File]::WriteAllText($fileY, "FRAMES:5`nPARTIAL_THEN_SLEEP:5000")
 $expectedWebpY = Join-Path $chY "stillrunning_y.webp"
 
-$realWriteLogFnY = ${function:Write-Log}
-function Write-Log {
-    param([string]$Message, [ValidateSet("Info", "Warn", "Error", "Summary")][string]$Level = "Info")
-    if ($Message -like "*magick stdout for*throws_y.avif*") { throw "simulated Write-Log failure on the second job's UNGUARDED stdout-log call" }
-    & $script:realWriteLogFnY -Message $Message -Level $Level
+# Re-install the call-count spy (Scenario U's own teardown, above, already
+# restored the real Test-AbortSignal) - same idiom as
+# ImageConversionPipeline.Harness.ps1's ported Scenario AG.
+function Test-AbortSignal {
+    $script:testAbortSignalCallCount++
+    if ($script:testAbortSignalCallCount -eq $script:testAbortSignalTriggerAt) {
+        [ConsoleCtrl]::AbortRequested = $true
+    }
+    & $originalTestAbortSignal
 }
-$script:realWriteLogFnY = $realWriteLogFnY
+$script:testAbortSignalTriggerAt = 4
 
-$threwY = $false
-try {
-    $null = Convert-AnimatedBatch -AnimatedFiles @($fileY1, $fileY2) -MagickExe $fakeMagickExe -AnimatedThreads 5 -DoFullLogging $true `
-        -CancelToken ([System.Threading.CancellationToken]::None)
-} catch {
-    $threwY = $true
-} finally {
-    ${function:Write-Log} = $realWriteLogFnY
-}
+$totalsY = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-y") -MagickExe $fakeMagickExe -AnimatedThreads 2 -FullLogging $false -AbortTimeoutSeconds 1
 
-Test-Assert $threwY "the injected failure propagated out of Convert-AnimatedBatch"
-Test-Assert (-not (Test-Path -LiteralPath $expectedWebpY)) "the partial output left by the force-killed still-running job was deleted, not left as debris"
-Write-Host ""
+${function:Test-AbortSignal} = $originalTestAbortSignal
+Reset-AbortState
 
-# ==============================================================================
-#  Scenario Z (2026-08-31 fix, found by verifying today's own Scenario X/Y
-#  fix): a job in the -DoAnimatedOverwrite case whose OWN unguarded
-#  "magick stdout for" Write-Log call throws AFTER its finally already ran
-#  (SlotReleased=true) used to leave its "_tmp_overwrite.webp" scratch file
-#  on disk forever. Note the throw happens BEFORE the success-verification
-#  block that does the real File.Replace swap (a later verification pass
-#  caught an earlier version of this comment claiming the swap had already
-#  happened by then - it hasn't; magick wrote a complete, unverified temp
-#  file, nothing more) - $j.MagickOutputPath at throw time is still the
-#  TEMP path, never the pre-existing real .webp, so SlotReleased's guard on
-#  MagickOutputPath was never actually protecting anything in this
-#  specific scenario; TempOverwritePath's unconditional cleanup is what's
-#  under test here. A single job (no timing tricks needed - it's the only
-#  entry in $running when it throws) is enough to reproduce this.
-# ==============================================================================
-Write-Host "=== Scenario Z: an orphaned _tmp_overwrite.webp scratch file is cleaned up even when its own job already completed successfully ===" -ForegroundColor Cyan
-$chZ = New-Dir "scenario-z\Series\Chapter 1"
-$webpZPath = Join-Path $chZ "overwrite_z.webp"
-[System.IO.File]::WriteAllText($webpZPath, "pre-existing good webp bytes")
-$fileZPath = Join-Path $chZ "overwrite_z.avif"
-[System.IO.File]::WriteAllText($fileZPath, "FRAMES:5`nSTDOUT_MARKER")
-$fileZ = Get-Item -LiteralPath $fileZPath
-$expectedTempZ = Join-Path $chZ "overwrite_z_tmp_overwrite.webp"
-
-$realWriteLogFnZ = ${function:Write-Log}
-function Write-Log {
-    param([string]$Message, [ValidateSet("Info", "Warn", "Error", "Summary")][string]$Level = "Info")
-    if ($Message -like "*magick stdout for*overwrite_z.avif*") { throw "simulated Write-Log failure on the job's own UNGUARDED stdout-log call, AFTER its own finally already ran" }
-    & $script:realWriteLogFnZ -Message $Message -Level $Level
-}
-$script:realWriteLogFnZ = $realWriteLogFnZ
-
-$threwZ = $false
-try {
-    $null = Convert-AnimatedBatch -AnimatedFiles @($fileZ) -MagickExe $fakeMagickExe -AnimatedThreads 5 -DoFullLogging $true -DoAnimatedOverwrite $true `
-        -CancelToken ([System.Threading.CancellationToken]::None)
-} catch {
-    $threwZ = $true
-} finally {
-    ${function:Write-Log} = $realWriteLogFnZ
-}
-
-Test-Assert $threwZ "the injected failure propagated out of Convert-AnimatedBatch"
-Test-Assert (-not (Test-Path -LiteralPath $expectedTempZ)) "the orphaned _tmp_overwrite.webp scratch file was cleaned up, not left as permanent debris"
-Test-Assert (Test-Path -LiteralPath $webpZPath) "sanity check: the pre-existing real .webp was never touched by this job at all - magick wrote only to the separate temp path, confirming the deleted file above was genuinely the scratch file, not a misattributed real output"
-Write-Host ""
-
-# ==============================================================================
-#  Scenario AA (2026-08-31 addition, project owner approved as an easy
-#  fix mirroring the sibling module's own identical fix): the straggler-
-#  drain block (only reached after a real cancel, when $running.Count -gt 0)
-#  had no equivalent guard. The force-kill sub-block's own "Force-stopping
-#  N job(s)..." Write-Log call is the realistic trigger, unguarded - a job
-#  that never finishes within -AbortTimeoutSeconds (still genuinely
-#  running, SlotReleased never set) must still be force-killed/disposed/
-#  released by the new catch.
-# ==============================================================================
-Write-Host "=== Scenario AA: an unexpected throw during the straggler-drain's force-kill step still cleans up correctly ===" -ForegroundColor Cyan
-$chAA = New-Dir "scenario-aa\Series\Chapter 1"
-$fileAAPath = Join-Path $chAA "neverfinishes_aa.avif"
-[System.IO.File]::WriteAllText($fileAAPath, "FRAMES:5`nSLEEP_MS:30000")
-$fileAA = Get-Item -LiteralPath $fileAAPath
-$expectedWebpAA = Join-Path $chAA "neverfinishes_aa.webp"
-$ctsAA = [System.Threading.CancellationTokenSource]::new()
-$pollAA = { param($inFlight) if ($inFlight.Count -gt 0) { $ctsAA.Cancel() } }
-
-$realWriteLogFnAA = ${function:Write-Log}
-function Write-Log {
-    param([string]$Message, [ValidateSet("Info", "Warn", "Error", "Summary")][string]$Level = "Info")
-    if ($Message -like "*Force-stopping*") { throw "simulated Write-Log failure during the straggler-drain's own force-kill logging" }
-    & $script:realWriteLogFnAA -Message $Message -Level $Level
-}
-$script:realWriteLogFnAA = $realWriteLogFnAA
-
-$threwAA = $false
-try {
-    $null = Convert-AnimatedBatch -AnimatedFiles @($fileAA) -MagickExe $fakeMagickExe -AnimatedThreads 5 -DoFullLogging $false `
-        -CancelToken $ctsAA.Token -AbortPollCallback $pollAA -AbortTimeoutSeconds 1
-} catch {
-    $threwAA = $true
-} finally {
-    ${function:Write-Log} = $realWriteLogFnAA
-    $ctsAA.Dispose()
-}
-
-Test-Assert $threwAA "the injected failure propagated out of Convert-AnimatedBatch during the straggler-drain, not silently swallowed"
-Test-Assert (-not (Test-Path -LiteralPath $expectedWebpAA)) "no .webp was ever created for a job that was force-killed mid-sleep (sanity check - fake magick only writes output AFTER its SLEEP_MS completes)"
-Write-Host ""
-
-# ==============================================================================
-#  Scenario AB (2026-09-03 fix, real bug, live-reported and live-tested):
-#  the straggler-drain's wait-for-natural-completion loop must be skipped
-#  entirely when [ConsoleCtrl]::IsCloseEvent is true (a window-close
-#  abort), going straight to the force-kill block instead - same fix and
-#  reasoning as the sibling module's identical Scenario AK. Uses a LONG
-#  -AbortTimeoutSeconds (30s) with a real still-sleeping fake magick
-#  process, timed with a Stopwatch to prove the whole call returns almost
-#  immediately instead of anywhere near that.
-# ==============================================================================
-Write-Host "=== Scenario AB: IsCloseEvent skips the straggler-drain wait entirely, force-kills immediately ===" -ForegroundColor Cyan
-$fileAB = New-FakeAvif -Name "chapter-ab\slow.avif" -Content "FRAMES:6`nSLEEP_MS:30000"
-$ctsAB = New-Object System.Threading.CancellationTokenSource
-$pollAB = { param($inFlight) if ($inFlight.Count -gt 0) { $ctsAB.Cancel() } }.GetNewClosure()
-
-[ConsoleCtrl]::IsCloseEvent = $true
-$swAB = [System.Diagnostics.Stopwatch]::StartNew()
-try {
-    $resultAB = Convert-AnimatedBatch -AnimatedFiles @($fileAB) -MagickExe $fakeMagickExe -AnimatedThreads 1 -CancelToken $ctsAB.Token -AbortPollCallback $pollAB -AbortTimeoutSeconds 30
-} finally {
-    $swAB.Stop()
-    [ConsoleCtrl]::IsCloseEvent = $false
-    $ctsAB.Dispose()
-}
-
-Test-Assert ($swAB.Elapsed.TotalSeconds -lt 5) ("returned in under 5s despite a 30s -AbortTimeoutSeconds and a 30s-sleeping job (took " + [int]$swAB.Elapsed.TotalSeconds + "s)")
-Test-Assert ($resultAB.ForceKilledCount -eq 1) ("the still-sleeping job was force-killed, not waited for (got ForceKilledCount=" + $resultAB.ForceKilledCount + ")")
+Test-Assert ($totalsY.Aborted) "sanity check: the run was actually aborted"
+Test-Assert ($totalsY.ForceKilledCount -eq 1) ("sanity check: the still-running job was actually force-killed, not drained gracefully (got ForceKilledCount=" + $totalsY.ForceKilledCount + ")")
+Test-Assert (-not (Test-Path -LiteralPath $expectedWebpY)) "the partial output left by the force-killed job was deleted, not left as debris"
 Write-Host ""
 
 # ==============================================================================
