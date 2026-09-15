@@ -383,7 +383,7 @@ $script:fullPipelineEngineWorker = {
 
             $cr = @{
                 ConvertedCount = 0; FailedCount = 0; SkippedCount = 0; DeletedCount = 0; DeleteFailedCount = 0
-                InspectFailedCount = 0
+                InspectFailedCount = 0; ForceKilledCount = 0
                 SkippedPaths = [System.Collections.Generic.List[string]]::new()
                 TotalFiles = $classified.Images.Count
             }
@@ -581,7 +581,18 @@ $script:fullPipelineEngineWorker = {
             param($job)
             if ($job.TempPng) { try { [System.IO.File]::Delete($job.TempPng) } catch { } }
             try { [System.IO.File]::Delete($job.JxlPath) } catch { }
-        }
+            # DOCUMENTED DUPLICATE of this same function's own animated-
+            # engine jobAbortCleanup below, and of
+            # ImageConversionPipeline.ps1/AnimatedConversionPipeline.ps1's
+            # own copies - keep all four in sync. Feeds
+            # Get-ChapterProgressStatus/Get-MergedChapterStatus so a
+            # force-killed/never-started chapter reports as "N
+            # force-stopped" (and, critically, NOT a plain 'Success' that
+            # Complete-MergedFullPipelineChapter would then zip and
+            # delete) instead of silently disappearing (2026-09-15 fix).
+            $cr = $chapterResults[$job.ChapterKey]
+            if ($null -ne $cr) { $cr.ForceKilledCount++ }
+        }.GetNewClosure()
     } else {
         $jobBuilder = {
             param($chapterInfo)
@@ -590,7 +601,7 @@ $script:fullPipelineEngineWorker = {
 
             $cr = @{
                 ConvertedCount = 0; FailedCount = 0; SkippedCount = 0; StaticSkippedCount = 0
-                InspectFailedCount = 0; DeletedCount = 0; DeleteFailedCount = 0
+                InspectFailedCount = 0; DeletedCount = 0; DeleteFailedCount = 0; ForceKilledCount = 0
                 SkippedPaths = [System.Collections.Generic.List[string]]::new()
                 StaticSkippedPaths = [System.Collections.Generic.List[string]]::new()
                 TotalFiles = $classified.AnimatedFiles.Count
@@ -681,7 +692,14 @@ $script:fullPipelineEngineWorker = {
             param($job)
             if ($job.TempOverwritePath) { try { [System.IO.File]::Delete($job.TempOverwritePath) } catch { } }
             try { [System.IO.File]::Delete($job.MagickOutputPath) } catch { }
-        }
+            # DOCUMENTED DUPLICATE - see this same function's own image-
+            # engine jobAbortCleanup above for the full explanation; keep
+            # all four copies (that one, this one,
+            # ImageConversionPipeline.ps1, AnimatedConversionPipeline.ps1)
+            # in sync.
+            $cr = $chapterResults[$job.ChapterKey]
+            if ($null -ne $cr) { $cr.ForceKilledCount++ }
+        }.GetNewClosure()
     }
 
     $chapterCompleteCallback = {

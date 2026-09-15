@@ -288,7 +288,8 @@ $abortPollCallback4 = {
     $script:pollPassCount4++
     if ($script:pollPassCount4 -eq 2) { $cts4.Cancel() }
 }
-$chapterCompleteCallback4 = { param($chapterInfo) }
+$chapterCompleteCount4 = 0
+$chapterCompleteCallback4 = { param($chapterInfo) $script:chapterCompleteCount4++ }
 $result4 = Invoke-ChapterDispatch -ChapterProvider $feed4.ChapterProvider -JobBuilder $feed4.JobBuilder `
     -JobStarter $jobStarter4 -JobPollCompleted $jobPollCompleted4 -JobFinalize $jobFinalize4 `
     -JobAbortCleanup $jobAbortCleanup4 -ChapterCompleteCallback $chapterCompleteCallback4 `
@@ -299,6 +300,14 @@ Test-Assert ($script:finalizedCount4 -eq 1) ("job A4 finished gracefully through
 Test-Assert ($script:abortCleanupCount4 -eq 1 -and $script:abortCleanupIds4[0] -eq "B4") ("only job B4 (the one that never finished) got JobAbortCleanup, not job A4 (got count=" + $script:abortCleanupCount4 + ", ids=" + ($script:abortCleanupIds4 -join ",") + ")")
 Test-Assert ($result4.ForceKilledCount -eq 1) ("exactly one job (B4) was force-killed (got " + $result4.ForceKilledCount + ")")
 Test-Assert ($budget4.CurrentCount -eq 2) ("both jobs' budget slots were released exactly once each - semaphore back to its full count of 2 (got " + $budget4.CurrentCount + ")")
+# 2026-09-15 fix (real bug, found by the full line-by-line review series):
+# Chapter4 never reaches Outstanding=0 through the normal paths here - A4's
+# JobFinalize decrements it from 2 to 1, but B4's force-kill (unlike a
+# normal JobFinalize) never touches Outstanding at all. Before the fix,
+# $ChapterCompleteCallback was NEVER invoked for a chapter like this one,
+# so A4's own already-finished, real work (a converted+deleted file in the
+# real engines) silently never made it into the caller's summary totals.
+Test-Assert ($script:chapterCompleteCount4 -eq 1) ("ChapterCompleteCallback still fires exactly once for Chapter4 even though it was force-killed mid-flight, not fully completed through the normal path (got " + $script:chapterCompleteCount4 + ") - this is what actually credits A4's already-finished work to the caller's totals")
 Write-Host ""
 
 # ==============================================================================
@@ -691,6 +700,56 @@ Test-Assert (($yielded | Where-Object { $_.SeriesName -eq "Series A" }).Count -e
 Test-Assert (($yielded | Where-Object { $_.SeriesName -eq "Series B" }).Count -eq 3) "Series B's 3 chapters were all yielded, with SeriesName set correctly"
 Test-Assert (($yielded | Select-Object -First 2 | ForEach-Object { $_.SeriesName }) -notcontains "Series B") "Series A's chapters are yielded before Series B's - lazy, series-by-series order preserved (not shuffled/parallel)"
 Test-Assert ($null -eq (& $providerP)) "calling again after exhaustion keeps returning `$null, not an error"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario 14 (2026-09-15, full line-by-line review series - real bug):
+#  a job still sitting in $pending (never even started via $JobStarter)
+#  when cancellation fires was previously silently dropped - nothing
+#  decremented its chapter's Outstanding, nothing called $JobAbortCleanup
+#  on it, and (worse) that meant its chapter's Outstanding could never
+#  reach 0, so $ChapterCompleteCallback never fired for it either -
+#  distinct from Scenario 4's already-running/force-killed job case.
+#  -MaxConcurrent 1 with 2 jobs in the same chapter: job A starts and
+#  never finishes (force-killed via the normal running-job path), job B
+#  can never even start (budget.Wait(0) always fails while A holds the
+#  only slot) and is still in $pending when cancellation fires.
+# ==============================================================================
+Write-Host "=== Scenario 14: a never-started (still-$pending) job at cancellation gets cleaned up and its chapter still completes ===" -ForegroundColor Cyan
+$budget14 = [System.Threading.SemaphoreSlim]::new(1, 1)
+$jobA14 = New-FakeJob -Id "A14"
+$jobB14 = New-FakeJob -Id "B14"
+$feed14 = New-ManualChapterFeed -Chapters @(@{ ChapterInfo = "Chapter14"; Jobs = @($jobA14, $jobB14) })
+$cts14 = [System.Threading.CancellationTokenSource]::new()
+$abortCleanupIds14 = [System.Collections.Generic.List[string]]::new()
+$pollPassCount14 = 0
+$jobStarter14 = { param($job) $job.Started = $true; return $job }
+$jobPollCompleted14 = { param($job) return $false }   # nothing ever finishes
+$jobFinalize14 = { param($job, $pendingQueue) return @{ Success = $true } }
+$jobAbortCleanup14 = { param($job) $script:abortCleanupIds14.Add($job.Id) }
+$abortPollCallback14 = {
+    param($runningJobs)
+    $script:pollPassCount14++
+    # Pass 1: cancel BEFORE it fires would cancel before A14 even starts
+    # (this callback runs before each iteration's own start-pending-jobs
+    # step) - pass 2 is the first opportunity where A14 has already been
+    # dispatched into $running (during pass 1's own start step) while B14
+    # is still genuinely stuck in $pending (only 1 budget slot).
+    if ($script:pollPassCount14 -eq 2) { $cts14.Cancel() }
+}
+$chapterCompleteCount14 = 0
+$chapterCompleteCallback14 = { param($chapterInfo) $script:chapterCompleteCount14++ }
+$result14 = Invoke-ChapterDispatch -ChapterProvider $feed14.ChapterProvider -JobBuilder $feed14.JobBuilder `
+    -JobStarter $jobStarter14 -JobPollCompleted $jobPollCompleted14 -JobFinalize $jobFinalize14 `
+    -JobAbortCleanup $jobAbortCleanup14 -ChapterCompleteCallback $chapterCompleteCallback14 `
+    -MaxConcurrent $budget14 -AbortPollCallback $abortPollCallback14 -AbortTimeoutSeconds 0 -CancelToken $cts14.Token
+
+Test-Assert ($result14.Aborted -eq $true) "run reports Aborted=true"
+Test-Assert ($jobA14.Started -eq $true) "job A14 DID start (it's the one holding the only budget slot) - confirms this is a genuine mixed running+pending scenario"
+Test-Assert ($jobB14.Started -eq $false) "job B14 never started - it was genuinely still in `$pending at cancellation, not a running job"
+Test-Assert (($script:abortCleanupIds14 -contains "A14") -and ($script:abortCleanupIds14 -contains "B14")) ("JobAbortCleanup ran for BOTH the force-killed running job A14 AND the never-started pending job B14 (got ids=" + ($script:abortCleanupIds14 -join ",") + ")")
+Test-Assert ($budget14.CurrentCount -eq 1) ("the one budget slot (held by A14) was released - semaphore back to its full count of 1 (got " + $budget14.CurrentCount + ")")
+Test-Assert ($script:chapterCompleteCount14 -eq 1) ("ChapterCompleteCallback still fires exactly once for Chapter14 even though one of its jobs never started at all (got " + $script:chapterCompleteCount14 + ")")
 Write-Host ""
 
 # ==============================================================================

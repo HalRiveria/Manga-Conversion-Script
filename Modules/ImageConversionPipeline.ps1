@@ -455,7 +455,7 @@ function Invoke-LooseImageConversionPipeline {
             $totals.ChapterCount++
             $cr = @{
                 ConvertedCount = 0; FailedCount = 0; SkippedCount = 0; DeletedCount = 0; DeleteFailedCount = 0
-                InspectFailedCount = 0
+                InspectFailedCount = 0; ForceKilledCount = 0
                 SkippedPaths = [System.Collections.Generic.List[string]]::new()
                 TotalFiles = $chapterInfo.Images.Count
             }
@@ -647,7 +647,17 @@ function Invoke-LooseImageConversionPipeline {
             param($job)
             if ($job.TempPng) { try { [System.IO.File]::Delete($job.TempPng) } catch { } }
             try { [System.IO.File]::Delete($job.JxlPath) } catch { }
-        }
+            # DOCUMENTED DUPLICATE of AnimatedConversionPipeline.ps1's own
+            # jobAbortCleanup ForceKilledCount increment - keep both in
+            # sync. Feeds Get-ChapterProgressStatus (this file) so a
+            # force-killed/never-started chapter reports as "N
+            # force-stopped" instead of a false clean Success once
+            # ChapterDispatch.ps1 invokes $ChapterCompleteCallback for it
+            # (2026-09-15 fix - this key didn't exist before, so the
+            # force-stopped status branch below was dead code).
+            $cr = $chapterResults[$job.ChapterKey]
+            if ($null -ne $cr) { $cr.ForceKilledCount++ }
+        }.GetNewClosure()
 
         $chapterCompleteCallback = {
             param($chapterInfo)

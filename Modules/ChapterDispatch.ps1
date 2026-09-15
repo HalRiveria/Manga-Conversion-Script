@@ -269,9 +269,44 @@ function Invoke-ChapterDispatch {
         }
     }
 
+    # A chapter's jobs still sitting in $pending when the loop above exits
+    # (only reachable via cancellation - the outer while loop otherwise
+    # keeps running until $pending drains) were never started, so
+    # $JobStarter's own try/catch and the running-job force-stop block
+    # below never see them - nothing decrements their chapter's
+    # Outstanding or calls $JobAbortCleanup on them. Left unhandled, a
+    # chapter with any never-started job can never reach Outstanding=0,
+    # so it silently never completes at all (2026-09-15 finding - the
+    # force-killed-chapter-undercounts-totals bug's own untested sibling
+    # case). Treat them the same as a force-killed running job: cleanup,
+    # decrement, let the loop below credit whatever real work the
+    # chapter's OTHER jobs already finished.
+    if ($pending.Count -gt 0) {
+        foreach ($job in $pending) {
+            try { & $JobAbortCleanup $job } catch { }
+            $key = $job.ChapterKey
+            if ($chapterStates.ContainsKey($key)) { $chapterStates[$key].Outstanding-- }
+        }
+        $pending.Clear()
+    }
+
     $dispatchResult.Aborted = $CancelToken.IsCancellationRequested
     foreach ($state in $chapterStates.Values) {
         if (-not $state.Completed) {
+            # A chapter that was force-killed or aborted mid-flight still
+            # needs $ChapterCompleteCallback invoked - it's the only thing
+            # that merges this chapter's real, already-finished work (jobs
+            # that completed via $JobFinalize before the kill) into the
+            # caller's totals. Skipping it here (the pre-2026-09-15
+            # behavior) meant a chapter that converted+deleted N files
+            # before being force-killed contributed ZERO to the run
+            # summary, even though those N files are correctly on disk.
+            # Wrapped in try/catch: this function is already in its own
+            # cleanup/finalization phase, and a callback failure here
+            # shouldn't prevent returning a result for every other
+            # chapter.
+            try { & $ChapterCompleteCallback $state.ChapterInfo } catch { }
+            $state.Completed = $true
             $chapterResults.Add(@{ ChapterInfo = $state.ChapterInfo; Completed = $false; Aborted = $true })
         }
     }
