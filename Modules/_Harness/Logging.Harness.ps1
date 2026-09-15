@@ -790,6 +790,34 @@ $script:CleanConsoleOutputEnabled = $false
 Write-Host ""
 
 # ==============================================================================
+#  Scenario W (2026-09-15 fix, real bug): a locked/inaccessible log file must
+#  not make Write-Log throw. Before the fix, a locked Errors file would throw
+#  from inside the catch that's LOGGING the original error - escaping the
+#  whole run over an unrelated conversion failure.
+# ==============================================================================
+Write-Host "=== Scenario W: Write-Log does not throw when its target file is locked ===" -ForegroundColor Cyan
+Initialize-LogPaths -TargetPath "C:\W\Path" -FullLogging $false -ScriptDir $scratchDir
+Initialize-LogMutex
+
+$lockedStream = [System.IO.File]::Open($script:logErrorFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+$threwW = $false
+try {
+    Write-Log "this should not throw even though the target file is locked" -Level Error
+} catch {
+    $threwW = $true
+}
+$lockedStream.Close()
+
+Test-Assert (-not $threwW) "Write-Log swallowed the locked-file write failure instead of throwing"
+
+# Sanity check: once unlocked, later writes to the same file still work -
+# the swallow above didn't leave the mutex or file handle in a bad state.
+Write-Log "this one should actually land" -Level Error
+$errorContentW = [System.IO.File]::ReadAllText($script:logErrorFile)
+Test-Assert ($errorContentW.Contains("this one should actually land")) "a later write to the same file after the lock is released still succeeds"
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

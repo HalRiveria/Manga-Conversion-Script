@@ -163,7 +163,22 @@ function Write-LogLineToHost {
 function Write-LogLineToFile {
     param([string]$FilePath, [string]$Line)
     if ([string]::IsNullOrEmpty($FilePath)) { return }
-    Invoke-MutexGuardedWrite { [System.IO.File]::AppendAllText($FilePath, $Line + [System.Environment]::NewLine, [System.Text.Encoding]::UTF8) }
+    Invoke-MutexGuardedWrite {
+        try {
+            [System.IO.File]::AppendAllText($FilePath, $Line + [System.Environment]::NewLine, [System.Text.Encoding]::UTF8)
+        } catch {
+            # Swallowed deliberately - a locked/inaccessible log file (an
+            # external editor with it open, antivirus scanning it,
+            # OneDrive/cloud storage sync mid-upload) must never be allowed to crash
+            # the real conversion work over losing one log line. Worse
+            # without this (2026-09-15 finding, real): if it's specifically
+            # the Errors log that's locked, the catch handler that's
+            # logging the ORIGINAL error via Write-Log -Level Error would
+            # throw AGAIN from inside that catch and escape the whole run -
+            # a locked log file taking down the pipeline over an unrelated
+            # conversion error.
+        }
+    }
 }
 
 function Write-Log {
@@ -241,8 +256,14 @@ function Write-LogFileSummary {
         } else {
             Write-Host "  Summary  : (disabled)" -ForegroundColor DarkGray
         }
-        if (Test-Path -LiteralPath $script:logErrorFile) { Write-Host ("  Errors   : " + $script:logErrorFile) -ForegroundColor Green }
-        if (Test-Path -LiteralPath $script:logWarnFile)  { Write-Host ("  Warnings : " + $script:logWarnFile)  -ForegroundColor Green }
+        # IsNullOrEmpty guards before Test-Path (2026-09-15 fix, real but
+        # latent - not reachable today since Initialize-LogPaths always
+        # runs before this, but every other path read in this module
+        # already guards this way; this pair was the one omission) -
+        # Test-Path -LiteralPath $null throws a parameter-binding error,
+        # not a clean $false.
+        if ((-not [string]::IsNullOrEmpty($script:logErrorFile)) -and (Test-Path -LiteralPath $script:logErrorFile)) { Write-Host ("  Errors   : " + $script:logErrorFile) -ForegroundColor Green }
+        if ((-not [string]::IsNullOrEmpty($script:logWarnFile))  -and (Test-Path -LiteralPath $script:logWarnFile))  { Write-Host ("  Warnings : " + $script:logWarnFile)  -ForegroundColor Green }
     }
 }
 
