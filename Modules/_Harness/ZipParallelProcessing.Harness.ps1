@@ -340,11 +340,19 @@ $resultsD = [System.Collections.Generic.List[hashtable]]::new()
 $jobParamsD = [System.Collections.Generic.List[hashtable]]::new()
 $jobParamsD.Add(@{ JobId = 1; DoFullLogging = $FullLogging; LogFile = $logFile; LogErrorFile = $logErrorFile; LogWarnFile = $logWarnFile })
 $handlerD = { param($r) $resultsD.Add($r) }
+# 2026-09-15 fix: -JobCrashedHandler is the only way a caller learns a
+# worker's own runspace died mid-run at all (Controller.ps1's Full Pipeline
+# treats one whole engine as a single long-lived "job" - losing it silently
+# previously meant chapters that engine hadn't reported yet got zipped and
+# deleted anyway by the leftover-merge pass, see Controller.Harness.ps1).
+$crashedCountD = 0
+$crashedHandlerD = { param($errorRecord) $script:crashedCountD++ }
 
 $threwD = $false
 try {
     $outcomeD = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerFail -JobParams $jobParamsD `
-        -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile') -MaxParallel 2 -Cts $script:cts -ResultHandler $handlerD
+        -SharedFunctionNames @('Write-Log', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile') -MaxParallel 2 -Cts $script:cts -ResultHandler $handlerD `
+        -JobCrashedHandler $crashedHandlerD
 } catch {
     $threwD = $true
 }
@@ -352,6 +360,7 @@ $script:cts.Dispose()
 
 Test-Assert (-not $threwD) "Invoke-ZipParallelProcessing itself did not throw when a worker threw"
 Test-Assert ($resultsD.Count -eq 0) "no result was recorded for the failed worker (ResultHandler never invoked for it)"
+Test-Assert ($script:crashedCountD -eq 1) ("-JobCrashedHandler fired exactly once for the worker that threw (got " + $script:crashedCountD + ")")
 Write-Host ""
 
 # ==============================================================================

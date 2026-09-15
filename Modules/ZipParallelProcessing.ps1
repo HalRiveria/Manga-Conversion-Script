@@ -14,7 +14,8 @@ function Invoke-ZipParallelProcessing {
         [Parameter(Mandatory)]
         [scriptblock]$ResultHandler,
         [string]$AbortWaitMessage = "[ABORT] Waiting for current jobs to finish (up to 60s)...",
-        [scriptblock]$PollCallback = $null
+        [scriptblock]$PollCallback = $null,
+        [scriptblock]$JobCrashedHandler = $null
     )
 
     if ($null -eq $JobParams -and $null -eq $NextJobProvider) {
@@ -94,6 +95,19 @@ function Invoke-ZipParallelProcessing {
                         }
                     } catch {
                         Write-Log ("Error collecting runspace result: " + $_) -Level Error
+                        # An unhandled exception in the worker script itself
+                        # (not just a non-terminating error in its output
+                        # streams, above) lands here - EndInvoke rethrows it.
+                        # -JobCrashedHandler exists so a caller whose "job" is
+                        # a long-lived worker (Controller.ps1's Full Pipeline
+                        # engines, one job = one whole engine) can react to
+                        # losing that worker entirely - -ResultHandler is
+                        # NEVER called for a job that lands here, since there
+                        # is no result (2026-09-15 finding: a caller with no
+                        # -JobCrashedHandler previously had no way to learn a
+                        # worker died mid-run at all, not even via logging it
+                        # noticed anything was wrong).
+                        if ($null -ne $JobCrashedHandler) { try { & $JobCrashedHandler $_ } catch { } }
                     } finally {
                         $h.PS.Dispose()
                     }

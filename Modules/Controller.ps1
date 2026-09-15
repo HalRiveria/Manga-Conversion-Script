@@ -953,6 +953,31 @@ function Invoke-FullPipeline {
             if ($r.Aborted) { $totals.Aborted = $true }
         }.GetNewClosure()
 
+        # 2026-09-15 fix (real bug, HIGH severity - full line-by-line review
+        # series): if one engine's runspace throws an unhandled exception,
+        # -ResultHandler above is NEVER called for it (there is no result -
+        # EndInvoke rethrows) - previously that meant $totals.Aborted never
+        # got set from a crash alone, the surviving engine just kept going,
+        # and every chapter the crashed engine hadn't yet reported on sat in
+        # $mergeState forever with that engine's Got<Engine> flag still
+        # false. The leftover-merge loop below used to hand those straight
+        # to $finalizeChapterEntry anyway, and Get-ChapterProgressStatus($null)
+        # (ImageConversionPipeline.ps1) returns a bare "Success" for a $null
+        # result - indistinguishable from "this engine legitimately had
+        # nothing to do here" - so Complete-MergedFullPipelineChapter would
+        # zip and DELETE the folder, discarding whatever the crashed engine
+        # hadn't finished, and report the run as clean. Cancelling here stops
+        # the surviving engine from wandering further into the same
+        # uncertain state; the leftover loop below is what actually stops
+        # the zip+delete for chapters already caught in it.
+        $anyEngineCrashed = $false
+        $jobCrashedHandler = {
+            param($errorRecord)
+            $script:anyEngineCrashed = $true
+            Write-Log ("Full Pipeline: an engine's runspace threw an unhandled exception and stopped - " + $errorRecord + ". The other engine will finish its own remaining work, then the run will abort; any chapter left incomplete because of this will NOT be zipped or have its folder touched.") -Level Error -ForceConsole
+            try { $fullCts.Cancel() } catch { }
+        }.GetNewClosure()
+
         $engineWorkerSharedFunctionNames = @(Get-LoggingSharedFunctionNames) + @(Get-FileDeletionSharedFunctionNames) +
             @(Get-ImageConversionSharedFunctionNames) + @(Get-AnimatedConversionSharedFunctionNames) +
             @(Get-LeafDirectoryDiscoverySharedFunctionNames) + @(Get-ChapterDispatchSharedFunctionNames) +
@@ -962,10 +987,35 @@ function Invoke-FullPipeline {
 
         $null = Invoke-ZipParallelProcessing -WorkerScript $script:fullPipelineEngineWorker -JobParams $jobParamsWorker `
             -SharedFunctionNames $engineWorkerSharedFunctionNames -MaxParallel 2 -Cts $fullCts -ResultHandler $engineResultHandler `
-            -AbortWaitMessage "[ABORT] Waiting for current image/animated jobs to finish (up to 60s)..." -PollCallback $pollCallback
+            -AbortWaitMessage "[ABORT] Waiting for current image/animated jobs to finish (up to 60s)..." -PollCallback $pollCallback `
+            -JobCrashedHandler $jobCrashedHandler
+
+        if ($anyEngineCrashed) { $totals.Aborted = $true }
 
         foreach ($leftoverKey in @($mergeState.Keys)) {
-            & $finalizeChapterEntry $leftoverKey $mergeState[$leftoverKey]
+            $leftoverEntry = $mergeState[$leftoverKey]
+            # A chapter can only be a genuine "both engines reported nothing
+            # more to say, but never actually paired up" leftover if at
+            # least one engine's Got<Engine> flag is still false - every
+            # chapter BOTH engines actually finished reporting on already
+            # got removed from $mergeState and finalized live, above, in the
+            # 'EngineChapterDone' handler. A still-false flag here means
+            # that engine never told us anything about this chapter at all -
+            # either it crashed before reaching it, or the run was aborted
+            # before its own dispatch got that far. Distinct from a
+            # legitimate $null ImageResult/AnimatedResult (an engine that DID
+            # report but had zero files for this chapter) - that case
+            # already has its Got<Engine> flag correctly set true. Do NOT
+            # zip/delete a chapter we have incomplete information about -
+            # 2026-09-15 fix, the most severe finding in the full review
+            # series (a crashed engine's leftover chapters were previously
+            # zipped and deleted anyway, reported as a clean run).
+            if (-not ($leftoverEntry.GotImage -and $leftoverEntry.GotAnimated)) {
+                $totals.Aborted = $true
+                Write-Log ("Full Pipeline: '" + $leftoverEntry.Dir.FullName + "' was left incomplete (an engine never finished reporting on it, likely due to the run stopping mid-way) - NOT zipped, NOT deleted, left exactly as-is for a future run to pick back up.") -Level Warn -ForceConsole
+                continue
+            }
+            & $finalizeChapterEntry $leftoverKey $leftoverEntry
         }
         $mergeState.Clear()
     } finally {
