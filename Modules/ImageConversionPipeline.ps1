@@ -588,7 +588,42 @@ function Invoke-LooseImageConversionPipeline {
                     $magickProcLocal = $magickProc
                     $magickStdoutTask = $magickProc.StandardOutput.ReadToEndAsync()
                     $magickStderrTask = $magickProc.StandardError.ReadToEndAsync()
-                    $magickProc.WaitForExit()
+                    # DOCUMENTED DUPLICATE of Controller.ps1's own image-engine
+                    # JobStarter's identical PNG pre-conversion wait - keep
+                    # both in sync. A bare WaitForExit() here (fixed
+                    # 2026-09-15) has no timeout, and this jobStarter runs on
+                    # the main thread inside the dispatch loop - a wedged
+                    # magick.exe would freeze the entire mode 2/8 run with no
+                    # Ctrl+C escape (the cancel token is only checked between
+                    # dispatch loop passes). Raw-handle ManualResetEvent
+                    # instead of Process.WaitForExit(int) - this codebase's
+                    # own precedent (2026-09-10 round-6 fix,
+                    # Docs/full-pipeline-hang-investigation.md) for why
+                    # WaitForExit(int) itself can't be trusted here.
+                    $preConvWaitHandle = [System.Threading.ManualResetEvent]::new($false)
+                    $preConvOrigHandle = $preConvWaitHandle.SafeWaitHandle
+                    $preConvWaitHandle.SafeWaitHandle = (
+                        [Microsoft.Win32.SafeHandles.SafeWaitHandle]::new(
+                            $magickProc.Handle, $false
+                        )
+                    )
+                    try {
+                        $preConvExited = $preConvWaitHandle.WaitOne(120000)
+                    } finally {
+                        $preConvWaitHandle.SafeWaitHandle = $preConvOrigHandle
+                        $preConvWaitHandle.Dispose()
+                    }
+                    if (-not $preConvExited) {
+                        try { $magickProc.Kill() } catch { }   # already-exited/access-denied races are fine to ignore - Dispose() right below runs regardless
+                        [System.Threading.Thread]::Sleep(200)
+                        $magickProc.Dispose()
+                        $magickProcLocal = $null
+                        Write-Log ("FAILED " + $formatLabel + "->PNG pre-conversion for '" + $job.SrcPath + "': magick did not exit within 120s - killed") -Level Error
+                        $cr.FailedCount++
+                        $failureAlreadyAccounted = $true
+                        if ([System.IO.File]::Exists($tempPng)) { try { [System.IO.File]::Delete($tempPng) } catch { } }
+                        throw ($formatLabel + "->PNG pre-conversion did not exit within 120s - killed")
+                    }
                     $null = $magickStdoutTask.GetAwaiter().GetResult()
                     $null = $magickStderrTask.GetAwaiter().GetResult()
                     $magickExitCode = $magickProc.ExitCode

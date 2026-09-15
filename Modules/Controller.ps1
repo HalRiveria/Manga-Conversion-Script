@@ -500,6 +500,12 @@ $script:fullPipelineEngineWorker = {
                     $magickProcLocal = $magickProc
                     $magickStdoutTask = $magickProc.StandardOutput.ReadToEndAsync()
                     $magickStderrTask = $magickProc.StandardError.ReadToEndAsync()
+                    # DOCUMENTED DUPLICATE of ImageConversionPipeline.ps1's own
+                    # jobStarter's identical PNG pre-conversion wait (ported
+                    # there 2026-09-15, after a full line-by-line review found
+                    # it was still using a bare, unbounded WaitForExit() - the
+                    # exact bug this codebase already fixed here) - keep both
+                    # in sync.
                     $preConvWaitHandle = [System.Threading.ManualResetEvent]::new($false)
                     $preConvOrigHandle = $preConvWaitHandle.SafeWaitHandle
                     $preConvWaitHandle.SafeWaitHandle = (

@@ -17,8 +17,14 @@ $ErrorActionPreference = "Stop"
 
 $script:writeLogCalls = New-Object System.Collections.Generic.List[object]
 function Write-Log {
-    param([string]$Message, [string]$Level = "Info")
-    $script:writeLogCalls.Add(@{ Message = $Message; Level = $Level })
+    # -ForceConsole tracked explicitly (2026-09-15 fix regression coverage) -
+    # a fake without this parameter declared doesn't throw when called with
+    # -ForceConsole (verified live: PowerShell silently accepts it as if it
+    # were positional/ignored on a non-CmdletBinding function), so a fake
+    # missing the parameter can't catch a caller failing to pass it either -
+    # it has to actually capture the value to be a meaningful test.
+    param([string]$Message, [string]$Level = "Info", [switch]$ForceConsole)
+    $script:writeLogCalls.Add(@{ Message = $Message; Level = $Level; ForceConsole = [bool]$ForceConsole })
 }
 
 $script:summaryLogCalls = New-Object System.Collections.Generic.List[string[]]
@@ -168,6 +174,11 @@ Write-SummaryReport -Lines $reportLinesG -FullLogging $true
 Test-Assert ($script:writeLogCalls.Count -eq $reportLinesG.Count) "Write-Log was called once per line"
 Test-Assert (@($script:writeLogCalls | Where-Object { $_.Level -ne 'Summary' }).Count -eq 0) "every Write-Log call used -Level Summary"
 Test-Assert ($script:summaryLogCalls.Count -eq 0) "Write-SummaryLog was NOT called in full-logging mode"
+# 2026-09-15 fix (real bug): without -ForceConsole, Write-Log suppresses
+# console output whenever Clean Console Output is enabled, and nothing
+# turns CCO off before the summary is written - so the whole summary
+# (every line) silently vanished from the console with CCO on.
+Test-Assert (@($script:writeLogCalls | Where-Object { -not $_.ForceConsole }).Count -eq 0) "every Write-Log call passed -ForceConsole (so the summary still shows even with Clean Console Output enabled)"
 
 $script:writeLogCalls.Clear()
 $script:summaryLogCalls.Clear()

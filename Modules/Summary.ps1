@@ -81,7 +81,17 @@ function Write-SummaryReport {
     )
 
     Write-Host ""
-    foreach ($line in $Lines) { Write-Log $line -Level Summary }
+    # -ForceConsole (2026-09-15 fix, real bug): without it, Write-Log
+    # (Logging.ps1) suppresses console output whenever Clean Console
+    # Output is enabled, and nothing turns CCR off before this runs
+    # (Controller.ps1 sets it once per loop iteration, the summary is
+    # written inside that same iteration) - so with CCO on, the user saw
+    # a single blank line and no summary at all: no counts, no elapsed
+    # time, no "=== Processing ABORTED ===" footer. Every other
+    # end-of-operation Summary-level Write-Log call in this codebase
+    # (UnwantedImage.ps1's four) already passes -ForceConsole - this one
+    # was the omission, not a design choice.
+    foreach ($line in $Lines) { Write-Log $line -Level Summary -ForceConsole }
 
     if (-not $FullLogging) {
         Write-SummaryLog -Lines $Lines
