@@ -496,11 +496,13 @@ Write-Host ""
 #  is genuinely still running - NOT a caught -JobStarter failure, that's
 #  Scenario 6's own case) must still release the still-running job via
 #  -JobAbortCleanup and the shared budget before rethrowing. Same bug
-#  species ImageConversionPipeline.Harness.ps1's Scenario AB and
-#  AnimatedConversionPipeline.Harness.ps1's Scenario X used to prove
-#  against Convert-ImageBatch/Convert-AnimatedBatch's own now-deleted
-#  copy of this same try/catch shape - this is the one, shared copy that
-#  replaced both.
+#  species ImageConversionPipeline.Harness.ps1's Scenario AB used to
+#  prove against Convert-ImageBatch's own now-deleted copy of this same
+#  try/catch shape - this is the one, shared copy that replaced it
+#  (AnimatedConversionPipeline.Harness.ps1 never had a scenario for this
+#  exact species - its own same-pass-throw scenario, Scenario X, is the
+#  SlotReleased-double-clean species instead, covered by Scenario 11
+#  below).
 # ==============================================================================
 Write-Host "=== Scenario 10: an unrelated throw mid-dispatch still releases a genuinely-running job ===" -ForegroundColor Cyan
 $budget10 = [System.Threading.SemaphoreSlim]::new(2, 2)
@@ -539,9 +541,12 @@ Write-Host ""
 #  normally (SlotReleased already true) - the outer catch's own
 #  -JobAbortCleanup call is gated on "not SlotReleased" for exactly this
 #  reason. Same bug species ImageConversionPipeline.Harness.ps1's Scenario
-#  AF and AnimatedConversionPipeline.Harness.ps1's Scenario Y used to prove
+#  AF and AnimatedConversionPipeline.Harness.ps1's Scenario X used to prove
 #  against Convert-ImageBatch/Convert-AnimatedBatch's own now-deleted copy
-#  of this same try/catch shape.
+#  of this same try/catch shape (Animated Scenario Y is unrelated - it
+#  tests a force-killed job's JobAbortCleanup, the same species as image
+#  Scenario AG, and was ported rather than deleted - see
+#  AnimatedConversionPipeline.Harness.ps1's own header on that scenario).
 # ==============================================================================
 Write-Host "=== Scenario 11: a same-pass throw does not double-clean an earlier job that already finished normally ===" -ForegroundColor Cyan
 $budget11 = [System.Threading.SemaphoreSlim]::new(2, 2)
