@@ -1193,13 +1193,18 @@ function Invoke-MainLoop {
 
         & $StartLogRunHandler
         & $SetRunActiveHandler -Active $true
-        & $SetQuickEditHandler -Enabled $false
+        # $null = : -SetQuickEditHandler's default (Set-ConsoleQuickEditEnabled)
+        # returns [ConsoleQuickEdit]::SetEnabled's own bool (the PREVIOUS
+        # enabled state) - uncaptured, & prints it straight to the console
+        # (confirmed live: "True" at the start of a run, "False" right after
+        # it finishes - 2026-09-14).
+        $null = & $SetQuickEditHandler -Enabled $false
         $runStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         try {
             $stats = & $InvokeModeHandler -Resolved $resolved -TargetPath $TargetPath -Settings $Settings -CjxlExe $CjxlExe -MagickExe $MagickExe `
                 -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile
         } finally {
-            & $SetQuickEditHandler -Enabled $true
+            $null = & $SetQuickEditHandler -Enabled $true
             & $SetRunActiveHandler -Active $false
         }
         $runStopwatch.Stop()
