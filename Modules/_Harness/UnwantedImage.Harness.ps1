@@ -1018,6 +1018,36 @@ Test-Assert ($null -ne $flowResultAC -and $flowResultAC.Added -eq $false -and $f
 Write-Host ""
 
 # ==============================================================================
+#  Scenario AD (2026-09-16 fix, real bug, latent/unreachable by any real
+#  caller today but cheap to close): PS 5.1 binds an explicit
+#  -ExcludePaths $null to the [string[]]$ExcludePaths parameter as a real
+#  $null, not an empty array - passing that straight into
+#  HashSet<string>'s own (IEnumerable, comparer) constructor throws
+#  ArgumentNullException ("Value cannot be null. (Parameter 'collection')"),
+#  confirmed live. Both Get-ScannableFiles and Get-TrailingZeroGroups
+#  (the -PreScannedFiles branch) build their exclude set via foreach +
+#  Add now instead, which tolerates a $null collection (foreach over
+#  $null just doesn't iterate).
+# ==============================================================================
+Write-Host "=== Scenario AD: -ExcludePaths `$null does not throw ===" -ForegroundColor Cyan
+$rootAD = Join-Path $scratchDir "scenario-ad"
+New-Item -ItemType Directory -Path $rootAD -Force | Out-Null
+$imgAD = New-RealImage -Name "scenario-ad\real_0.png" -Width 5 -Height 5
+
+$threwAD1 = $false
+$resultAD1 = $null
+try { $resultAD1 = Get-ScannableFiles -Path $rootAD -ExcludePaths $null } catch { $threwAD1 = $true }
+Test-Assert (-not $threwAD1) "Get-ScannableFiles does not throw on an explicit -ExcludePaths `$null"
+Test-Assert (@($resultAD1).Count -eq 1) "...and still finds the real file, nothing excluded"
+
+$threwAD2 = $false
+$resultAD2 = $null
+try { $resultAD2 = Get-TrailingZeroGroups -Path $rootAD -PreScannedFiles @($imgAD) -ExcludePaths $null } catch { $threwAD2 = $true }
+Test-Assert (-not $threwAD2) "Get-TrailingZeroGroups's own -PreScannedFiles branch does not throw on an explicit -ExcludePaths `$null either"
+Test-Assert ($null -ne $resultAD2 -and $resultAD2.Groups.Count -eq 1) "...and still groups the real trailing-zero file, nothing excluded"
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

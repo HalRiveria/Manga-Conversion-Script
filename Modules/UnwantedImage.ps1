@@ -310,7 +310,19 @@ function Get-ScannableFiles {
         [string[]]$ImageExtensions = $null
     )
 
-    $excludeSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$ExcludePaths, [System.StringComparer]::OrdinalIgnoreCase)
+    # Built via foreach + Add, not the HashSet(IEnumerable, comparer)
+    # constructor directly on $ExcludePaths (2026-09-16 fix, real bug,
+    # latent/unreachable by any current caller but cheap to close) - an
+    # explicit -ExcludePaths $null binds to this [string[]] parameter as a
+    # real $null (confirmed live via parameter binding, not just direct
+    # assignment), and HashSet<string>'s own (IEnumerable, comparer)
+    # constructor throws ArgumentNullException on a null collection.
+    # foreach over a $null collection just doesn't iterate - no guard
+    # needed beyond the inner null-element check. This is a DOCUMENTED
+    # DUPLICATE of Get-TrailingZeroGroups's own identical guard below -
+    # keep both in sync.
+    $excludeSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($p in $ExcludePaths) { if ($null -ne $p) { $null = $excludeSet.Add($p) } }
 
     return Get-ChildItem -LiteralPath $Path -Recurse -File -ErrorAction SilentlyContinue | Where-Object {
         (-not $excludeSet.Contains($_.FullName)) -and
@@ -437,7 +449,11 @@ function Get-TrailingZeroGroups {
     $hashFailureCount = 0
 
     if ($null -ne $PreScannedFiles) {
-        $excludeSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$ExcludePaths, [System.StringComparer]::OrdinalIgnoreCase)
+        # DOCUMENTED DUPLICATE of Get-ScannableFiles's own identical guard
+        # above - keep both in sync. See that function's own comment for
+        # why (2026-09-16 fix, real bug, latent/unreachable today).
+        $excludeSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($p in $ExcludePaths) { if ($null -ne $p) { $null = $excludeSet.Add($p) } }
         $files = $PreScannedFiles | Where-Object { -not $excludeSet.Contains($_.FullName) }
     } else {
         $files = Get-ScannableFiles -Path $Path -ExcludePaths $ExcludePaths
