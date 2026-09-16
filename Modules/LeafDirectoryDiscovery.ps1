@@ -269,10 +269,24 @@ function Get-SeriesChapters {
         [System.Collections.Generic.HashSet[string]]$ExcludeStagingDirs = $null,
         [bool]$ForceRezip = $false
     )
-    $result = Get-ZippableLeafDirs -ScanPath $SeriesPath -QualifyingExtensions $QualifyingExtensions `
-        -ExcludeStagingDirs $ExcludeStagingDirs -ForceRezip $ForceRezip
-
-    return ,$result
+    # try/catch around a real TOCTOU window (2026-09-15 fix, real bug) -
+    # New-SeriesProvider enumerates series lazily, so there's a genuine
+    # gap between a series folder being listed and Get-SeriesChapters
+    # actually scanning it - someone reorganizing their library mid-scan
+    # can delete/rename it in that window. Get-ZippableLeafDirs's own
+    # throw for a missing -ScanPath is correct for ITS OWN direct callers
+    # (catching a mistyped path at startup), but every OTHER traversal
+    # failure in this module is a skip-it-and-log-a-Warn case - this was
+    # the one outlier that would kill the entire chapter-dispatch loop
+    # for every OTHER series too, not just the one that vanished.
+    try {
+        $result = Get-ZippableLeafDirs -ScanPath $SeriesPath -QualifyingExtensions $QualifyingExtensions `
+            -ExcludeStagingDirs $ExcludeStagingDirs -ForceRezip $ForceRezip
+        return ,$result
+    } catch {
+        Write-Log ("Could not scan series '" + $SeriesPath + "' for chapters - it may have been moved or deleted since it was found: " + $_) -Level Warn
+        return ,@()
+    }
 }
 
 function Get-LeafDirectoryDiscoverySharedFunctionNames {

@@ -587,6 +587,30 @@ Test-Assert (($foundNamesT -join "|") -eq "Chapter 1|Chapter 2") "the correct 2 
 Write-Host ""
 
 # ==============================================================================
+#  Scenario T2 (2026-09-15 fix, real bug): a series folder that no longer
+#  exists (deleted/renamed in the real TOCTOU window between
+#  New-SeriesProvider listing it and Get-SeriesChapters actually
+#  scanning it) must degrade to an empty result with a logged Warn, not
+#  throw and kill the whole chapter-dispatch loop for every OTHER
+#  series too.
+# ==============================================================================
+Write-Host "=== Scenario T2: Get-SeriesChapters on a vanished series folder degrades gracefully ===" -ForegroundColor Cyan
+$seriesT2 = Join-Path $scratchDir "scenario-t2-series-does-not-exist"
+
+$script:logMessages.Clear()
+$threwT2 = $false
+$resultT2 = $null
+try {
+    $resultT2 = Get-SeriesChapters -SeriesPath $seriesT2 -QualifyingExtensions $imgExts
+} catch {
+    $threwT2 = $true
+}
+Test-Assert (-not $threwT2) "Get-SeriesChapters did not throw for a vanished series folder"
+Test-Assert ($resultT2.Count -eq 0) "a vanished series folder returns an empty (not `$null) chapter list"
+Test-Assert (($script:logMessages | Where-Object { $_ -like "*$seriesT2*" }).Count -ge 1) "a Warn was logged naming the vanished series folder"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario U: integration - New-SeriesProvider + Get-SeriesChapters paired
 #  together across a small library, mimicking how a real caller (mode 1's
 #  restructured orchestration) would actually use the two-tier model: walk
