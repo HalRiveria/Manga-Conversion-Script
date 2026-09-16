@@ -134,14 +134,34 @@ function Invoke-MutexGuardedWrite {
     param([scriptblock]$Action)
 
     $mtx = $script:logMutex
+    $acquired = $true
     try {
         if ($null -ne $mtx) {
-            try { $null = $mtx.WaitOne() }
-            catch [System.Threading.AbandonedMutexException] { }
+            # WaitOne() used to have no timeout (2026-09-16 fix, real bug,
+            # live-experienced this session - see CHANGELOG.md): a stuck or
+            # orphaned process that never released this named, system-wide
+            # mutex left every later Write-Log call on the same target path
+            # blocked here forever, 0% CPU, no error. 10s is generous for a
+            # real writer (a brief file append) but short enough that a
+            # genuinely stuck holder doesn't stall the whole run.
+            try { $acquired = $mtx.WaitOne(10000) }
+            catch [System.Threading.AbandonedMutexException] { $acquired = $true }
         }
-        & $Action
+        if ($acquired) {
+            & $Action
+        } else {
+            # Skip the write rather than proceed unguarded - some callers
+            # (Write-SummaryLog, Complete-LogRun) do a real read-modify-write
+            # against the shared file, which an unguarded write could
+            # corrupt against whatever's still holding the mutex. Reported
+            # straight to the console, not through Write-Log - this IS
+            # Write-Log's own write path; recursing back in would just wait
+            # on the same stuck mutex again.
+            $warnLine = Format-LogLine -Message "Could not acquire the log mutex within 10s - a prior process may still be holding it. This write was skipped rather than risk corrupting the log file." -Level "Warn"
+            try { Write-LogLineToHost -Line $warnLine -Level "Warn" } catch { }
+        }
     } finally {
-        if ($null -ne $mtx) { try { $mtx.ReleaseMutex() } catch { } }
+        if ($acquired -and $null -ne $mtx) { try { $mtx.ReleaseMutex() } catch { } }
     }
 }
 

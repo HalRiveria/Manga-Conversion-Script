@@ -679,6 +679,69 @@ $script:logMutex.Dispose()
 Write-Host ""
 
 # ==============================================================================
+#  Scenario N2c (2026-09-16 fix, real bug, live-experienced this session -
+#  see CHANGELOG.md): Invoke-MutexGuardedWrite's own WaitOne() used to have
+#  no timeout, so a mutex still held by a genuinely live process (not an
+#  abandoned one - Scenario L already covers that case) blocked every
+#  later write against the same target path forever. Same real
+#  cross-thread contention setup as Scenario N2 (main thread holds the
+#  named OS mutex, a worker calls through the real code path), but proving
+#  Invoke-MutexGuardedWrite itself returns instead of hanging, skips the
+#  write, and reports a console warning.
+# ==============================================================================
+Write-Host "=== Scenario N2c: Invoke-MutexGuardedWrite times out and skips the write instead of hanging forever ===" -ForegroundColor Cyan
+Reset-LoggingState
+$n2cHash = "N2cTESTHASH0123456"
+Initialize-LogMutex -PathHash $n2cHash
+
+# .NET Mutex is thread-affine and recursive for its OWNING thread - holding
+# it on this same (harness) thread and then calling Invoke-MutexGuardedWrite
+# from here too would just re-enter for free, proving nothing (confirmed
+# live: the first draft of this scenario did exactly that and returned in
+# 0.01s). Needs genuine CROSS-THREAD contention, same as Scenario N2 - a
+# worker runspace opens the mutex by name and holds it deliberately longer
+# than Invoke-MutexGuardedWrite's own 10s timeout, standing in for an
+# orphaned process that never released it.
+$n2cPool = [RunspaceFactory]::CreateRunspacePool(1, 1)
+$n2cPool.Open()
+$n2cHolderPs = [PowerShell]::Create()
+$n2cHolderPs.RunspacePool = $n2cPool
+$null = $n2cHolderPs.AddScript({
+    param($MutexName)
+    $m = [System.Threading.Mutex]::OpenExisting($MutexName)
+    $null = $m.WaitOne()
+    Start-Sleep -Seconds 12
+    $m.ReleaseMutex()
+})
+$null = $n2cHolderPs.AddArgument("JxlLogMutex_" + $n2cHash)
+$n2cHolderHandle = $n2cHolderPs.BeginInvoke()
+Start-Sleep -Milliseconds 500   # give the worker a real head start acquiring it
+
+$script:hostLinesN2c = New-Object System.Collections.Generic.List[string]
+$realWriteLogLineToHostN2c = ${function:Write-LogLineToHost}
+function Write-LogLineToHost {
+    param([string]$Line, [string]$Level)
+    $script:hostLinesN2c.Add($Line)
+    & $script:realWriteLogLineToHostN2cRef -Line $Line -Level $Level
+}
+$script:realWriteLogLineToHostN2cRef = $realWriteLogLineToHostN2c
+
+$script:actionRanN2c = $false
+$swN2c = [System.Diagnostics.Stopwatch]::StartNew()
+Invoke-MutexGuardedWrite { $script:actionRanN2c = $true }
+$swN2c.Stop()
+
+${function:Write-LogLineToHost} = $realWriteLogLineToHostN2c
+$null = $n2cHolderPs.EndInvoke($n2cHolderHandle)
+$n2cHolderPs.Dispose(); $n2cPool.Close(); $n2cPool.Dispose()
+$script:logMutex.Dispose()
+
+Test-Assert ($swN2c.Elapsed.TotalSeconds -ge 9 -and $swN2c.Elapsed.TotalSeconds -lt 15) ("returned after roughly its own 10s timeout, not instantly and not hanging forever (took " + [math]::Round($swN2c.Elapsed.TotalSeconds, 2) + "s)")
+Test-Assert (-not $script:actionRanN2c) "the write was skipped, not attempted, once the wait timed out"
+Test-Assert (($script:hostLinesN2c | Where-Object { $_ -match "mutex" }).Count -ge 1) "a warning about the stuck mutex was reported straight to the console"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario N3: Initialize-LogMutex throws a clear, actionable error when
 #  no -PathHash is supplied and $script:pathHash was never set.
 # ==============================================================================
