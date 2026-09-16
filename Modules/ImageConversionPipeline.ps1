@@ -39,13 +39,15 @@ function Invoke-IccStripRetryOrFail {
     Write-Log ("ICC profile mismatch on '" + $Job.SrcPath + "' - stripping profile and retrying.") -Level Warn
     $stripPsi = [System.Diagnostics.ProcessStartInfo]::new()
     $stripPsi.FileName               = $MagickExe
-    # %% (2026-09-16 fix, real bug, live-reported and confirmed) - see
-    # AnimatedConversionPipeline.ps1's Test-AvifAnimated own comment for
-    # why. A literal % in the path is read by ImageMagick as its own
-    # percent-escape syntax, not a literal character.
-    $escapedSrcPathStrip = $Job.SrcPath.Replace('%', '%%')
+    # %% on the OUTPUT path only (2026-09-16 fix, real bug, live-reported
+    # and confirmed) - see AnimatedConversionPipeline.ps1's jobStarter own
+    # comment for the full story. The SOURCE does NOT need this - reading
+    # an existing file with a literal % works fine unescaped; an earlier
+    # version of this fix mistakenly escaped it too, which broke it
+    # outright (magick looking for a literal %% that doesn't exist on
+    # disk, live-reported the same day).
     $escapedStrippedPng  = $strippedPng.Replace('%', '%%')
-    $stripPsi.Arguments              = "`"" + $escapedSrcPathStrip + "`" -strip `"" + $escapedStrippedPng + "`""
+    $stripPsi.Arguments              = "`"" + $Job.SrcPath + "`" -strip `"" + $escapedStrippedPng + "`""
     $stripPsi.UseShellExecute        = $false
     $stripPsi.RedirectStandardOutput = $true
     $stripPsi.RedirectStandardError  = $true
@@ -600,14 +602,17 @@ function Invoke-LooseImageConversionPipeline {
                     $tempPngLocal = $tempPng
                     $magickPsi = [System.Diagnostics.ProcessStartInfo]::new()
                     $magickPsi.FileName               = $MagickExe
-                    # %% (2026-09-16 fix, real bug, live-reported and
-                    # confirmed) - DOCUMENTED DUPLICATE of Controller.ps1's
-                    # own matching jobStarter - keep both in sync. See
-                    # AnimatedConversionPipeline.ps1's Test-AvifAnimated own
-                    # comment for why.
-                    $escapedSrcPathPre2 = $job.SrcPath.Replace('%', '%%')
+                    # %% on the OUTPUT path only (2026-09-16 fix, real bug,
+                    # live-reported and confirmed - DOCUMENTED DUPLICATE of
+                    # Controller.ps1's own matching jobStarter, keep both
+                    # in sync). The SOURCE does NOT need this - reading an
+                    # existing file with a literal % works fine unescaped;
+                    # an earlier version of this fix mistakenly escaped it
+                    # too, which broke it outright (magick looking for a
+                    # literal %% that doesn't exist on disk, live-reported
+                    # the same day).
                     $escapedTempPng2    = $tempPng.Replace('%', '%%')
-                    $magickPsi.Arguments              = "`"" + $escapedSrcPathPre2 + "[0]`" `"" + $escapedTempPng2 + "`""
+                    $magickPsi.Arguments              = "`"" + $job.SrcPath + "[0]`" `"" + $escapedTempPng2 + "`""
                     $magickPsi.UseShellExecute        = $false
                     $magickPsi.RedirectStandardOutput = $true
                     $magickPsi.RedirectStandardError  = $true

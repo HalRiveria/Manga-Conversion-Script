@@ -507,15 +507,17 @@ $script:fullPipelineEngineWorker = {
                     $tempPngLocal = $tempPng
                     $magickPsi = [System.Diagnostics.ProcessStartInfo]::new()
                     $magickPsi.FileName               = $MagickExe
-                    # %% (2026-09-16 fix, real bug, live-reported and
-                    # confirmed) - DOCUMENTED DUPLICATE of
-                    # AnimatedConversionPipeline.ps1's Test-AvifAnimated own
-                    # matching comment - keep all copies in sync. A literal
-                    # % in the path is read by ImageMagick as its own
-                    # percent-escape syntax, not a literal character.
-                    $escapedSrcPathPre = $job.SrcPath.Replace('%', '%%')
+                    # %% on the OUTPUT path only (2026-09-16 fix, real bug,
+                    # live-reported and confirmed - DOCUMENTED DUPLICATE of
+                    # AnimatedConversionPipeline.ps1's matching jobStarter
+                    # comment, keep all copies in sync). The SOURCE does
+                    # NOT need this - reading an existing file with a
+                    # literal % works fine unescaped; an earlier version of
+                    # this fix mistakenly escaped it too, which broke it
+                    # outright (magick looking for a literal %% that
+                    # doesn't exist on disk, live-reported the same day).
                     $escapedTempPng    = $tempPng.Replace('%', '%%')
-                    $magickPsi.Arguments              = "`"" + $escapedSrcPathPre + "[0]`" `"" + $escapedTempPng + "`""
+                    $magickPsi.Arguments              = "`"" + $job.SrcPath + "[0]`" `"" + $escapedTempPng + "`""
                     $magickPsi.UseShellExecute        = $false
                     $magickPsi.RedirectStandardOutput = $true
                     $magickPsi.RedirectStandardError  = $true
@@ -695,14 +697,17 @@ $script:fullPipelineEngineWorker = {
                 $psi = [System.Diagnostics.ProcessStartInfo]::new()
                 $psi.FileName = $MagickExe
                 $qualityArg = if ($DoAnimatedLossless) { "-define webp:lossless=true" } else { "-quality " + $AnimatedQuality }
-                # %% (2026-09-16 fix, real bug, live-reported and
-                # confirmed) - DOCUMENTED DUPLICATE of
-                # AnimatedConversionPipeline.ps1's own matching jobStarter -
-                # keep both in sync. See Test-AvifAnimated's own comment
-                # (that file) for why.
-                $escapedSrcPathAnim = $job.SrcPath.Replace('%', '%%')
+                # %% on the OUTPUT path only (2026-09-16 fix, real bug,
+                # live-reported and confirmed - DOCUMENTED DUPLICATE of
+                # AnimatedConversionPipeline.ps1's own matching jobStarter,
+                # keep both in sync). The SOURCE does NOT need this -
+                # reading an existing file with a literal % works fine
+                # unescaped; an earlier version of this fix mistakenly
+                # escaped it too, which broke it outright (magick looking
+                # for a literal %% that doesn't exist on disk, live-
+                # reported the same day).
                 $escapedOutPathAnim = $job.MagickOutputPath.Replace('%', '%%')
-                $psi.Arguments = "`"" + $escapedSrcPathAnim + "`" -coalesce -loop 0 " + $qualityArg + " `"" + $escapedOutPathAnim + "`""
+                $psi.Arguments = "`"" + $job.SrcPath + "`" -coalesce -loop 0 " + $qualityArg + " `"" + $escapedOutPathAnim + "`""
                 $psi.UseShellExecute        = $false
                 $psi.RedirectStandardOutput = $true
                 $psi.RedirectStandardError  = $true

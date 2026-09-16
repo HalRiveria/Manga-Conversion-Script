@@ -12,17 +12,17 @@ function Test-AvifAnimated {
         [string]$MagickExe
     )
 
-    # %% (2026-09-16 fix, real bug, live-reported and confirmed) - a
-    # literal % anywhere in $AvifPath (a folder or file name containing
-    # one, e.g. "100%" - a real scanlation-group naming pattern) gets
-    # read by ImageMagick as the start of its own percent-escape/format-
-    # specifier syntax, not a literal character, even outside an
-    # explicit -format string - corrupts the path magick actually reads.
-    # Doubling it is ImageMagick's own documented escape for a literal %.
-    $escapedAvifPath = $AvifPath.Replace('%', '%%')
+    # 2026-09-16: a literal % in an INPUT path does NOT need escaping -
+    # confirmed live (reading works fine either way; a real % is only
+    # misread by ImageMagick when WRITING multiple images/frames to one
+    # output path - see Complete-AnimatedDispatchJob's own jobStarter for
+    # where the real fix belongs). An earlier version of this fix
+    # mistakenly escaped this read path too, which broke it outright
+    # (magick looking for a literal %% that doesn't exist on disk,
+    # live-reported the same day).
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName               = $MagickExe
-    $psi.Arguments              = "identify -ping -format `"%T\n`" `"" + $escapedAvifPath + "[0]`""
+    $psi.Arguments              = "identify -ping -format `"%T\n`" `"" + $AvifPath + "[0]`""
     $psi.UseShellExecute        = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
@@ -408,13 +408,26 @@ function Invoke-LooseAnimatedConversionPipeline {
                 $psi = [System.Diagnostics.ProcessStartInfo]::new()
                 $psi.FileName = $MagickExe
                 $qualityArg = if ($AnimatedLossless) { "-define webp:lossless=true" } else { "-quality " + $AnimatedQuality }
-                # %% (2026-09-16 fix, real bug, live-reported and confirmed
-                # by the project owner testing with/without a "100%" folder
-                # name) - see Test-AvifAnimated's own matching comment above
-                # for why. Applies to both the source and output paths.
-                $escapedSrcPath = $job.SrcPath.Replace('%', '%%')
+                # %% on the OUTPUT path only (2026-09-16 fix, real bug,
+                # live-reported and confirmed by the project owner testing
+                # with/without a "100%" folder name, then confirmed again
+                # live here: a literal % anywhere in the path of a
+                # MULTI-FRAME output write - exactly this call's own
+                # -coalesce/animated-webp write - gets read by ImageMagick
+                # as its own percent-escape syntax, and when it can't
+                # resolve the destination as one literal filename, it
+                # falls back to its own per-scene auto-numbered output
+                # instead (observed live: a real, correctly-sized file
+                # with "-0" appended, not the expected clean path).
+                # Doubling it is ImageMagick's own documented escape for a
+                # literal %. The SOURCE path does NOT need this - reading
+                # an existing file with a literal % works fine unescaped;
+                # an earlier version of this fix mistakenly escaped the
+                # source too, which broke it outright (magick looking for
+                # a literal %% that doesn't exist on disk, live-reported
+                # the same day).
                 $escapedOutPath = $job.MagickOutputPath.Replace('%', '%%')
-                $psi.Arguments = "`"" + $escapedSrcPath + "`" -coalesce -loop 0 " + $qualityArg + " `"" + $escapedOutPath + "`""
+                $psi.Arguments = "`"" + $job.SrcPath + "`" -coalesce -loop 0 " + $qualityArg + " `"" + $escapedOutPath + "`""
                 $psi.UseShellExecute        = $false
                 $psi.RedirectStandardOutput = $true
                 $psi.RedirectStandardError  = $true
