@@ -331,12 +331,22 @@ function Invoke-UnwantedImageScan {
         HashMismatchCount = 0
         HashFailureCount  = 0
         AlreadyGoneCount  = 0
+        Aborted           = $false
     }
 
     $allScannedFiles = @(Get-ScannableFiles -Path $Path -ExcludePaths $ExcludePaths)
     $files = $allScannedFiles | Where-Object { $ImageExtensions -icontains $_.Extension }
 
     foreach ($file in $files) {
+        # 2026-09-15 fix, real bug: this loop never polled the abort signal
+        # at all, unlike every other long-running per-file loop in this
+        # codebase. During Full Pipeline's cover-deletion pre-scan,
+        # Test-AbortSignal is what actually PRINTS the "[ABORT] Ctrl+C
+        # detected" message - since nothing here called it, a user hitting
+        # Ctrl+C during this scan saw no feedback at all and deletions kept
+        # happening for the rest of the scan regardless, only stopping once
+        # the main dispatch loop later polled the abort signal itself.
+        if (Test-AbortSignal) { $totals.Aborted = $true; break }
         $totals.ScannedCount++
         $matchResult = Test-UnwantedImageMatch -File $file -Profiles $Profiles
 
@@ -381,10 +391,11 @@ function Invoke-UnwantedImageScan {
         }
     }
 
+    $abortedSuffix = if ($totals.Aborted) { " (ABORTED - stopped early, " + ($files.Count - $totals.ScannedCount) + " file(s) never scanned)" } else { "" }
     if ($DryRun) {
-        Write-Log ("Unwanted-image scan complete (dry run): " + $totals.WouldDeleteCount + " would delete, " + $totals.HashMismatchCount + " hash mismatch(es), " + $totals.ScannedCount + " image(s) scanned.") -Level Summary -ForceConsole
+        Write-Log ("Unwanted-image scan complete (dry run): " + $totals.WouldDeleteCount + " would delete, " + $totals.HashMismatchCount + " hash mismatch(es), " + $totals.ScannedCount + " image(s) scanned." + $abortedSuffix) -Level Summary -ForceConsole
     } else {
-        Write-Log ("Unwanted-image scan complete: " + $totals.DeletedCount + " deleted, " + $totals.HashMismatchCount + " hash mismatch(es), " + $totals.ScannedCount + " image(s) scanned.") -Level Summary -ForceConsole
+        Write-Log ("Unwanted-image scan complete: " + $totals.DeletedCount + " deleted, " + $totals.HashMismatchCount + " hash mismatch(es), " + $totals.ScannedCount + " image(s) scanned." + $abortedSuffix) -Level Summary -ForceConsole
     }
     $totals.AllScannedFiles = $allScannedFiles
     return $totals

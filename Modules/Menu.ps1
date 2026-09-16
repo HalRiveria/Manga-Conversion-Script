@@ -73,8 +73,35 @@ function Show-ModeMenu {
             Initialize-CleanConsoleOutput -Enabled ([bool]$Settings.CleanConsoleOutputEnabled)
             Initialize-FileDeletion -PermanentDelete ([bool]$Settings.PermanentDelete)
             Start-LogRun
-            $null = Show-CoverDeletionMenu -PromptFunc $PromptFunc -Settings $Settings -SettingsPath $SettingsPath
-            Complete-LogRun
+            # RunActive bracket + Complete-LogRun-in-finally (2026-09-15
+            # fix, real bugs, land together): Cover Deletion's real,
+            # permanent-deletion-capable scan never returns out to
+            # Invoke-MainLoop's own dispatch (this branch loops right back
+            # to the top of THIS while loop instead) - it never reached
+            # Invoke-MainLoop's RunActive/QuickEdit bracket, so a Ctrl+C
+            # during a real scan hit the OS default action and hard-killed
+            # the process mid-scan (possibly between Get-FileHash and
+            # Remove-Source), instead of draining gracefully like every
+            # other real deletion-capable path in this project. Only safe
+            # to add now that Invoke-UnwantedImageScan's own scan loop
+            # actually polls the abort signal (2026-09-15 fix,
+            # UnwantedImage.ps1) - RunActive=true with nothing polling it
+            # would instead freeze here for 65s with Ctrl+C swallowed.
+            # Complete-LogRun moved into the same finally so an exception
+            # inside the submenu (a locked report file, a path that
+            # vanishes mid-scan) can't skip closing the log run - Scenario
+            # Q3's own 2026-09-04 fix exists to prevent exactly the log-
+            # ordering corruption that would otherwise cause.
+            Set-AbortHandlerRunActive -Active $true
+            $null = Set-ConsoleQuickEditEnabled -Enabled $false
+            try {
+                $null = Show-CoverDeletionMenu -PromptFunc $PromptFunc -Settings $Settings -SettingsPath $SettingsPath
+            } finally {
+                $null = Set-ConsoleQuickEditEnabled -Enabled $true
+                Set-AbortHandlerRunActive -Active $false
+                Complete-AbortDrain
+                Complete-LogRun
+            }
             Write-Host ""
             continue
         }
@@ -107,7 +134,7 @@ function Get-OptionsMenuSchema {
     return @(
         @{ Key = '1'; Label = 'Full Pipeline Settings'; Type = 'Submenu'; Items = @(
             @{ Key = '1'; Label = 'Max Concurrent Processes'; Type = 'Int'; SettingsKey = 'FullPipelineMaxConcurrentProcs'; Min = 1; Max = [int]::MaxValue; Description = 'shared cjxl+magick process budget (independent of CJXL Processes/Animated Threads)' }
-            @{ Key = '2'; Label = 'Run Cover Deletion Before Conversion'; Type = 'Bool'; SettingsKey = 'RunCoverDeletionBeforeConversion'; Description = 'placeholder - not wired into a real run yet' }
+            @{ Key = '2'; Label = 'Run Cover Deletion Before Conversion'; Type = 'Bool'; SettingsKey = 'RunCoverDeletionBeforeConversion'; Description = 'runs a Cover Deletion pre-scan before Full Pipeline conversion starts' }
         ) }
         @{ Key = '2'; Label = 'Image Conversion Settings'; Type = 'Submenu'; Items = @(
             @{ Key = '1'; Label = 'CJXL Processes'; Type = 'Int';  SettingsKey = 'MaxCjxlProcs'; Min = 1; Max = [int]::MaxValue; Description = 'how many cjxl.exe run at once per batch' }

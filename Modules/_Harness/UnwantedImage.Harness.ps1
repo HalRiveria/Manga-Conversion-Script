@@ -19,6 +19,19 @@ $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "..\UnwantedImage.ps1")
 
+# Fake, not the real AbortPipeline.ps1 (2026-09-15 addition, for the abort-
+# poll fix in Invoke-UnwantedImageScan's own scan loop) - this harness's own
+# convention is stubbed dependencies (see this file's header), and a simple
+# call-counted fake gives deterministic control over exactly which file the
+# abort fires before, which a real native console handler can't offer.
+$script:testAbortSignalCallCount   = 0
+$script:testAbortAfterCallCount    = -1   # -1 = never signal abort
+function Test-AbortSignal {
+    $script:testAbortSignalCallCount++
+    if ($script:testAbortAfterCallCount -ge 0 -and $script:testAbortSignalCallCount -gt $script:testAbortAfterCallCount) { return $true }
+    return $false
+}
+
 $script:logCalls = New-Object System.Collections.Generic.List[string]
 # -ForceConsole tracked separately, not folded into $logCalls' own string
 # shape (2026-09-03 addition) - Scenario Z below checks specifically that
@@ -930,6 +943,34 @@ Test-Assert ($groupsResultZ2b.Groups.Count -eq 1 -and $groupsResultZ2b.Groups[0]
 $reportPathZ2 = Join-Path $scratchDir "scenario-z2-report.txt"
 $auditResultZ2 = Invoke-TrailingZeroAudit -Path $rootZ2 -ReportPath $reportPathZ2 -PreScannedFiles $preScannedZ2b
 Test-Assert ($auditResultZ2.UniqueFileCount -eq 1 -and (Test-Path -LiteralPath $reportPathZ2)) "Invoke-TrailingZeroAudit's own -PreScannedFiles reaches Get-TrailingZeroGroups and produces a real report"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario AA (2026-09-15 fix, real bug): the scan loop now polls the abort
+#  signal per file, instead of never checking it at all. 4 real matching
+#  files, abort signalled to fire before the 3rd Test-AbortSignal call
+#  (i.e. right after file 2 finishes) - the scan must stop there, not walk
+#  all 4.
+# ==============================================================================
+Write-Host "=== Scenario AA: Invoke-UnwantedImageScan stops when the abort signal fires mid-scan ===" -ForegroundColor Cyan
+$rootAA = Join-Path $scratchDir "scenario-aa"
+New-Item -ItemType Directory -Path $rootAA -Force | Out-Null
+$imgAA1 = New-RealImage -Name "scenario-aa\a1.png" -Width 70 -Height 50
+$imgAA2 = New-RealImage -Name "scenario-aa\a2.png" -Width 70 -Height 50
+$imgAA3 = New-RealImage -Name "scenario-aa\a3.png" -Width 70 -Height 50
+$imgAA4 = New-RealImage -Name "scenario-aa\a4.png" -Width 70 -Height 50
+# No profile actually matches any of these - the point of this scenario is
+# the loop stopping early, not deletion; Test-UnwantedImageMatch runs and
+# reports NoMatch for all four regardless of the abort signal below.
+$nonMatchingProfileAA = New-ProfileFromRealFile -File $imgAA1 -Width 999 -Height 999 -Label "AA Never Matches"
+
+$script:testAbortSignalCallCount = 0
+$script:testAbortAfterCallCount  = 2
+$scanResultAA = Invoke-UnwantedImageScan -Path $rootAA -Profiles @($nonMatchingProfileAA)
+$script:testAbortAfterCallCount = -1   # reset for any later scenario
+
+Test-Assert ($scanResultAA.Aborted -eq $true) "the scan reports Aborted=`$true"
+Test-Assert ($scanResultAA.ScannedCount -lt 4) ("the scan stopped before reaching all 4 files (got ScannedCount=" + $scanResultAA.ScannedCount + ")")
 Write-Host ""
 
 # ==============================================================================

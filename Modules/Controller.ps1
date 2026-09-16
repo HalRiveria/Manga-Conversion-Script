@@ -1197,7 +1197,8 @@ function Invoke-MainLoop {
         [scriptblock]$StartLogRunHandler = ${function:Start-LogRun},
         [scriptblock]$InitializeLogPathsHandler = ${function:Initialize-LogPaths},
         [scriptblock]$InitializeLogMutexHandler = ${function:Initialize-LogMutex},
-        [scriptblock]$GetLogMutexHandler = ${function:Get-LogMutex}
+        [scriptblock]$GetLogMutexHandler = ${function:Get-LogMutex},
+        [scriptblock]$CompleteAbortDrainHandler = ${function:Complete-AbortDrain}
     )
 
     $lastFullLogging        = [bool]$Settings.FullLogging
@@ -1280,6 +1281,19 @@ function Invoke-MainLoop {
         } finally {
             $null = & $SetQuickEditHandler -Enabled $true
             & $SetRunActiveHandler -Active $false
+            # 2026-09-15 fix, real bug: Complete-AbortDrain (the only thing
+            # that sets [ConsoleCtrl]::DrainComplete, unblocking the native
+            # Ctrl+C handler thread) previously had only two callers -
+            # Invoke-AbortOrFatalHandler (needs a real exception) and
+            # Invoke-GracefulDrain (reached only via
+            # Invoke-ZipParallelProcessing - modes 1/4 only). Modes 2/3/8
+            # return normally with Aborted=$true and nothing ever set
+            # DrainComplete, so a window-close abort in those modes hung
+            # the OS handler thread for the full 65s wait every time.
+            # Invoke-MainLoop is the one place that brackets every mode -
+            # calling it here unconditionally (idempotent, safe even on a
+            # non-aborted run) closes the gap for all of them at once.
+            & $CompleteAbortDrainHandler
         }
         $runStopwatch.Stop()
 

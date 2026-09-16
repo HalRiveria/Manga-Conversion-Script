@@ -32,6 +32,13 @@ $ErrorActionPreference = "Stop"
 # harness still never touches a real log file.
 . (Join-Path $PSScriptRoot "..\Logging.ps1")
 . (Join-Path $PSScriptRoot "..\FileDeletion.ps1")
+# AbortPipeline.ps1 dot-sourced too (2026-09-15 addition, for the real
+# Set-AbortHandlerRunActive/Complete-AbortDrain calls Show-ModeMenu's '5'
+# branch now makes for real - see that fix's own comment in Menu.ps1).
+# Same "real module, not stubbed" reasoning as Logging.ps1/FileDeletion.ps1
+# above - this harness needs the real [ConsoleCtrl]::RunActive/DrainComplete
+# state to assert against, not a fake.
+. (Join-Path $PSScriptRoot "..\AbortPipeline.ps1")
 . (Join-Path $PSScriptRoot "..\Menu.ps1")
 
 $script:logCalls = New-Object System.Collections.Generic.List[string]
@@ -455,6 +462,72 @@ try {
 
 Test-Assert (($script:eventOrderQ3 -join ',') -eq "START,COVER,COMPLETE") ("Start-LogRun, then Cover Deletion's own work, then Complete-LogRun, in that order (got " + ($script:eventOrderQ3 -join ',') + ")")
 Test-Assert ($resultQ3.Mode -eq 'ImageConversion') "the loop still resolved a mode normally afterward"
+
+# ==============================================================================
+#  Scenario Q3b (2026-09-15 fix, real bug, two parts landing together):
+#  (a) Cover Deletion never bracketed [ConsoleCtrl]::RunActive around its
+#  own real, permanent-deletion-capable work, unlike every dispatched mode
+#  via Invoke-MainLoop - a Ctrl+C during a real scan hit the OS default
+#  action instead of draining gracefully. (b) Complete-LogRun (fixed
+#  above in Q3, still real here) must ALSO fire when Show-CoverDeletionMenu
+#  itself throws, not just on the happy path - moved into a finally.
+# ==============================================================================
+Write-Host "=== Scenario Q3b: Cover Deletion brackets RunActive, and Complete-LogRun still fires if the submenu throws ===" -ForegroundColor Cyan
+$settingsQ3b = Get-DefaultScriptSettings
+$pathQ3b = New-ScratchSettingsPath "scenario-q3b"
+$promptQ3b = New-ScriptedPrompt -Responses @('5', '2')
+
+$realShowCoverDeletionMenuQ3b = ${function:Show-CoverDeletionMenu}
+$script:runActiveDuringCoverQ3b = $null
+# Deliberately NOT .GetNewClosure()'d - this stub references no outer local
+# variable (only a $script:-prefixed one, already directly visible without
+# closure capture, and a .NET static member read) - .GetNewClosure() would
+# actually BREAK the $script: write here (Docs/lessons-learned.md's 9th
+# entry: a $script:-prefixed write inside a .GetNewClosure()'d scriptblock
+# doesn't reach the real script-scope variable) - confirmed live while
+# writing this test, the exact documented pitfall.
+${function:Show-CoverDeletionMenu} = { param($PromptFunc) $script:runActiveDuringCoverQ3b = [ConsoleCtrl]::RunActive }
+[ConsoleCtrl]::RunActive = $false
+[ConsoleCtrl]::DrainComplete.Reset()
+try {
+    $null = Show-ModeMenu -Settings $settingsQ3b -SettingsPath $pathQ3b -PromptFunc $promptQ3b
+} finally {
+    ${function:Show-CoverDeletionMenu} = $realShowCoverDeletionMenuQ3b
+}
+
+Test-Assert ($script:runActiveDuringCoverQ3b -eq $true) "RunActive was true WHILE Cover Deletion's own real work was running"
+Test-Assert ([ConsoleCtrl]::RunActive -eq $false) "RunActive was set back to false after Cover Deletion finished"
+Test-Assert ([ConsoleCtrl]::DrainComplete.IsSet) "DrainComplete was signalled after Cover Deletion finished (unblocks the native Ctrl+C handler thread rather than leaving it waiting up to 65s)"
+
+# Part (b): Complete-LogRun still fires when the submenu itself throws.
+$settingsQ3c = Get-DefaultScriptSettings
+$pathQ3c = New-ScratchSettingsPath "scenario-q3c"
+$promptQ3c = New-ScriptedPrompt -Responses @('5', '2')
+
+$script:eventOrderQ3c = [System.Collections.Generic.List[string]]::new()
+$realStartLogRunQ3c = ${function:Start-LogRun}
+$realCompleteLogRunQ3c = ${function:Complete-LogRun}
+$realShowCoverDeletionMenuQ3c = ${function:Show-CoverDeletionMenu}
+function Start-LogRun { $script:eventOrderQ3c.Add("START") }
+function Complete-LogRun { $script:eventOrderQ3c.Add("COMPLETE") }
+${function:Show-CoverDeletionMenu} = { param($PromptFunc) throw "simulated failure inside the Cover Deletion submenu" }
+$threwQ3c = $false
+try {
+    try {
+        $null = Show-ModeMenu -Settings $settingsQ3c -SettingsPath $pathQ3c -PromptFunc $promptQ3c
+    } catch {
+        $threwQ3c = $true
+    }
+} finally {
+    ${function:Start-LogRun} = $realStartLogRunQ3c
+    ${function:Complete-LogRun} = $realCompleteLogRunQ3c
+    ${function:Show-CoverDeletionMenu} = $realShowCoverDeletionMenuQ3c
+    [ConsoleCtrl]::RunActive = $false
+}
+
+Test-Assert $threwQ3c "sanity check: the simulated submenu failure really did propagate out"
+Test-Assert ($script:eventOrderQ3c -contains "COMPLETE") ("Complete-LogRun still fired even though the submenu threw (got " + ($script:eventOrderQ3c -join ',') + ") - without the fix this is where the log run would have stayed open")
+Write-Host ""
 Write-Host ""
 
 # ==============================================================================
