@@ -314,6 +314,17 @@ $hiddenFileM2 = Join-Path $scratchDir "scenario-m-hidden-recycle.txt"
 (Get-Item -LiteralPath $hiddenFileM2 -Force).Attributes = [System.IO.FileAttributes]::Hidden
 $null = Move-ToRecycleBin -ItemPath $hiddenFileM2
 Test-Assert (-not (Test-Path -LiteralPath $hiddenFileM2)) "Move-ToRecycleBin deletes a Hidden file instead of throwing"
+
+# 2026-09-15 fix, real bug: [System.IO.File]::Delete throws
+# UnauthorizedAccessException on a read-only file, which meant a
+# read-only source survived right next to its already-converted .jxl
+# and was misreported as a delete FAILURE.
+$readOnlyFileM = Join-Path $scratchDir "scenario-m-readonly.txt"
+"read-only content" | Out-File -FilePath $readOnlyFileM -Encoding UTF8
+(Get-Item -LiteralPath $readOnlyFileM -Force).Attributes = [System.IO.FileAttributes]::ReadOnly
+$resultM3 = Remove-ItemPermanently -ItemPath $readOnlyFileM
+Test-Assert (-not (Test-Path -LiteralPath $readOnlyFileM)) "Remove-ItemPermanently deletes a read-only file instead of leaving it behind"
+Test-Assert ($resultM3 -eq $true) "Remove-ItemPermanently reports the read-only file's deletion as a real success, not a failure"
 Write-Host ""
 
 # ==============================================================================

@@ -83,6 +83,20 @@ function Remove-ItemPermanently {
         $isDirectory    = [bool]($attr -band [System.IO.FileAttributes]::Directory)
         $isReparsePoint = [bool]($attr -band [System.IO.FileAttributes]::ReparsePoint)
 
+        # Clear ReadOnly before a permanent delete (2026-09-15 fix, real
+        # bug) - [System.IO.File]::Delete throws UnauthorizedAccessException
+        # on a read-only file, which meant a read-only source survived
+        # right next to its already-converted .jxl and was logged as a
+        # delete FAILURE. Move-ToRecycleBin (above) already handles this
+        # case fine via the VisualBasic FileIO API - this is the one path
+        # that didn't. Only strips ReadOnly, not other attributes, and
+        # only on the top-level item being deleted (a read-only file
+        # nested inside a directory being recursively deleted is a
+        # separate, harder problem - see Todo.md).
+        if ($attr -band [System.IO.FileAttributes]::ReadOnly) {
+            [System.IO.File]::SetAttributes($ItemPath, $attr -bxor [System.IO.FileAttributes]::ReadOnly)
+        }
+
         if ($isDirectory -and $isReparsePoint) {
             [System.IO.Directory]::Delete($ItemPath, $false)
         } elseif ($isDirectory) {
