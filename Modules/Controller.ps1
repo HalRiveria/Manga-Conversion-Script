@@ -800,7 +800,12 @@ function Invoke-FullPipeline {
         [int]$MaxQueueAhead = 3,
         [bool]$RunCoverDeletionBeforeConversion = $false,
         [scriptblock]$CoverDeletionScanHandler = ${function:Invoke-UnwantedImageScan},
-        [scriptblock]$PromptFunc = { param($Message) Read-Host $Message }
+        [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
+        # Injectable (2026-09-16, Todo.md's own tracked gap) - lets a test
+        # substitute a scriptblock that deliberately throws, to genuinely
+        # exercise -JobCrashedHandler's real code path end-to-end. Real
+        # callers never pass this; it defaults to the real engine worker.
+        [scriptblock]$EngineWorkerScript = $script:fullPipelineEngineWorker
     )
 
     $totals = @{
@@ -1015,10 +1020,22 @@ function Invoke-FullPipeline {
         # the surviving engine from wandering further into the same
         # uncertain state; the leftover loop below is what actually stops
         # the zip+delete for chapters already caught in it.
-        $anyEngineCrashed = $false
+        # $totals.Aborted set directly here, not via a local
+        # $anyEngineCrashed flag checked after the call (2026-09-16 fix,
+        # real bug) - the old version wrote `$script:anyEngineCrashed =
+        # $true` inside this .GetNewClosure()'d handler while the check
+        # below read the local, unprefixed `$anyEngineCrashed` - two
+        # different variables in two different scopes, so the local one
+        # never updated and `if ($anyEngineCrashed)` was always $false.
+        # Confirmed live in isolation. $totals is a hashtable already in
+        # this closure's lexical scope, and mutating a captured
+        # reference's own properties works fine through .GetNewClosure()
+        # (unlike a `$script:`-prefixed write, or rebinding a scalar) -
+        # the exact pattern $finalizeChapterEntry above already uses for
+        # the same $totals object.
         $jobCrashedHandler = {
             param($errorRecord)
-            $script:anyEngineCrashed = $true
+            $totals.Aborted = $true
             Write-Log ("Full Pipeline: an engine's runspace threw an unhandled exception and stopped - " + $errorRecord + ". The other engine will finish its own remaining work, then the run will abort; any chapter left incomplete because of this will NOT be zipped or have its folder touched.") -Level Error -ForceConsole
             try { $fullCts.Cancel() } catch { }
         }.GetNewClosure()
@@ -1030,12 +1047,10 @@ function Invoke-FullPipeline {
               'Test-AbortSignal', 'Get-LooseImageCandidates', 'Remove-StaleLooseSources', 'Get-LooseAnimatedCandidates',
               'Get-LooseImageExtensions', 'Test-OrphanedScratchFileName')
 
-        $null = Invoke-ZipParallelProcessing -WorkerScript $script:fullPipelineEngineWorker -JobParams $jobParamsWorker `
+        $null = Invoke-ZipParallelProcessing -WorkerScript $EngineWorkerScript -JobParams $jobParamsWorker `
             -SharedFunctionNames $engineWorkerSharedFunctionNames -MaxParallel 2 -Cts $fullCts -ResultHandler $engineResultHandler `
             -AbortWaitMessage "[ABORT] Waiting for current image/animated jobs to finish (up to 60s)..." -PollCallback $pollCallback `
             -JobCrashedHandler $jobCrashedHandler
-
-        if ($anyEngineCrashed) { $totals.Aborted = $true }
 
         foreach ($leftoverKey in @($mergeState.Keys)) {
             $leftoverEntry = $mergeState[$leftoverKey]
@@ -1058,6 +1073,46 @@ function Invoke-FullPipeline {
             if (-not ($leftoverEntry.GotImage -and $leftoverEntry.GotAnimated)) {
                 $totals.Aborted = $true
                 Write-Log ("Full Pipeline: '" + $leftoverEntry.Dir.FullName + "' was left incomplete (an engine never finished reporting on it, likely due to the run stopping mid-way) - NOT zipped, NOT deleted, left exactly as-is for a future run to pick back up.") -Level Warn -ForceConsole
+                # Credit whichever engine's result DID arrive before
+                # skipping zip/delete (2026-09-16 fix, real bug found by a
+                # Gemini review). $finalizeChapterEntry above is the ONLY
+                # place in this function that adds to these totals - since
+                # every entry that reaches this branch skips it entirely
+                # (by construction: $mergeState.Remove only ever runs once
+                # BOTH engines have reported, so a leftover entry can never
+                # have both flags true), real completed conversions and
+                # deletions from whichever engine DID finish this chapter
+                # before the crash/abort were silently dropped from the
+                # run's own summary - the exact undercount bug this same
+                # 2026-09-15 fix was supposed to have closed everywhere,
+                # reintroduced one level up in this same function the same
+                # day.
+                $totals.ChapterCount++
+                if ($null -ne $leftoverEntry.ImageResult) {
+                    $ir = $leftoverEntry.ImageResult
+                    $totals.ConvertedImageSuccess += $ir.ConvertedCount
+                    $totals.ConvertedImageFail    += $ir.FailedCount
+                    $totals.ConvertedImageSkipped += $ir.SkippedCount
+                    $totals.DeletedImageSuccess   += $ir.DeletedCount
+                    $totals.DeletedImageFail      += $ir.DeleteFailedCount
+                    $totals.InspectFailedCount    += $ir.InspectFailedCount
+                }
+                if ($null -ne $leftoverEntry.AnimatedResult) {
+                    $ar = $leftoverEntry.AnimatedResult
+                    $totals.ConvertedAnimatedSuccess += $ar.ConvertedCount
+                    $totals.ConvertedAnimatedFail    += $ar.FailedCount
+                    $totals.ConvertedAnimatedSkipped += $ar.SkippedCount
+                    $totals.DeletedAnimatedSuccess   += $ar.DeletedCount
+                    $totals.DeletedAnimatedFail      += $ar.DeleteFailedCount
+                    $totals.InspectFailedCount       += $ar.InspectFailedCount
+                }
+                # Tell CCR this chapter is done (as a Warning, not a clean
+                # Success) so its live display doesn't leave it stuck
+                # showing "in progress" forever - same call shape
+                # $finalizeChapterEntry itself uses below.
+                if ($cleanConsoleOutputEnabled) {
+                    $null = Complete-ChapterProgress -SeriesName $leftoverEntry.SeriesName -ChapterName $leftoverEntry.ChapterName -Status 'Warning' -Detail "left incomplete - run stopped before both engines finished"
+                }
                 continue
             }
             & $finalizeChapterEntry $leftoverKey $leftoverEntry

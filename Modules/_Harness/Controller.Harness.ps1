@@ -364,6 +364,34 @@ Test-Assert ($totalsC2.ZipCreatedSuccess -eq 0 -and $totalsC2.ZipSkippedDueToErr
 Test-Assert (Test-Path -LiteralPath $chC2) "the chapter folder still exists - never zipped, never deleted, despite the engine crash"
 Write-Host ""
 
+# ==============================================================================
+#  Scenario C2b (2026-09-16 fix, real bug found by a Gemini review):
+#  Invoke-FullPipeline's own -JobCrashedHandler used to write
+#  $script:anyEngineCrashed inside a .GetNewClosure()'d scriptblock while
+#  the check right after Invoke-ZipParallelProcessing read the LOCAL,
+#  unprefixed $anyEngineCrashed - two different variables in two
+#  different scopes, so the local one never updated and
+#  `if ($anyEngineCrashed)` was always $false, regardless of what the
+#  handler did. Scenario C2 above doesn't actually exercise this path
+#  any more (its nonexistent-cjxl-path setup is now caught as a normal
+#  per-file failure, not a genuine runspace crash - Todo.md's own tracked
+#  gap: no test could reach -JobCrashedHandler's real code path through
+#  Invoke-FullPipeline without a way to inject a deliberately-crashing
+#  engine worker). -EngineWorkerScript (added this same fix) closes that
+#  gap: a scriptblock with no param() block ignores whatever named
+#  parameters Invoke-ZipParallelProcessing's own AddParameter calls pass
+#  it (confirmed live) and just throws immediately.
+# ==============================================================================
+Write-Host "=== Scenario C2b: a genuinely crashed engine runspace sets totals.Aborted, not just totals.ZipSkippedDueToError ===" -ForegroundColor Cyan
+$chC2b = New-Dir "scenario-c2b\Series\Chapter 1"
+New-FakeImageIn -DirPath $chC2b -Name "page1.jpg" | Out-Null
+$crashingWorkerC2b = { throw "simulated engine runspace crash" }
+
+$totalsC2b = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-c2b") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true -EngineWorkerScript $crashingWorkerC2b
+
+Test-Assert ($totalsC2b.Aborted -eq $true) "the run's own totals record the crash as an abort (got Aborted=$($totalsC2b.Aborted))"
+Write-Host ""
+
 
 # ==============================================================================
 #  Scenario C3 (2026-08-31 fix): AVIF classification used to only look at
