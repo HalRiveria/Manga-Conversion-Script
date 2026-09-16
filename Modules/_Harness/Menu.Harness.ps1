@@ -696,6 +696,19 @@ Test-Assert ($script:trailingZeroOpenCallsS2.Count -eq 1 -and $script:trailingZe
 Write-Host ""
 
 # ==============================================================================
+#  Scenario S2b (2026-09-15 fix, real bug, latent): -OpenHandler's own
+#  return value used to leak into Invoke-TrailingZeroAuditRun's output
+#  stream - a handler returning something (the shipped default,
+#  Start-Process with no -PassThru, never does) would turn this
+#  function's single-hashtable return into a 2-element array.
+# ==============================================================================
+Write-Host "=== Scenario S2b: a chatty -OpenHandler's return value does not leak into the function's own output ===" -ForegroundColor Cyan
+$chattyOpenHandlerS2b = { param($Path) return "some object a real Start-Process -PassThru might return" }
+$resultTZChattyS2b = Invoke-TrailingZeroAuditRun -ReportPath $reportPathS2 -PromptFunc $promptFolderS2 -OpenHandler $chattyOpenHandlerS2b
+Test-Assert ($resultTZChattyS2b -is [hashtable]) ("the function still returns a single hashtable, not an array, even when -OpenHandler itself returns something (got type: " + $resultTZChattyS2b.GetType().Name + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario S3 (2026-09-09, "Approved new functionality" from Todo.md):
 #  Invoke-CoverDeletionRun/Invoke-TrailingZeroAuditRun's new -DefaultPath
 #  (remembered-folder reuse on blank input) and Invoke-TrailingZeroAuditRun's

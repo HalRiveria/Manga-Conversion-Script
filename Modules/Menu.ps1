@@ -204,7 +204,12 @@ function Open-FolderInExplorer {
     if (-not (Test-Path -LiteralPath $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
-    Start-Process -FilePath "explorer.exe" -ArgumentList $dir
+    # Quoted (2026-09-15 fix, real bug) - PS 5.1's Start-Process
+    # -ArgumentList doesn't quote a bare path itself, so an unquoted path
+    # containing a space (e.g. a username with a space in it) arrives at
+    # explorer.exe as two separate arguments instead of one. Verified
+    # live with an argv-dumping helper.
+    Start-Process -FilePath "explorer.exe" -ArgumentList ("`"" + $dir + "`"")
 }
 
 function Invoke-OptionsMenuAction {
@@ -380,7 +385,14 @@ function Invoke-TrailingZeroAuditRun {
     }
 
     Write-Host ("Report written: '" + $result.ReportPath + "' (" + $result.UniqueFileCount + " unique file(s))") -ForegroundColor Green
-    & $OpenHandler $result.ReportPath
+    # $null = (2026-09-15 fix, real bug, latent) - the shipped default
+    # (Start-Process with no -PassThru) emits nothing, so this was safe
+    # in practice, but -OpenHandler is advertised as an injection point -
+    # a handler returning anything would make this function return a
+    # 2-element array instead of the single hashtable below, and
+    # Show-CoverDeletionMenu's own caller would then persist a garbage
+    # space-joined string as LastCoverDeletionPath.
+    $null = & $OpenHandler $result.ReportPath
     return @{ Ran = $true; Reason = $null; Result = $result; ResolvedPath = $resolvedPath }
 }
 
