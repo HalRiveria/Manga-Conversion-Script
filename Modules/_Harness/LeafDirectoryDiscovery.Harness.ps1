@@ -730,6 +730,74 @@ if (-not $icaclsOkW2) {
 Write-Host ""
 
 # ==============================================================================
+#  Scenario W3 (2026-09-15 fix, real bug found by the full line-by-line
+#  review series): a junction pointing back at an ancestor directory used
+#  to make every one of these stack-walk traversals loop, multiplying
+#  every file under the cycle once per loop - live-reproduced by a
+#  reviewer as 64 duplicate candidates for one real chapter before the
+#  synthesized path length finally exceeded MAX_PATH. Junctions don't
+#  need admin rights on Windows (unlike symlinks), so this is a real,
+#  unprivileged repro, not a mock.
+# ==============================================================================
+Write-Host "=== Scenario W3: Get-FilesRecursiveSafe does not loop through a junction cycle ===" -ForegroundColor Cyan
+$libraryW3 = Join-Path $scratchDir "scenario-w3"
+$subW3     = Join-Path $libraryW3 "sub"
+New-Item -ItemType Directory -Path $subW3 -Force | Out-Null
+"x" | Out-File -LiteralPath (Join-Path $libraryW3 "root.txt") -Encoding ASCII
+"x" | Out-File -LiteralPath (Join-Path $subW3 "sub.txt") -Encoding ASCII
+
+$junctionW3 = Join-Path $subW3 "loop-back"
+$mklinkOutW3 = cmd /c mklink /J "`"$junctionW3`"" "`"$libraryW3`"" 2>&1
+$junctionOkW3 = (Test-Path -LiteralPath $junctionW3)
+
+if (-not $junctionOkW3) {
+    Write-Host "  [SKIP] could not create a real junction in this environment - skipping Scenario W3's assertions" -ForegroundColor Yellow
+} else {
+    $foundW3 = Get-FilesRecursiveSafe -ScanPath $libraryW3
+    $foundNamesW3 = @($foundW3 | ForEach-Object { $_.Name })
+    Test-Assert (($foundNamesW3 | Where-Object { $_ -eq "root.txt" }).Count -eq 1) ("root.txt was found exactly once, not once per loop through the junction (got " + (($foundNamesW3 | Where-Object { $_ -eq "root.txt" }).Count) + ")")
+    Test-Assert (($foundNamesW3 | Where-Object { $_ -eq "sub.txt" }).Count -eq 1) ("sub.txt was found exactly once (got " + (($foundNamesW3 | Where-Object { $_ -eq "sub.txt" }).Count) + ")")
+}
+Write-Host ""
+
+# ==============================================================================
+#  Scenario X (2026-09-15 fix, same bug, the other two traversals):
+#  Get-ZippableLeafDirs and New-ZippableLeafDirProvider must not multiply
+#  candidates through the same kind of junction cycle either.
+# ==============================================================================
+Write-Host "=== Scenario X: Get-ZippableLeafDirs / New-ZippableLeafDirProvider do not loop through a junction cycle ===" -ForegroundColor Cyan
+$libraryX = Join-Path $scratchDir "scenario-x"
+$chapterX = Join-Path $libraryX "Chapter 1"
+New-Item -ItemType Directory -Path $chapterX -Force | Out-Null
+"x" | Out-File -LiteralPath (Join-Path $chapterX "page1.jpg") -Encoding ASCII
+
+$junctionX = Join-Path $libraryX "loop-back"
+$mklinkOutX = cmd /c mklink /J "`"$junctionX`"" "`"$libraryX`"" 2>&1
+$junctionOkX = (Test-Path -LiteralPath $junctionX)
+
+if (-not $junctionOkX) {
+    Write-Host "  [SKIP] could not create a real junction in this environment - skipping Scenario X's assertions" -ForegroundColor Yellow
+} else {
+    $foundX = Get-ZippableLeafDirs -ScanPath $libraryX -QualifyingExtensions @(".jpg")
+    $matchingX = @($foundX | Where-Object { $_.Dir.Name -eq "Chapter 1" })
+    Test-Assert ($matchingX.Count -eq 1) ("Get-ZippableLeafDirs found 'Chapter 1' exactly once, not once per loop through the junction (got " + $matchingX.Count + ")")
+
+    $providerX = New-ZippableLeafDirProvider -ScanPath $libraryX -QualifyingExtensions @(".jpg")
+    $yieldedX = [System.Collections.Generic.List[hashtable]]::new()
+    $callCountX = 0
+    while ($true) {
+        $callCountX++
+        if ($callCountX -gt 200) { throw "Scenario X: New-ZippableLeafDirProvider did not terminate after 200 calls - possible infinite loop through the junction." }
+        $nextX = & $providerX
+        if ($null -eq $nextX) { break }
+        $yieldedX.Add($nextX)
+    }
+    $matchingProviderX = @($yieldedX | Where-Object { $_.Dir.Name -eq "Chapter 1" })
+    Test-Assert ($matchingProviderX.Count -eq 1) ("New-ZippableLeafDirProvider yielded 'Chapter 1' exactly once, not once per loop through the junction (got " + $matchingProviderX.Count + ")")
+}
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

@@ -80,6 +80,17 @@ function Get-FilesRecursiveSafe {
 
         try {
             foreach ($d in [System.IO.Directory]::EnumerateDirectories($currentDir)) {
+                # Reparse-point guard (2026-09-15 fix, real bug) - a
+                # junction/symlink pointing back into an already-visited
+                # part of the tree turns this into an unbounded (in
+                # practice, MAX_PATH-bounded) cycle, multiplying every file
+                # under it once per loop. Confirmed live: one chapter plus
+                # one self-pointing junction produced 64 duplicate
+                # candidates for the same physical folder before the walk
+                # ran out of path length. DOCUMENTED DUPLICATE of the same
+                # guard in Get-ZippableLeafDirs/New-ZippableLeafDirProvider
+                # below - keep all three in sync.
+                if (([System.IO.File]::GetAttributes($d) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
                 $dirStack.Push($d)
             }
         } catch {
@@ -131,6 +142,16 @@ function Get-ZippableLeafDirs {
 
                 $childPath = $enumerator.Current
                 $dirInfo = [System.IO.DirectoryInfo]::new($childPath)
+                # Reparse-point guard (2026-09-15 fix, real bug) - see
+                # Get-FilesRecursiveSafe above for the live-reproduced
+                # failure mode (a self-pointing junction produced 64
+                # duplicate candidates for the same physical folder).
+                # Skipped entirely, not just excluded from recursion - a
+                # junction/symlink isn't real content this location owns,
+                # so it's neither a leaf candidate nor safe to descend
+                # into. DOCUMENTED DUPLICATE, keep in sync with the other
+                # two copies in this file.
+                if (($dirInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
                 $candidate = Test-ZippableLeafDirCandidate -Dir $dirInfo -QualifyingExtensions $QualifyingExtensions `
                     -ExcludeStagingDirs $ExcludeStagingDirs -ForceRezip $ForceRezip
                 if ($null -ne $candidate) {
@@ -198,6 +219,12 @@ function New-ZippableLeafDirProvider {
             $childPath = $state.CurrentEnumerator.Current
 
             $dirInfo = [System.IO.DirectoryInfo]::new($childPath)
+            # Reparse-point guard (2026-09-15 fix, real bug) - DOCUMENTED
+            # DUPLICATE of the same guard in Get-FilesRecursiveSafe/
+            # Get-ZippableLeafDirs above, keep all three in sync. See
+            # Get-FilesRecursiveSafe's own comment for the live-reproduced
+            # failure mode.
+            if (($dirInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
             $candidate = Test-ZippableLeafDirCandidate -Dir $dirInfo -QualifyingExtensions $QualifyingExtensions `
                 -ExcludeStagingDirs $ExcludeStagingDirs -ForceRezip $ForceRezip
             if ($null -ne $candidate) { return $candidate }
