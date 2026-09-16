@@ -39,7 +39,13 @@ function Invoke-IccStripRetryOrFail {
     Write-Log ("ICC profile mismatch on '" + $Job.SrcPath + "' - stripping profile and retrying.") -Level Warn
     $stripPsi = [System.Diagnostics.ProcessStartInfo]::new()
     $stripPsi.FileName               = $MagickExe
-    $stripPsi.Arguments              = "`"" + $Job.SrcPath + "`" -strip `"" + $strippedPng + "`""
+    # %% (2026-09-16 fix, real bug, live-reported and confirmed) - see
+    # AnimatedConversionPipeline.ps1's Test-AvifAnimated own comment for
+    # why. A literal % in the path is read by ImageMagick as its own
+    # percent-escape syntax, not a literal character.
+    $escapedSrcPathStrip = $Job.SrcPath.Replace('%', '%%')
+    $escapedStrippedPng  = $strippedPng.Replace('%', '%%')
+    $stripPsi.Arguments              = "`"" + $escapedSrcPathStrip + "`" -strip `"" + $escapedStrippedPng + "`""
     $stripPsi.UseShellExecute        = $false
     $stripPsi.RedirectStandardOutput = $true
     $stripPsi.RedirectStandardError  = $true
@@ -148,9 +154,13 @@ function Complete-ImageDispatchJob {
             }
             throw ("cjxl exited with code " + $code + ". Stderr: " + $stderr)
         }
-        if (-not [System.IO.File]::Exists($Job.JxlPath)) { throw ("Output .jxl was not created: '" + $Job.JxlPath + "'") }
+        # Exit code and stderr included even on these two throws
+        # (2026-09-16 fix, same reasoning as AnimatedConversionPipeline.ps1's
+        # matching fix - cjxl exiting 0 while failing to produce real
+        # output shouldn't leave the log with no diagnostic detail).
+        if (-not [System.IO.File]::Exists($Job.JxlPath)) { throw ("Output .jxl was not created (cjxl exited " + $code + "): '" + $Job.JxlPath + "'. Stderr: " + $stderr) }
         $jxlSize = [System.IO.FileInfo]::new($Job.JxlPath).Length
-        if ($jxlSize -eq 0) { throw ("Output .jxl is 0 bytes: '" + $Job.JxlPath + "'") }
+        if ($jxlSize -eq 0) { throw ("Output .jxl is 0 bytes (cjxl exited " + $code + "): '" + $Job.JxlPath + "'. Stderr: " + $stderr) }
         Write-Log ("Conversion OK: '" + $Job.JxlPath + "' (" + $jxlSize + " bytes)")
         $ChapterResult.ConvertedCount++
         $convOk = $true
@@ -590,7 +600,14 @@ function Invoke-LooseImageConversionPipeline {
                     $tempPngLocal = $tempPng
                     $magickPsi = [System.Diagnostics.ProcessStartInfo]::new()
                     $magickPsi.FileName               = $MagickExe
-                    $magickPsi.Arguments              = "`"" + $job.SrcPath + "[0]`" `"" + $tempPng + "`""
+                    # %% (2026-09-16 fix, real bug, live-reported and
+                    # confirmed) - DOCUMENTED DUPLICATE of Controller.ps1's
+                    # own matching jobStarter - keep both in sync. See
+                    # AnimatedConversionPipeline.ps1's Test-AvifAnimated own
+                    # comment for why.
+                    $escapedSrcPathPre2 = $job.SrcPath.Replace('%', '%%')
+                    $escapedTempPng2    = $tempPng.Replace('%', '%%')
+                    $magickPsi.Arguments              = "`"" + $escapedSrcPathPre2 + "[0]`" `"" + $escapedTempPng2 + "`""
                     $magickPsi.UseShellExecute        = $false
                     $magickPsi.RedirectStandardOutput = $true
                     $magickPsi.RedirectStandardError  = $true

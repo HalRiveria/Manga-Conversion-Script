@@ -12,9 +12,17 @@ function Test-AvifAnimated {
         [string]$MagickExe
     )
 
+    # %% (2026-09-16 fix, real bug, live-reported and confirmed) - a
+    # literal % anywhere in $AvifPath (a folder or file name containing
+    # one, e.g. "100%" - a real scanlation-group naming pattern) gets
+    # read by ImageMagick as the start of its own percent-escape/format-
+    # specifier syntax, not a literal character, even outside an
+    # explicit -format string - corrupts the path magick actually reads.
+    # Doubling it is ImageMagick's own documented escape for a literal %.
+    $escapedAvifPath = $AvifPath.Replace('%', '%%')
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName               = $MagickExe
-    $psi.Arguments              = "identify -ping -format `"%T\n`" `"" + $AvifPath + "[0]`""
+    $psi.Arguments              = "identify -ping -format `"%T\n`" `"" + $escapedAvifPath + "[0]`""
     $psi.UseShellExecute        = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
@@ -172,9 +180,16 @@ function Complete-AnimatedDispatchJob {
     $webpReplaceBackup = $null
     try {
         if ($code -ne 0) { throw ("magick exited with code " + $code + ". Stderr: " + $stderr) }
-        if (-not [System.IO.File]::Exists($Job.MagickOutputPath)) { throw ("Output .webp was not created: '" + $Job.MagickOutputPath + "'") }
+        # Exit code and stderr included even on these two throws
+        # (2026-09-16 fix, real gap found live) - magick can exit 0
+        # (clean success) while still failing to produce real output
+        # (observed live: a -quality 100 WebP encode that ran for minutes
+        # then left no output file, exit code 0, cause unconfirmed) -
+        # without this, the log gave no way to tell what magick actually
+        # said on its way out.
+        if (-not [System.IO.File]::Exists($Job.MagickOutputPath)) { throw ("Output .webp was not created (magick exited " + $code + "): '" + $Job.MagickOutputPath + "'. Stderr: " + $stderr) }
         $webpSize = [System.IO.FileInfo]::new($Job.MagickOutputPath).Length
-        if ($webpSize -eq 0) { throw ("Output .webp is 0 bytes: '" + $Job.MagickOutputPath + "'") }
+        if ($webpSize -eq 0) { throw ("Output .webp is 0 bytes (magick exited " + $code + "): '" + $Job.MagickOutputPath + "'. Stderr: " + $stderr) }
         if ($Job.MagickOutputPath -ne $Job.WebpPath) {
             $webpReplaceBackup = $Job.WebpPath + "_replace_backup.tmp"
             [System.IO.File]::Replace($Job.MagickOutputPath, $Job.WebpPath, $webpReplaceBackup)
@@ -393,7 +408,13 @@ function Invoke-LooseAnimatedConversionPipeline {
                 $psi = [System.Diagnostics.ProcessStartInfo]::new()
                 $psi.FileName = $MagickExe
                 $qualityArg = if ($AnimatedLossless) { "-define webp:lossless=true" } else { "-quality " + $AnimatedQuality }
-                $psi.Arguments = "`"" + $job.SrcPath + "`" -coalesce -loop 0 " + $qualityArg + " `"" + $job.MagickOutputPath + "`""
+                # %% (2026-09-16 fix, real bug, live-reported and confirmed
+                # by the project owner testing with/without a "100%" folder
+                # name) - see Test-AvifAnimated's own matching comment above
+                # for why. Applies to both the source and output paths.
+                $escapedSrcPath = $job.SrcPath.Replace('%', '%%')
+                $escapedOutPath = $job.MagickOutputPath.Replace('%', '%%')
+                $psi.Arguments = "`"" + $escapedSrcPath + "`" -coalesce -loop 0 " + $qualityArg + " `"" + $escapedOutPath + "`""
                 $psi.UseShellExecute        = $false
                 $psi.RedirectStandardOutput = $true
                 $psi.RedirectStandardError  = $true

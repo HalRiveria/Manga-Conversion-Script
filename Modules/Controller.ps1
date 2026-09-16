@@ -507,7 +507,15 @@ $script:fullPipelineEngineWorker = {
                     $tempPngLocal = $tempPng
                     $magickPsi = [System.Diagnostics.ProcessStartInfo]::new()
                     $magickPsi.FileName               = $MagickExe
-                    $magickPsi.Arguments              = "`"" + $job.SrcPath + "[0]`" `"" + $tempPng + "`""
+                    # %% (2026-09-16 fix, real bug, live-reported and
+                    # confirmed) - DOCUMENTED DUPLICATE of
+                    # AnimatedConversionPipeline.ps1's Test-AvifAnimated own
+                    # matching comment - keep all copies in sync. A literal
+                    # % in the path is read by ImageMagick as its own
+                    # percent-escape syntax, not a literal character.
+                    $escapedSrcPathPre = $job.SrcPath.Replace('%', '%%')
+                    $escapedTempPng    = $tempPng.Replace('%', '%%')
+                    $magickPsi.Arguments              = "`"" + $escapedSrcPathPre + "[0]`" `"" + $escapedTempPng + "`""
                     $magickPsi.UseShellExecute        = $false
                     $magickPsi.RedirectStandardOutput = $true
                     $magickPsi.RedirectStandardError  = $true
@@ -687,7 +695,14 @@ $script:fullPipelineEngineWorker = {
                 $psi = [System.Diagnostics.ProcessStartInfo]::new()
                 $psi.FileName = $MagickExe
                 $qualityArg = if ($DoAnimatedLossless) { "-define webp:lossless=true" } else { "-quality " + $AnimatedQuality }
-                $psi.Arguments = "`"" + $job.SrcPath + "`" -coalesce -loop 0 " + $qualityArg + " `"" + $job.MagickOutputPath + "`""
+                # %% (2026-09-16 fix, real bug, live-reported and
+                # confirmed) - DOCUMENTED DUPLICATE of
+                # AnimatedConversionPipeline.ps1's own matching jobStarter -
+                # keep both in sync. See Test-AvifAnimated's own comment
+                # (that file) for why.
+                $escapedSrcPathAnim = $job.SrcPath.Replace('%', '%%')
+                $escapedOutPathAnim = $job.MagickOutputPath.Replace('%', '%%')
+                $psi.Arguments = "`"" + $escapedSrcPathAnim + "`" -coalesce -loop 0 " + $qualityArg + " `"" + $escapedOutPathAnim + "`""
                 $psi.UseShellExecute        = $false
                 $psi.RedirectStandardOutput = $true
                 $psi.RedirectStandardError  = $true
