@@ -220,8 +220,24 @@ function Complete-MergedFullPipelineChapter {
     if ($IsZippable -and $status -ne 'Error' -and -not $Cts.Token.IsCancellationRequested) {
         $zipResult = @{ Status = $null; ZipSize = 0; EntryCount = 0; FolderDeleted = $false; FolderDeleteFailed = $false }
         try {
-            $orphanedScratchFiles = @(Get-ChildItem -LiteralPath $ChapterDir -Recurse -File -ErrorAction SilentlyContinue |
-                Where-Object { Test-OrphanedScratchFileName -Name $_.Name })
+            # Get-FilesRecursiveSafe, not Get-ChildItem -Recurse | Where-Object
+            # (2026-09-16 fix) - this runs on the MAIN thread, concurrently
+            # with both engine worker runspaces still processing later
+            # chapters (called from $pollCallback/$finalizeChapterEntry
+            # above). Never proven to hit this project's own confirmed PS
+            # 5.1 concurrent-runspace cmdlet-race (that class needs two
+            # FRESH runspaces racing on their own first invocation - the
+            # main thread's own Get-ChildItem/Where-Object use is not
+            # "fresh" by the time a real run gets here), but reuses
+            # already-tested, already-.NET-only infrastructure either way,
+            # and closes a real, independent gap this raw Get-ChildItem
+            # call had: no reparse-point guard, unlike every other
+            # recursive tree walk in this codebase since the 2026-09-15
+            # junction-cycle fix (see LeafDirectoryDiscovery.ps1).
+            $orphanedScratchFiles = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+            foreach ($f in (Get-FilesRecursiveSafe -ScanPath $ChapterDir)) {
+                if (Test-OrphanedScratchFileName -Name $f.Name) { $orphanedScratchFiles.Add($f) }
+            }
             foreach ($orphan in $orphanedScratchFiles) {
                 try {
                     [System.IO.File]::Delete($orphan.FullName)
