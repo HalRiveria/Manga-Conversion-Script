@@ -109,6 +109,29 @@ Test-Assert ($resultD -eq $realCandidateD) "the first EXISTING candidate in orde
 Write-Host ""
 
 # ==============================================================================
+#  Scenario D3 (2026-09-15 fix, real bug, latent): an empty-string entry
+#  anywhere in -Candidates used to abort the WHOLE search instead of
+#  being skipped - Test-PathSafely's -Path is a Mandatory [string], and
+#  PS 5.1 rejects an empty string for that at parameter-BIND time, before
+#  the function's own try/catch can even run. A real candidate later in
+#  the list should still be found.
+# ==============================================================================
+Write-Host "=== Scenario D3: an empty-string candidate is skipped, not fatal to the whole search ===" -ForegroundColor Cyan
+$realCandidateD3 = Join-Path $scratchDir "candidate-d3-exists.exe"
+"fake exe content" | Out-File -FilePath $realCandidateD3 -Encoding UTF8
+
+$threwD3 = $false
+$resultD3 = $null
+try {
+    $resultD3 = Find-Exe -ExeName "totally-fake-exe-name-zzz" -Candidates @("", $realCandidateD3)
+} catch {
+    $threwD3 = $true
+}
+Test-Assert (-not $threwD3) "Find-Exe did not throw when a candidate was an empty string"
+Test-Assert ($resultD3 -eq $realCandidateD3) ("the real candidate AFTER the empty-string one was still found (got: " + $resultD3 + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario D2 (2026-08-31 fix, caught by a same-day /code-review
 #  full-codebase pass): a function or alias sharing $ExeName's name (a
 #  real, not hypothetical, case - a user's own PowerShell profile
