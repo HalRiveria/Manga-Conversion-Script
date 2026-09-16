@@ -635,6 +635,22 @@ function Invoke-LooseImageConversionPipeline {
                         if ([System.IO.File]::Exists($tempPng)) { try { [System.IO.File]::Delete($tempPng) } catch { } }
                         throw ($formatLabel + "->PNG pre-conversion did not exit within 120s - killed")
                     }
+                    # Bounded the same way Test-AvifAnimated/
+                    # Invoke-IccStripRetryOrFail already are (2026-09-16 fix,
+                    # real bug found by a Gemini review - this pre-conversion
+                    # detour and Controller.ps1's own documented-duplicate
+                    # copy above were missed during that same pass). The
+                    # WaitOne above only proves the PROCESS exited, not that
+                    # its redirected stdout/stderr pipes reached EOF.
+                    if (-not [System.Threading.Tasks.Task]::WaitAll(@($magickStdoutTask, $magickStderrTask), 5000)) {
+                        $magickProc.Dispose()
+                        $magickProcLocal = $null
+                        Write-Log ("FAILED " + $formatLabel + "->PNG pre-conversion for '" + $job.SrcPath + "': magick exited but its output streams did not finish reading within 5s") -Level Error
+                        $cr.FailedCount++
+                        $failureAlreadyAccounted = $true
+                        if ([System.IO.File]::Exists($tempPng)) { try { [System.IO.File]::Delete($tempPng) } catch { } }
+                        throw ($formatLabel + "->PNG pre-conversion's output streams did not finish reading within 5s")
+                    }
                     $null = $magickStdoutTask.GetAwaiter().GetResult()
                     $null = $magickStderrTask.GetAwaiter().GetResult()
                     $magickExitCode = $magickProc.ExitCode

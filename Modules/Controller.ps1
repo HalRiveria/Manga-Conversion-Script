@@ -542,6 +542,20 @@ $script:fullPipelineEngineWorker = {
                         $magickProcLocal = $null
                         throw ("magick pre-conversion did not exit within 120s - killed")
                     }
+                    # Bounded the same way Test-AvifAnimated/
+                    # Invoke-IccStripRetryOrFail already are (2026-09-16 fix,
+                    # real bug found by a Gemini review - this pre-conversion
+                    # detour and ImageConversionPipeline.ps1's own copy were
+                    # missed during that same pass). The WaitOne above only
+                    # proves the PROCESS exited, not that its redirected
+                    # stdout/stderr pipes reached EOF - a process tree where
+                    # something else inherited the handle could still hang
+                    # the un-timed GetResult() forever.
+                    if (-not [System.Threading.Tasks.Task]::WaitAll(@($magickStdoutTask, $magickStderrTask), 5000)) {
+                        $magickProc.Dispose()
+                        $magickProcLocal = $null
+                        throw ("magick pre-conversion exited but its output streams did not finish reading within 5s")
+                    }
                     $null = $magickStdoutTask.GetAwaiter().GetResult()
                     $null = $magickStderrTask.GetAwaiter().GetResult()
                     $magickExitCode = $magickProc.ExitCode
@@ -829,7 +843,17 @@ function Invoke-FullPipeline {
         } catch {
             $exMessage = $_.Exception.Message
             Write-Log ("Cover deletion pre-scan failed: " + $exMessage) -Level Error -ForceConsole
-            $answer = (& $PromptFunc ("Cover deletion scan failed: " + $exMessage + ". Continue with conversion anyway? (Y/N)")).Trim()
+            # Null-checked before .Trim() (2026-09-16 fix, real bug found by
+            # a Gemini review, confirmed live) - Read-Host (the real
+            # default -PromptFunc) returns $null, not "", when stdin is
+            # genuinely closed/at EOF rather than just an empty line -
+            # every other prompt call in this codebase already guards this
+            # (Menu.ps1, UnwantedImage.ps1, Conversion Script Main.ps1);
+            # this was the one that didn't, and would otherwise crash the
+            # whole run with a NullReferenceException instead of the
+            # graceful abort this catch block exists to provide.
+            $rawAnswer = & $PromptFunc ("Cover deletion scan failed: " + $exMessage + ". Continue with conversion anyway? (Y/N)")
+            $answer = if ($null -ne $rawAnswer) { $rawAnswer.Trim() } else { "" }
             if ($answer -ne 'Y' -and $answer -ne 'y') {
                 $totals.Aborted = $true
                 return $totals

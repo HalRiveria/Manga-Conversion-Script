@@ -1176,6 +1176,32 @@ Test-Assert ($totalsAA4.SeriesCount -eq 0) "chapter discovery/dispatch never sta
 Write-Host ""
 
 # ==============================================================================
+#  Scenario AA5 (2026-09-16 fix, real bug found by a Gemini review,
+#  confirmed live): Read-Host (the real default -PromptFunc) returns
+#  $null, not "", when stdin is genuinely closed/at EOF rather than just
+#  an empty line - `(& $PromptFunc ...).Trim()` used to call .Trim()
+#  directly on that $null, throwing a NullReferenceException that
+#  escaped this catch block entirely instead of the graceful abort it
+#  exists to provide. Distinct from Scenario AA4 above, which only covers
+#  a literal "" return, never $null.
+# ==============================================================================
+Write-Host "=== Scenario AA5: a failed scan + a `$null-returning prompt (closed stdin) aborts gracefully, does not throw ===" -ForegroundColor Cyan
+New-Dir "scenario-aa5\Empty Series" | Out-Null
+$fakeScanAA5 = { param($Path) throw "fake scan failure AA5" }
+$fakePromptAA5 = { param($Message) return $null }
+$threwAA5 = $false
+$totalsAA5 = $null
+try {
+    $totalsAA5 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-aa5") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true -RunCoverDeletionBeforeConversion $true -CoverDeletionScanHandler $fakeScanAA5 -PromptFunc $fakePromptAA5
+} catch {
+    $threwAA5 = $true
+}
+Test-Assert (-not $threwAA5) "a `$null prompt result does not crash the whole run"
+Test-Assert ($null -ne $totalsAA5 -and $totalsAA5.Aborted -eq $true) "a `$null prompt result defaults to abort, same as blank input"
+Test-Assert ($null -ne $totalsAA5 -and $totalsAA5.SeriesCount -eq 0) "chapter discovery/dispatch never started - the abort happened before it"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario T: Invoke-MainLoop (2026-08-28) - the run loop moved out of the
 #  main script. Every handler injected, so this proves the LOOP's own
 #  control flow (how many iterations, what stops it) without a real
