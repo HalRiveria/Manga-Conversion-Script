@@ -108,10 +108,8 @@ Conversion Script/
 │   ├── _Harness/          <- test harness per module, plus GuardRules/Lint/MainLoopIntegration
 │   └── _Reference/        <- extraction each module was built from, plus the frozen old monolithic script
 ├── Tools/
-│   ├── Run-Harness.ps1    <- runs one or all harnesses, compresses output to
-│   │                          PASS/FAIL summaries instead of every assertion line
-│   ├── Backup-Repo.ps1    <- pushes to the E: backup mirror, reads it back to confirm
-│   └── PreToolUse-Guard.ps1  <- repo guard hook, see Docs/repo-guard.md
+│   └── Run-Harness.ps1    <- runs one or all harnesses, compresses output to
+│                              PASS/FAIL summaries instead of every assertion line
 ├── Testing/               <- scratch copy scripts run against (gitignored)
 └── Backups/               <- original test media, never touched by scripts (gitignored)
     └── Old Scripts/       <- earlier working versions, kept for reference
@@ -127,7 +125,7 @@ current source; the latter is regenerated scratch content.
 
 New functionality is built as an independent module first (its own file,
 its own test harness, living in `Modules\`), verified working in isolation,
-and only merged into the main script once proven. That's how all 19
+and only merged into the main script once proven. That's how all 18
 current modules were built, and it's still the process for anything new.
 
 Testing is manual: `.\Tools\Run-Harness.ps1 -All` runs every harness and
