@@ -444,6 +444,10 @@ $script:removeSourceShouldThrow = $false
 
 Test-Assert (-not $threwG) "a delete failure does not crash the whole scan"
 Test-Assert ($resultG.DeleteFailedCount -eq 1 -and $resultG.DeletedCount -eq 0) "counted as a delete failure, not a success"
+# 2026-09-15/16 fix, real bug: the summary line only ever reported
+# DeletedCount/HashMismatchCount/ScannedCount - a real delete failure
+# was silently invisible in the one line most likely to be read.
+Test-Assert (($script:logCalls | Where-Object { $_ -like "Summary:*delete failure*" }).Count -eq 1) "the scan-complete summary line now mentions the delete failure, not just the scanned/deleted counts"
 Write-Host ""
 
 # ==============================================================================
@@ -971,6 +975,46 @@ $script:testAbortAfterCallCount = -1   # reset for any later scenario
 
 Test-Assert ($scanResultAA.Aborted -eq $true) "the scan reports Aborted=`$true"
 Test-Assert ($scanResultAA.ScannedCount -lt 4) ("the scan stopped before reaching all 4 files (got ScannedCount=" + $scanResultAA.ScannedCount + ")")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario AB (2026-09-15/16 fix, real bug): Get-TrailingZeroGroups used
+#  to ignore -ExcludePaths entirely whenever -PreScannedFiles was also
+#  supplied - it took the pre-scanned list as-is with no filtering at
+#  all, unlike the Get-ScannableFiles path taken when no pre-scanned list
+#  is given.
+# ==============================================================================
+Write-Host "=== Scenario AB: -ExcludePaths still filters an explicit -PreScannedFiles list ===" -ForegroundColor Cyan
+$rootAB = Join-Path $scratchDir "scenario-ab"
+New-Item -ItemType Directory -Path $rootAB -Force | Out-Null
+$imgAB = New-RealImage -Name "scenario-ab\real_0.png" -Width 5 -Height 5
+$preScannedAB = @($imgAB)
+
+$groupsResultAB = Get-TrailingZeroGroups -Path $rootAB -PreScannedFiles $preScannedAB -ExcludePaths @($imgAB.FullName)
+Test-Assert ($groupsResultAB.Groups.Count -eq 0) "the pre-scanned file was excluded via -ExcludePaths, same as a real disk walk would exclude it"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario AC (2026-09-15/16 fix, real bug): Add-UnwantedImageProfile's
+#  own Export-UnwantedImageProfiles write can throw (locked file, no
+#  permission, disk full) - Show-AddUnwantedImageProfileFlow didn't catch
+#  it, so a write failure at the very last step of an otherwise-successful
+#  interactive flow crashed out instead of reporting cleanly like the
+#  earlier file-read-error path already does.
+# ==============================================================================
+Write-Host "=== Scenario AC: a profile-write failure is caught, not left to crash the flow ===" -ForegroundColor Cyan
+$imgAC = New-RealImage -Name "flow-source-ac.png" -Width 18 -Height 28
+# ProfilesPath points AT a directory, not a file - Set-Content against a
+# directory path throws, simulating any real write failure without
+# needing actual file locking/permissions.
+$profilesPathAC = Join-Path $scratchDir "profiles-ac-is-a-dir"
+New-Item -ItemType Directory -Path $profilesPathAC -Force | Out-Null
+$promptAC = New-ScriptedPrompt -Responses @($imgAC.FullName, "AC Label", "Y")
+$threwAC = $false
+$flowResultAC = $null
+try { $flowResultAC = Show-AddUnwantedImageProfileFlow -ProfilesPath $profilesPathAC -PromptFunc $promptAC } catch { $threwAC = $true }
+Test-Assert (-not $threwAC) "a profile-write failure does not crash the flow"
+Test-Assert ($null -ne $flowResultAC -and $flowResultAC.Added -eq $false -and $flowResultAC.Reason -like "Cancelled by profile-write error*") "reported cleanly as a cancelled add, with the write-error reason"
 Write-Host ""
 
 # ==============================================================================

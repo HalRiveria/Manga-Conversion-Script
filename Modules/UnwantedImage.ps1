@@ -212,7 +212,12 @@ function Show-AddUnwantedImageProfileFlow {
         return @{ Added = $false; Reason = "Cancelled by user."; Profile = $profile }
     }
 
-    $addResult = Add-UnwantedImageProfile -Profile $profile -ProfilesPath $ProfilesPath
+    try {
+        $addResult = Add-UnwantedImageProfile -Profile $profile -ProfilesPath $ProfilesPath
+    } catch {
+        Write-Host ("Could not save the profile to '" + $ProfilesPath + "': " + $_) -ForegroundColor Red
+        return @{ Added = $false; Reason = "Cancelled by profile-write error: " + $_; Profile = $profile }
+    }
     if ($addResult.Added) {
         Write-Host ("Added '" + $profile.Label + "' - will be caught on every future scan.") -ForegroundColor Green
         return @{ Added = $true; Reason = $null; Profile = $profile }
@@ -392,10 +397,14 @@ function Invoke-UnwantedImageScan {
     }
 
     $abortedSuffix = if ($totals.Aborted) { " (ABORTED - stopped early, " + ($files.Count - $totals.ScannedCount) + " file(s) never scanned)" } else { "" }
+    $failureSuffix = ""
+    if ($totals.DeleteFailedCount -gt 0) { $failureSuffix += ", " + $totals.DeleteFailedCount + " delete failure(s)" }
+    if ($totals.AlreadyGoneCount -gt 0) { $failureSuffix += ", " + $totals.AlreadyGoneCount + " already gone" }
+    if ($totals.HashFailureCount -gt 0) { $failureSuffix += ", " + $totals.HashFailureCount + " hash failure(s)" }
     if ($DryRun) {
-        Write-Log ("Unwanted-image scan complete (dry run): " + $totals.WouldDeleteCount + " would delete, " + $totals.HashMismatchCount + " hash mismatch(es), " + $totals.ScannedCount + " image(s) scanned." + $abortedSuffix) -Level Summary -ForceConsole
+        Write-Log ("Unwanted-image scan complete (dry run): " + $totals.WouldDeleteCount + " would delete, " + $totals.HashMismatchCount + " hash mismatch(es), " + $totals.ScannedCount + " image(s) scanned." + $failureSuffix + $abortedSuffix) -Level Summary -ForceConsole
     } else {
-        Write-Log ("Unwanted-image scan complete: " + $totals.DeletedCount + " deleted, " + $totals.HashMismatchCount + " hash mismatch(es), " + $totals.ScannedCount + " image(s) scanned." + $abortedSuffix) -Level Summary -ForceConsole
+        Write-Log ("Unwanted-image scan complete: " + $totals.DeletedCount + " deleted, " + $totals.HashMismatchCount + " hash mismatch(es), " + $totals.ScannedCount + " image(s) scanned." + $failureSuffix + $abortedSuffix) -Level Summary -ForceConsole
     }
     $totals.AllScannedFiles = $allScannedFiles
     return $totals
@@ -428,7 +437,8 @@ function Get-TrailingZeroGroups {
     $hashFailureCount = 0
 
     if ($null -ne $PreScannedFiles) {
-        $files = $PreScannedFiles
+        $excludeSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$ExcludePaths, [System.StringComparer]::OrdinalIgnoreCase)
+        $files = $PreScannedFiles | Where-Object { -not $excludeSet.Contains($_.FullName) }
     } else {
         $files = Get-ScannableFiles -Path $Path -ExcludePaths $ExcludePaths
     }
