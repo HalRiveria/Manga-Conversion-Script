@@ -871,9 +871,24 @@ function Invoke-FullPipeline {
                 } else {
                     $totals.ZipCreatedFail++
                 }
-            } elseif ($isZippableNow -and ($chapterOutcome.Status -eq 'Error' -or $fullCts.Token.IsCancellationRequested)) {
+            } elseif ($isZippableNow -and $fullCts.Token.IsCancellationRequested) {
+                # Split from the genuine-error case below (2026-09-15 fix,
+                # real bug, latent) - the original combined condition
+                # conflated "this chapter's conversion genuinely errored"
+                # with "the whole run was aborted," and would have labeled
+                # a real conversion failure on a non-aborted run as "zip
+                # skipped: run aborted". Currently masked -
+                # Get-ZipBlockedStatusOverride (ImageConversionPipeline.ps1)
+                # short-circuits `if ($Status -eq 'Error') { return $Status,
+                # $Detail }` before the "run aborted" text is ever appended,
+                # so today this branch is genuinely only reachable when the
+                # run really was aborted. Splitting it removes the latent
+                # trap rather than relying on that short-circuit staying in
+                # place forever.
                 $totals.ZipSkippedDueToError++
                 $displayStatus, $displayDetail = Get-ZipBlockedStatusOverride -Status $chapterOutcome.Status -Detail $chapterOutcome.Detail -BlockedReason "run aborted"
+            } elseif ($isZippableNow -and $chapterOutcome.Status -eq 'Error') {
+                $totals.ZipSkippedDueToError++
             } elseif ((-not $isZippableNow) -and $hasBlockReason) {
                 $totals.ZipSkippedDueToError++
                 if (-not $isExtra) {
@@ -928,7 +943,15 @@ function Invoke-FullPipeline {
                         else                              { $entry.AnimatedResult = $evt.Result; $entry.GotAnimated = $true }
 
                         if (-not ($entry.GotImage -and $entry.GotAnimated)) { continue }
-                        $mergeState.Remove($key)
+                        # $null = (2026-09-15 fix) - Dictionary.Remove
+                        # returns bool; the identical call at this
+                        # function's own :697 (chapterCompleteCallback)
+                        # already captures it correctly. Doesn't print
+                        # today only because this whole poll callback is
+                        # invoked bare and its output stream discarded by
+                        # ZipParallelProcessing's own caller - not a reason
+                        # to leave it uncaptured.
+                        $null = $mergeState.Remove($key)
                         & $finalizeChapterEntry $key $entry
                     }
                 }
