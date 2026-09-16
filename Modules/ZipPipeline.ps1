@@ -197,17 +197,31 @@ function Invoke-ZipOnlyPipeline {
                 $seriesName = $next.Dir.Name
             }
 
-            if ((Test-CcrEnabledForZipOnly) -and -not $zoSeenSeriesNames.Contains($seriesName)) {
-                $null = $zoSeenSeriesNames.Add($seriesName)
-                $seriesRoot  = Join-Path $trimmedPath $seriesName
-                $seriesTotal = 1
-                if (Test-Path -LiteralPath $seriesRoot -PathType Container) {
-                    $seriesLeaves = Get-ZippableLeafDirs -ScanPath $seriesRoot -QualifyingExtensions $QualifyingExtensions -ForceRezip $false
-                    $seriesTotal  = [Math]::Max($seriesLeaves.Count, 1)
+            # Wrapped in try/catch (2026-09-15 fix, real bug) - this whole
+            # block is pure Clean Console Output bookkeeping (a side-scan
+            # to count a series' own chapters for the progress display),
+            # not real zip work. It runs inside $zoJobProvider, which
+            # Invoke-ZipParallelProcessing calls with no try/catch of its
+            # own around -NextJobProvider - an unguarded throw here (the
+            # side-scan's own Get-ZippableLeafDirs hitting a real TOCTOU
+            # if $seriesRoot vanishes between the Test-Path check and the
+            # scan, or CCR rendering itself throwing) used to kill the
+            # ENTIRE mode 3/8 run over a display-only concern.
+            try {
+                if ((Test-CcrEnabledForZipOnly) -and -not $zoSeenSeriesNames.Contains($seriesName)) {
+                    $null = $zoSeenSeriesNames.Add($seriesName)
+                    $seriesRoot  = Join-Path $trimmedPath $seriesName
+                    $seriesTotal = 1
+                    if (Test-Path -LiteralPath $seriesRoot -PathType Container) {
+                        $seriesLeaves = Get-ZippableLeafDirs -ScanPath $seriesRoot -QualifyingExtensions $QualifyingExtensions -ForceRezip $false
+                        $seriesTotal  = [Math]::Max($seriesLeaves.Count, 1)
+                    }
+                    Start-CcrSeriesProgressIfEnabled -SeriesName $seriesName -TotalChapters $seriesTotal
                 }
-                Start-CcrSeriesProgressIfEnabled -SeriesName $seriesName -TotalChapters $seriesTotal
+                Start-CcrChapterProgressIfEnabled -SeriesName $seriesName -ChapterName $next.Dir.Name
+            } catch {
+                Write-Log ("Zip-only: Clean Console Output bookkeeping failed for series '" + $seriesName + "' - continuing without it for this chapter: " + $_) -Level Warn
             }
-            Start-CcrChapterProgressIfEnabled -SeriesName $seriesName -ChapterName $next.Dir.Name
 
             return @{
                 FolderPath        = $next.Dir.FullName
@@ -250,7 +264,17 @@ function Invoke-ZipOnlyPipeline {
         }
 
         if ($totals.CandidateCount -eq 0) {
-            Write-Log "Zip-only: no qualifying leaf directories found." -Level Warn
+            # Check Aborted first (2026-09-15 fix, real bug) - an abort
+            # before the very first candidate was ever found used to log
+            # the same "no qualifying leaf directories found" message as
+            # a genuinely empty library, pointing the user at their
+            # folder layout instead of telling them the run was
+            # cancelled. $totals.Aborted is already correctly set above.
+            if ($totals.Aborted) {
+                Write-Log "Zip-only: aborted before any leaf directory was found." -Level Warn
+            } else {
+                Write-Log "Zip-only: no qualifying leaf directories found." -Level Warn
+            }
             return $totals
         }
 

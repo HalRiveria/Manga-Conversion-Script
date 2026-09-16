@@ -187,6 +187,30 @@ Test-Assert ($totalsB.ZippedSuccess -eq 0 -and $totalsB.ZippedFail -eq 0) "no zi
 Write-Host ""
 
 # ==============================================================================
+#  Scenario B2 (2026-09-15 fix, real bug): an abort BEFORE any candidate
+#  is found must be reported as an abort, not as "no qualifying leaf
+#  directories found" (the same message a genuinely empty library gets)
+#  - the two are different problems that need different next steps from
+#  the user. [ConsoleCtrl]::AbortRequested pre-signalled so the scan
+#  never gets a chance to find the one real candidate present.
+# ==============================================================================
+Write-Host "=== Scenario B2: an abort before any candidate is found reports Aborted, not empty ===" -ForegroundColor Cyan
+$rootB2 = New-Dir "scenario-b2"
+
+[ConsoleCtrl]::AbortRequested = $true
+[ConsoleCtrl]::DrainComplete.Set()
+try {
+    $totalsB2 = Invoke-ZipOnlyPipeline -Path $rootB2 -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -FullLogging $false -PermanentDelete $true
+} finally {
+    Reset-AbortState
+}
+Test-Assert ($totalsB2.CandidateCount -eq 0) "sanity check: the abort really did prevent the one real candidate from being counted"
+Test-Assert ($totalsB2.Aborted -eq $true) "the run correctly reports Aborted = `$true, not just a silent 0-candidate result"
+$abortedLineB2 = @(Get-Content -LiteralPath $script:logWarnFile | Where-Object { $_ -like "*aborted before any leaf directory*" })
+Test-Assert ($abortedLineB2.Count -ge 1) "the log reports the run was aborted before finding anything, not the generic 'no qualifying leaf directories found' message an empty library gets"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario C: -DeleteFolders $false - zips are created but source
 #  folders are left alone.
 # ==============================================================================
