@@ -28,23 +28,63 @@ public static class ConsoleCtrl
 
     private static HandlerRoutine _handler;   // keep a strong ref so the GC can't collect it
 
+    // Whether the most recent Register() call actually succeeded
+    // (2026-09-15 fix) - SetConsoleCtrlHandler's own BOOL return was
+    // previously discarded entirely, so a failed registration left the
+    // whole abort system silently inert with no way for the caller to
+    // even find out.
+    public static bool LastRegisterSucceeded = false;
+
     public static void Register()
     {
+        // Unregister the previous handler first if Register() has already
+        // been called once in this process (2026-09-15 fix, real bug) -
+        // SetConsoleCtrlHandler is additive; calling Register() a second
+        // time in the same console session (e.g. a manual smoke test run
+        // twice without restarting the shell) left the FIRST delegate
+        // still registered with the OS on top of the new one, unrooted
+        // and eligible for GC once _handler is reassigned below. A
+        // Ctrl+C reaching that orphaned delegate after it's been
+        // collected is undefined behavior. The Add-Type guard above
+        // means this static class survives the whole PowerShell session,
+        // so this is a real, reachable path, not just a defensive guard.
+        if (_handler != null)
+        {
+            SetConsoleCtrlHandler(_handler, false);
+        }
         _handler = new HandlerRoutine(Handler);
-        SetConsoleCtrlHandler(_handler, true);
+        LastRegisterSucceeded = SetConsoleCtrlHandler(_handler, true);
     }
 
     private static bool Handler(uint ctrlType)
     {
         // ctrlType: 0=CTRL_C, 1=CTRL_BREAK, 2=CTRL_CLOSE, 5=CTRL_LOGOFF, 6=CTRL_SHUTDOWN
-        if ((ctrlType == 0 || ctrlType == 1) && !RunActive)
+        // !RunActive now exempts EVERY ctrl type, not just Ctrl+C/Break
+        // (2026-09-15 fix, real bug) - closing the window (or logging
+        // off/shutting down) while sitting at the menu, with nothing
+        // actually running, used to still set AbortRequested and park
+        // here for the full 65s wait for a drain that will never
+        // complete (nothing is dispatched to complete it) - a ~5s hang
+        // before Windows force-kills the process, every time.
+        if (!RunActive)
         {
             return false;
         }
         if (ctrlType == 0 || ctrlType == 1 || ctrlType == 2 || ctrlType == 5 || ctrlType == 6)
         {
-            AbortRequested = true;
+            // IsCloseEvent set BEFORE AbortRequested (2026-09-15 fix, real
+            // bug) - Test-AbortSignal (PowerShell side) reads
+            // AbortRequested first as its own "is this a NEW abort" latch,
+            // then reads IsCloseEvent to decide which message to print. A
+            // poll landing in the gap between the two writes under the
+            // OLD order would see AbortRequested=true while IsCloseEvent
+            // was still stale, permanently mislabeling a window close as
+            // Ctrl+C for the rest of the run (Test-AbortSignal's own latch
+            // means it only reads these two fields once). Reordering
+            // closes the race - by the time AbortRequested is visibly
+            // true, IsCloseEvent already reflects this event correctly.
             IsCloseEvent   = (ctrlType == 2 || ctrlType == 5 || ctrlType == 6);
+            AbortRequested = true;
             DrainComplete.Wait(65000);   // 65 s > our default 60 s drain timeout
             return true;   // suppress default OS action
         }
@@ -97,6 +137,16 @@ $script:abortCancellationSources = [System.Collections.Generic.List[System.Threa
 
 function Register-AbortHandler {
     [ConsoleCtrl]::Register()
+    # 2026-09-15 fix, real bug - SetConsoleCtrlHandler's own BOOL return
+    # was previously discarded entirely inside Register(), so a failed
+    # registration left the whole abort system silently inert with no
+    # way for anything to even find out. Warn loudly rather than stay
+    # quiet - a failure here is rare (a process out of handle slots, or
+    # already at the OS's per-process handler limit) but means Ctrl+C
+    # won't drain gracefully at all for the rest of this run.
+    if (-not [ConsoleCtrl]::LastRegisterSucceeded) {
+        Write-Host "[WARNING] Could not register the Ctrl+C/window-close handler - aborting a run may not drain gracefully (Ctrl+C will use the OS default action instead)." -ForegroundColor Yellow
+    }
 }
 
 function Set-AbortHandlerRunActive {
@@ -247,15 +297,25 @@ function Invoke-GracefulDrain {
     if (-not $PSBoundParameters.ContainsKey('AbortWaitMessage')) {
         $AbortWaitMessage = "[ABORT] Waiting for current jobs to finish (up to " + $TimeoutSeconds + "s)..."
     }
-    if ($AbortWaitMessage -ne "") {
-        Write-GatedConsoleMessage -Text $AbortWaitMessage -Color Yellow -CleanConsoleOutputEnabled ([bool]$script:CleanConsoleOutputEnabled)
-    }
 
     $localHandles  = $Handles
     $abortDeadline = [System.Diagnostics.Stopwatch]::StartNew()
     $forceStoppedCount = 0
 
     try {
+        # Moved inside the try (2026-09-15 fix, real bug) - this call used
+        # to sit BEFORE the try/finally below that guarantees
+        # Complete-AbortDrain runs. If it threw (Docs/function-notes.md
+        # already documents Flush-ConsoleQueue-on-a-bad-queue and
+        # Write-GatedConsoleMessage-not-resolving as exactly the failure
+        # modes that try/finally exists to protect against), Complete-AbortDrain
+        # never ran, DrainComplete never got Set(), and the native Ctrl+C
+        # handler thread stayed parked in its own 65s wait for a drain
+        # that already effectively failed.
+        if ($AbortWaitMessage -ne "") {
+            Write-GatedConsoleMessage -Text $AbortWaitMessage -Color Yellow -CleanConsoleOutputEnabled ([bool]$script:CleanConsoleOutputEnabled)
+        }
+
         while ($localHandles.Count -gt 0 -and -not [ConsoleCtrl]::IsCloseEvent -and $abortDeadline.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
             $localHandles = Receive-CompletedHandles -Handles $localHandles -ResultHandler $ResultHandler -ErrorHandler $ErrorHandler
             if ($null -ne $ConsoleQueue) { Flush-ConsoleQueue -Queue $ConsoleQueue }

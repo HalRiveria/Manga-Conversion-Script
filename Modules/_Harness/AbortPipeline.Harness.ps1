@@ -686,16 +686,21 @@ Write-Host ""
 
 # ==============================================================================
 #  Scenario T (2026-08-31 addition, project owner's own explicit
-#  decision): Ctrl+C/Ctrl+Break while [ConsoleCtrl]::RunActive is $false
-#  (idle at the menu) must fall through to the OS's own default action
-#  (return $false, no AbortRequested set, no blocking) instead of being
-#  caught - previously the handler caught EVERY Ctrl+C unconditionally,
-#  which leaked into the very next run dispatched in the same loop
-#  iteration and blocked the handler thread on a drain that would never
-#  happen. Invokes the private static Handler method directly via
-#  reflection - the real logic under test, not a simulation of its
-#  output state (the pattern every other scenario in this file uses,
-#  since Handler can't otherwise be called from outside the type).
+#  decision): ANY ctrl event (Ctrl+C, Ctrl+Break, window-close, logoff,
+#  shutdown) while [ConsoleCtrl]::RunActive is $false (idle at the menu)
+#  must fall through to the OS's own default action (return $false, no
+#  AbortRequested set, no blocking) instead of being caught - previously
+#  the handler caught EVERY Ctrl+C unconditionally, which leaked into the
+#  very next run dispatched in the same loop iteration and blocked the
+#  handler thread on a drain that would never happen. Window-close/
+#  logoff/shutdown were widened into this same !RunActive guard on
+#  2026-09-15 (a real bug - they were previously always caught regardless
+#  of RunActive, hanging ~5s waiting on a drain nothing would ever
+#  complete when closing the window at the menu). Invokes the private
+#  static Handler method directly via reflection - the real logic under
+#  test, not a simulation of its output state (the pattern every other
+#  scenario in this file uses, since Handler can't otherwise be called
+#  from outside the type).
 # ==============================================================================
 Write-Host "=== Scenario T: Ctrl+C/Ctrl+Break at the menu (RunActive `$false) falls through to the OS default, not caught ===" -ForegroundColor Cyan
 Reset-HarnessScenarioState
@@ -710,14 +715,19 @@ $resultCtrlBreakT = $handlerMethodT.Invoke($null, @([uint32]1))   # CTRL_BREAK_E
 Test-Assert ($resultCtrlBreakT -eq $false) "Ctrl+Break with no active run also returns `$false"
 Test-Assert ([ConsoleCtrl]::AbortRequested -eq $false) "AbortRequested still NOT set after Ctrl+Break"
 
-# Window-close/logoff/shutdown are UNAFFECTED by RunActive - still real
-# termination requests regardless. Pre-signal DrainComplete so the
-# handler's own Wait(65000) returns immediately instead of actually
-# blocking this test for 65 seconds.
+# Window-close/logoff/shutdown are now ALSO exempted by !RunActive
+# (2026-09-15 fix, real bug) - closing the window at the menu, with
+# nothing actually running, used to still set AbortRequested and park
+# the handler thread in its own 65s Wait() for a drain that would never
+# complete (nothing dispatched to complete it) - a ~5s hang before
+# Windows force-killed the process anyway. Pre-signal DrainComplete
+# defensively (so this test can't itself hang for 65s if the fix
+# regresses), but the real assertion is that Wait() is never reached at
+# all - the handler returns immediately.
 [ConsoleCtrl]::DrainComplete.Set()
 $resultCloseT = $handlerMethodT.Invoke($null, @([uint32]2))   # CTRL_CLOSE_EVENT
-Test-Assert ($resultCloseT -eq $true) "window-close with no active run is still caught (returns `$true), unaffected by RunActive"
-Test-Assert ([ConsoleCtrl]::AbortRequested -eq $true -and [ConsoleCtrl]::IsCloseEvent -eq $true) "AbortRequested/IsCloseEvent were both set for the window-close case"
+Test-Assert ($resultCloseT -eq $false) "window-close with no active run now ALSO falls through to the OS default (returns `$false), not caught - closing at the menu no longer hangs ~5s waiting on a drain nothing will ever complete"
+Test-Assert ([ConsoleCtrl]::AbortRequested -eq $false -and [ConsoleCtrl]::IsCloseEvent -eq $false) "AbortRequested/IsCloseEvent were NOT set for a menu-time window-close"
 Reset-HarnessScenarioState
 
 # Now with a run genuinely active: Ctrl+C IS caught normally.
