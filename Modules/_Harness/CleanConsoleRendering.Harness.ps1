@@ -61,6 +61,7 @@ function Reset-CCRState {
     $script:ccrActiveSeries        = [System.Collections.Specialized.OrderedDictionary]::new()
     $script:ccrLiveRegionLineCount = 0
     $script:ccrCursorAvailable     = $null
+    $script:ccrLastDrawWidth       = $null
 }
 
 # ==============================================================================
@@ -83,6 +84,13 @@ Test-Assert ((Get-ProgressBarString -Completed 0 -Total 8 -Width 8) -eq "[------
 Test-Assert ((Get-ProgressBarString -Completed 8 -Total 8 -Width 8) -eq "[########]") "8/8 is fully filled"
 Test-Assert ((Get-ProgressBarString -Completed 4 -Total 8 -Width 8) -eq "[####----]") "4/8 is half filled"
 Test-Assert ((Get-ProgressBarString -Completed 0 -Total 0 -Width 8) -eq "[########]") "0/0 (degenerate) renders as fully filled, not divide-by-zero"
+# 2026-09-15 fix, real bug: Math.Round(19.8) rounds UP to 20, so a
+# 39/40 bar (ratio 0.975, at width 20 that's 19.5) used to show as
+# COMPLETELY FULL - defeating the documented "a bar short of full means
+# something's still not done" signal, including for a chapter that then
+# goes on to fail. Floor keeps it honestly short of full until the last
+# chapter truly finishes.
+Test-Assert ((Get-ProgressBarString -Completed 39 -Total 40 -Width 20) -eq ("[" + ("#" * 19) + "-" + "]")) "39/40 at width 20 is NOT fully filled (Floor, not Round) - 19 filled, 1 dash short of full"
 Write-Host ""
 
 # ==============================================================================
@@ -368,6 +376,19 @@ $outputTextL2 = ($outputL2 | ForEach-Object { $_.ToString() }) -join "`n"
 Test-Assert ($outputTextL2 -like "*Waiting for current jobs*") "the message prints correctly even while a series is actively in progress"
 Test-Assert ($script:ccrActiveSeries.Contains("Series L")) "the active series is untouched - still registered after the message was printed"
 Test-Assert ($script:ccrActiveSeries["Series L"].ActiveChapters -contains "Chapter 1") "the active series' in-progress chapter is untouched too"
+
+# 2026-09-15 fix, real bug (latent - no current caller passes CRLF, but a
+# public function's own contract shouldn't depend on that): splitting on
+# a bare "`n" leaves a trailing "`r" on each CRLF-delimited segment. A
+# stray CR mid-row makes the terminal snap the cursor back to column 0,
+# so the row's own trailing padding then overwrites the real message
+# text with blanks. -split "\r?\n" strips the CR cleanly either way.
+Reset-CCRState
+$outputL3 = & { Write-CleanConsoleMessage -Text "line one`r`nline two" -Color Yellow } 6>&1
+$rowTextsL3 = @($outputL3 | ForEach-Object { $_.ToString() })
+Test-Assert (-not ($rowTextsL3 | Where-Object { $_.Contains("`r") })) ("no output row contains a stray carriage return from CRLF input (rows: [" + ($rowTextsL3 -join "]/[") + "])")
+Test-Assert (($rowTextsL3 | Where-Object { $_ -like "*line one*" }).Count -eq 1) "the CRLF input still split into two separate rows, not one row with an embedded CR"
+Test-Assert (($rowTextsL3 | Where-Object { $_ -like "*line two*" }).Count -eq 1) "both lines from the CRLF input are present"
 Write-Host ""
 
 # ==============================================================================

@@ -3,6 +3,9 @@
 $script:ccrActiveSeries       = [System.Collections.Specialized.OrderedDictionary]::new()
 $script:ccrLiveRegionLineCount = 0
 $script:ccrCursorAvailable     = $null
+# Tracks the console width the PREVIOUS draw actually wrapped its rows
+# against - see Update-CleanConsoleDisplay's own use of this for why.
+$script:ccrLastDrawWidth       = $null
 
 function Test-CleanConsoleCursorAvailable {
     if ($null -ne $script:ccrCursorAvailable) { return $script:ccrCursorAvailable }
@@ -28,7 +31,12 @@ function Get-ProgressBarString {
     if ($Total -le 0) { return ("[" + ("#" * $Width) + "]") }
 
     $ratio  = [Math]::Min(1.0, [Math]::Max(0.0, $Completed / [double]$Total))
-    $filled = [int][Math]::Round($ratio * $Width)
+    # Floor, not Round (2026-09-15 fix, real bug) - Round(19.8) is 20, so
+    # a 40-chapter series showed a COMPLETELY FULL bar at chapter 39/40,
+    # even when that 40th chapter then failed. That directly defeats the
+    # documented "a bar that stalls short of full means something went
+    # wrong" signal - a full bar has to mean everything actually finished.
+    $filled = [int][Math]::Floor($ratio * $Width)
     $empty  = $Width - $filled
     return ("[" + ("#" * $filled) + ("-" * $empty) + "]")
 }
@@ -198,6 +206,20 @@ function Update-CleanConsoleDisplay {
     $newContentRows.AddRange($liveRows)
 
     $oldCount = $script:ccrLiveRegionLineCount
+    # 2026-09-15 fix, real bug: $oldCount is a ROW COUNT from the PREVIOUS
+    # draw, measured against that draw's own $effectiveWidth. If the
+    # console window was resized since (narrower especially - conhost
+    # reflows already-padded rows into MORE physical rows at a narrower
+    # width), moving the cursor up by $oldCount lands mid-region instead
+    # of at the true top, and the redraw below then paints over the wrong
+    # rows. Skip the erase-and-overwrite entirely for this one round when
+    # the width has changed - draw fresh from the current cursor position
+    # instead of trusting a stale row count. Self-correcting: the NEXT
+    # draw (now working from the freshly-cached width) erases normally.
+    if ($script:ccrLastDrawWidth -ne $null -and $script:ccrLastDrawWidth -ne $effectiveWidth) {
+        $oldCount = 0
+    }
+    $script:ccrLastDrawWidth = $effectiveWidth
 
     if ($cursorOk) {
         try {
@@ -329,7 +351,14 @@ function Write-CleanConsoleMessage {
         [string]$Color
     )
     $rows = [System.Collections.Generic.List[hashtable]]::new()
-    foreach ($segment in ($Text -split "`n")) {
+    # -split "\r?\n" (2026-09-15 fix, real latent bug), not a bare "`n" -
+    # splitting on LF only leaves a trailing CR on each segment for CRLF
+    # input. A stray CR written mid-row makes the terminal move the
+    # cursor back to column 0, so the row's own trailing padding then
+    # overwrites the message text with blanks - the row renders empty.
+    # Latent today (no current caller passes CRLF), but a real defect in
+    # a public function's own contract.
+    foreach ($segment in ($Text -split "\r?\n")) {
         $rows.Add(@{ Text = $segment; Color = $Color })
     }
     Update-CleanConsoleDisplay -ExtraFrozenRows $rows
