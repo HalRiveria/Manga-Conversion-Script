@@ -348,6 +348,47 @@ Test-Assert ($resultF2.FolderDeleteFailed -eq $false) "FolderDeleteFailed is als
 Write-Host ""
 
 # ==============================================================================
+#  Scenario F3 (2026-09-15 fix, real bug): a double failure in the post-zip
+#  delete phase - Remove-Source itself throws, AND the catch block logging
+#  THAT failure also throws (e.g. a locked Errors log file, before Logging.ps1's
+#  own 2026-09-15 fix) - used to propagate out of the delete phase's own
+#  try/catch entirely and get caught by the OUTER try/catch that guards zip
+#  CREATION, which unconditionally deletes $ZipOut on the theory that
+#  anything caught there means the zip itself failed. It doesn't anymore -
+#  the zip is already built and verified by the time this phase runs. The
+#  one property that has to hold regardless of whether this double failure
+#  makes the function throw: the already-good zip file must survive.
+# ==============================================================================
+Write-Host "=== Scenario F3: a double failure in the post-zip delete phase does not delete the already-good zip ===" -ForegroundColor Cyan
+$dirF3 = New-Dir "scenario-f3"
+New-FileIn -DirPath $dirF3 -Name "page1.jxl" | Out-Null
+$zipOutF3 = Join-Path $scratchDir "scenario-f3.zip"
+
+$realRemoveSourceF3 = ${function:Remove-Source}
+$realWriteLogF3      = ${function:Write-Log}
+function Remove-Source { param([string]$ItemPath) throw "simulated Remove-Source failure" }
+function Write-Log {
+    param([string]$Message, [string]$Level = "Info", [switch]$ForceConsole)
+    if ($Message -like "*FAILED to delete folder*") { throw "simulated failure logging the delete failure itself" }
+    & $realWriteLogF3 -Message $Message -Level $Level -ForceConsole:$ForceConsole
+}
+$threwF3 = $false
+try {
+    $resultF3 = Invoke-LooseFolderZip -FolderPath $dirF3 -ZipOut $zipOutF3 -LooseImageExtensions @(".jpg", ".png")
+} catch {
+    $threwF3 = $true
+} finally {
+    ${function:Remove-Source} = $realRemoveSourceF3
+    ${function:Write-Log}     = $realWriteLogF3
+}
+
+Test-Assert (Test-Path -LiteralPath $zipOutF3) "the already-verified zip survives even a double failure in the post-zip delete phase - it is NOT deleted just because something unrelated threw after it was built"
+if ($threwF3) {
+    Write-Host "  (the double failure did propagate out of the function this time - that's fine, the important property is the zip survives either way)" -ForegroundColor DarkGray
+}
+Write-Host ""
+
+# ==============================================================================
 #  Scenario G: Invoke-LooseFolderZip - remaining unconverted source images
 #  present - skipped, nothing zipped, folder left alone (partial-failure
 #  protection).

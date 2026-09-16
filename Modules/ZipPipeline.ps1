@@ -104,28 +104,40 @@ $script:zipOnlyWorker = {
 
         Write-Log ("ZIP OK: '" + $ZipOutPath + "' (" + $zipSize + " bytes, " + $verify.EntryCount + " entries)")
         $result.Success = 1
-
-        if ($DeleteFolders) {
-            try {
-                $removed = Remove-Source -ItemPath $FolderPath
-                if ($removed) {
-                    $deleteDesc = if ($DoPermanentDelete) { "permanently" } else { "Recycle Bin" }
-                    Write-Log ("Deleted source folder (" + $deleteDesc + "): '" + $FolderPath + "'")
-                    $result.FolderDeleted = 1
-                } else {
-                    Write-Log ("Source folder already gone before deletion (not counted as deleted): '" + $FolderPath + "'") -Level Warn
-                }
-            } catch {
-                Write-Log ("FAILED to delete folder '" + $FolderPath + "': " + $_) -Level Error
-                $result.FolderDeleteFailed = 1
-            }
-        }
     } catch {
         Write-Log ("FAILED to zip '" + $folderName + "': " + $_) -Level Error
         $result.Failed = 1
         try {
             if (Test-Path -LiteralPath $ZipOutPath) { [System.IO.File]::Delete($ZipOutPath) }
         } catch { }
+        return $result
+    }
+
+    # Deliberately OUTSIDE the try/catch above (2026-09-15 fix, real bug):
+    # that block's own catch treats ANY exception as "the zip failed" and
+    # deletes $ZipOutPath - correct for a failure during zip creation, but
+    # this step runs only AFTER the zip is already built and verified. If
+    # this step's own Write-Log calls (or anything else here) had thrown
+    # while still inside that try, the outer catch would have logged a
+    # false "FAILED to zip", set BOTH Success=1 and Failed=1, and deleted
+    # the zip it had just finished verifying - discarding a good archive
+    # over an unrelated post-success logging hiccup. This step already has
+    # its own inner try/catch for the one call that can legitimately fail
+    # (Remove-Source) - it doesn't need the outer one too.
+    if ($DeleteFolders) {
+        try {
+            $removed = Remove-Source -ItemPath $FolderPath
+            if ($removed) {
+                $deleteDesc = if ($DoPermanentDelete) { "permanently" } else { "Recycle Bin" }
+                Write-Log ("Deleted source folder (" + $deleteDesc + "): '" + $FolderPath + "'")
+                $result.FolderDeleted = 1
+            } else {
+                Write-Log ("Source folder already gone before deletion (not counted as deleted): '" + $FolderPath + "'") -Level Warn
+            }
+        } catch {
+            Write-Log ("FAILED to delete folder '" + $FolderPath + "': " + $_) -Level Error
+            $result.FolderDeleteFailed = 1
+        }
     }
 
     return $result
@@ -333,26 +345,34 @@ function Invoke-LooseFolderZip {
             $result.Status     = "Success"
             $result.ZipSize    = $zipSize
             $result.EntryCount = $verify.EntryCount
-
-            try {
-                $removed = Remove-Source -ItemPath $FolderPath
-                if ($removed) {
-                    $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
-                    Write-Log ("Deleted folder (" + $deleteDesc + "): '" + $FolderPath + "'")
-                    $result.FolderDeleted = $true
-                } else {
-                    Write-Log ("Folder already gone before deletion (not counted as deleted): '" + $FolderPath + "'") -Level Warn
-                }
-            } catch {
-                Write-Log ("FAILED to delete folder '" + $FolderPath + "': " + $_) -Level Error
-                $result.FolderDeleteFailed = $true
-            }
         } catch {
             Write-Log ("FAILED to zip folder '" + $FolderPath + "': " + $_) -Level Error
             $result.Status = "Fail"
             try {
                 if (Test-Path -LiteralPath $ZipOut) { [System.IO.File]::Delete($ZipOut) }
             } catch { }
+            return $result
+        }
+
+        # Deliberately OUTSIDE the try/catch above (2026-09-15 fix, real bug
+        # - same species as $script:zipOnlyWorker's own copy earlier in this
+        # file, keep both in sync): that block's catch treats any exception
+        # as "the zip failed" and deletes $ZipOut - correct during zip
+        # creation, wrong once the zip is already built and verified. This
+        # step has its own inner try/catch for the one call that can
+        # legitimately fail (Remove-Source) - it doesn't need the outer one.
+        try {
+            $removed = Remove-Source -ItemPath $FolderPath
+            if ($removed) {
+                $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
+                Write-Log ("Deleted folder (" + $deleteDesc + "): '" + $FolderPath + "'")
+                $result.FolderDeleted = $true
+            } else {
+                Write-Log ("Folder already gone before deletion (not counted as deleted): '" + $FolderPath + "'") -Level Warn
+            }
+        } catch {
+            Write-Log ("FAILED to delete folder '" + $FolderPath + "': " + $_) -Level Error
+            $result.FolderDeleteFailed = $true
         }
 
         return $result
