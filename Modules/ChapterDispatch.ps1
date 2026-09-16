@@ -86,7 +86,27 @@ function Invoke-ChapterDispatch {
             $chapterInfo = & $ChapterProvider
             if ($null -eq $chapterInfo) { $providerExhausted = $true; break }
             $chapterKey = $chapterInfo
-            $jobs = @(& $JobBuilder $chapterInfo)
+            # @($null) is a 1-element array containing $null, not an empty
+            # array (2026-09-15 fix, real bug) - a $JobBuilder returning
+            # $null for "nothing to do" (the documented zero-job-chapter
+            # contract every builder is supposed to satisfy with @()
+            # instead) used to crash on $null.ChapterKey below rather than
+            # taking that path. All 3 production builders already return
+            # @(), so this only ever bit a harness's own manually-built
+            # feed - explicit $null-to-empty-array normalization either way.
+            $rawJobs = & $JobBuilder $chapterInfo
+            # Statement-form assignment inside each branch, NOT
+            # `$jobs = if (...) { @() } else { @($rawJobs) }` (confirmed
+            # live while building this fix - a real, separate PowerShell
+            # trap from the one this fix targets: when an if/else block's
+            # own tail expression is what's captured by an OUTER
+            # assignment, a single Hashtable emitted from inside that
+            # block gets enumerated into its individual DictionaryEntry
+            # pairs by the outer capture - @()'s usual one-object
+            # protection doesn't survive that extra layer. Assigning
+            # $jobs directly inside each branch instead of capturing the
+            # if/else's own return value avoids the extra layer entirely.
+            if ($null -eq $rawJobs) { $jobs = @() } else { $jobs = @($rawJobs) }
             foreach ($j in $jobs) { $j.ChapterKey = $chapterKey; $pending.Enqueue($j) }
             $state = @{ ChapterInfo = $chapterInfo; Outstanding = $jobs.Count; Completed = $false }
             $chapterStates[$chapterKey] = $state
@@ -108,9 +128,17 @@ function Invoke-ChapterDispatch {
                 $job = & $JobStarter $job
                 $running.Add($job)
             } catch {
+                # Release BEFORE Write-Log (2026-09-15 fix, real bug): if
+                # Write-Log itself throws (a locked Errors log file), the
+                # old order left this job's semaphore slot permanently
+                # leaked - it was never added to $running, so the outer
+                # catch's own cleanup (which only walks $running) can't
+                # find it either. In Full Pipeline the semaphore is SHARED
+                # between both engines, so a leak here would have shrunk
+                # the surviving engine's own ceiling too.
+                if ($isSharedBudget) { $null = $MaxConcurrent.Release() }
                 Write-Log ("ChapterDispatch: JobStarter failed to start a job: " + $_) -Level Error
                 $dispatchResult.JobStarterFailedCount++
-                if ($isSharedBudget) { $null = $MaxConcurrent.Release() }
                 $key = $job.ChapterKey
                 if ($chapterStates.ContainsKey($key)) {
                     $state = $chapterStates[$key]
@@ -121,6 +149,14 @@ function Invoke-ChapterDispatch {
                         $activeChapterCount--
                         $chapterResults.Add(@{ ChapterInfo = $state.ChapterInfo; Completed = $true; Aborted = $false })
                     }
+                } else {
+                    # Invariant violation (2026-09-15 fix) - should never
+                    # happen (every job's ChapterKey is set from a key this
+                    # function itself just registered), but if it ever did,
+                    # this chapter's Outstanding count would never reach 0
+                    # and the dispatch loop would spin forever with no
+                    # error. Log loudly rather than fail silently.
+                    Write-Log ("ChapterDispatch: invariant violation - job's ChapterKey is not in `$chapterStates (JobStarter failure path). This should be unreachable; the dispatch loop may now hang.") -Level Error
                 }
             }
         }
@@ -148,6 +184,12 @@ function Invoke-ChapterDispatch {
                             $activeChapterCount--
                             $chapterResults.Add(@{ ChapterInfo = $state.ChapterInfo; Completed = $true; Aborted = $false })
                         }
+                    } else {
+                        # Invariant violation (2026-09-15 fix) - see the
+                        # JobStarter-failure catch above for the full
+                        # explanation. DOCUMENTED DUPLICATE, keep in sync
+                        # with the other two copies of this same block.
+                        Write-Log ("ChapterDispatch: invariant violation - job's ChapterKey is not in `$chapterStates (main dispatch loop poll pass). This should be unreachable; the dispatch loop may now hang.") -Level Error
                     }
                 }
             } else {
@@ -198,6 +240,13 @@ function Invoke-ChapterDispatch {
                                     $activeChapterCount--
                                     $chapterResults.Add(@{ ChapterInfo = $state.ChapterInfo; Completed = $true; Aborted = $false })
                                 }
+                            } else {
+                                # Invariant violation (2026-09-15 fix) - see
+                                # the JobStarter-failure catch earlier in
+                                # this function for the full explanation.
+                                # DOCUMENTED DUPLICATE, keep in sync with
+                                # the other two copies of this same block.
+                                Write-Log ("ChapterDispatch: invariant violation - job's ChapterKey is not in `$chapterStates (graceful-wait loop). This should be unreachable; the dispatch loop may now hang.") -Level Error
                             }
                         }
                     } else {
@@ -234,6 +283,13 @@ function Invoke-ChapterDispatch {
                                     $activeChapterCount--
                                     $chapterResults.Add(@{ ChapterInfo = $state.ChapterInfo; Completed = $true; Aborted = $false })
                                 }
+                            } else {
+                                # Invariant violation (2026-09-15 fix) - see
+                                # the JobStarter-failure catch earlier in
+                                # this function for the full explanation.
+                                # DOCUMENTED DUPLICATE, keep in sync with
+                                # the other two copies of this same block.
+                                Write-Log ("ChapterDispatch: invariant violation - job's ChapterKey is not in `$chapterStates (mandatory final completion-check pass). This should be unreachable; the dispatch loop may now hang.") -Level Error
                             }
                         }
                     } else {
