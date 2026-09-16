@@ -47,8 +47,21 @@ function Test-AvifAnimated {
             throw "magick identify did not exit within 30s - killed"
         }
 
-        $stdout = $stdoutTask.GetAwaiter().GetResult()
-        $stderr = $stderrTask.GetAwaiter().GetResult()
+        # DOCUMENTED DUPLICATE: Invoke-IccStripRetryOrFail in
+        # ImageConversionPipeline.ps1 uses the identical bounded-stream-read
+        # pattern below - keep both in sync.
+        if (-not [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 5000)) {
+            # 2026-09-16 fix: the process handle above only proves the
+            # PROCESS exited, not that its redirected stdout/stderr pipes
+            # reached EOF - an inherited handle in the process tree (a
+            # delegate ImageMagick can spawn) could keep a pipe open after
+            # the process itself is gone, and an un-timed GetResult() below
+            # would then wait forever. Bounded the same way the process-exit
+            # wait above already is.
+            throw "magick identify exited but its output streams did not finish reading within 5s."
+        }
+        $stdout = $stdoutTask.Result
+        $stderr = $stderrTask.Result
         $code = $proc.ExitCode
     } finally {
         $proc.Dispose()

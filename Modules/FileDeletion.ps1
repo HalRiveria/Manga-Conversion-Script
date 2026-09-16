@@ -36,6 +36,20 @@ function Invoke-DeleteTreatingVanishedAsFalse {
 function Resolve-ItemPathOrNull {
     param([Parameter(Mandatory)][string]$ItemPath)
     try {
+        # Rooted paths (every real caller here passes $file.FullName)
+        # short-circuit to a raw .NET call instead of
+        # $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath
+        # (2026-09-16 fix) - that call is reachable from both of Full
+        # Pipeline's concurrent engine runspaces via Move-ToRecycleBin/
+        # Remove-ItemPermanently, and touches the same PowerShell provider/
+        # SessionState machinery that's the confirmed root cause of this
+        # project's own PS 5.1 concurrent-runspace cmdlet-race bugs (see
+        # Docs/lessons-learned.md) - never proven to hit that exact race
+        # itself, but pointless SessionState work for an already-rooted
+        # path either way.
+        if ([System.IO.Path]::IsPathRooted($ItemPath)) {
+            return [System.IO.Path]::GetFullPath($ItemPath)
+        }
         return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ItemPath)
     } catch {
         return $null

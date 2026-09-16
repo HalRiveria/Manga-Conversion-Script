@@ -513,7 +513,12 @@ $script:realCompleteChapterProgressC6Ref = $realCompleteChapterProgressC6
 $script:CleanConsoleOutputEnabled = $true
 
 try {
-    $totalsC6 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-c6") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+    # -AbortTimeoutSeconds explicit and small (2026-09-16 fix, same
+    # reasoning as Scenario Z6's own matching change) - the 60s default is
+    # for a real run's graceful-drain window, not a test scenario; bounds
+    # the worst case if the marker-polling background runspace below ever
+    # slips its timing.
+    $totalsC6 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-c6") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true -AbortTimeoutSeconds 3
 } finally {
     $cancelPsC6.EndInvoke($cancelHandleC6)
     $cancelPsC6.Dispose()
@@ -2227,15 +2232,39 @@ $abortPsZ6.Runspace = $abortRunspaceZ6
 $null = $abortPsZ6.AddScript({
     param($LogPath)
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
-    while ((-not (Test-Path -LiteralPath $LogPath) -or (Get-Content -LiteralPath $LogPath).Count -lt 1) -and [DateTime]::UtcNow -lt $deadline) {
-        Start-Sleep -Milliseconds 5
+    while ([DateTime]::UtcNow -lt $deadline) {
+        # 2026-09-16 fix, real bug (found by a Gemini review, verified
+        # live): Get-Content against a file the fake magick.exe is
+        # concurrently appending to (via File.AppendAllText, its own
+        # writer guarded by a separate named mutex - see that C# source's
+        # own comment) has a real, if narrow, window to hit a sharing
+        # violation - and this scriptblock had no try/catch, so that
+        # exception used to terminate the whole background runspace
+        # silently, meaning [ConsoleCtrl]::AbortRequested never got set at
+        # all. Raw .NET read (matching this project's own established
+        # avoid-cmdlets-in-a-runspace convention anyway) plus a try/catch
+        # so a transient sharing violation just gets retried on the next
+        # poll instead of ending the poll loop.
+        $hasLine = $false
+        try {
+            if ([System.IO.File]::Exists($LogPath)) {
+                $hasLine = ([System.IO.File]::ReadAllLines($LogPath).Length -ge 1)
+            }
+        } catch { }
+        if ($hasLine) { break }
+        [System.Threading.Thread]::Sleep(5)
     }
     [ConsoleCtrl]::AbortRequested = $true
 }).AddArgument($identifyLogZ6)
 $abortHandleZ6 = $abortPsZ6.BeginInvoke()
 
 try {
-    $totalsZ6 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-z6") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+    # -AbortTimeoutSeconds explicit and small (2026-09-16 fix) - the
+    # default is 60s, meant for a real run's own graceful-drain window,
+    # not a test scenario. If the background poller above ever DOES miss
+    # its window despite the fix just above, this bounds the resulting
+    # wait to a few seconds instead of the real 60s default.
+    $totalsZ6 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-z6") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true -AbortTimeoutSeconds 3
 } finally {
     $abortPsZ6.EndInvoke($abortHandleZ6)
     $abortPsZ6.Dispose()

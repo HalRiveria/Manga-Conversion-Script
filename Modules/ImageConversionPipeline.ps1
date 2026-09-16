@@ -77,8 +77,19 @@ function Invoke-IccStripRetryOrFail {
             return $false
         }
 
-        $null = $stripStdoutTask.GetAwaiter().GetResult()
-        $null = $stripStderrTask.GetAwaiter().GetResult()
+        # DOCUMENTED DUPLICATE: Test-AvifAnimated in
+        # AnimatedConversionPipeline.ps1 uses the identical bounded-stream-
+        # read pattern below - keep both in sync.
+        if (-not [System.Threading.Tasks.Task]::WaitAll(@($stripStdoutTask, $stripStderrTask), 5000)) {
+            # 2026-09-16 fix: same reasoning as Test-AvifAnimated's own
+            # matching comment - the process handle above only proves the
+            # PROCESS exited, not that its redirected stdout/stderr pipes
+            # reached EOF.
+            Write-Log ("ICC-strip retry process for '" + $Job.SrcPath + "' exited but its output streams did not finish reading within 5s - counting as conversion failure.") -Level Error
+            return $false
+        }
+        $null = $stripStdoutTask.Result
+        $null = $stripStderrTask.Result
         $stripExitCode = $stripProc.ExitCode
     } finally {
         $stripProc.Dispose()

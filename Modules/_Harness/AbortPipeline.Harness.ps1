@@ -805,9 +805,18 @@ Reset-HarnessScenarioState
 $fakeW = New-FakeHandles -DelaysMs @(30000, 30000)
 [ConsoleCtrl]::IsCloseEvent = $true
 $swW = [System.Diagnostics.Stopwatch]::StartNew()
-$outcomeW = Invoke-GracefulDrain -Handles $fakeW.Handles -TimeoutSeconds 30
+try {
+    # try/finally around the call (2026-09-16 fix) - [ConsoleCtrl] is a
+    # real, process-wide static type, and this harness runs every later
+    # scenario in this same process. If Invoke-GracefulDrain ever threw
+    # here, IsCloseEvent would have stayed $true for the rest of the run,
+    # silently making every later drain in this file take the immediate-
+    # force-stop fast path instead of its own real wait behavior.
+    $outcomeW = Invoke-GracefulDrain -Handles $fakeW.Handles -TimeoutSeconds 30
+} finally {
+    [ConsoleCtrl]::IsCloseEvent = $false
+}
 $swW.Stop()
-[ConsoleCtrl]::IsCloseEvent = $false
 $fakeW.Pool.Close(); $fakeW.Pool.Dispose()
 
 Test-Assert ($swW.Elapsed.TotalSeconds -lt 5) ("returned in under 5s despite a 30s -TimeoutSeconds and 30s-delayed jobs (took " + [math]::Round($swW.Elapsed.TotalSeconds, 2) + "s)")
