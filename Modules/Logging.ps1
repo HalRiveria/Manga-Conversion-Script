@@ -188,8 +188,8 @@ function Write-LogLineToFile {
             [System.IO.File]::AppendAllText($FilePath, $Line + [System.Environment]::NewLine, [System.Text.Encoding]::UTF8)
         } catch {
             # Swallowed deliberately - a locked/inaccessible log file (an
-            # external editor with it open, antivirus scanning it,
-            # OneDrive/cloud storage sync mid-upload) must never be allowed to crash
+            # external editor with it open, antivirus scanning it, a cloud-
+            # sync client mid-upload) must never be allowed to crash
             # the real conversion work over losing one log line. Worse
             # without this (2026-09-15 finding, real): if it's specifically
             # the Errors log that's locked, the catch handler that's
