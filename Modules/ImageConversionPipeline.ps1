@@ -87,13 +87,14 @@ function Invoke-IccStripRetryOrFail {
 
         # DOCUMENTED DUPLICATE: Test-AvifAnimated in
         # AnimatedConversionPipeline.ps1 uses the identical bounded-stream-
-        # read pattern below - keep both in sync.
-        if (-not [System.Threading.Tasks.Task]::WaitAll(@($stripStdoutTask, $stripStderrTask), 5000)) {
+        # read pattern below - keep both in sync. 15s, not 5s (2026-09-16
+        # band-aid, see that module's own matching comment).
+        if (-not [System.Threading.Tasks.Task]::WaitAll(@($stripStdoutTask, $stripStderrTask), 15000)) {
             # 2026-09-16 fix: same reasoning as Test-AvifAnimated's own
             # matching comment - the process handle above only proves the
             # PROCESS exited, not that its redirected stdout/stderr pipes
             # reached EOF.
-            Write-Log ("ICC-strip retry process for '" + $Job.SrcPath + "' exited but its output streams did not finish reading within 5s - counting as conversion failure.") -Level Error
+            Write-Log ("ICC-strip retry process for '" + $Job.SrcPath + "' exited but its output streams did not finish reading within 15s - counting as conversion failure.") -Level Error
             return $false
         }
         $null = $stripStdoutTask.Result
@@ -664,14 +665,14 @@ function Invoke-LooseImageConversionPipeline {
                     # copy above were missed during that same pass). The
                     # WaitOne above only proves the PROCESS exited, not that
                     # its redirected stdout/stderr pipes reached EOF.
-                    if (-not [System.Threading.Tasks.Task]::WaitAll(@($magickStdoutTask, $magickStderrTask), 5000)) {
+                    if (-not [System.Threading.Tasks.Task]::WaitAll(@($magickStdoutTask, $magickStderrTask), 15000)) {
                         $magickProc.Dispose()
                         $magickProcLocal = $null
-                        Write-Log ("FAILED " + $formatLabel + "->PNG pre-conversion for '" + $job.SrcPath + "': magick exited but its output streams did not finish reading within 5s") -Level Error
+                        Write-Log ("FAILED " + $formatLabel + "->PNG pre-conversion for '" + $job.SrcPath + "': magick exited but its output streams did not finish reading within 15s") -Level Error
                         $cr.FailedCount++
                         $failureAlreadyAccounted = $true
                         if ([System.IO.File]::Exists($tempPng)) { try { [System.IO.File]::Delete($tempPng) } catch { } }
-                        throw ($formatLabel + "->PNG pre-conversion's output streams did not finish reading within 5s")
+                        throw ($formatLabel + "->PNG pre-conversion's output streams did not finish reading within 15s")
                     }
                     $null = $magickStdoutTask.GetAwaiter().GetResult()
                     $null = $magickStderrTask.GetAwaiter().GetResult()

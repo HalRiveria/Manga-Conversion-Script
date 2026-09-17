@@ -58,7 +58,14 @@ function Test-AvifAnimated {
         # DOCUMENTED DUPLICATE: Invoke-IccStripRetryOrFail in
         # ImageConversionPipeline.ps1 uses the identical bounded-stream-read
         # pattern below - keep both in sync.
-        if (-not [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 5000)) {
+        # 15s, not 5s (2026-09-16 band-aid) - live-reported as "pretty
+        # frequent" under this project's normal 12-concurrent-process load;
+        # 5s was too tight for a process that's just CPU-starved by
+        # contention, not actually stuck. DOCUMENTED DUPLICATE: keep in sync
+        # with ImageConversionPipeline.ps1's Invoke-IccStripRetryOrFail and
+        # its own pre-conversion detour, and Controller.ps1's matching
+        # pre-conversion detour - all four bumped together.
+        if (-not [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 15000)) {
             # 2026-09-16 fix: the process handle above only proves the
             # PROCESS exited, not that its redirected stdout/stderr pipes
             # reached EOF - an inherited handle in the process tree (a
@@ -66,7 +73,7 @@ function Test-AvifAnimated {
             # the process itself is gone, and an un-timed GetResult() below
             # would then wait forever. Bounded the same way the process-exit
             # wait above already is.
-            throw "magick identify exited but its output streams did not finish reading within 5s."
+            throw "magick identify exited but its output streams did not finish reading within 15s."
         }
         $stdout = $stdoutTask.Result
         $stderr = $stderrTask.Result

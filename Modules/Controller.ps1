@@ -561,10 +561,10 @@ $script:fullPipelineEngineWorker = {
                     # stdout/stderr pipes reached EOF - a process tree where
                     # something else inherited the handle could still hang
                     # the un-timed GetResult() forever.
-                    if (-not [System.Threading.Tasks.Task]::WaitAll(@($magickStdoutTask, $magickStderrTask), 5000)) {
+                    if (-not [System.Threading.Tasks.Task]::WaitAll(@($magickStdoutTask, $magickStderrTask), 15000)) {
                         $magickProc.Dispose()
                         $magickProcLocal = $null
-                        throw ("magick pre-conversion exited but its output streams did not finish reading within 5s")
+                        throw ("magick pre-conversion exited but its output streams did not finish reading within 15s")
                     }
                     $null = $magickStdoutTask.GetAwaiter().GetResult()
                     $null = $magickStderrTask.GetAwaiter().GetResult()
