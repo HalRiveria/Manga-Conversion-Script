@@ -62,6 +62,7 @@ function Reset-CCRState {
     $script:ccrLiveRegionLineCount = 0
     $script:ccrCursorAvailable     = $null
     $script:ccrLastDrawWidth       = $null
+    $script:ccrMaxLiveRows         = $null
 }
 
 # ==============================================================================
@@ -389,6 +390,73 @@ $rowTextsL3 = @($outputL3 | ForEach-Object { $_.ToString() })
 Test-Assert (-not ($rowTextsL3 | Where-Object { $_.Contains("`r") })) ("no output row contains a stray carriage return from CRLF input (rows: [" + ($rowTextsL3 -join "]/[") + "])")
 Test-Assert (($rowTextsL3 | Where-Object { $_ -like "*line one*" }).Count -eq 1) "the CRLF input still split into two separate rows, not one row with an embedded CR"
 Test-Assert (($rowTextsL3 | Where-Object { $_ -like "*line two*" }).Count -eq 1) "both lines from the CRLF input are present"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario M: live-region cap (2026-09-21 fix - CCR pacing gap). A Full
+#  Pipeline run whose idle engine walks the whole library up front
+#  announces every series to CCR at once. Before this fix the live region
+#  grew unbounded, eventually overran the console buffer, and
+#  SetCursorPosition threw - latching CCR into the print-everything
+#  fallback that floods the console and starves the main thread (zip stops,
+#  abort polls are never reached). Get-CappedLiveRows bounds the live
+#  region to the window height so that can never happen at any library
+#  size. This environment has no real console, so the cursor mechanics
+#  themselves still can't be exercised (see this harness's header); what IS
+#  proven here is the cap logic that makes the overrun unreachable.
+# ==============================================================================
+Write-Host "=== Scenario M: live-region cap (CCR pacing gap) ===" -ForegroundColor Cyan
+Reset-CCRState
+
+# Build 100 active series, each with one in-progress chapter (= 3 rows per
+# series: name, bar, the in-progress chapter line), all in the registry at
+# once - exactly the "whole library announced up front" flood.
+$floodSeries = [System.Collections.Specialized.OrderedDictionary]::new()
+for ($s = 1; $s -le 100; $s++) {
+    $entry = @{
+        TotalChapters  = 1
+        SuccessCount   = 0
+        ActiveChapters = [System.Collections.Generic.List[string]]::new()
+        IssueChapters  = [System.Collections.Generic.List[hashtable]]::new()
+    }
+    $entry.ActiveChapters.Add("Chapter 1")
+    $floodSeries[("Series " + $s)] = $entry
+}
+
+# Uncapped (MaxRows 0) = the pre-fix behavior: the entire flood renders.
+# (Get-CappedLiveRows returns its List via the `,` unary-array convention,
+# so capture it directly - @(...) would see the wrapper as one element.)
+$uncapped = Get-CappedLiveRows -ActiveSeries $floodSeries -Width 79 -MaxRows 0
+Test-Assert ($uncapped.Count -eq 300) ("without a cap the full flood renders - 100 series x 3 rows = 300 rows (got " + $uncapped.Count + ")")
+
+# Capped to a 20-row window: bounded, and a summary accounts for the rest.
+$capped = Get-CappedLiveRows -ActiveSeries $floodSeries -Width 79 -MaxRows 20
+Test-Assert ($capped.Count -le 20) ("capped to a 20-row window, the live region never exceeds it (got " + $capped.Count + " rows)")
+$summaryRow = $capped | Where-Object { $_.Text -like "*more series in progress*" }
+Test-Assert ($null -ne $summaryRow) "a '... and N more series in progress' summary replaces the hidden series"
+Test-Assert ($capped[$capped.Count - 1].Text -like "*more series in progress*") "the summary is the last row of the capped region"
+
+# The cap never cuts a series mid-block: the last shown series' rows are
+# whole (6 series x 3 rows = 18, then the summary = 19 total).
+Test-Assert ($capped.Count -eq 19) ("cap stops on a whole-series boundary - 6 full series (18 rows) + 1 summary = 19 (got " + $capped.Count + ")")
+
+# A cap larger than the content shows everything, with no summary.
+$roomy = Get-CappedLiveRows -ActiveSeries $floodSeries -Width 79 -MaxRows 5000
+Test-Assert ($roomy.Count -eq 300) "a cap larger than the content renders every row, no truncation"
+Test-Assert ($null -eq ($roomy | Where-Object { $_.Text -like "*more series in progress*" })) "no summary row when nothing is hidden"
+
+# Integration: Update-CleanConsoleDisplay honors the $ccrMaxLiveRows seam,
+# so a real redraw of the flooded registry emits a bounded row count
+# instead of the whole library.
+Reset-CCRState
+$script:ccrMaxLiveRows = 20
+for ($s = 1; $s -le 100; $s++) {
+    Start-SeriesProgress -SeriesName ("S" + $s) -TotalChapters 1
+    Start-ChapterProgress -SeriesName ("S" + $s) -ChapterName "Chapter 1"
+}
+$redraw = & { Update-CleanConsoleDisplay } 6>&1
+Test-Assert (@($redraw).Count -le 20) ("a full redraw of 100 announced series emits at most a window's worth of rows, not the whole flood (emitted " + @($redraw).Count + ")")
+$script:ccrMaxLiveRows = $null
 Write-Host ""
 
 # ==============================================================================

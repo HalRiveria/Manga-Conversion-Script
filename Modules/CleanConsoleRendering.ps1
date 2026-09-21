@@ -6,6 +6,11 @@ $script:ccrCursorAvailable     = $null
 # Tracks the console width the PREVIOUS draw actually wrapped its rows
 # against - see Update-CleanConsoleDisplay's own use of this for why.
 $script:ccrLastDrawWidth       = $null
+# Test seam: when non-null, forces the live-region row cap instead of
+# deriving it from [Console]::WindowHeight (which throws with no real
+# console). The harness sets this to reproduce a small window; production
+# leaves it null. See Get-CappedLiveRows / Update-CleanConsoleDisplay.
+$script:ccrMaxLiveRows         = $null
 
 function Test-CleanConsoleCursorAvailable {
     if ($null -ne $script:ccrCursorAvailable) { return $script:ccrCursorAvailable }
@@ -166,6 +171,57 @@ function Get-WrappedSeriesRows {
     return ,$rows
 }
 
+function Get-CappedLiveRows {
+    # Builds the wrapped rows for every active series, but stops once the
+    # total would exceed $MaxRows and emits a one-line "... and N more"
+    # summary instead. Capping the live region is what keeps the CURSOR
+    # PATH alive when a Full Pipeline run announces the whole library up
+    # front (a zero-job engine walking ahead unthrottled): a bounded live
+    # region means Update-CleanConsoleDisplay's own
+    # `SetCursorPosition(0, CursorTop - oldCount)` can never address a row
+    # outside the buffer, so it never throws and never latches into the
+    # print-everything fallback that floods the console and starves the
+    # main thread. $MaxRows -le 0 means "no cap" (unknown window size).
+    # Stops on a whole-series boundary so a series is never cut mid-block.
+    param(
+        [Parameter(Mandatory)]
+        $ActiveSeries,
+        [Parameter(Mandatory)]
+        [int]$Width,
+        [int]$MaxRows = 0
+    )
+
+    $rows  = [System.Collections.Generic.List[hashtable]]::new()
+    $names = @($ActiveSeries.Keys)
+
+    if ($MaxRows -le 0) {
+        foreach ($n in $names) {
+            $rows.AddRange((Get-WrappedSeriesRows -SeriesName $n -Entry $ActiveSeries[$n] -Width $Width))
+        }
+        return ,$rows
+    }
+
+    $shown = 0
+    for ($i = 0; $i -lt $names.Count; $i++) {
+        $n = $names[$i]
+        $seriesRows = Get-WrappedSeriesRows -SeriesName $n -Entry $ActiveSeries[$n] -Width $Width
+        # Reserve one row for the summary line UNLESS this is the last
+        # series (nothing left to summarize, so the whole budget is free).
+        if ($i -eq ($names.Count - 1)) { $budget = $MaxRows } else { $budget = $MaxRows - 1 }
+        if ($rows.Count -gt 0 -and ($rows.Count + $seriesRows.Count) -gt $budget) {
+            $hidden  = $names.Count - $shown
+            $summary = "... and " + $hidden + " more series in progress"
+            foreach ($chunk in (Split-TextToWidth -Text $summary -Width $Width)) {
+                $rows.Add(@{ Text = $chunk; Color = $null })
+            }
+            break
+        }
+        $rows.AddRange($seriesRows)
+        $shown++
+    }
+    return ,$rows
+}
+
 function Update-CleanConsoleDisplay {
     param(
         [System.Collections.Generic.List[hashtable]]$NewlyFrozen = $null,
@@ -196,10 +252,23 @@ function Update-CleanConsoleDisplay {
         }
     }
 
-    $liveRows = [System.Collections.Generic.List[hashtable]]::new()
-    foreach ($seriesName in @($script:ccrActiveSeries.Keys)) {
-        $liveRows.AddRange((Get-WrappedSeriesRows -SeriesName $seriesName -Entry $script:ccrActiveSeries[$seriesName] -Width $effectiveWidth))
+    # Cap the live region to the window height so it can never grow past
+    # what SetCursorPosition can safely rewind over (see Get-CappedLiveRows
+    # for why). Reserve a margin below WindowHeight for the frozen rows
+    # printed above the region this frame and the shell prompt. Test seam
+    # $ccrMaxLiveRows wins when set; with no readable console, 0 = no cap
+    # (preserves the pre-cap behavior of the no-console fallback path).
+    $maxLiveRows = 0
+    if ($null -ne $script:ccrMaxLiveRows) {
+        $maxLiveRows = $script:ccrMaxLiveRows
+    } elseif ($cursorOk) {
+        try {
+            $wh = [Console]::WindowHeight
+            if ($wh -gt 6) { $maxLiveRows = $wh - 4 } else { $maxLiveRows = 1 }
+        } catch { $maxLiveRows = 0 }
     }
+
+    $liveRows = Get-CappedLiveRows -ActiveSeries $script:ccrActiveSeries -Width $effectiveWidth -MaxRows $maxLiveRows
 
     $newContentRows = [System.Collections.Generic.List[hashtable]]::new()
     $newContentRows.AddRange($frozenRows)
