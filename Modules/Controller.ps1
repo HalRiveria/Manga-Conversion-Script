@@ -1183,8 +1183,18 @@ function Invoke-FullPipeline {
                 # Tell CCR this chapter is done (as a Warning, not a clean
                 # Success) so its live display doesn't leave it stuck
                 # showing "in progress" forever - same call shape
-                # $finalizeChapterEntry itself uses below.
-                if ($cleanConsoleOutputEnabled) {
+                # $finalizeChapterEntry itself uses below. Only if it was
+                # actually announced though: since A (2026-09-22) a chapter
+                # is announced only once an engine has real work for it, so a
+                # leftover the run never got to (e.g. the zero-job engine
+                # walked ahead and reported it done, but the working engine
+                # was aborted before starting it) was never Start-ChapterProgress'd
+                # - calling Complete-ChapterProgress on it throws ("not an
+                # active chapter"). It was never shown, so there's nothing to
+                # complete; Complete-AllActiveSeriesProgress in the finally
+                # still freezes the series. $announcedChapters is the same
+                # shared dedup the jobBuilders and $finalizeChapterEntry use.
+                if ($cleanConsoleOutputEnabled -and $announcedChapters.ContainsKey($leftoverKey)) {
                     $null = Complete-ChapterProgress -SeriesName $leftoverEntry.SeriesName -ChapterName $leftoverEntry.ChapterName -Status 'Warning' -Detail "left incomplete - run stopped before both engines finished"
                 }
                 continue
