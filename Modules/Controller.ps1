@@ -36,7 +36,18 @@ function Get-OrCreateFullPipelineSeriesBundle {
         [Parameter(Mandatory)]
         [System.Collections.Concurrent.ConcurrentQueue[hashtable]]$EventQueue,
         [Parameter(Mandatory)]
-        [System.Collections.Concurrent.ConcurrentDictionary[object,string]]$ZipBlockReasons
+        [System.Collections.Concurrent.ConcurrentDictionary[object,string]]$ZipBlockReasons,
+        # Captured by the factory closure below and checked directly, NOT via
+        # $script:CleanConsoleOutputEnabled: this factory runs via a shared
+        # [System.Lazy] whose script-scope state (CCR flag, log-file paths,
+        # Full-Logging flag) is not reliably the running engine worker's -
+        # confirmed live 2026-09-22, where the "=== Series ===" milestone
+        # both printed raw to the console under CCR AND never reached the log
+        # file, which only happens when Write-Log sees those $script: vars at
+        # their unset defaults here. Passing the flag explicitly lets us skip
+        # the milestone under CCR regardless of that runspace-state gap (the
+        # broader gap is its own open item).
+        [bool]$CleanConsoleOutputEnabled = $false
     )
 
     $factory = {
@@ -107,10 +118,16 @@ function Get-OrCreateFullPipelineSeriesBundle {
             })
         }
 
-        if ($chapterEntries.Count -gt 0) {
-            Write-Log ("=== Series '" + $Series.Name + "': " + $chapterEntries.Count + " chapter(s) ===")
-        } else {
-            Write-Log ("Series '" + $Series.Name + "': no qualifying chapters found.") -Level Info
+        # Skip the per-series milestone entirely under CCR - CCR's live
+        # display already shows the series, and (per the param note above)
+        # this factory's runspace-state is unreliable, so Write-Log's own
+        # console suppression can't be trusted to hide it here.
+        if (-not $CleanConsoleOutputEnabled) {
+            if ($chapterEntries.Count -gt 0) {
+                Write-Log ("=== Series '" + $Series.Name + "': " + $chapterEntries.Count + " chapter(s) ===")
+            } else {
+                Write-Log ("Series '" + $Series.Name + "': no qualifying chapters found.") -Level Info
+            }
         }
         $EventQueue.Enqueue(@{
             Kind = 'SeriesReady'; SeriesName = $Series.Name; TotalChapters = $chapterEntries.Count
@@ -381,7 +398,7 @@ $script:fullPipelineEngineWorker = {
             $bundle = Get-OrCreateFullPipelineSeriesBundle -Cache $SeriesBundleCache -Series $series -MagickExe $MagickExe `
                 -LooseImageExtensions $LooseImageExtensions -AnimatedFileExtensions $AnimatedFileExtensions -KnownZipPaths $KnownZipPaths `
                 -FolderQualifyingExtensions $FolderQualifyingExtensions -FolderExcludeStagingDirs $FolderExcludeStagingDirs `
-                -EventQueue $EventQueue -ZipBlockReasons $ZipBlockReasons
+                -EventQueue $EventQueue -ZipBlockReasons $ZipBlockReasons -CleanConsoleOutputEnabled $CleanConsoleOutputEnabled
 
             foreach ($entry in $bundle.ChapterEntries) { $chapterQueue.Enqueue($entry) }
         }
