@@ -58,10 +58,11 @@ function Test-AvifAnimated {
         # DOCUMENTED DUPLICATE: Invoke-IccStripRetryOrFail in
         # ImageConversionPipeline.ps1 uses the identical bounded-stream-read
         # pattern below - keep both in sync.
-        # 15s, not 5s (2026-09-16 band-aid) - live-reported as "pretty
-        # frequent" under this project's normal 12-concurrent-process load;
-        # 5s was too tight for a process that's just CPU-starved by
-        # contention, not actually stuck. DOCUMENTED DUPLICATE: keep in sync
+        # 15s, not 5s (2026-09-16 band-aid). The real cause of the "pretty
+        # frequent" timeouts turned out to be thread-pool starvation, not a
+        # CPU-starved process (2026-09-22, see ChapterDispatch.ps1's
+        # Initialize-ChildProcessReadThreadPool) - 15s kept as margin.
+        # DOCUMENTED DUPLICATE: keep in sync
         # with ImageConversionPipeline.ps1's Invoke-IccStripRetryOrFail and
         # its own pre-conversion detour, and Controller.ps1's matching
         # pre-conversion detour - all four bumped together.

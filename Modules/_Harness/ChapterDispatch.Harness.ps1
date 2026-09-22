@@ -753,6 +753,62 @@ Test-Assert ($script:chapterCompleteCount14 -eq 1) ("ChapterCompleteCallback sti
 Write-Host ""
 
 # ==============================================================================
+#  Scenario 15 (2026-09-22, the "magick identify times out" Todo item):
+#  Initialize-ChildProcessReadThreadPool keeps a short-lived process's
+#  stream reads from starving behind long-running ones. Every child process
+#  in this project gets two ReadToEndAsync readers; on .NET Framework a
+#  redirected pipe is a synchronous handle, so each reader pins a
+#  thread-pool worker until the child exits. Once more readers are pinned
+#  than the pool's floor (default = core count), a new reader waits on the
+#  pool's slow thread injection - measured live at 8-30s for an identify
+#  call that had already exited in ~200ms. Runs in a child powershell.exe
+#  so it gets a fresh, untouched thread pool. Blockers are ping.exe (a
+#  cheap long-lived console process; waitfor.exe does NOT work here - its
+#  readers hit EOF at once, so nothing gets pinned); the probe is a fast
+#  `cmd /c echo`. Confirmed failing without the floor (-SkipFloor): the
+#  probe's reads missed the 3s bound. Same result live with 30 real
+#  `magick` jobs as blockers and a real `magick identify` probe: 20s
+#  timeouts without the floor, ~10ms with it.
+# ==============================================================================
+Write-Host "=== Scenario 15: raised thread-pool floor keeps short-lived stream reads from starving ===" -ForegroundColor Cyan
+$probeScript15 = Join-Path ([System.IO.Path]::GetTempPath()) ("chapterdispatch-harness-tp-" + [guid]::NewGuid().ToString("N") + ".ps1")
+[System.IO.File]::WriteAllText($probeScript15, @'
+param([string]$ModulePath, [switch]$SkipFloor)
+. $ModulePath
+if (-not $SkipFloor) { $null = Initialize-ChildProcessReadThreadPool }
+function Start-Redirected([string]$exe, [string]$argv) {
+    $psi = [System.Diagnostics.ProcessStartInfo]::new($exe, $argv)
+    $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.CreateNoWindow = $true
+    $p = [System.Diagnostics.Process]::Start($psi)
+    return @{ P = $p; O = $p.StandardOutput.ReadToEndAsync(); E = $p.StandardError.ReadToEndAsync() }
+}
+$pinned = [System.Collections.Generic.List[hashtable]]::new()
+try {
+    for ($i = 0; $i -lt ([Environment]::ProcessorCount * 2 + 8); $i++) { $pinned.Add((Start-Redirected 'ping.exe' '-n 25 127.0.0.1')) }
+    [System.Threading.Thread]::Sleep(1000)
+    $j = Start-Redirected 'cmd.exe' '/c echo probe'
+    $j.P.WaitForExit()
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $done = [System.Threading.Tasks.Task]::WaitAll(@($j.O, $j.E), 3000)
+    "RESULT done=$done ms=$($sw.ElapsedMilliseconds)"
+} finally {
+    foreach ($b in $pinned) { try { $b.P.Kill() } catch { } }
+}
+'@)
+$out15 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $probeScript15 -ModulePath (Join-Path $PSScriptRoot "..\ChapterDispatch.ps1")
+Remove-Item -LiteralPath $probeScript15 -Force -ErrorAction SilentlyContinue
+$result15 = @($out15 | Where-Object { "$_" -like "RESULT *" }) -join ""
+Test-Assert ($result15 -like "RESULT done=True*") ("with the floor raised, an exited process's stream reads finish within 3s despite 2x-cores+8 pinned readers (got '" + $result15 + "')")
+
+$worker15 = 0; $io15 = 0
+[System.Threading.ThreadPool]::GetMinThreads([ref]$worker15, [ref]$io15)
+$null = Initialize-ChildProcessReadThreadPool -MinimumWorkerThreads ([Math]::Max(1, $worker15 - 1))
+$worker15b = 0; $io15b = 0
+[System.Threading.ThreadPool]::GetMinThreads([ref]$worker15b, [ref]$io15b)
+Test-Assert ($worker15b -eq $worker15) "never LOWERS an existing floor"
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

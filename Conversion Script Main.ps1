@@ -158,6 +158,7 @@ try {
     }
 
     Register-AbortHandler
+    $null = Initialize-ChildProcessReadThreadPool
 
     if ([string]::IsNullOrWhiteSpace($Path)) { $Path = (Get-Location).Path }
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
