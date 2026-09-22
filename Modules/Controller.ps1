@@ -405,11 +405,24 @@ $script:fullPipelineEngineWorker = {
             }
             $chapterResults[$chapterInfo] = $cr
 
+            if ($cr.TotalFiles -eq 0) { return @() }
+
+            # Announce the chapter to CCR only once this engine actually has
+            # conversion work for it (A, 2026-09-22), NOT during the
+            # walk-ahead before the zero-file check above. A zero-job engine
+            # (e.g. the animated engine in a static-image library) walks the
+            # whole library unthrottled - announcing there made every chapter
+            # show as in-progress at once. Announcing here paces the
+            # announcement with whichever engine has real work (its dispatch
+            # is throttled to -MaxQueueAhead), so only in-flight chapters
+            # show. A chapter with zero conversion work in BOTH engines
+            # (already converted, zip-only) is never announced here by either
+            # engine - $finalizeChapterEntry announces it at the zip step
+            # instead. DOCUMENTED DUPLICATE: same move in the animated
+            # jobBuilder below - keep both in sync.
             if ($AnnouncedChapters.TryAdd($chapterInfo, 0)) {
                 $EventQueue.Enqueue(@{ Kind = 'ChapterStarted'; SeriesName = $chapterInfo.SeriesName; ChapterName = $chapterInfo.ChapterName })
             }
-
-            if ($cr.TotalFiles -eq 0) { return @() }
             Write-Log ("Processing chapter (image engine): '" + $chapterInfo.Dir.FullName + "' (" + $cr.TotalFiles + " image(s))")
 
             $allJobs = [System.Collections.Generic.List[hashtable]]::new()
@@ -654,11 +667,14 @@ $script:fullPipelineEngineWorker = {
             }
             $chapterResults[$chapterInfo] = $cr
 
+            if ($cr.TotalFiles -eq 0) { return @() }
+
+            # Announce only once this engine has real work - see the image
+            # jobBuilder above for the full reasoning (DOCUMENTED DUPLICATE,
+            # keep both in sync).
             if ($AnnouncedChapters.TryAdd($chapterInfo, 0)) {
                 $EventQueue.Enqueue(@{ Kind = 'ChapterStarted'; SeriesName = $chapterInfo.SeriesName; ChapterName = $chapterInfo.ChapterName })
             }
-
-            if ($cr.TotalFiles -eq 0) { return @() }
             Write-Log ("Processing chapter (animated engine): '" + $chapterInfo.Dir.FullName + "' (" + $cr.TotalFiles + " animated file(s))")
 
             $jobs = [System.Collections.Generic.List[hashtable]]::new()
@@ -897,6 +913,20 @@ function Invoke-FullPipeline {
         $finalizeChapterEntry = {
             param($key, $entry)
             $totals.ChapterCount++
+
+            # Zip-only chapter (no conversion work in either engine, so never
+            # announced during dispatch - see the jobBuilders' own note):
+            # announce it now, as it reaches the merge/zip step, so it shows
+            # briefly in CCR ("in progress") while it's zipped below and then
+            # completes. This also keeps Complete-ChapterProgress (further
+            # down) from throwing on an unannounced chapter, which would
+            # additionally stall the per-series bar short of its total. TryAdd
+            # is the same shared dedup the jobBuilders use, and $key is the
+            # same chapterInfo identity, so a chapter an engine already
+            # announced is not re-announced here.
+            if ($cleanConsoleOutputEnabled -and $announcedChapters.TryAdd($key, 0)) {
+                Start-ChapterProgress -SeriesName $entry.SeriesName -ChapterName $entry.ChapterName
+            }
 
             if ($null -ne $entry.ImageResult) {
                 $ir = $entry.ImageResult

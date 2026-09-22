@@ -640,6 +640,57 @@ Test-Assert (-not (Test-Path -LiteralPath $chD3)) "the chapter folder was delete
 Write-Host ""
 
 # ==============================================================================
+#  Scenario D3b (2026-09-22, A fix): D3's zip-only chapter, but with CCR ON.
+#  A moved the ChapterStarted announcement out of the dispatch walk-ahead
+#  and into the point where an engine actually has conversion work, so a
+#  chapter with zero conversion work in BOTH engines (already converted,
+#  zip-only) is no longer announced during dispatch. $finalizeChapterEntry
+#  must announce it (Start-ChapterProgress) at the zip step - otherwise
+#  Complete-ChapterProgress would throw on an unannounced chapter AND the
+#  per-series bar would stall short of its total. Proves: the zip-only
+#  chapter is Started exactly once and Completed as Success under CCR, and
+#  still zips, with no exception. Same function-swap spy technique as
+#  Scenario C6.
+# ==============================================================================
+Write-Host "=== Scenario D3b: zip-only chapter is announced + completed under CCR (A fix) ===" -ForegroundColor Cyan
+$chD3b = New-Dir "scenario-d3b\Series D3b\Chapter 1"
+[System.IO.File]::WriteAllText((Join-Path $chD3b "page1.jxl"), "already converted - nothing loose left")
+
+$script:startCallsD3b    = New-Object System.Collections.Generic.List[hashtable]
+$script:completeCallsD3b = New-Object System.Collections.Generic.List[hashtable]
+$realStartD3b    = ${function:Start-ChapterProgress}
+$realCompleteD3b = ${function:Complete-ChapterProgress}
+$script:realStartD3bRef    = $realStartD3b
+$script:realCompleteD3bRef = $realCompleteD3b
+function Start-ChapterProgress {
+    param([string]$SeriesName, [string]$ChapterName)
+    $script:startCallsD3b.Add(@{ SeriesName = $SeriesName; ChapterName = $ChapterName })
+    & $script:realStartD3bRef -SeriesName $SeriesName -ChapterName $ChapterName
+}
+function Complete-ChapterProgress {
+    param([string]$SeriesName, [string]$ChapterName, [string]$Status, [string]$Detail = "")
+    $script:completeCallsD3b.Add(@{ Status = $Status; Detail = $Detail })
+    & $script:realCompleteD3bRef -SeriesName $SeriesName -ChapterName $ChapterName -Status $Status -Detail $Detail
+}
+$script:CleanConsoleOutputEnabled = $true
+$d3bThrew = $false
+try {
+    $totalsD3b = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-d3b") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+} catch {
+    $d3bThrew = $true
+} finally {
+    $script:CleanConsoleOutputEnabled = $false
+    ${function:Start-ChapterProgress}    = $realStartD3b
+    ${function:Complete-ChapterProgress} = $realCompleteD3b
+}
+
+Test-Assert (-not $d3bThrew) "the zip-only chapter under CCR did not throw (it was announced before Complete-ChapterProgress)"
+Test-Assert ($totalsD3b.ZipCreatedSuccess -eq 1) ("the zip-only chapter still zipped under CCR (got ZipCreatedSuccess=" + $totalsD3b.ZipCreatedSuccess + ")")
+Test-Assert (@($script:startCallsD3b | Where-Object { $_.ChapterName -eq "Chapter 1" }).Count -eq 1) ("the zip-only chapter was announced (Start-ChapterProgress) exactly once, at the zip step (got " + $script:startCallsD3b.Count + ")")
+Test-Assert (@($script:completeCallsD3b | Where-Object { $_.Status -eq "Success" }).Count -eq 1) "the zip-only chapter completed as Success under CCR, advancing the per-series bar"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario E: a chapter with ONLY animated files - symmetric to D, the
 #  image engine is never dispatched.
 # ==============================================================================
