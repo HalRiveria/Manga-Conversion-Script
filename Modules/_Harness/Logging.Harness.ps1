@@ -204,6 +204,10 @@ Test-Assert ($script:workerConsoleQueue.Count -eq 1) "message was enqueued inste
 $peeked = $null
 $null = $script:workerConsoleQueue.TryPeek([ref]$peeked)
 Test-Assert ($peeked.Message -eq "queued message" -and $peeked.Level -eq "Warn") "queued item has the correct Message/Level"
+Test-Assert ($peeked.Line -like "*[[]Warn[]] queued message" -and $peeked.ForceConsole -eq $false) "queued item carries the pre-formatted Line and ForceConsole=false"
+Test-Assert (-not (Test-Path -LiteralPath $script:logFile)) "a worker-side Write-Log does NOT write the log file itself - the main thread's Flush-ConsoleQueue does"
+Flush-ConsoleQueue -Queue $script:workerConsoleQueue
+Test-Assert ((Get-Content -LiteralPath $script:logFile -Raw) -like "*queued message*") "after the main thread flushes, the queued line IS in the log file"
 $script:workerConsoleQueue = $null
 Write-Host ""
 
@@ -227,14 +231,17 @@ Test-Assert (-not $emptyFlushThrew) "Flush-ConsoleQueue on an already-empty queu
 Write-Host ""
 
 # ==============================================================================
-#  Scenario G2 (2026-09-22): under CCR, Flush-ConsoleQueue drops leaked
-#  worker Info milestones (e.g. a "=== Series ===" line that leaked because
-#  a worker runspace read CleanConsoleOutputEnabled as false) and routes
-#  Warn/Error/Summary through CCR's frozen-row path instead of printing raw
-#  into the live region. Stub Write-GatedConsoleMessage here since
+#  Scenario G2 (2026-09-22, reworked same day for the worker-state fix):
+#  under CCR, Flush-ConsoleQueue applies the SAME console policy the main
+#  thread's own Write-Log does - nothing reaches the console unless the
+#  worker passed -ForceConsole, and a forced line goes through CCR's
+#  frozen-row path (not raw into the live region). Every entry still gets
+#  its file write. Stub Write-GatedConsoleMessage here since
 #  CleanConsoleRendering.ps1 isn't dot-sourced in this isolated harness.
 # ==============================================================================
 Write-Host "=== Scenario G2: Flush-ConsoleQueue under CCR ===" -ForegroundColor Cyan
+Reset-LoggingState
+Initialize-LogPaths -TargetPath "C:\G2\Path" -FullLogging $true -ScriptDir $scratchDir
 $script:ccrRouted = [System.Collections.Generic.List[hashtable]]::new()
 function Write-GatedConsoleMessage {
     param([string]$Text, [string]$Color, [bool]$CleanConsoleOutputEnabled)
@@ -242,18 +249,22 @@ function Write-GatedConsoleMessage {
 }
 $script:CleanConsoleOutputEnabled = $true
 $q2 = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
-$q2.Enqueue([pscustomobject]@{ Message = "=== Series 'X': 3 chapter(s) ==="; Level = "Info" })
-$q2.Enqueue([pscustomobject]@{ Message = "a warning"; Level = "Warn" })
-$q2.Enqueue([pscustomobject]@{ Message = "an error";  Level = "Error" })
-$q2.Enqueue([pscustomobject]@{ Message = "a summary"; Level = "Summary" })
-Flush-ConsoleQueue -Queue $q2
+$q2.Enqueue(@{ Message = "=== Series 'X': 3 chapter(s) ==="; Level = "Info" })
+$q2.Enqueue(@{ Message = "a plain warning"; Level = "Warn" })
+$q2.Enqueue(@{ Message = "a forced warning"; Level = "Warn"; ForceConsole = $true })
+$q2.Enqueue(@{ Message = "a forced error"; Level = "Error"; ForceConsole = $true })
+$q2.Enqueue(@{ Message = "a forced summary"; Level = "Summary"; ForceConsole = $true })
+$outputG2 = & { Flush-ConsoleQueue -Queue $q2 } 6>&1
 $script:CleanConsoleOutputEnabled = $false
 
-Test-Assert ($script:ccrRouted.Count -eq 3) ("under CCR, the Info milestone is dropped and only Warn/Error/Summary are routed (got " + $script:ccrRouted.Count + ")")
-Test-Assert (-not ($script:ccrRouted | Where-Object { $_.Text -like "*=== Series*" })) "the leaked '=== Series ===' Info line is NOT shown under CCR"
-Test-Assert (@($script:ccrRouted | Where-Object { $_.Text -like "*a warning*" -and $_.Color -eq "Yellow" }).Count -eq 1) "the Warn line is routed through CCR in Yellow"
-Test-Assert (@($script:ccrRouted | Where-Object { $_.Text -like "*an error*" -and $_.Color -eq "Red" }).Count -eq 1) "the Error line is routed through CCR in Red"
-Test-Assert (@($script:ccrRouted | Where-Object { $_.Text -like "*a summary*" -and $_.Color -eq "Cyan" }).Count -eq 1) "the Summary line is routed through CCR in Cyan"
+Test-Assert (@($outputG2).Count -eq 0) "under CCR, nothing is printed raw to the console"
+Test-Assert ($script:ccrRouted.Count -eq 3) ("under CCR, only the -ForceConsole entries are routed through CCR (got " + $script:ccrRouted.Count + ")")
+Test-Assert (-not ($script:ccrRouted | Where-Object { $_.Text -like "*=== Series*" -or $_.Text -like "*a plain warning*" })) "non-forced entries (the '=== Series ===' milestone, a plain Warn) are NOT shown under CCR"
+Test-Assert (@($script:ccrRouted | Where-Object { $_.Text -like "*a forced warning*" -and $_.Color -eq "Yellow" }).Count -eq 1) "a forced Warn is routed through CCR in Yellow"
+Test-Assert (@($script:ccrRouted | Where-Object { $_.Text -like "*a forced error*" -and $_.Color -eq "Red" }).Count -eq 1) "a forced Error is routed through CCR in Red"
+Test-Assert (@($script:ccrRouted | Where-Object { $_.Text -like "*a forced summary*" -and $_.Color -eq "Cyan" }).Count -eq 1) "a forced Summary is routed through CCR in Cyan"
+$g2Content = Get-Content -LiteralPath $script:logFile -Raw
+Test-Assert ($g2Content -like "*=== Series 'X'*" -and $g2Content -like "*a plain warning*" -and $g2Content -like "*a forced error*") "every drained entry, shown or not, reached the log file"
 Test-Assert ($q2.Count -eq 0) "queue is fully drained under CCR too"
 Write-Host ""
 
@@ -327,52 +338,66 @@ $script:logMutex = $null
 Write-Host ""
 
 # ==============================================================================
-#  Scenario J: Write-Log inside a real runspace worker writes to THAT
-#  runspace's own configured file, not the main thread's - the critical
-#  check that $script: prefixes resolve per-runspace, not to whichever
-#  runspace happened to set them first.
+#  Scenario J (reworked 2026-09-22, the worker-state fix): Write-Log inside
+#  a REAL runspace worker, including the shape that silently broke before -
+#  a Write-Log call from inside a .GetNewClosure()'d block created inside
+#  another -SharedFunctionNames function (every [System.Lazy] factory in
+#  Controller.ps1 is exactly this). There, a propagated function's $script:
+#  resolves to the closure's own EMPTY module scope, so the old Write-Log
+#  saw no queue/paths/flags: printed raw and wrote no file (confirmed by
+#  running this scenario against the pre-fix Logging.ps1 - the closure
+#  line never reached the queue or any file). Now: both calls enqueue, the
+#  worker never writes a file itself, and the main thread's flush lands
+#  both lines in the main run's log file.
 # ==============================================================================
-Write-Host "=== Scenario J: Write-Log from inside a runspace worker ===" -ForegroundColor Cyan
+Write-Host "=== Scenario J: Write-Log from inside a runspace worker (direct + closure) ===" -ForegroundColor Cyan
 Reset-LoggingState
 Initialize-LogPaths -TargetPath "C:\Main\Path" -FullLogging $true -ScriptDir $scratchDir
 Write-Log "main thread's own line"
 $mainThreadLogFile = $script:logFile
 
+function Invoke-HarnessWorkerClosureLog {
+    $closure = { Write-Log "worker line from a closure" -Level Error }.GetNewClosure()
+    & $closure
+}
 $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-foreach ($fn in @('Write-Log', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile')) {
+foreach ($fn in @(Get-LoggingSharedFunctionNames) + @('Invoke-HarnessWorkerClosureLog')) {
     $fnDef = (Get-Item ("Function:\" + $fn)).Definition
     $iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList $fn, $fnDef))
 }
 $pool = [RunspaceFactory]::CreateRunspacePool(1, 1, $iss, $Host)
 $pool.Open()
 
-$workerLogFile = Join-Path $scratchDir "worker-own-log.log"
+$workerOwnLogFile = Join-Path $scratchDir "worker-own-log.log"
+$jQueue = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+# Seeded exactly the way Controller.ps1's/ZipPipeline.ps1's real worker
+# bodies do it - including a worker-side log path, to prove it's ignored.
 $worker = {
-    param($LogFilePath)
-    $script:FullLogging = $true
-    $script:logFile     = $LogFilePath
-    $script:logMutex    = $null
-    Write-Log "worker's own line"
+    param($ConsoleQueue, $LogFilePath)
+    $script:workerConsoleQueue = $ConsoleQueue
+    $script:FullLogging        = $true
+    $script:logFile            = $LogFilePath
+    Write-Log "worker line, direct" -Level Warn
+    Invoke-HarnessWorkerClosureLog
 }
 $ps = [PowerShell]::Create()
 $ps.RunspacePool = $pool
-$null = $ps.AddScript($worker)
-$null = $ps.AddArgument($workerLogFile)
+$null = $ps.AddScript($worker).AddArgument($jQueue).AddArgument($workerOwnLogFile)
 $handle = $ps.BeginInvoke()
 $null = $ps.EndInvoke($handle)
+$jErrors = @($ps.Streams.Error)
 $ps.Dispose()
 $pool.Close(); $pool.Dispose()
 
-$workerFileExists = Test-Path -LiteralPath $workerLogFile
-Test-Assert $workerFileExists "the worker runspace created its OWN log file at its own configured path"
-if ($workerFileExists) {
-    $workerContent = Get-Content -LiteralPath $workerLogFile
-    Test-Assert ($workerContent -like "*worker's own line*") "the worker's log file contains the worker's own message"
-    Test-Assert ($workerContent -notlike "*main thread's own line*") "the worker's log file does NOT contain the main thread's message (no cross-contamination)"
-}
-$mainContent = Get-Content -LiteralPath $mainThreadLogFile
-Test-Assert ($mainContent -like "*main thread's own line*") "the main thread's log file still has its own message"
-Test-Assert ($mainContent -notlike "*worker's own line*") "the main thread's log file does NOT contain the worker's message"
+Test-Assert ($jErrors.Count -eq 0) ("the worker ran without errors (got " + $jErrors.Count + ": " + ($jErrors -join '; ') + ")")
+$jItems = @($jQueue.ToArray())
+Test-Assert (@($jItems | Where-Object { $_.Message -eq "worker line, direct" }).Count -eq 1) "a direct worker Write-Log was enqueued"
+Test-Assert (@($jItems | Where-Object { $_.Message -eq "worker line from a closure" -and $_.Level -eq "Error" }).Count -eq 1) "a worker Write-Log from inside a .GetNewClosure()'d block was ALSO enqueued (the case that used to print raw and drop from every log)"
+Test-Assert (-not (Test-Path -LiteralPath $workerOwnLogFile)) "the worker never wrote a log file of its own"
+Flush-ConsoleQueue -Queue $jQueue
+$mainContent = Get-Content -LiteralPath $mainThreadLogFile -Raw
+Test-Assert ($mainContent -like "*main thread's own line*") "the main thread's log file has its own message"
+Test-Assert ($mainContent -like "*worker line, direct*" -and $mainContent -like "*[[]Error[]] worker line from a closure*") "after the main thread flushes, BOTH worker lines are in the main run's log file"
 Write-Host ""
 
 # ==============================================================================
@@ -803,11 +828,14 @@ Test-Assert ($outputO.Count -eq 0) ("no console output was produced while Clean 
 $logContentO = Get-Content -LiteralPath $script:logFile
 Test-Assert ($logContentO -like "*should not print to console*") "the line was still written to the log FILE - only the console echo is suppressed"
 
-# also confirm the worker-queue path is suppressed (nothing gets enqueued,
-# so Flush-ConsoleQueue naturally has nothing to drain)
+# A worker never applies the CCR policy itself (it can't reliably see the
+# toggle - see Scenario J) - it always enqueues, flagged ForceConsole=false,
+# and Flush-ConsoleQueue suppresses it on the main thread (Scenario G2).
 $script:workerConsoleQueue = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
-Write-Log "should not be queued either" -Level Warn
-Test-Assert ($script:workerConsoleQueue.Count -eq 0) "nothing was enqueued for the worker-console-queue path either while the toggle is on"
+Write-Log "queued, suppressed at flush" -Level Warn
+$peekedO = $null
+$null = $script:workerConsoleQueue.TryPeek([ref]$peekedO)
+Test-Assert ($script:workerConsoleQueue.Count -eq 1 -and $peekedO.ForceConsole -eq $false) "a worker-side Write-Log still enqueues under CCR, flagged ForceConsole=false for the main thread to suppress"
 $script:workerConsoleQueue = $null
 
 Initialize-CleanConsoleOutput -Enabled $false
@@ -858,26 +886,24 @@ Write-Host ""
 #  Deletion has no CCR live-progress display of its own to replace the
 #  suppressed console lines with, so before this fix it reported nothing
 #  to the console at all with CCO on, silently, while still working and
-#  file-logging normally. Uses $script:workerConsoleQueue as the
-#  observable proxy for "did Write-Log get past its own CCO gate" (same
-#  technique as Scenario F) - CCO's early `return` fires before the
-#  worker-queue check, so an empty queue after the call means the gate
-#  caught it; a populated queue means -ForceConsole let it through.
+#  file-logging normally. Main-thread path checked via a real 6>&1
+#  capture; the worker path via the flag the queued entry carries.
 # ==============================================================================
 Write-Host "=== Scenario Q: Write-Log -ForceConsole bypasses the Clean Console Output gate ===" -ForegroundColor Cyan
 Reset-LoggingState
 Initialize-LogPaths -TargetPath "C:\Q\Path" -FullLogging $true -ScriptDir $scratchDir
 $script:CleanConsoleOutputEnabled = $true
+
+$outputQ1 = & { Write-Log "suppressed under CCO" -Level Warn } 6>&1
+Test-Assert (@($outputQ1).Count -eq 0) "without -ForceConsole, CCO suppresses the main thread's console echo"
+$outputQ2 = & { Write-Log "forced through CCO" -Level Warn -ForceConsole } 6>&1
+Test-Assert (@($outputQ2 | Where-Object { "$_" -like "*forced through CCO*" }).Count -eq 1) "-ForceConsole gets past the CCO gate on the main thread"
+
 $script:workerConsoleQueue = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
-
-Write-Log "suppressed under CCO" -Level Warn
-Test-Assert ($script:workerConsoleQueue.Count -eq 0) "without -ForceConsole, CCO still suppresses console echo entirely (queue stays empty)"
-
-Write-Log "forced through CCO" -Level Warn -ForceConsole
-Test-Assert ($script:workerConsoleQueue.Count -eq 1) "-ForceConsole gets past the CCO gate and reaches the normal post-gate path"
+Write-Log "forced from a worker" -Level Warn -ForceConsole
 $peekedQ = $null
 $null = $script:workerConsoleQueue.TryPeek([ref]$peekedQ)
-Test-Assert ($peekedQ.Message -eq "forced through CCO") "the forced-through item is the right one"
+Test-Assert ($peekedQ.Message -eq "forced from a worker" -and $peekedQ.ForceConsole -eq $true) "a worker-side -ForceConsole is carried on the queued entry for the main thread to honour"
 
 $script:workerConsoleQueue = $null
 $script:CleanConsoleOutputEnabled = $false

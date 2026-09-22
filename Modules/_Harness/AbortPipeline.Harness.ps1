@@ -21,6 +21,11 @@
 
 $ErrorActionPreference = "Stop"
 
+# Real Logging.ps1 too, for Test-AbortSignal's worker check
+# (Get-WorkerConsoleQueue) - the real one, since its $global: fallback is
+# exactly what Scenario A3 exercises. Its Flush-ConsoleQueue is overridden
+# by the call-tracking stub below.
+. (Join-Path $PSScriptRoot "..\Logging.ps1")
 . (Join-Path $PSScriptRoot "..\AbortPipeline.ps1")
 
 function Flush-ConsoleQueue {
@@ -158,30 +163,90 @@ $ctsKeep.Dispose(); $ctsDrop.Dispose(); $ctsRemove.Dispose()
 Write-Host ""
 
 # ==============================================================================
-#  Scenario A2: inside a runspace worker ($script:workerConsoleQueue set),
-#  Test-AbortSignal must queue the abort message instead of calling
-#  Write-GatedConsoleMessage directly - that function isn't in every
-#  worker's -SharedFunctionNames list and would throw "term not
-#  recognized" there (2026-09-14 fix).
+#  Scenario A2 (reworked 2026-09-22, the worker-state fix): inside a runspace
+#  worker ($script:workerConsoleQueue set), Test-AbortSignal only REACTS -
+#  returns true, never announces, never enqueues, never touches the main
+#  thread's latch/CTS registry. The main thread's own call (its dispatch
+#  loop polls it) is the single announcer. Before this, the worker queued
+#  its own copy of the message, which printed a second, oddly-timestamped
+#  [ABORT] line on top of the main thread's.
 # ==============================================================================
-Write-Host "=== Scenario A2: Test-AbortSignal queues its message inside a worker ===" -ForegroundColor Cyan
+Write-Host "=== Scenario A2: Test-AbortSignal inside a worker reacts but never announces ===" -ForegroundColor Cyan
 Reset-HarnessScenarioState
 
 $fakeQueue = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+$ctsA2 = [System.Threading.CancellationTokenSource]::new()
+Register-AbortCancellationSource -Cts $ctsA2
 $script:workerConsoleQueue = $fakeQueue
 [ConsoleCtrl]::AbortRequested = $true
 [ConsoleCtrl]::IsCloseEvent   = $false
-$queuedResult = Test-AbortSignal
+$workerResult1 = Test-AbortSignal
+$workerResult2 = Test-AbortSignal
 
-Test-Assert ($queuedResult -eq $true) "Test-AbortSignal still returns true when routing through the queue"
-Test-Assert ($fakeQueue.Count -eq 1) "exactly one item was queued instead of calling Write-GatedConsoleMessage"
-$queuedItem = $null
-$null = $fakeQueue.TryDequeue([ref]$queuedItem)
-Test-Assert ($queuedItem.Level -eq "Warn") "queued abort message uses Level=Warn, matching Flush-ConsoleQueue's expected shape"
-Test-Assert ($queuedItem.Message -like "*Ctrl+C detected*") "queued abort message has the expected text"
-Test-Assert ($script:cleanConsoleMessageCalls.Count -eq 0) "Write-GatedConsoleMessage/Write-CleanConsoleMessage was NOT called while the worker queue was set"
+Test-Assert ($workerResult1 -eq $true -and $workerResult2 -eq $true) "Test-AbortSignal returns true inside a worker once abort is signalled"
+Test-Assert ($fakeQueue.Count -eq 0) "nothing was queued - a worker never announces the abort"
+Test-Assert ($script:cleanConsoleMessageCalls.Count -eq 0) "Write-GatedConsoleMessage/Write-CleanConsoleMessage was NOT called from the worker"
+Test-Assert ($script:abortRequested -eq $false) "the main thread's own announce latch was left untouched"
+Test-Assert ($ctsA2.IsCancellationRequested -eq $false) "the worker did not cancel CTSs - that's the main thread's job"
 
 $script:workerConsoleQueue = $null
+$outputA2 = & { Test-AbortSignal } 6>&1
+Test-Assert (@($outputA2 | Where-Object { "$_" -like "*Ctrl+C detected*" }).Count -eq 1) "the main thread's next call still announces exactly once"
+Test-Assert ($ctsA2.IsCancellationRequested -eq $true) "...and cancels the registered CTS"
+Unregister-AbortCancellationSource -Cts $ctsA2
+$ctsA2.Dispose()
+Write-Host ""
+
+# ==============================================================================
+#  Scenario A3 (2026-09-22): the real-runspace shape that printed the abort
+#  message 2-3 times per Ctrl+C. Test-AbortSignal propagated into a worker
+#  runspace via SessionStateFunctionEntry (exactly what -SharedFunctionNames
+#  does), called from inside a .GetNewClosure()'d block created inside
+#  another propagated function - the shape of Controller.ps1's chapter
+#  provider and [System.Lazy] factories. There, a propagated function's
+#  $script: resolves to the closure's own empty module scope, so the old
+#  code saw no worker queue AND a latch private to that closure - so it
+#  announced from the worker, once per closure instance, on top of the
+#  main thread's own. Write-GatedConsoleMessage here is a worker-side
+#  recorder (located via $global:, which does resolve correctly in that
+#  context). Confirmed against the pre-fix AbortPipeline.ps1: 1
+#  worker-side announcement here (0 expected).
+# ==============================================================================
+Write-Host "=== Scenario A3: Test-AbortSignal in a real runspace closure never announces ===" -ForegroundColor Cyan
+Reset-HarnessScenarioState
+
+function Invoke-HarnessAbortCheckFromClosure {
+    $closure = { Test-AbortSignal }.GetNewClosure()
+    return @((& $closure), (& $closure), (& $closure))
+}
+$a3Iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+foreach ($fn in @('Test-AbortSignal', 'Get-WorkerConsoleQueue', 'Invoke-HarnessAbortCheckFromClosure')) {
+    $a3Iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList $fn, (Get-Item ("Function:\" + $fn)).Definition))
+}
+$a3Iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList 'Write-GatedConsoleMessage', 'param($Text, $Color, $CleanConsoleOutputEnabled) $global:announceLog.Enqueue($Text)'))
+$a3Pool = [RunspaceFactory]::CreateRunspacePool(1, 1, $a3Iss, $Host)
+$a3Pool.Open()
+$a3Queue       = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+$a3AnnounceLog = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+[ConsoleCtrl]::AbortRequested = $true
+[ConsoleCtrl]::IsCloseEvent   = $false
+$a3Ps = [PowerShell]::Create()
+$a3Ps.RunspacePool = $a3Pool
+$null = $a3Ps.AddScript({
+    param($ConsoleQueue, $AnnounceLog)
+    $script:workerConsoleQueue = $ConsoleQueue
+    $global:announceLog = $AnnounceLog
+    Invoke-HarnessAbortCheckFromClosure
+}).AddArgument($a3Queue).AddArgument($a3AnnounceLog)
+$a3Results = @($a3Ps.Invoke())
+$a3Errors = @($a3Ps.Streams.Error)
+$a3Ps.Dispose()
+$a3Pool.Close(); $a3Pool.Dispose()
+
+Test-Assert ($a3Errors.Count -eq 0) ("the worker ran without errors (got " + $a3Errors.Count + ": " + ($a3Errors -join '; ') + ")")
+Test-Assert ($a3Results.Count -eq 3 -and @($a3Results | Where-Object { $_ -ne $true }).Count -eq 0) "all 3 closure-context calls returned true"
+Test-Assert ($a3AnnounceLog.Count -eq 0) ("the worker announced the abort 0 times (got " + $a3AnnounceLog.Count + ")")
+Test-Assert ($a3Queue.Count -eq 0) "and queued nothing for the main thread to print"
 Write-Host ""
 
 # ==============================================================================

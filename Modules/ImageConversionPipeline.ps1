@@ -183,7 +183,7 @@ function Complete-ImageDispatchJob {
         try {
             $removed = Remove-Source -ItemPath $Job.SrcPath
             if ($removed) {
-                $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
+                $deleteDesc = if (Test-PermanentDeleteEnabled) { "permanently" } else { "Recycle Bin" }
                 Write-Log ("Deleted " + $SourceNoun + " (" + $deleteDesc + "): '" + $Job.SrcPath + "'")
                 $ChapterResult.DeletedCount++
             } else {
@@ -298,7 +298,7 @@ function Remove-StaleLooseSources {
         try {
             $removed = Remove-Source -ItemPath $stale.FullName
             if ($removed) {
-                $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
+                $deleteDesc = if (Test-PermanentDeleteEnabled) { "permanently" } else { "Recycle Bin" }
                 Write-Log ("Deleted stale source image (" + $deleteDesc + ", .jxl already exists): '" + $stale.FullName + "'")
                 $result.Success++
             } else {

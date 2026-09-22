@@ -402,6 +402,47 @@ if ($null -eq $unmountedLetterO) {
 Write-Host ""
 
 # ==============================================================================
+#  Scenario P (2026-09-22, the worker-state fix): Remove-Source honours
+#  Permanent Delete inside a REAL runspace worker, including when called from
+#  a .GetNewClosure()'d block created inside another propagated function
+#  (the shape of every Full Pipeline job builder / [System.Lazy] factory).
+#  There, a propagated function's $script: resolves to the closure's own
+#  empty module scope - the old Remove-Source read $script:PermanentDelete
+#  as $null and silently sent the file to the Recycle Bin instead
+#  (confirmed against the pre-fix FileDeletion.ps1: the closure call took
+#  the Recycle Bin branch). The two deletion primitives are recorders here,
+#  so nothing real is deleted or recycled.
+# ==============================================================================
+Write-Host "=== Scenario P: Remove-Source honours Permanent Delete in a runspace closure ===" -ForegroundColor Cyan
+function Invoke-HarnessRemoveSourceFromClosure {
+    $closure = { Remove-Source -ItemPath "C:\not\a\real\file.png" }.GetNewClosure()
+    return (& $closure)
+}
+$pIss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+foreach ($fn in @('Remove-Source', 'Test-PermanentDeleteEnabled', 'Invoke-HarnessRemoveSourceFromClosure')) {
+    $pIss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList $fn, (Get-Item ("Function:\" + $fn)).Definition))
+}
+$pIss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList 'Remove-ItemPermanently', 'param($ItemPath) "permanent"'))
+$pIss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList 'Move-ToRecycleBin', 'param($ItemPath) "recycle"'))
+$pPool = [RunspaceFactory]::CreateRunspacePool(1, 1, $pIss, $Host)
+$pPool.Open()
+$pPs = [PowerShell]::Create()
+$pPs.RunspacePool = $pPool
+$null = $pPs.AddScript({
+    $script:PermanentDelete = $true   # seeded exactly like the real worker bodies
+    @{ Direct = (Remove-Source -ItemPath "C:\not\a\real\file.png"); Closure = (Invoke-HarnessRemoveSourceFromClosure) }
+})
+$pResult = @($pPs.Invoke())[0]
+$pErrors = @($pPs.Streams.Error)
+$pPs.Dispose()
+$pPool.Close(); $pPool.Dispose()
+
+Test-Assert ($pErrors.Count -eq 0) ("the worker ran without errors (got " + $pErrors.Count + ": " + ($pErrors -join '; ') + ")")
+Test-Assert ($pResult.Direct -eq "permanent") "a direct worker Remove-Source call takes the permanent-delete branch"
+Test-Assert ($pResult.Closure -eq "permanent") ("a worker Remove-Source call from inside a .GetNewClosure()'d block ALSO takes the permanent-delete branch (got '" + $pResult.Closure + "')")
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

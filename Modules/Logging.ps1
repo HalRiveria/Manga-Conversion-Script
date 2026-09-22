@@ -208,31 +208,43 @@ function Write-Log {
         [switch]$ForceConsole
     )
 
-    $writesToFile = $script:FullLogging -or $Level -eq "Error" -or $Level -eq "Warn"
-    $suppressConsole = $script:CleanConsoleOutputEnabled -and -not $ForceConsole
-    $echoesToHostDirectly = (-not $suppressConsole) -and ($null -eq $script:workerConsoleQueue)
+    $line = Format-LogLine -Message $Message -Level $Level
 
-    if ($writesToFile -or $echoesToHostDirectly) {
-        $line = Format-LogLine -Message $Message -Level $Level
+    # Worker runspace: hand the whole entry to the main thread, which owns
+    # the log files and the console policy (Flush-ConsoleQueue). Nothing
+    # below this point is safe in a worker - see Docs/function-notes.md.
+    $workerQueue = Get-WorkerConsoleQueue
+    if ($null -ne $workerQueue) {
+        $workerQueue.Enqueue(@{ Message = $Message; Level = $Level; Line = $line; ForceConsole = [bool]$ForceConsole })
+        return
     }
 
-    if ($writesToFile) {
-        if ($script:FullLogging) {
-            Write-LogLineToFile -FilePath $script:logFile -Line $line
-        } elseif ($Level -eq "Error") {
-            Write-LogLineToFile -FilePath $script:logErrorFile -Line $line
-        } else {
-            Write-LogLineToFile -FilePath $script:logWarnFile -Line $line
-        }
-    }
+    Write-LogLineToRunFiles -Line $line -Level $Level
 
-    if ($suppressConsole) { return }
+    if ($script:CleanConsoleOutputEnabled -and -not $ForceConsole) { return }
+    Write-LogLineToHost -Line $line -Level $Level
+}
 
-    if ($null -ne $script:workerConsoleQueue) {
-        $script:workerConsoleQueue.Enqueue(@{ Message = $Message; Level = $Level })
-    } else {
-        Write-LogLineToHost -Line $line -Level $Level
+function Write-LogLineToRunFiles {
+    param([string]$Line, [string]$Level)
+    if ($script:FullLogging) {
+        Write-LogLineToFile -FilePath $script:logFile -Line $Line
+    } elseif ($Level -eq "Error") {
+        Write-LogLineToFile -FilePath $script:logErrorFile -Line $Line
+    } elseif ($Level -eq "Warn") {
+        Write-LogLineToFile -FilePath $script:logWarnFile -Line $Line
     }
+}
+
+function Get-WorkerConsoleQueue {
+    # $global: fallback: see Docs/function-notes.md (Logging.ps1) and
+    # Docs/lessons-learned.md - a -SharedFunctionNames function's $script:
+    # reads come back empty when called from a .GetNewClosure()'d block in
+    # a worker runspace. Same pattern as FileDeletion.ps1's
+    # Test-PermanentDeleteEnabled - keep the two in sync.
+    $queue = $script:workerConsoleQueue
+    if ($null -eq $queue) { $queue = $global:workerConsoleQueue }
+    return ,$queue
 }
 
 function Write-SummaryLog {
@@ -259,33 +271,18 @@ function Write-SummaryLog {
 function Flush-ConsoleQueue {
     param([System.Collections.Concurrent.ConcurrentQueue[object]]$Queue)
 
+    # Main thread only (not in Get-LoggingSharedFunctionNames). Worker
+    # Write-Log calls land here as whole entries - this is where they get
+    # their file write AND the same console policy the main thread's own
+    # Write-Log applies. See Docs/function-notes.md.
     $item = $null
     while ($Queue.TryDequeue([ref]$item)) {
+        $line = $item.Line
+        if ([string]::IsNullOrEmpty($line)) { $line = Format-LogLine -Message $item.Message -Level $item.Level }
+        Write-LogLineToRunFiles -Line $line -Level $item.Level
+
         if ($script:CleanConsoleOutputEnabled) {
-            # CCR owns the live console region while it's on, and this is the
-            # main-thread point where worker-queued lines reach the console
-            # (a worker's own Write-Log can't see CCR state, so the console
-            # policy is applied here). Two rules:
-            #   * Info-level lines that reach this queue are leaked worker
-            #     milestones ("=== Series ... ===", "Processing chapter",
-            #     "ZIP OK") - exactly the per-series chatter CCR's live
-            #     display replaces. Drop them (the log file still has them
-            #     under Full Logging). This is also what stops the leaked
-            #     "=== Series ===" line from showing/desyncing the region.
-            #     The only Info+ForceConsole lines in this project (the
-            #     unwanted-image pre-scan's "Deleted"/"WOULD DELETE") run on
-            #     the main thread and print direct, never through this queue,
-            #     so they're unaffected.
-            #   * Warn/Error/Summary (abort notices, force-stops, real
-            #     failures) must still show - route them through CCR's
-            #     frozen-row path so they scroll cleanly ABOVE the live region
-            #     instead of printing raw INTO it (raw was the cause of the
-            #     abort-time stacked/duplicated blocks and stale right-edge
-            #     characters). Main-thread only (not in
-            #     Get-LoggingSharedFunctionNames), so Write-GatedConsoleMessage
-            #     always resolves here. Color mirrors Write-LogLineToHost's.
-            if ($item.Level -eq "Info") { continue }
-            $line = Format-LogLine -Message $item.Message -Level $item.Level
+            if (-not $item.ForceConsole) { continue }
             $ccrColor = $null
             switch ($item.Level) {
                 "Error"   { $ccrColor = "Red" }
@@ -294,7 +291,6 @@ function Flush-ConsoleQueue {
             }
             Write-GatedConsoleMessage -Text $line -Color $ccrColor -CleanConsoleOutputEnabled $true
         } else {
-            $line = Format-LogLine -Message $item.Message -Level $item.Level
             Write-LogLineToHost -Line $line -Level $item.Level
         }
     }
@@ -322,5 +318,5 @@ function Write-LogFileSummary {
 }
 
 function Get-LoggingSharedFunctionNames {
-    return @('Write-Log', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile')
+    return @('Write-Log', 'Get-WorkerConsoleQueue', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile', 'Write-LogLineToRunFiles')
 }

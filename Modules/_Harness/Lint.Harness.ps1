@@ -36,11 +36,43 @@ $script:LintKnownExceptions = @(
     @{ File  = 'Controller.ps1'
        Rule  = 'shared-function-names'
        Names = @('Write-GatedConsoleMessage')
-       Why   = 'Test-AbortSignal (AbortPipeline.ps1) is in this worker''s -SharedFunctionNames and its source still references Write-GatedConsoleMessage, which Rule 5''s call-graph walk correctly finds - but Test-AbortSignal only calls it when $script:workerConsoleQueue is unset (main thread); inside a worker it queues the abort message instead (same pattern as Write-Log), so Write-GatedConsoleMessage - which really would be unsafe to call inside a worker, CCR state is never initialized there - is never actually reached at runtime. Propagating it would just be dead weight. See CHANGELOG.md 2026-09-14.' }
+       Why   = 'Test-AbortSignal (AbortPipeline.ps1) is in this worker''s -SharedFunctionNames and its source still references Write-GatedConsoleMessage, which Rule 5''s call-graph walk correctly finds - but only past its worker early-return (a worker never announces the abort, it just returns [ConsoleCtrl]::AbortRequested), so Write-GatedConsoleMessage - unsafe in a worker, CCR state doesn''t exist there - is never reached at runtime. See CHANGELOG.md 2026-09-14 / 2026-09-22.' }
+)
+
+# Rule 6 only: specific (function, $script: variable) pairs reviewed as safe
+# on a runspace-reachable path. Keep this tiny - each entry must say why the
+# read can't silently come back empty in a worker.
+$script:LintScriptVarAllowed = @(
+    @{ Function  = 'Get-WorkerConsoleQueue'
+       Variables = @('workerConsoleQueue')
+       Why       = 'The one sanctioned worker-state lookup: reads $script: first, falls back to $global: (the worker body seeds its $script: at top level, which IS the runspace''s global scope) when a closure context makes $script: come back empty.' }
+    @{ Function  = 'Test-PermanentDeleteEnabled'
+       Variables = @('PermanentDelete')
+       Why       = 'Same $script:-then-$global: fallback as Get-WorkerConsoleQueue - a user setting fixed for the whole run, not something the queue can carry.' }
+    @{ Function  = 'Write-Log'
+       Variables = @('CleanConsoleOutputEnabled')
+       Why       = 'Only read after Write-Log''s own worker early-return (Get-WorkerConsoleQueue non-null -> enqueue + return), i.e. main thread only.' }
+    @{ Function  = 'Write-LogLineToRunFiles'
+       Variables = @('FullLogging', 'logFile', 'logErrorFile', 'logWarnFile')
+       Why       = 'Only called from Write-Log past its worker early-return and from Flush-ConsoleQueue (main thread). Listed in Get-LoggingSharedFunctionNames only because Rule 5 walks Write-Log''s callees statically.' }
+    @{ Function  = 'Invoke-MutexGuardedWrite'
+       Variables = @('logMutex')
+       Why       = 'Only reached via Write-LogLineToRunFiles (main thread, see above) inside a worker''s propagated set. Same Rule 5 static-listing reason.' }
+    @{ Function  = 'Test-AbortSignal'
+       Variables = @('abortRequested', 'ctrlCloseAbort', 'abortCancellationSources', 'CleanConsoleOutputEnabled')
+       Why       = 'Only read after Test-AbortSignal''s own worker early-return (returns [ConsoleCtrl]::AbortRequested, never announces), i.e. main thread only.' }
 )
 
 $script:passCount = 0
 $script:failCount = 0
+
+function Test-IsScriptVarAllowed {
+    param([string]$Function, [string]$Variable)
+    foreach ($a in $script:LintScriptVarAllowed) {
+        if ($a.Function -eq $Function -and ($a.Variables -contains $Variable)) { return $true }
+    }
+    return $false
+}
 
 function Test-Assert {
     param([bool]$Condition, [string]$Message)
@@ -336,6 +368,8 @@ foreach ($name in $fileText.Keys) {
 }
 
 $rule5 = @()
+$runspaceReachable    = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$runspaceWorkerBodies = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($name in $fileText.Keys) {
     foreach ($call in $fileAsts[$name].FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Invoke-ZipParallelProcessing' }, $true)) {
         $sharedNamesArg = $null
@@ -406,10 +440,68 @@ foreach ($name in $fileText.Keys) {
             if (Test-IsExceptedName -FileName $name -Rule 'shared-function-names' -Name $missingName) { continue }
             $rule5 += @{ File = $name; Line = $lineNum; Text = ("-SharedFunctionNames is missing '" + $missingName + "' (needed transitively)") }
         }
+
+        # Rule 6 input, gathered here so it reuses Rule 5's resolved lists.
+        foreach ($listedName in $listed) { $null = $runspaceReachable.Add($listedName) }
+        if ($workerScriptVarName -and $scriptBlockVars.ContainsKey($workerScriptVarName)) {
+            $null = $runspaceWorkerBodies.Add($workerScriptVarName)
+        }
     }
 }
 Test-Assert (@($rule5).Count -eq 0) "every -SharedFunctionNames array covers everything its worker/listed functions transitively call"
 Show-Findings -Findings @($rule5)
+Write-Host ""
+
+# ------------------------------------------------------------------------
+#  Rule 6: $script: variable used on a runspace-reachable path
+# ------------------------------------------------------------------------
+# A function propagated via -SharedFunctionNames is recreated in the worker
+# runspace from its definition TEXT, so it isn't bound to any module's
+# session state - its `$script:` resolves against whatever scope is calling
+# it. Called straight from the worker body that's the runspace's global
+# scope (where the worker seeded its state), but called from inside a
+# .GetNewClosure()'d block (every [System.Lazy] factory, chapter provider,
+# job builder in this codebase) it resolves to that closure's own EMPTY
+# dynamic-module scope instead - every `$script:` read comes back $null,
+# silently. Live-reproduced 2026-09-22 (CHANGELOG.md): the cause of worker
+# [Error]/[Warn] lines never reaching a log file and the duplicated abort
+# message. So: no runspace-reachable function, and no nested scriptblock
+# inside a worker body, may touch `$script:` at all. The worker body's own
+# top level is fine (it IS the runspace's script scope). Worker-side state
+# goes through the console queue (Logging.ps1's Get-WorkerConsoleQueue),
+# which the main thread drains. Deliberate, reviewed exceptions only - add
+# them to $script:LintScriptVarAllowed below with a reason.
+Write-Host "=== Lint: `$script: variable on a runspace-reachable path ===" -ForegroundColor Cyan
+
+$rule6 = @()
+$scriptVarRefFilter = {
+    param($n)
+    $n -is [System.Management.Automation.Language.VariableExpressionAst] -and $n.VariablePath.IsScript
+}
+foreach ($fname in $runspaceReachable) {
+    if (-not $fnAstByName.ContainsKey($fname)) { continue }
+    $fnAst = $fnAstByName[$fname]
+    $fnFile = $null
+    foreach ($name in $fileAsts.Keys) { if ($fileText[$name].Contains($fnAst.Extent.Text)) { $fnFile = $name; break } }
+    foreach ($ref in $fnAst.FindAll($scriptVarRefFilter, $true)) {
+        $varName = $ref.VariablePath.UserPath -replace '^script:', ''
+        if (Test-IsScriptVarAllowed -Function $fname -Variable $varName) { continue }
+        $rule6 += @{ File = $fnFile; Line = $ref.Extent.StartLineNumber; Text = ($fname + " (runspace-reachable) uses `$script:" + $varName) }
+    }
+}
+foreach ($workerVar in $runspaceWorkerBodies) {
+    $body = $scriptBlockVars[$workerVar]
+    $workerFile = $null
+    foreach ($name in $fileAsts.Keys) { if ($fileText[$name].Contains($body.Extent.Text)) { $workerFile = $name; break } }
+    foreach ($nested in $body.FindAll({ param($n) $n -is [System.Management.Automation.Language.ScriptBlockExpressionAst] }, $true)) {
+        foreach ($ref in $nested.FindAll($scriptVarRefFilter, $true)) {
+            $varName = $ref.VariablePath.UserPath -replace '^script:', ''
+            $rule6 += @{ File = $workerFile; Line = $ref.Extent.StartLineNumber; Text = ("nested scriptblock in worker `$" + $workerVar + " uses `$script:" + $varName) }
+        }
+    }
+}
+Test-Assert (@($rule6).Count -eq 0) "no runspace-reachable function or nested worker scriptblock touches `$script: state"
+Show-Findings -Findings @($rule6)
 Write-Host ""
 
 # ==============================================================================

@@ -56,6 +56,9 @@ function Write-Log {
 
 $script:removeSourceCalls = New-Object System.Collections.Generic.List[string]
 $script:PermanentDelete = $true
+# Real ones live in FileDeletion.ps1/Logging.ps1 (not dot-sourced here).
+function Test-PermanentDeleteEnabled { return [bool]$script:PermanentDelete }
+function Get-WorkerConsoleQueue { return ,$script:workerConsoleQueue }
 function Remove-Source {
     param([string]$ItemPath)
     $script:removeSourceCalls.Add($ItemPath)
@@ -391,6 +394,8 @@ $null = $psB2.AddScript({
         return $true
     }
     $script:PermanentDelete = $true
+    function Test-PermanentDeleteEnabled { return [bool]$script:PermanentDelete }
+    function Get-WorkerConsoleQueue { return ,$script:workerConsoleQueue }
     Invoke-LooseAnimatedConversionPipeline -Path $LibraryPath -MagickExe $MagickExe -AnimatedThreads 2 -FullLogging $false
 }).AddArgument($modulesDirAC).AddArgument($fakeMagickExe).AddArgument((Join-Path $scratchDir "scenario-b2"))
 

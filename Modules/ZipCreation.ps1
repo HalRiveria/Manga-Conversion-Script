@@ -14,7 +14,7 @@ function Compress-FolderToZip {
     if (Test-Path -LiteralPath $ZipOut) {
         $removed = Remove-Source -ItemPath $ZipOut
         if ($removed) {
-            $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
+            $deleteDesc = if (Test-PermanentDeleteEnabled) { "permanently" } else { "Recycle Bin" }
             Write-Log ("Deleted existing ZIP (" + $deleteDesc + ") before re-zipping: '" + $ZipOut + "'")
         } else {
             Write-Log ("Existing ZIP already gone before re-zipping (not counted as deleted): '" + $ZipOut + "'") -Level Warn

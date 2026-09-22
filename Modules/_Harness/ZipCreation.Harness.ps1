@@ -35,6 +35,7 @@ function Remove-ItemPermanently {
     return $true
 }
 $script:PermanentDelete = $false
+function Test-PermanentDeleteEnabled { return [bool]$script:PermanentDelete }
 
 . (Join-Path $PSScriptRoot "..\ZipCreation.ps1")
 

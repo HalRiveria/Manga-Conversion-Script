@@ -186,6 +186,15 @@ function Reset-AbortState {
 }
 
 function Test-AbortSignal {
+    # Worker runspace: react only, never announce - the main thread's own
+    # Test-AbortSignal (its dispatch loop polls it) is the single place the
+    # abort is announced and CTSs are cancelled. A per-runspace (or, inside
+    # a .GetNewClosure()'d block, per-closure) $script:abortRequested latch is
+    # what printed the message 2-3 times. See Docs/function-notes.md.
+    if ($null -ne (Get-WorkerConsoleQueue)) {
+        return [ConsoleCtrl]::AbortRequested
+    }
+
     if ([ConsoleCtrl]::AbortRequested -and -not $script:abortRequested) {
         $script:abortRequested = $true
         $script:ctrlCloseAbort = [ConsoleCtrl]::IsCloseEvent
@@ -197,15 +206,7 @@ function Test-AbortSignal {
         } else {
             "`n[ABORT] Window close detected - finishing current jobs, please wait..."
         }
-        if ($null -ne $script:workerConsoleQueue) {
-            # Inside a runspace worker: Write-GatedConsoleMessage isn't in
-            # every worker's -SharedFunctionNames list and CCR state doesn't
-            # exist here anyway, so queue for the main thread to print -
-            # same pattern Write-Log uses (Logging.ps1's $script:workerConsoleQueue).
-            $script:workerConsoleQueue.Enqueue(@{ Message = $abortMessage; Level = "Warn" })
-        } else {
-            Write-GatedConsoleMessage -Text $abortMessage -Color Yellow -CleanConsoleOutputEnabled ([bool]$script:CleanConsoleOutputEnabled)
-        }
+        Write-GatedConsoleMessage -Text $abortMessage -Color Yellow -CleanConsoleOutputEnabled ([bool]$script:CleanConsoleOutputEnabled)
     }
     return $script:abortRequested
 }

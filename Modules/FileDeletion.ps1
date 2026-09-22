@@ -126,13 +126,24 @@ function Remove-Source {
         [Parameter(Mandatory)]
         [string]$ItemPath
     )
-    if ($script:PermanentDelete) {
+    if (Test-PermanentDeleteEnabled) {
         return Remove-ItemPermanently -ItemPath $ItemPath
     } else {
         return Move-ToRecycleBin -ItemPath $ItemPath
     }
 }
 
+function Test-PermanentDeleteEnabled {
+    # $global: fallback: see Docs/function-notes.md (FileDeletion.ps1) - a
+    # -SharedFunctionNames function's $script: reads come back empty when
+    # called from a .GetNewClosure()'d block in a worker runspace, which
+    # silently turned Permanent Delete into Recycle Bin there. Same pattern
+    # as Logging.ps1's Get-WorkerConsoleQueue - keep the two in sync.
+    $enabled = $script:PermanentDelete
+    if ($null -eq $enabled) { $enabled = $global:PermanentDelete }
+    return [bool]$enabled
+}
+
 function Get-FileDeletionSharedFunctionNames {
-    return @('Remove-Source', 'Move-ToRecycleBin', 'Remove-ItemPermanently', 'Invoke-DeleteTreatingVanishedAsFalse', 'Resolve-ItemPathOrNull')
+    return @('Remove-Source', 'Test-PermanentDeleteEnabled', 'Move-ToRecycleBin', 'Remove-ItemPermanently', 'Invoke-DeleteTreatingVanishedAsFalse', 'Resolve-ItemPathOrNull')
 }
