@@ -261,8 +261,42 @@ function Flush-ConsoleQueue {
 
     $item = $null
     while ($Queue.TryDequeue([ref]$item)) {
-        $line = Format-LogLine -Message $item.Message -Level $item.Level
-        Write-LogLineToHost -Line $line -Level $item.Level
+        if ($script:CleanConsoleOutputEnabled) {
+            # CCR owns the live console region while it's on, and this is the
+            # main-thread point where worker-queued lines reach the console
+            # (a worker's own Write-Log can't see CCR state, so the console
+            # policy is applied here). Two rules:
+            #   * Info-level lines that reach this queue are leaked worker
+            #     milestones ("=== Series ... ===", "Processing chapter",
+            #     "ZIP OK") - exactly the per-series chatter CCR's live
+            #     display replaces. Drop them (the log file still has them
+            #     under Full Logging). This is also what stops the leaked
+            #     "=== Series ===" line from showing/desyncing the region.
+            #     The only Info+ForceConsole lines in this project (the
+            #     unwanted-image pre-scan's "Deleted"/"WOULD DELETE") run on
+            #     the main thread and print direct, never through this queue,
+            #     so they're unaffected.
+            #   * Warn/Error/Summary (abort notices, force-stops, real
+            #     failures) must still show - route them through CCR's
+            #     frozen-row path so they scroll cleanly ABOVE the live region
+            #     instead of printing raw INTO it (raw was the cause of the
+            #     abort-time stacked/duplicated blocks and stale right-edge
+            #     characters). Main-thread only (not in
+            #     Get-LoggingSharedFunctionNames), so Write-GatedConsoleMessage
+            #     always resolves here. Color mirrors Write-LogLineToHost's.
+            if ($item.Level -eq "Info") { continue }
+            $line = Format-LogLine -Message $item.Message -Level $item.Level
+            $ccrColor = $null
+            switch ($item.Level) {
+                "Error"   { $ccrColor = "Red" }
+                "Warn"    { $ccrColor = "Yellow" }
+                "Summary" { $ccrColor = "Cyan" }
+            }
+            Write-GatedConsoleMessage -Text $line -Color $ccrColor -CleanConsoleOutputEnabled $true
+        } else {
+            $line = Format-LogLine -Message $item.Message -Level $item.Level
+            Write-LogLineToHost -Line $line -Level $item.Level
+        }
     }
 }
 

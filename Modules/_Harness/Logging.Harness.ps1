@@ -227,6 +227,37 @@ Test-Assert (-not $emptyFlushThrew) "Flush-ConsoleQueue on an already-empty queu
 Write-Host ""
 
 # ==============================================================================
+#  Scenario G2 (2026-09-22): under CCR, Flush-ConsoleQueue drops leaked
+#  worker Info milestones (e.g. a "=== Series ===" line that leaked because
+#  a worker runspace read CleanConsoleOutputEnabled as false) and routes
+#  Warn/Error/Summary through CCR's frozen-row path instead of printing raw
+#  into the live region. Stub Write-GatedConsoleMessage here since
+#  CleanConsoleRendering.ps1 isn't dot-sourced in this isolated harness.
+# ==============================================================================
+Write-Host "=== Scenario G2: Flush-ConsoleQueue under CCR ===" -ForegroundColor Cyan
+$script:ccrRouted = [System.Collections.Generic.List[hashtable]]::new()
+function Write-GatedConsoleMessage {
+    param([string]$Text, [string]$Color, [bool]$CleanConsoleOutputEnabled)
+    $script:ccrRouted.Add(@{ Text = $Text; Color = $Color })
+}
+$script:CleanConsoleOutputEnabled = $true
+$q2 = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+$q2.Enqueue([pscustomobject]@{ Message = "=== Series 'X': 3 chapter(s) ==="; Level = "Info" })
+$q2.Enqueue([pscustomobject]@{ Message = "a warning"; Level = "Warn" })
+$q2.Enqueue([pscustomobject]@{ Message = "an error";  Level = "Error" })
+$q2.Enqueue([pscustomobject]@{ Message = "a summary"; Level = "Summary" })
+Flush-ConsoleQueue -Queue $q2
+$script:CleanConsoleOutputEnabled = $false
+
+Test-Assert ($script:ccrRouted.Count -eq 3) ("under CCR, the Info milestone is dropped and only Warn/Error/Summary are routed (got " + $script:ccrRouted.Count + ")")
+Test-Assert (-not ($script:ccrRouted | Where-Object { $_.Text -like "*=== Series*" })) "the leaked '=== Series ===' Info line is NOT shown under CCR"
+Test-Assert (@($script:ccrRouted | Where-Object { $_.Text -like "*a warning*" -and $_.Color -eq "Yellow" }).Count -eq 1) "the Warn line is routed through CCR in Yellow"
+Test-Assert (@($script:ccrRouted | Where-Object { $_.Text -like "*an error*" -and $_.Color -eq "Red" }).Count -eq 1) "the Error line is routed through CCR in Red"
+Test-Assert (@($script:ccrRouted | Where-Object { $_.Text -like "*a summary*" -and $_.Color -eq "Cyan" }).Count -eq 1) "the Summary line is routed through CCR in Cyan"
+Test-Assert ($q2.Count -eq 0) "queue is fully drained under CCR too"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario H: Write-SummaryLog prepends newest-first
 # ==============================================================================
 Write-Host "=== Scenario H: Write-SummaryLog prepends newest run first ===" -ForegroundColor Cyan
