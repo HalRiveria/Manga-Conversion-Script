@@ -691,6 +691,77 @@ Test-Assert (@($script:completeCallsD3b | Where-Object { $_.Status -eq "Success"
 Write-Host ""
 
 # ==============================================================================
+#  Scenario D3c (2026-09-22, A follow-ups): aborting mid-run with a series
+#  the run never reached. Series A has 4 sleeping image chapters (fills the
+#  image engine's -MaxQueueAhead=3 walk-ahead so it stays in Series A);
+#  Series B's chapters are never reached by the image engine, but the
+#  zero-job animated engine walks the whole library and reports every
+#  chapter, so all of Series B lands in $mergeState as leftover. Aborting
+#  once Series A's chapter 1 starts must:
+#    (a) NOT crash in the leftover handler - Series B's chapters were never
+#        announced (Start-ChapterProgress), so Complete-ChapterProgress must
+#        be skipped for them (the fatal this session fixed); and
+#    (b) never Start-SeriesProgress for the unreached Series B - it must not
+#        show as "0/N" before the run gets to it (the series-level deferral).
+#  CCR on; Start-SeriesProgress spy; C6-style marker-polling abort.
+# ==============================================================================
+Write-Host "=== Scenario D3c: abort before a series is reached - no crash, unreached series never shown ===" -ForegroundColor Cyan
+Reset-AbortState
+$chD3cA1 = New-Dir "scenario-d3c\Series A\01 - Chapter 1"
+$imgD3cA1 = New-FakeImageIn -DirPath $chD3cA1 -Name "page1.jpg" -SleepMs 400
+2..4 | ForEach-Object {
+    $ch = New-Dir ("scenario-d3c\Series A\{0:00} - Chapter {0}" -f $_)
+    New-FakeImageIn -DirPath $ch -Name "page1.jpg" -SleepMs 400 | Out-Null
+}
+1..3 | ForEach-Object {
+    $ch = New-Dir ("scenario-d3c\Series B\{0:00} - Chapter {0}" -f $_)
+    New-FakeImageIn -DirPath $ch -Name "page1.jpg" | Out-Null
+}
+$markerD3c = [System.IO.Path]::ChangeExtension($imgD3cA1, ".jxl") + ".started"
+
+$cancelRunspaceD3c = [runspacefactory]::CreateRunspace()
+$cancelRunspaceD3c.Open()
+$cancelPsD3c = [PowerShell]::Create()
+$cancelPsD3c.Runspace = $cancelRunspaceD3c
+$null = $cancelPsD3c.AddScript({
+    param($MarkerPath)
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    while (-not (Test-Path -LiteralPath $MarkerPath) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 5 }
+    [ConsoleCtrl]::AbortRequested = $true
+}).AddArgument($markerD3c)
+
+$script:startSeriesCallsD3c = New-Object System.Collections.Generic.List[string]
+$realStartSeriesD3c = ${function:Start-SeriesProgress}
+$script:realStartSeriesD3cRef = $realStartSeriesD3c
+function Start-SeriesProgress {
+    param([string]$SeriesName, [int]$TotalChapters)
+    $script:startSeriesCallsD3c.Add($SeriesName)
+    & $script:realStartSeriesD3cRef -SeriesName $SeriesName -TotalChapters $TotalChapters
+}
+$script:CleanConsoleOutputEnabled = $true
+$d3cThrew = $false
+$cancelHandleD3c = $cancelPsD3c.BeginInvoke()
+try {
+    $totalsD3c = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-d3c") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true -AbortTimeoutSeconds 3
+} catch {
+    $d3cThrew = $true
+} finally {
+    $cancelPsD3c.EndInvoke($cancelHandleD3c)
+    $cancelPsD3c.Dispose()
+    $cancelRunspaceD3c.Close()
+    $cancelRunspaceD3c.Dispose()
+    Reset-AbortState
+    $script:CleanConsoleOutputEnabled = $false
+    ${function:Start-SeriesProgress} = $realStartSeriesD3c
+}
+
+Test-Assert (-not $d3cThrew) "aborting before Series B was reached did not throw in the leftover handler (Series B chapters were never announced)"
+Test-Assert ($totalsD3c.Aborted -eq $true) "the run registered as aborted"
+Test-Assert ($script:startSeriesCallsD3c -contains "Series A") "Series A (actually worked) WAS shown via Start-SeriesProgress"
+Test-Assert (-not ($script:startSeriesCallsD3c -contains "Series B")) ("the unreached Series B was NEVER shown via Start-SeriesProgress (got: " + ($script:startSeriesCallsD3c -join ", ") + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario E: a chapter with ONLY animated files - symmetric to D, the
 #  image engine is never dispatched.
 # ==============================================================================

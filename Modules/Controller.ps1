@@ -927,6 +927,29 @@ function Invoke-FullPipeline {
         $fullCts = [System.Threading.CancellationTokenSource]::new()
         Register-AbortCancellationSource -Cts $fullCts
 
+        # A series is shown in CCR only once real work reaches it (the
+        # series-level twin of A, 2026-09-22): the SeriesReady event records
+        # the series' chapter total here, but Start-SeriesProgress is
+        # deferred until the series' first chapter is actually announced or
+        # zipped. Otherwise a series whose bundle was resolved during the
+        # zero-job engine's unthrottled walk-ahead shows as "0/N" long before
+        # the run reaches it. $ensureSeriesStarted is the lazy start, shared
+        # by the ChapterStarted handler and $finalizeChapterEntry's zip-only
+        # path (both main-thread, so the plain hashtable/HashSet are safe).
+        $seriesChapterTotals = @{}
+        $startedSeries       = [System.Collections.Generic.HashSet[string]]::new()
+        $ensureSeriesStarted = {
+            param($seriesName)
+            if (-not $cleanConsoleOutputEnabled) { return }
+            if ($startedSeries.Contains($seriesName)) { return }
+            $total = 0
+            if ($seriesChapterTotals.ContainsKey($seriesName)) { $total = $seriesChapterTotals[$seriesName] }
+            if ($total -gt 0) {
+                Start-SeriesProgress -SeriesName $seriesName -TotalChapters $total
+                $null = $startedSeries.Add($seriesName)
+            }
+        }.GetNewClosure()
+
         $finalizeChapterEntry = {
             param($key, $entry)
             $totals.ChapterCount++
@@ -942,6 +965,7 @@ function Invoke-FullPipeline {
             # same chapterInfo identity, so a chapter an engine already
             # announced is not re-announced here.
             if ($cleanConsoleOutputEnabled -and $announcedChapters.TryAdd($key, 0)) {
+                & $ensureSeriesStarted $entry.SeriesName
                 Start-ChapterProgress -SeriesName $entry.SeriesName -ChapterName $entry.ChapterName
             }
 
@@ -1022,8 +1046,11 @@ function Invoke-FullPipeline {
                     'SeriesReady' {
                         $totals.SeriesCount++
                         $totals.InspectFailedCount += $evt.InspectFailedCount
-                        if ($evt.TotalChapters -gt 0 -and $cleanConsoleOutputEnabled) {
-                            Start-SeriesProgress -SeriesName $evt.SeriesName -TotalChapters $evt.TotalChapters
+                        # Record the total, but defer Start-SeriesProgress to
+                        # the series' first real chapter (see $ensureSeriesStarted)
+                        # so a not-yet-reached series doesn't show as "0/N".
+                        if ($evt.TotalChapters -gt 0) {
+                            $seriesChapterTotals[$evt.SeriesName] = $evt.TotalChapters
                         }
                     }
                     'ChapterInspectFailed' {
@@ -1035,6 +1062,7 @@ function Invoke-FullPipeline {
                     }
                     'ChapterStarted' {
                         if ($cleanConsoleOutputEnabled) {
+                            & $ensureSeriesStarted $evt.SeriesName
                             Start-ChapterProgress -SeriesName $evt.SeriesName -ChapterName $evt.ChapterName
                         }
                     }
@@ -1163,7 +1191,19 @@ function Invoke-FullPipeline {
             # zipped and deleted anyway, reported as a clean run).
             if (-not ($leftoverEntry.GotImage -and $leftoverEntry.GotAnimated)) {
                 $totals.Aborted = $true
-                Write-Log ("Full Pipeline: '" + $leftoverEntry.Dir.FullName + "' was left incomplete (an engine never finished reporting on it, likely due to the run stopping mid-way) - NOT zipped, NOT deleted, left exactly as-is for a future run to pick back up.") -Level Warn -ForceConsole
+                # Only warn about a chapter that was actually STARTED and left
+                # mid-work - that one may hold partial state a future run needs
+                # to know about. A chapter no engine ever started (the zero-job
+                # engine walked ahead and reported it done with nothing to do,
+                # but the working engine was aborted/crashed before reaching it)
+                # is untouched; warning per such chapter floods the console on
+                # any early abort of a large library (one line per not-yet-
+                # reached chapter, all -ForceConsole) for no real signal. The
+                # zip/delete skip and partial-credit below stay unconditional.
+                # $announcedChapters is the same shared dedup used above.
+                if ($announcedChapters.ContainsKey($leftoverKey)) {
+                    Write-Log ("Full Pipeline: '" + $leftoverEntry.Dir.FullName + "' was left incomplete (an engine never finished reporting on it, likely due to the run stopping mid-way) - NOT zipped, NOT deleted, left exactly as-is for a future run to pick back up.") -Level Warn -ForceConsole
+                }
                 # Credit whichever engine's result DID arrive before
                 # skipping zip/delete (2026-09-16 fix, real bug found by a
                 # Gemini review). $finalizeChapterEntry above is the ONLY
