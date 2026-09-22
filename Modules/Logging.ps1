@@ -271,10 +271,7 @@ function Write-SummaryLog {
 function Flush-ConsoleQueue {
     param([System.Collections.Concurrent.ConcurrentQueue[object]]$Queue)
 
-    # Main thread only (not in Get-LoggingSharedFunctionNames). Worker
-    # Write-Log calls land here as whole entries - this is where they get
-    # their file write AND the same console policy the main thread's own
-    # Write-Log applies. See Docs/function-notes.md.
+    # Main thread only (not in Get-LoggingSharedFunctionNames). See Docs/function-notes.md.
     $item = $null
     while ($Queue.TryDequeue([ref]$item)) {
         $line = $item.Line
@@ -282,7 +279,7 @@ function Flush-ConsoleQueue {
         Write-LogLineToRunFiles -Line $line -Level $item.Level
 
         if ($script:CleanConsoleOutputEnabled) {
-            if (-not $item.ForceConsole) { continue }
+            if ($item.Level -eq "Info" -and -not $item.ForceConsole) { continue }
             $ccrColor = $null
             switch ($item.Level) {
                 "Error"   { $ccrColor = "Red" }

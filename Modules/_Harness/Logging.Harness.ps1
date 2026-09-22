@@ -231,12 +231,13 @@ Test-Assert (-not $emptyFlushThrew) "Flush-ConsoleQueue on an already-empty queu
 Write-Host ""
 
 # ==============================================================================
-#  Scenario G2 (2026-09-22, reworked same day for the worker-state fix):
-#  under CCR, Flush-ConsoleQueue applies the SAME console policy the main
-#  thread's own Write-Log does - nothing reaches the console unless the
-#  worker passed -ForceConsole, and a forced line goes through CCR's
-#  frozen-row path (not raw into the live region). Every entry still gets
-#  its file write. Stub Write-GatedConsoleMessage here since
+#  Scenario G2 (2026-09-22): under CCR, Flush-ConsoleQueue shows worker
+#  Warn/Error/Summary lines (e.g. a per-file conversion failure) through
+#  CCR's frozen-row path so they scroll cleanly above the live region, and
+#  drops worker Info lines (the per-series milestone chatter CCR's display
+#  replaces) unless the worker passed -ForceConsole. Every entry still gets
+#  its file write. Owner decision, same day: keep failure lines visible
+#  during a CCR run. Stub Write-GatedConsoleMessage here since
 #  CleanConsoleRendering.ps1 isn't dot-sourced in this isolated harness.
 # ==============================================================================
 Write-Host "=== Scenario G2: Flush-ConsoleQueue under CCR ===" -ForegroundColor Cyan
@@ -250,21 +251,22 @@ function Write-GatedConsoleMessage {
 $script:CleanConsoleOutputEnabled = $true
 $q2 = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
 $q2.Enqueue(@{ Message = "=== Series 'X': 3 chapter(s) ==="; Level = "Info" })
-$q2.Enqueue(@{ Message = "a plain warning"; Level = "Warn" })
-$q2.Enqueue(@{ Message = "a forced warning"; Level = "Warn"; ForceConsole = $true })
-$q2.Enqueue(@{ Message = "a forced error"; Level = "Error"; ForceConsole = $true })
-$q2.Enqueue(@{ Message = "a forced summary"; Level = "Summary"; ForceConsole = $true })
+$q2.Enqueue(@{ Message = "a forced info"; Level = "Info"; ForceConsole = $true })
+$q2.Enqueue(@{ Message = "a warning"; Level = "Warn" })
+$q2.Enqueue(@{ Message = "an error"; Level = "Error" })
+$q2.Enqueue(@{ Message = "a summary"; Level = "Summary" })
 $outputG2 = & { Flush-ConsoleQueue -Queue $q2 } 6>&1
 $script:CleanConsoleOutputEnabled = $false
 
 Test-Assert (@($outputG2).Count -eq 0) "under CCR, nothing is printed raw to the console"
-Test-Assert ($script:ccrRouted.Count -eq 3) ("under CCR, only the -ForceConsole entries are routed through CCR (got " + $script:ccrRouted.Count + ")")
-Test-Assert (-not ($script:ccrRouted | Where-Object { $_.Text -like "*=== Series*" -or $_.Text -like "*a plain warning*" })) "non-forced entries (the '=== Series ===' milestone, a plain Warn) are NOT shown under CCR"
-Test-Assert (@($script:ccrRouted | Where-Object { $_.Text -like "*a forced warning*" -and $_.Color -eq "Yellow" }).Count -eq 1) "a forced Warn is routed through CCR in Yellow"
-Test-Assert (@($script:ccrRouted | Where-Object { $_.Text -like "*a forced error*" -and $_.Color -eq "Red" }).Count -eq 1) "a forced Error is routed through CCR in Red"
-Test-Assert (@($script:ccrRouted | Where-Object { $_.Text -like "*a forced summary*" -and $_.Color -eq "Cyan" }).Count -eq 1) "a forced Summary is routed through CCR in Cyan"
+Test-Assert ($script:ccrRouted.Count -eq 4) ("under CCR, the plain Info milestone is dropped and the other 4 are routed through CCR (got " + $script:ccrRouted.Count + ")")
+Test-Assert (-not ($script:ccrRouted | Where-Object { $_.Text -like "*=== Series*" })) "the plain '=== Series ===' Info line is NOT shown under CCR"
+Test-Assert (@($script:ccrRouted | Where-Object { $_.Text -like "*a forced info*" }).Count -eq 1) "a -ForceConsole Info line IS shown under CCR"
+Test-Assert (@($script:ccrRouted | Where-Object { $_.Text -like "*a warning*" -and $_.Color -eq "Yellow" }).Count -eq 1) "a worker Warn line is shown through CCR in Yellow"
+Test-Assert (@($script:ccrRouted | Where-Object { $_.Text -like "*an error*" -and $_.Color -eq "Red" }).Count -eq 1) "a worker Error line (e.g. a per-file failure) is shown through CCR in Red"
+Test-Assert (@($script:ccrRouted | Where-Object { $_.Text -like "*a summary*" -and $_.Color -eq "Cyan" }).Count -eq 1) "a worker Summary line is shown through CCR in Cyan"
 $g2Content = Get-Content -LiteralPath $script:logFile -Raw
-Test-Assert ($g2Content -like "*=== Series 'X'*" -and $g2Content -like "*a plain warning*" -and $g2Content -like "*a forced error*") "every drained entry, shown or not, reached the log file"
+Test-Assert ($g2Content -like "*=== Series 'X'*" -and $g2Content -like "*a warning*" -and $g2Content -like "*an error*") "every drained entry, shown or not, reached the log file"
 Test-Assert ($q2.Count -eq 0) "queue is fully drained under CCR too"
 Write-Host ""
 
@@ -830,12 +832,12 @@ Test-Assert ($logContentO -like "*should not print to console*") "the line was s
 
 # A worker never applies the CCR policy itself (it can't reliably see the
 # toggle - see Scenario J) - it always enqueues, flagged ForceConsole=false,
-# and Flush-ConsoleQueue suppresses it on the main thread (Scenario G2).
+# and Flush-ConsoleQueue applies the CCR policy on the main thread (Scenario G2).
 $script:workerConsoleQueue = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
 Write-Log "queued, suppressed at flush" -Level Warn
 $peekedO = $null
 $null = $script:workerConsoleQueue.TryPeek([ref]$peekedO)
-Test-Assert ($script:workerConsoleQueue.Count -eq 1 -and $peekedO.ForceConsole -eq $false) "a worker-side Write-Log still enqueues under CCR, flagged ForceConsole=false for the main thread to suppress"
+Test-Assert ($script:workerConsoleQueue.Count -eq 1 -and $peekedO.ForceConsole -eq $false) "a worker-side Write-Log still enqueues under CCR, flagged ForceConsole=false for the main thread to decide"
 $script:workerConsoleQueue = $null
 
 Initialize-CleanConsoleOutput -Enabled $false
