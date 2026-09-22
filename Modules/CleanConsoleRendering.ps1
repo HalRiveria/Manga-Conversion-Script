@@ -302,8 +302,32 @@ function Update-CleanConsoleDisplay {
                 [Console]::SetCursorPosition(0, [Console]::CursorTop - $blankRowsNeeded)
             }
         } catch {
-            $script:ccrCursorAvailable = $false
-            foreach ($row in $newContentRows) { Write-ColoredConsoleRow -Text $row.Text -Color $row.Color }
+            # A single SetCursorPosition failure here is transient, not "no
+            # console at all" - the upfront Test-CleanConsoleCursorAvailable
+            # probe already confirmed a real console, so reaching this catch
+            # means one rewind failed (the region scrolled, or a raw console
+            # write from elsewhere - a worker's log line, an abort message -
+            # moved the cursor out from under our saved row count). Do NOT
+            # latch $ccrCursorAvailable to $false permanently: that drops the
+            # whole rest of the run to append-only, which turns every later
+            # in-place update into a fresh appended copy of the entire live
+            # region - a flood in its own right (seen live on abort: one
+            # series reprinted once per completed chapter). Instead draw this
+            # frame fresh from the current position and leave the cursor path
+            # enabled; $ccrLiveRegionLineCount is still set to the live-row
+            # count below, and the live-region cap above guarantees the next
+            # redraw's rewind fits the buffer, so the cursor path self-heals
+            # on the following draw. Cost is at most one stale copy left on
+            # screen per transient failure, not a permanent regression.
+            try {
+                foreach ($row in $newContentRows) { Write-ColoredConsoleRow -Text (Set-PadToDisplayWidth -Text $row.Text -Width $effectiveWidth) -Color $row.Color }
+            } catch {
+                # Even a plain write threw - the console really is gone now;
+                # fall back permanently (the original behavior) for the rest
+                # of the run rather than throwing on every future redraw.
+                $script:ccrCursorAvailable = $false
+                foreach ($row in $newContentRows) { Write-ColoredConsoleRow -Text $row.Text -Color $row.Color }
+            }
         }
     } else {
         foreach ($row in $newContentRows) { Write-ColoredConsoleRow -Text $row.Text -Color $row.Color }
