@@ -54,6 +54,7 @@ function Invoke-IccStripRetryOrFail {
     $stripPsi.CreateNoWindow         = $true
     try {
         $stripProc = [System.Diagnostics.Process]::Start($stripPsi)
+        $null = [ChildProcessJob]::Assign($stripProc)  # see AbortPipeline.ps1's ChildProcessJob
     } catch {
         Write-Log ("Could not start ICC-strip retry process for '" + $Job.SrcPath + "': " + $_) -Level Error
         return $false
@@ -619,6 +620,7 @@ function Invoke-LooseImageConversionPipeline {
                     $magickPsi.RedirectStandardError  = $true
                     $magickPsi.CreateNoWindow         = $true
                     $magickProc = [System.Diagnostics.Process]::Start($magickPsi)
+                    $null = [ChildProcessJob]::Assign($magickProc)  # see AbortPipeline.ps1's ChildProcessJob
                     $magickProcLocal = $magickProc
                     $magickStdoutTask = $magickProc.StandardOutput.ReadToEndAsync()
                     $magickStderrTask = $magickProc.StandardError.ReadToEndAsync()
@@ -705,6 +707,7 @@ function Invoke-LooseImageConversionPipeline {
                 Write-Log ("Converting loose image: '" + $job.SrcPath + "'")
 
                 $job.Proc       = [System.Diagnostics.Process]::Start($psi)
+                $null = [ChildProcessJob]::Assign($job.Proc)  # see AbortPipeline.ps1's ChildProcessJob
                 $job.StdoutTask = $job.Proc.StandardOutput.ReadToEndAsync()
                 $job.StderrTask = $job.Proc.StandardError.ReadToEndAsync()
                 return $job

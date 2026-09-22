@@ -32,6 +32,7 @@ function Test-AvifAnimated {
     # ImageConversionPipeline.ps1 uses the identical raw-handle-wait
     # pattern below - keep both in sync.
     $proc = [System.Diagnostics.Process]::Start($psi)
+    $null = [ChildProcessJob]::Assign($proc)  # see AbortPipeline.ps1's ChildProcessJob
     try {
         $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
         $stderrTask = $proc.StandardError.ReadToEndAsync()
@@ -448,6 +449,7 @@ function Invoke-LooseAnimatedConversionPipeline {
                 Write-Log ("Converting animated: '" + $job.SrcPath + "'")
 
                 $job.Proc          = [System.Diagnostics.Process]::Start($psi)
+                $null = [ChildProcessJob]::Assign($job.Proc)  # see AbortPipeline.ps1's ChildProcessJob
                 $job.StdoutTask    = $job.Proc.StandardOutput.ReadToEndAsync()
                 $job.StderrTask    = $job.Proc.StandardError.ReadToEndAsync()
                 $job.StartTime     = [System.Diagnostics.Stopwatch]::StartNew()

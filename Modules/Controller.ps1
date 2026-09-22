@@ -536,6 +536,7 @@ $script:fullPipelineEngineWorker = {
                     $magickPsi.RedirectStandardError  = $true
                     $magickPsi.CreateNoWindow         = $true
                     $magickProc = [System.Diagnostics.Process]::Start($magickPsi)
+                    $null = [ChildProcessJob]::Assign($magickProc)  # see AbortPipeline.ps1's ChildProcessJob
                     $magickProcLocal = $magickProc
                     $magickStdoutTask = $magickProc.StandardOutput.ReadToEndAsync()
                     $magickStderrTask = $magickProc.StandardError.ReadToEndAsync()
@@ -610,6 +611,7 @@ $script:fullPipelineEngineWorker = {
                 Write-Log ("Converting loose image: '" + $job.SrcPath + "'")
 
                 $job.Proc       = [System.Diagnostics.Process]::Start($psi)
+                $null = [ChildProcessJob]::Assign($job.Proc)  # see AbortPipeline.ps1's ChildProcessJob
                 $job.StdoutTask = $job.Proc.StandardOutput.ReadToEndAsync()
                 $job.StderrTask = $job.Proc.StandardError.ReadToEndAsync()
                 return $job
@@ -732,6 +734,7 @@ $script:fullPipelineEngineWorker = {
                 Write-Log ("Converting animated: '" + $job.SrcPath + "'")
 
                 $job.Proc       = [System.Diagnostics.Process]::Start($psi)
+                $null = [ChildProcessJob]::Assign($job.Proc)  # see AbortPipeline.ps1's ChildProcessJob
                 $job.StdoutTask = $job.Proc.StandardOutput.ReadToEndAsync()
                 $job.StderrTask = $job.Proc.StandardError.ReadToEndAsync()
                 return $job

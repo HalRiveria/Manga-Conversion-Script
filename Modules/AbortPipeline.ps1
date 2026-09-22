@@ -130,6 +130,118 @@ public static class ConsoleQuickEdit
 '@ -Language CSharp
 }
 
+if (-not ([System.Management.Automation.PSTypeName]'ChildProcessJob').Type) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+// See Docs/function-notes.md's AbortPipeline.ps1 section (Initialize-ChildProcessJob).
+public static class ChildProcessJob
+{
+    private const int JobObjectExtendedLimitInformation = 9;
+    private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IO_COUNTERS
+    {
+        public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount;
+        public ulong ReadTransferCount, WriteTransferCount, OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateJobObject(IntPtr lpJobAttributes, string lpName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetInformationJobObject(IntPtr hJob, int infoClass, IntPtr lpInfo, uint cbInfoLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    // Deliberately never closed: the OS closes it when this process exits,
+    // for ANY reason (force-kill included), and KILL_ON_JOB_CLOSE then
+    // kills every process still assigned. Closing it early would kill
+    // running conversions.
+    private static IntPtr _job = IntPtr.Zero;
+    private static readonly object _lock = new object();
+
+    public static bool IsInitialized { get { return _job != IntPtr.Zero; } }
+    public static int LastError { get; private set; }
+
+    public static bool Initialize()
+    {
+        lock (_lock)
+        {
+            if (_job != IntPtr.Zero) { return true; }
+            IntPtr job = CreateJobObject(IntPtr.Zero, null);
+            if (job == IntPtr.Zero) { LastError = Marshal.GetLastWin32Error(); return false; }
+
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            int size = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+            IntPtr buffer = Marshal.AllocHGlobal(size);
+            try
+            {
+                Marshal.StructureToPtr(info, buffer, false);
+                if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, buffer, (uint)size))
+                {
+                    LastError = Marshal.GetLastWin32Error();
+                    CloseHandle(job);
+                    return false;
+                }
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+            _job = job;
+            return true;
+        }
+    }
+
+    // Never throws - called right after every Process.Start() in this
+    // project, including inside worker runspaces, and a failed assignment
+    // must never fail the conversion itself (it only loses the
+    // force-kill cleanup guarantee for that one process).
+    public static bool Assign(System.Diagnostics.Process process)
+    {
+        if (_job == IntPtr.Zero || process == null) { return false; }
+        try
+        {
+            if (AssignProcessToJobObject(_job, process.Handle)) { return true; }
+            LastError = Marshal.GetLastWin32Error();
+            return false;
+        }
+        catch { return false; }
+    }
+}
+'@ -Language CSharp
+}
+
 $script:abortRequested = $false
 $script:ctrlCloseAbort  = $false
 
@@ -147,6 +259,16 @@ function Register-AbortHandler {
     if (-not [ConsoleCtrl]::LastRegisterSucceeded) {
         Write-Host "[WARNING] Could not register the Ctrl+C/window-close handler - aborting a run may not drain gracefully (Ctrl+C will use the OS default action instead)." -ForegroundColor Yellow
     }
+}
+
+function Initialize-ChildProcessJob {
+    # Bootstrap only. See Docs/function-notes.md - ties every child process
+    # (via [ChildProcessJob]::Assign at each Process.Start site) to this
+    # process's lifetime, so a force-killed/crashed parent can't orphan
+    # a running magick.exe/cjxl.exe.
+    if ([ChildProcessJob]::Initialize()) { return $true }
+    Write-Host ("[WARNING] Could not set up child-process cleanup (Win32 error " + [ChildProcessJob]::LastError + ") - if this window is force-closed mid-run, a running magick.exe/cjxl.exe may be left behind and need ending in Task Manager.") -ForegroundColor Yellow
+    return $false
 }
 
 function Set-AbortHandlerRunActive {

@@ -250,6 +250,68 @@ Test-Assert ($a3Queue.Count -eq 0) "and queued nothing for the main thread to pr
 Write-Host ""
 
 # ==============================================================================
+#  Scenario A4 (2026-09-22, the orphaned-magick.exe Todo item): a child
+#  process assigned to the ChildProcessJob dies when its parent is
+#  FORCE-killed (TerminateProcess - what Task Manager's End task and a
+#  hard window close do), with no chance for any PowerShell cleanup code
+#  to run. A real parent powershell.exe dot-sources this module, starts a
+#  long-lived ping.exe child, assigns it, reports the child's PID, then
+#  gets force-killed from here. Control run: same thing without
+#  Initialize-ChildProcessJob - the child must SURVIVE, proving the
+#  assertion above can actually fail (the pre-fix behavior, confirmed live
+#  2026-09-16 when a force-killed run left magick.exe running).
+# ==============================================================================
+Write-Host "=== Scenario A4: a force-killed parent takes its job-assigned children with it ===" -ForegroundColor Cyan
+$a4Script = Join-Path ([System.IO.Path]::GetTempPath()) ("abortpipeline-harness-job-" + [guid]::NewGuid().ToString("N") + ".ps1")
+[System.IO.File]::WriteAllText($a4Script, @'
+param([string]$ModulePath, [string]$PidFile, [switch]$NoJob)
+. $ModulePath
+if (-not $NoJob) { $null = Initialize-ChildProcessJob }
+$psi = [System.Diagnostics.ProcessStartInfo]::new('ping.exe', '-n 60 127.0.0.1')
+$psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.CreateNoWindow = $true
+$child = [System.Diagnostics.Process]::Start($psi)
+$assigned = [ChildProcessJob]::Assign($child)
+[System.IO.File]::WriteAllText($PidFile, ($child.Id.ToString() + " " + $assigned))
+[System.Threading.Thread]::Sleep(60000)
+'@)
+
+function Invoke-A4ForceKillRun {
+    param([bool]$UseJob)
+    $pidFile = Join-Path ([System.IO.Path]::GetTempPath()) ("abortpipeline-harness-jobpid-" + [guid]::NewGuid().ToString("N") + ".txt")
+    $argList = '-NoProfile -ExecutionPolicy Bypass -File "' + $a4Script + '" -ModulePath "' + (Join-Path $PSScriptRoot "..\AbortPipeline.ps1") + '" -PidFile "' + $pidFile + '"'
+    if (-not $UseJob) { $argList += ' -NoJob' }
+    $parentPsi = [System.Diagnostics.ProcessStartInfo]::new('powershell.exe', $argList)
+    $parentPsi.UseShellExecute = $false; $parentPsi.CreateNoWindow = $true
+    $parent = [System.Diagnostics.Process]::Start($parentPsi)
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    while (-not [System.IO.File]::Exists($pidFile) -and [DateTime]::UtcNow -lt $deadline) { [System.Threading.Thread]::Sleep(100) }
+    [System.Threading.Thread]::Sleep(200)
+    $parts = ([System.IO.File]::ReadAllText($pidFile)).Split(' ')
+    $childId = [int]$parts[0]
+    $parent.Kill()   # TerminateProcess - no PowerShell cleanup runs in the parent
+    $null = $parent.WaitForExit(10000)
+    $childAlive = $true
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    while ($childAlive -and [DateTime]::UtcNow -lt $deadline) {
+        try { $c = [System.Diagnostics.Process]::GetProcessById($childId); $childAlive = -not $c.HasExited } catch { $childAlive = $false }
+        if ($childAlive) { [System.Threading.Thread]::Sleep(100) }
+    }
+    if ($childAlive) { try { [System.Diagnostics.Process]::GetProcessById($childId).Kill() } catch { } }
+    try { [System.IO.File]::Delete($pidFile) } catch { }
+    return @{ Assigned = $parts[1]; ChildAlive = $childAlive }
+}
+
+$a4WithJob = Invoke-A4ForceKillRun -UseJob $true
+$a4NoJob   = Invoke-A4ForceKillRun -UseJob $false
+try { [System.IO.File]::Delete($a4Script) } catch { }
+
+Test-Assert ($a4WithJob.Assigned -eq "True") ("the child was assigned to the job (Assign returned '" + $a4WithJob.Assigned + "')")
+Test-Assert (-not $a4WithJob.ChildAlive) "with the job, the child died when its parent was force-killed"
+Test-Assert ($a4NoJob.Assigned -eq "False") "control: without Initialize-ChildProcessJob, Assign is a harmless no-op returning false"
+Test-Assert ($a4NoJob.ChildAlive) "control: without the job, the child SURVIVED its force-killed parent (the orphan this fixes)"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario B: Get-AbortTriggerLabel reflects Ctrl+C vs window-close.
 # ==============================================================================
 Write-Host "=== Scenario B: Get-AbortTriggerLabel ===" -ForegroundColor Cyan
