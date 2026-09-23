@@ -143,7 +143,8 @@ function Format-SeriesLines {
         $lines.Add(@{ Text = ("    " + $issue.ChapterName + " - " + $issue.Status + $detailSuffix); Color = (Get-IssueStatusColor -Status $issue.Status) })
     }
     foreach ($active in $Entry.ActiveChapters) {
-        $lines.Add(@{ Text = ("    " + $active + " (in progress)"); Color = $null })
+        $stateLabel = if ($null -ne $Entry.QueuedChapters -and $Entry.QueuedChapters.Contains($active)) { " (queued)" } else { " (in progress)" }
+        $lines.Add(@{ Text = ("    " + $active + $stateLabel); Color = $null })
     }
 
     return $lines
@@ -334,6 +335,7 @@ function Start-SeriesProgress {
         TotalChapters  = $TotalChapters
         SuccessCount   = 0
         ActiveChapters = [System.Collections.Generic.List[string]]::new()
+        QueuedChapters = [System.Collections.Generic.HashSet[string]]::new()
         IssueChapters  = [System.Collections.Generic.List[hashtable]]::new()
     }
 
@@ -353,12 +355,28 @@ function Start-ChapterProgress {
         [Parameter(Mandatory)]
         [string]$SeriesName,
         [Parameter(Mandatory)]
-        [string]$ChapterName
+        [string]$ChapterName,
+        [switch]$Queued
     )
     if (-not $script:ccrActiveSeries.Contains($SeriesName)) {
         throw ("Start-ChapterProgress: '" + $SeriesName + "' is not an active series - call Start-SeriesProgress first.")
     }
-    $script:ccrActiveSeries[$SeriesName].ActiveChapters.Add($ChapterName)
+    $entry = $script:ccrActiveSeries[$SeriesName]
+    $entry.ActiveChapters.Add($ChapterName)
+    if ($Queued) { $null = $entry.QueuedChapters.Add($ChapterName) }
+    Update-CleanConsoleDisplay
+}
+
+function Set-ChapterInProgress {
+    param(
+        [Parameter(Mandatory)]
+        [string]$SeriesName,
+        [Parameter(Mandatory)]
+        [string]$ChapterName
+    )
+    if (-not $script:ccrActiveSeries.Contains($SeriesName)) { return }
+    $entry = $script:ccrActiveSeries[$SeriesName]
+    if (-not $entry.QueuedChapters.Remove($ChapterName)) { return }
     Update-CleanConsoleDisplay
 }
 
@@ -380,6 +398,7 @@ function Complete-ChapterProgress {
     if (-not $entry.ActiveChapters.Remove($ChapterName)) {
         throw ("Complete-ChapterProgress: '" + $ChapterName + "' is not an active chapter of '" + $SeriesName + "' - call Start-ChapterProgress first.")
     }
+    $null = $entry.QueuedChapters.Remove($ChapterName)
 
     if ($Status -eq "Success") {
         $entry.SuccessCount++
@@ -454,6 +473,7 @@ function Complete-AllActiveSeriesProgress {
             $entry.IssueChapters.Add(@{ ChapterName = $chapterName; Status = "Aborted"; Detail = "" })
         }
         $entry.ActiveChapters.Clear()
+        $entry.QueuedChapters.Clear()
         $frozen.Add(@{ Name = $seriesName; Entry = $entry })
         $null = $script:ccrActiveSeries.Remove($seriesName)
     }

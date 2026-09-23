@@ -358,7 +358,7 @@ function Invoke-LooseAnimatedConversionPipeline {
             $chapterResults[$chapterInfo] = $cr
 
             if ($cleanConsoleOutputEnabled) {
-                Start-ChapterProgress -SeriesName $chapterInfo.SeriesName -ChapterName $chapterInfo.ChapterName
+                Start-ChapterProgress -SeriesName $chapterInfo.SeriesName -ChapterName $chapterInfo.ChapterName -Queued
             }
 
             if ($cr.TotalFiles -eq 0) {
@@ -423,6 +423,14 @@ function Invoke-LooseAnimatedConversionPipeline {
         $jobStarter = {
             param($job)
             $cr = $chapterResults[$job.ChapterKey]
+            # DOCUMENTED DUPLICATE: the same once-per-chapter queued -> in
+            # progress flip is in ImageConversionPipeline.ps1's jobStarter and (via a
+            # 'ChapterRunning' event) both of Controller.ps1's jobStarters -
+            # keep all four in sync.
+            if (-not $cr.CcrRunning) {
+                $cr.CcrRunning = $true
+                if ($cleanConsoleOutputEnabled) { Set-ChapterInProgress -SeriesName $job.ChapterKey.SeriesName -ChapterName $job.ChapterKey.ChapterName }
+            }
             try {
                 $psi = [System.Diagnostics.ProcessStartInfo]::new()
                 $psi.FileName = $MagickExe

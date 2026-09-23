@@ -341,6 +341,7 @@ $script:fullPipelineEngineWorker = {
         [System.Collections.Concurrent.ConcurrentDictionary[object, System.Lazy[hashtable]]]$ChapterClassificationCache,
         [System.Collections.Concurrent.ConcurrentDictionary[object,string]]$ZipBlockReasons,
         [System.Collections.Concurrent.ConcurrentDictionary[object,byte]]$AnnouncedChapters,
+        [System.Collections.Concurrent.ConcurrentDictionary[object,byte]]$RunningChapters,
         [System.Collections.Concurrent.ConcurrentQueue[hashtable]]$EventQueue,
         [string[]]$LooseImageExtensions,
         [string[]]$AnimatedFileExtensions,
@@ -405,7 +406,7 @@ $script:fullPipelineEngineWorker = {
             # Announce only once this engine has real work - see Docs/function-notes.md (Invoke-FullPipeline, "CCR announcement pacing").
             # DOCUMENTED DUPLICATE: same move in the animated jobBuilder below - keep both in sync.
             if ($AnnouncedChapters.TryAdd($chapterInfo, 0)) {
-                $EventQueue.Enqueue(@{ Kind = 'ChapterStarted'; SeriesName = $chapterInfo.SeriesName; ChapterName = $chapterInfo.ChapterName })
+                $EventQueue.Enqueue(@{ Kind = 'ChapterStarted'; ChapterKey = $chapterInfo; SeriesName = $chapterInfo.SeriesName; ChapterName = $chapterInfo.ChapterName })
             }
             Write-Log ("Processing chapter (image engine): '" + $chapterInfo.Dir.FullName + "' (" + $cr.TotalFiles + " image(s))")
 
@@ -475,6 +476,13 @@ $script:fullPipelineEngineWorker = {
         $jobStarter = {
             param($job)
             $cr = $chapterResults[$job.ChapterKey]
+            # DOCUMENTED DUPLICATE: the same once-per-chapter queued -> in
+            # progress flip is in this file's other engine jobStarter and
+            # (called directly, main thread) ImageConversionPipeline.ps1's/
+            # AnimatedConversionPipeline.ps1's jobStarters - keep all four in sync.
+            if ($RunningChapters.TryAdd($job.ChapterKey, 0)) {
+                $EventQueue.Enqueue(@{ Kind = 'ChapterRunning'; SeriesName = $job.ChapterKey.SeriesName; ChapterName = $job.ChapterKey.ChapterName })
+            }
             $tempPngLocal = $null
             $magickProcLocal = $null
             $failureAlreadyAccounted = $false
@@ -658,7 +666,7 @@ $script:fullPipelineEngineWorker = {
             # Announce only once this engine has real work. DOCUMENTED DUPLICATE: same move
             # in the image jobBuilder above - keep both in sync.
             if ($AnnouncedChapters.TryAdd($chapterInfo, 0)) {
-                $EventQueue.Enqueue(@{ Kind = 'ChapterStarted'; SeriesName = $chapterInfo.SeriesName; ChapterName = $chapterInfo.ChapterName })
+                $EventQueue.Enqueue(@{ Kind = 'ChapterStarted'; ChapterKey = $chapterInfo; SeriesName = $chapterInfo.SeriesName; ChapterName = $chapterInfo.ChapterName })
             }
             Write-Log ("Processing chapter (animated engine): '" + $chapterInfo.Dir.FullName + "' (" + $cr.TotalFiles + " animated file(s))")
 
@@ -694,6 +702,13 @@ $script:fullPipelineEngineWorker = {
         $jobStarter = {
             param($job)
             $cr = $chapterResults[$job.ChapterKey]
+            # DOCUMENTED DUPLICATE: the same once-per-chapter queued -> in
+            # progress flip is in this file's other engine jobStarter and
+            # (called directly, main thread) ImageConversionPipeline.ps1's/
+            # AnimatedConversionPipeline.ps1's jobStarters - keep all four in sync.
+            if ($RunningChapters.TryAdd($job.ChapterKey, 0)) {
+                $EventQueue.Enqueue(@{ Kind = 'ChapterRunning'; SeriesName = $job.ChapterKey.SeriesName; ChapterName = $job.ChapterKey.ChapterName })
+            }
             try {
                 $psi = [System.Diagnostics.ProcessStartInfo]::new()
                 $psi.FileName = $MagickExe
@@ -889,6 +904,7 @@ function Invoke-FullPipeline {
         $chapterClassificationCache = [System.Collections.Concurrent.ConcurrentDictionary[object, System.Lazy[hashtable]]]::new()
         $zipBlockReasons   = [System.Collections.Concurrent.ConcurrentDictionary[object,string]]::new()
         $announcedChapters = [System.Collections.Concurrent.ConcurrentDictionary[object,byte]]::new()
+        $runningChapters   = [System.Collections.Concurrent.ConcurrentDictionary[object,byte]]::new()
         $eventQueue        = [System.Collections.Concurrent.ConcurrentQueue[hashtable]]::new()
         $fullCts = [System.Threading.CancellationTokenSource]::new()
         Register-AbortCancellationSource -Cts $fullCts
@@ -1010,7 +1026,13 @@ function Invoke-FullPipeline {
                     'ChapterStarted' {
                         if ($cleanConsoleOutputEnabled) {
                             & $ensureSeriesStarted $evt.SeriesName
-                            Start-ChapterProgress -SeriesName $evt.SeriesName -ChapterName $evt.ChapterName
+                            # Queued unless a jobStarter already claimed it - its 'ChapterRunning' event can arrive first when the other engine starts the chapter.
+                            Start-ChapterProgress -SeriesName $evt.SeriesName -ChapterName $evt.ChapterName -Queued:(-not $runningChapters.ContainsKey($evt.ChapterKey))
+                        }
+                    }
+                    'ChapterRunning' {
+                        if ($cleanConsoleOutputEnabled) {
+                            Set-ChapterInProgress -SeriesName $evt.SeriesName -ChapterName $evt.ChapterName
                         }
                     }
                     'AbortMessage' {
@@ -1054,7 +1076,7 @@ function Invoke-FullPipeline {
                 DoAnimatedOverwrite = $AnimatedOverwrite; DoAnimatedDeleteSource = $AnimatedDeleteSource
                 DoFullLogging = $FullLogging; DoPermanentDelete = $PermanentDelete
                 SharedBudget = $sharedBudget; SeriesBundleCache = $seriesBundleCache; ChapterClassificationCache = $chapterClassificationCache; ZipBlockReasons = $zipBlockReasons
-                AnnouncedChapters = $announcedChapters; EventQueue = $eventQueue
+                AnnouncedChapters = $announcedChapters; RunningChapters = $runningChapters; EventQueue = $eventQueue
                 LooseImageExtensions = $LooseImageExtensions; AnimatedFileExtensions = $AnimatedFileExtensions
                 KnownZipPaths = $KnownZipPaths; FolderQualifyingExtensions = $FolderQualifyingExtensions
                 FolderExcludeStagingDirs = $FolderExcludeStagingDirs

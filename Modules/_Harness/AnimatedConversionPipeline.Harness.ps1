@@ -1016,6 +1016,52 @@ Test-Assert (@([System.IO.Directory]::GetFiles($chAM, "*.avif")).Count -eq 3) "a
 Write-Host ""
 
 # ==============================================================================
+#  Scenario QD: CCR shows a walk-ahead chapter as "queued" until its first job
+#  actually starts. Two chapters, one conversion slot: the dispatch builds
+#  (announces) both before starting anything, so when Chapter 1's first job
+#  starts, Chapter 2 must still be showing as queued - it flips only when its
+#  own job starts. Spies wrap the real CCR functions.
+# ==============================================================================
+Write-Host "=== Scenario QD: queued -> in progress flip happens at first job start, once per chapter ===" -ForegroundColor Cyan
+$rootQD = New-Dir "scenario-qd"
+$chQD1 = New-Dir "scenario-qd\Series QD\Chapter 1"
+$chQD2 = New-Dir "scenario-qd\Series QD\Chapter 2"
+$null = New-FakeAvifIn -DirPath $chQD1 -Name "page1.avif" -Frames 8
+$null = New-FakeAvifIn -DirPath $chQD2 -Name "page1.avif" -Frames 8
+$script:startsQD = New-Object System.Collections.Generic.List[hashtable]
+$script:flipsQD  = New-Object System.Collections.Generic.List[hashtable]
+$script:realStartQDRef = ${function:Start-ChapterProgress}
+$script:realFlipQDRef  = ${function:Set-ChapterInProgress}
+function Start-ChapterProgress {
+    param([string]$SeriesName, [string]$ChapterName, [switch]$Queued)
+    $script:startsQD.Add(@{ ChapterName = $ChapterName; Queued = [bool]$Queued })
+    & $script:realStartQDRef -SeriesName $SeriesName -ChapterName $ChapterName -Queued:$Queued
+}
+function Set-ChapterInProgress {
+    param([string]$SeriesName, [string]$ChapterName)
+    $e = $script:ccrActiveSeries[$SeriesName]
+    $script:flipsQD.Add(@{ ChapterName = $ChapterName; WasQueued = $e.QueuedChapters.Contains($ChapterName); OthersQueued = @($e.QueuedChapters | Where-Object { $_ -ne $ChapterName }) })
+    & $script:realFlipQDRef -SeriesName $SeriesName -ChapterName $ChapterName
+}
+$script:CleanConsoleOutputEnabled = $true
+try {
+    $totalsQD = Invoke-LooseAnimatedConversionPipeline -Path $rootQD -MagickExe $fakeMagickExe -AnimatedThreads 1 -FullLogging $false
+} finally {
+    $script:CleanConsoleOutputEnabled = $false
+    ${function:Start-ChapterProgress} = $script:realStartQDRef
+    ${function:Set-ChapterInProgress} = $script:realFlipQDRef
+}
+$flip1QD = @($script:flipsQD | Where-Object { $_.ChapterName -eq "Chapter 1" })
+$flip2QD = @($script:flipsQD | Where-Object { $_.ChapterName -eq "Chapter 2" })
+Test-Assert (@($script:startsQD | Where-Object { $_.Queued }).Count -eq 2) ("both chapters were announced as queued (got " + @($script:startsQD | Where-Object { $_.Queued }).Count + " of " + $script:startsQD.Count + ")")
+Test-Assert ($flip1QD.Count -eq 1 -and $flip2QD.Count -eq 1) ("each chapter flipped to in progress exactly once (got " + $flip1QD.Count + "/" + $flip2QD.Count + ")")
+Test-Assert ($flip1QD.Count -eq 1 -and $flip1QD[0].WasQueued -and ($flip1QD[0].OthersQueued -contains "Chapter 2")) "when Chapter 1's first job started, Chapter 2 was still showing as queued (the walk-ahead case)"
+Test-Assert ($flip2QD.Count -eq 1 -and $flip2QD[0].WasQueued) "Chapter 2 was queued right up until its own first job started"
+Test-Assert ($script:ccrActiveSeries.Count -eq 0) "the series still resolves and leaves the live region"
+Test-Assert ($totalsQD.ConvertedSuccess -eq 2) ("both chapters still converted (got ConvertedSuccess=" + $totalsQD.ConvertedSuccess + ")")
+Write-Host ""
+
+# ==============================================================================
 Write-Host "==============================================="
 if ($script:failCount -eq 0) {
     Write-Host ("ALL PASSED  (" + $script:passCount + " assertions)") -ForegroundColor Green

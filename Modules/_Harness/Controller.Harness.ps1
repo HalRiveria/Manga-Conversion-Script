@@ -663,9 +663,9 @@ $realCompleteD3b = ${function:Complete-ChapterProgress}
 $script:realStartD3bRef    = $realStartD3b
 $script:realCompleteD3bRef = $realCompleteD3b
 function Start-ChapterProgress {
-    param([string]$SeriesName, [string]$ChapterName)
+    param([string]$SeriesName, [string]$ChapterName, [switch]$Queued)
     $script:startCallsD3b.Add(@{ SeriesName = $SeriesName; ChapterName = $ChapterName })
-    & $script:realStartD3bRef -SeriesName $SeriesName -ChapterName $ChapterName
+    & $script:realStartD3bRef -SeriesName $SeriesName -ChapterName $ChapterName -Queued:$Queued
 }
 function Complete-ChapterProgress {
     param([string]$SeriesName, [string]$ChapterName, [string]$Status, [string]$Detail = "")
@@ -2232,6 +2232,7 @@ function New-FullPipelineTestSharedObjects {
         ChapterClassificationCache = [System.Collections.Concurrent.ConcurrentDictionary[object, System.Lazy[hashtable]]]::new()
         ZipBlockReasons            = [System.Collections.Concurrent.ConcurrentDictionary[object,string]]::new()
         AnnouncedChapters          = [System.Collections.Concurrent.ConcurrentDictionary[object,byte]]::new()
+        RunningChapters            = [System.Collections.Concurrent.ConcurrentDictionary[object,byte]]::new()
         EventQueue                 = [System.Collections.Concurrent.ConcurrentQueue[hashtable]]::new()
         SharedBudget               = [System.Threading.SemaphoreSlim]::new(4, 4)
     }
@@ -2252,7 +2253,7 @@ $imageResultZ3 = & $script:fullPipelineEngineWorker -EngineType 'Image' -Path $r
     -LooseImageExtensions (Get-LooseImageExtensions) -AnimatedFileExtensions @(".avif") -KnownZipPaths @() `
     -FolderQualifyingExtensions ((Get-LooseImageExtensions) + @(".jxl")) -AbortTimeoutSeconds 60 -MaxQueueAhead 3 `
     -SeriesBundleCache $sharedZ3.SeriesBundleCache -ChapterClassificationCache $sharedZ3.ChapterClassificationCache `
-    -ZipBlockReasons $sharedZ3.ZipBlockReasons -AnnouncedChapters $sharedZ3.AnnouncedChapters -EventQueue $sharedZ3.EventQueue `
+    -ZipBlockReasons $sharedZ3.ZipBlockReasons -AnnouncedChapters $sharedZ3.AnnouncedChapters -RunningChapters $sharedZ3.RunningChapters -EventQueue $sharedZ3.EventQueue `
     -SharedBudget $sharedZ3.SharedBudget -CancelToken ([System.Threading.CancellationToken]::None)
 $expectedJxlZ3 = Join-Path $chZ3 "page1.jxl"
 $argsTextZ3 = Get-Content -LiteralPath $expectedJxlZ3 -Raw
@@ -2265,7 +2266,7 @@ $animatedResultZ3 = & $script:fullPipelineEngineWorker -EngineType 'Animated' -P
     -LooseImageExtensions (Get-LooseImageExtensions) -AnimatedFileExtensions @(".avif") -KnownZipPaths @() `
     -FolderQualifyingExtensions ((Get-LooseImageExtensions) + @(".jxl")) -AbortTimeoutSeconds 60 -MaxQueueAhead 3 `
     -SeriesBundleCache $sharedZ3b.SeriesBundleCache -ChapterClassificationCache $sharedZ3b.ChapterClassificationCache `
-    -ZipBlockReasons $sharedZ3b.ZipBlockReasons -AnnouncedChapters $sharedZ3b.AnnouncedChapters -EventQueue $sharedZ3b.EventQueue `
+    -ZipBlockReasons $sharedZ3b.ZipBlockReasons -AnnouncedChapters $sharedZ3b.AnnouncedChapters -RunningChapters $sharedZ3b.RunningChapters -EventQueue $sharedZ3b.EventQueue `
     -SharedBudget $sharedZ3b.SharedBudget -CancelToken ([System.Threading.CancellationToken]::None)
 $expectedWebpZ3 = Join-Path $chZ3 "anim1.webp"
 $animArgsTextZ3 = Get-Content -LiteralPath $expectedWebpZ3 -Raw
@@ -2488,6 +2489,50 @@ Write-Host ""
 # ==============================================================================
 #  Summary
 # ==============================================================================
+# ==============================================================================
+#  Scenario D3d: Full Pipeline's queued -> in progress flip. The jobStarters
+#  run in worker runspaces, so the flip travels as a 'ChapterRunning' event
+#  latched once per chapter across BOTH engines ($RunningChapters.TryAdd).
+#  Chapter 1 has work in both engines (a still image + an animated AVIF),
+#  Chapter 2 in the image engine only. Proves: each chapter gets exactly one
+#  flip even when both engines start it, and no chapter is still showing as
+#  queued when it completes.
+# ==============================================================================
+Write-Host "=== Scenario D3d: Full Pipeline flips queued -> in progress once per chapter, across both engines ===" -ForegroundColor Cyan
+$chD3d1 = New-Dir "scenario-d3d\Series D3d\Chapter 1"
+$chD3d2 = New-Dir "scenario-d3d\Series D3d\Chapter 2"
+$null = New-FakeImageIn -DirPath $chD3d1 -Name "page1.jpg"
+$null = New-FakeAvifIn -DirPath $chD3d1 -Name "page2.avif" -Frames 8
+$null = New-FakeImageIn -DirPath $chD3d2 -Name "page1.jpg"
+
+$script:flipsD3d            = New-Object System.Collections.Generic.List[string]
+$script:queuedAtCompleteD3d = New-Object System.Collections.Generic.List[string]
+$script:realFlipD3dRef      = ${function:Set-ChapterInProgress}
+$script:realCompleteD3dRef  = ${function:Complete-ChapterProgress}
+function Set-ChapterInProgress {
+    param([string]$SeriesName, [string]$ChapterName)
+    $script:flipsD3d.Add($ChapterName)
+    & $script:realFlipD3dRef -SeriesName $SeriesName -ChapterName $ChapterName
+}
+function Complete-ChapterProgress {
+    param([string]$SeriesName, [string]$ChapterName, [string]$Status, [string]$Detail = "")
+    if ($script:ccrActiveSeries.Contains($SeriesName) -and $script:ccrActiveSeries[$SeriesName].QueuedChapters.Contains($ChapterName)) { $script:queuedAtCompleteD3d.Add($ChapterName) }
+    & $script:realCompleteD3dRef -SeriesName $SeriesName -ChapterName $ChapterName -Status $Status -Detail $Detail
+}
+$script:CleanConsoleOutputEnabled = $true
+try {
+    $totalsD3d = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-d3d") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
+} finally {
+    $script:CleanConsoleOutputEnabled = $false
+    ${function:Set-ChapterInProgress}    = $script:realFlipD3dRef
+    ${function:Complete-ChapterProgress} = $script:realCompleteD3dRef
+}
+Test-Assert (@($script:flipsD3d | Where-Object { $_ -eq "Chapter 1" }).Count -eq 1) ("Chapter 1 (work in both engines) got exactly one in-progress flip (got " + ($script:flipsD3d -join ", ") + ")")
+Test-Assert (@($script:flipsD3d | Where-Object { $_ -eq "Chapter 2" }).Count -eq 1) ("Chapter 2 got exactly one in-progress flip (got " + ($script:flipsD3d -join ", ") + ")")
+Test-Assert ($script:queuedAtCompleteD3d.Count -eq 0) ("no chapter was still showing as queued when it completed (got: " + ($script:queuedAtCompleteD3d -join ", ") + ")")
+Test-Assert ($totalsD3d.ZipCreatedSuccess -eq 2) ("both chapters still converted and zipped (got ZipCreatedSuccess=" + $totalsD3d.ZipCreatedSuccess + ")")
+Write-Host ""
+
 Write-Host "==============================================="
 if ($script:failCount -eq 0) {
     Write-Host ("ALL PASSED  (" + $script:passCount + " assertions)") -ForegroundColor Green

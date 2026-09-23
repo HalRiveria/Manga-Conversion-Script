@@ -494,6 +494,40 @@ Write-Host ""
 # ==============================================================================
 #  Summary
 # ==============================================================================
+# ==============================================================================
+#  Scenario N: queued -> in progress. A chapter started with -Queued shows
+#  "(queued)" until Set-ChapterInProgress flips it; the flip is a no-op for
+#  an unknown series/chapter or an already-flipped one, and completing a
+#  still-queued chapter clears its queued state.
+# ==============================================================================
+Write-Host "=== Scenario N: queued chapters show as queued until Set-ChapterInProgress ===" -ForegroundColor Cyan
+Reset-CCRState
+Start-SeriesProgress -SeriesName "Series N" -TotalChapters 3
+Start-ChapterProgress -SeriesName "Series N" -ChapterName "Chapter 1" -Queued
+Start-ChapterProgress -SeriesName "Series N" -ChapterName "Chapter 2"
+$linesN1 = @(Format-SeriesLines -SeriesName "Series N" -Entry $script:ccrActiveSeries["Series N"] | ForEach-Object { $_.Text })
+Test-Assert ($linesN1 -contains "    Chapter 1 (queued)") "a -Queued chapter renders as '(queued)'"
+Test-Assert ($linesN1 -contains "    Chapter 2 (in progress)") "a chapter started without -Queued still renders as '(in progress)'"
+
+Set-ChapterInProgress -SeriesName "Series N" -ChapterName "Chapter 1"
+$linesN2 = @(Format-SeriesLines -SeriesName "Series N" -Entry $script:ccrActiveSeries["Series N"] | ForEach-Object { $_.Text })
+Test-Assert ($linesN2 -contains "    Chapter 1 (in progress)") "Set-ChapterInProgress flips a queued chapter to '(in progress)'"
+Test-Assert (@($linesN2 -match '\(queued\)').Count -eq 0) "no chapter is left showing '(queued)' after the flip"
+
+$threwN = $false
+try {
+    Set-ChapterInProgress -SeriesName "Series N" -ChapterName "Chapter 1"
+    Set-ChapterInProgress -SeriesName "Series N" -ChapterName "Never Started"
+    Set-ChapterInProgress -SeriesName "Nonexistent Series" -ChapterName "X"
+} catch { $threwN = $true }
+Test-Assert (-not $threwN) "Set-ChapterInProgress is a silent no-op for an already-flipped chapter, an unknown chapter, and an unknown series"
+
+Start-ChapterProgress -SeriesName "Series N" -ChapterName "Chapter 3" -Queued
+$null = Complete-ChapterProgress -SeriesName "Series N" -ChapterName "Chapter 3" -Status Success
+Test-Assert (-not $script:ccrActiveSeries["Series N"].QueuedChapters.Contains("Chapter 3")) "completing a still-queued chapter clears its queued state"
+Reset-CCRState
+Write-Host ""
+
 Write-Host "==============================================="
 if ($script:failCount -eq 0) {
     Write-Host ("ALL PASSED  (" + $script:passCount + " assertions)") -ForegroundColor Green
