@@ -445,6 +445,38 @@ $roomy = Get-CappedLiveRows -ActiveSeries $floodSeries -Width 79 -MaxRows 5000
 Test-Assert ($roomy.Count -eq 300) "a cap larger than the content renders every row, no truncation"
 Test-Assert ($null -eq ($roomy | Where-Object { $_.Text -like "*more series in progress*" })) "no summary row when nothing is hidden"
 
+# A single series taller than the cap (2026-09-22 /code-review finding): a
+# series block keeps every Warning/Error chapter for the life of the series,
+# so one warning-heavy series can outgrow the window on its own. The old
+# cap always admitted the first series whole - the region could exceed
+# MaxRows and the cursor rewind failed exactly like the original flood.
+$tallSeries = [System.Collections.Specialized.OrderedDictionary]::new()
+$tallEntry = @{
+    TotalChapters  = 60
+    SuccessCount   = 0
+    ActiveChapters = [System.Collections.Generic.List[string]]::new()
+    IssueChapters  = [System.Collections.Generic.List[hashtable]]::new()
+}
+for ($c = 1; $c -le 40; $c++) { $tallEntry.IssueChapters.Add(@{ ChapterName = ("Chapter " + $c); Status = "Warning"; Detail = "AVIF classification failure" }) }
+$tallSeries["Tall Series"] = $tallEntry
+$tallAlone = Get-CappedLiveRows -ActiveSeries $tallSeries -Width 79 -MaxRows 20
+Test-Assert ($tallAlone.Count -eq 20) ("a lone series taller than the cap is cut to exactly the cap (got " + $tallAlone.Count + " rows for a 42-row series, cap 20)")
+Test-Assert ($tallAlone[0].Text -eq "Tall Series") "the cut series still starts with its own name row"
+Test-Assert ($tallAlone[$tallAlone.Count - 1].Text -like "*23 more line(s)*") ("the last row says how many of its lines were hidden (got '" + $tallAlone[$tallAlone.Count - 1].Text + "')")
+
+$tallSeries["Second"] = $floodSeries["Series 1"]
+$tallFirst = Get-CappedLiveRows -ActiveSeries $tallSeries -Width 79 -MaxRows 20
+Test-Assert ($tallFirst.Count -eq 20) ("a tall FIRST series followed by others still respects the cap (got " + $tallFirst.Count + ")")
+Test-Assert ($tallFirst[$tallFirst.Count - 1].Text -like "*and 1 more series in progress*") "...and the summary also counts the series behind it"
+
+$tinyCap = Get-CappedLiveRows -ActiveSeries $floodSeries -Width 79 -MaxRows 1
+Test-Assert ($tinyCap.Count -eq 1) ("a 1-row cap (tiny window) yields exactly 1 row, not a whole series (got " + $tinyCap.Count + ")")
+
+# The summary line is truncated to ONE row - it's the one row the cap
+# reserves, so a wrapping summary would overrun the cap at narrow widths.
+$narrow = Get-CappedLiveRows -ActiveSeries $floodSeries -Width 12 -MaxRows 10
+Test-Assert ($narrow.Count -le 10) ("at a 12-column width the region still fits a 10-row cap (got " + $narrow.Count + ")")
+
 # Integration: Update-CleanConsoleDisplay honors the $ccrMaxLiveRows seam,
 # so a real redraw of the flooded registry emits a bounded row count
 # instead of the whole library.

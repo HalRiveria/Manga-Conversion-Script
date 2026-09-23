@@ -6,10 +6,7 @@ $script:ccrCursorAvailable     = $null
 # Tracks the console width the PREVIOUS draw actually wrapped its rows
 # against - see Update-CleanConsoleDisplay's own use of this for why.
 $script:ccrLastDrawWidth       = $null
-# Test seam: when non-null, forces the live-region row cap instead of
-# deriving it from [Console]::WindowHeight (which throws with no real
-# console). The harness sets this to reproduce a small window; production
-# leaves it null. See Get-CappedLiveRows / Update-CleanConsoleDisplay.
+# Test seam for the live-region row cap - see Docs/function-notes.md (Update-CleanConsoleDisplay).
 $script:ccrMaxLiveRows         = $null
 
 function Test-CleanConsoleCursorAvailable {
@@ -172,17 +169,6 @@ function Get-WrappedSeriesRows {
 }
 
 function Get-CappedLiveRows {
-    # Builds the wrapped rows for every active series, but stops once the
-    # total would exceed $MaxRows and emits a one-line "... and N more"
-    # summary instead. Capping the live region is what keeps the CURSOR
-    # PATH alive when a Full Pipeline run announces the whole library up
-    # front (a zero-job engine walking ahead unthrottled): a bounded live
-    # region means Update-CleanConsoleDisplay's own
-    # `SetCursorPosition(0, CursorTop - oldCount)` can never address a row
-    # outside the buffer, so it never throws and never latches into the
-    # print-everything fallback that floods the console and starves the
-    # main thread. $MaxRows -le 0 means "no cap" (unknown window size).
-    # Stops on a whole-series boundary so a series is never cut mid-block.
     param(
         [Parameter(Mandatory)]
         $ActiveSeries,
@@ -201,23 +187,27 @@ function Get-CappedLiveRows {
         return ,$rows
     }
 
-    $shown = 0
+    $summary = $null
     for ($i = 0; $i -lt $names.Count; $i++) {
-        $n = $names[$i]
-        $seriesRows = Get-WrappedSeriesRows -SeriesName $n -Entry $ActiveSeries[$n] -Width $Width
-        # Reserve one row for the summary line UNLESS this is the last
-        # series (nothing left to summarize, so the whole budget is free).
+        $seriesRows = Get-WrappedSeriesRows -SeriesName $names[$i] -Entry $ActiveSeries[$names[$i]] -Width $Width
         if ($i -eq ($names.Count - 1)) { $budget = $MaxRows } else { $budget = $MaxRows - 1 }
-        if ($rows.Count -gt 0 -and ($rows.Count + $seriesRows.Count) -gt $budget) {
-            $hidden  = $names.Count - $shown
-            $summary = "... and " + $hidden + " more series in progress"
-            foreach ($chunk in (Split-TextToWidth -Text $summary -Width $Width)) {
-                $rows.Add(@{ Text = $chunk; Color = $null })
-            }
-            break
+        if (($rows.Count + $seriesRows.Count) -le $budget) {
+            $rows.AddRange($seriesRows)
+            continue
         }
-        $rows.AddRange($seriesRows)
-        $shown++
+        $hiddenSeries = $names.Count - $i
+        if ($rows.Count -eq 0) {
+            $take = $MaxRows - 1
+            for ($r = 0; $r -lt $take; $r++) { $rows.Add($seriesRows[$r]) }
+            $summary = "... " + ($seriesRows.Count - $take) + " more line(s)"
+            if ($hiddenSeries -gt 1) { $summary += ", and " + ($hiddenSeries - 1) + " more series in progress" }
+        } else {
+            $summary = "... and " + $hiddenSeries + " more series in progress"
+        }
+        break
+    }
+    if ($null -ne $summary) {
+        $rows.Add(@{ Text = @(Split-TextToWidth -Text $summary -Width $Width)[0]; Color = $null })
     }
     return ,$rows
 }
@@ -252,12 +242,6 @@ function Update-CleanConsoleDisplay {
         }
     }
 
-    # Cap the live region to the window height so it can never grow past
-    # what SetCursorPosition can safely rewind over (see Get-CappedLiveRows
-    # for why). Reserve a margin below WindowHeight for the frozen rows
-    # printed above the region this frame and the shell prompt. Test seam
-    # $ccrMaxLiveRows wins when set; with no readable console, 0 = no cap
-    # (preserves the pre-cap behavior of the no-console fallback path).
     $maxLiveRows = 0
     if ($null -ne $script:ccrMaxLiveRows) {
         $maxLiveRows = $script:ccrMaxLiveRows
@@ -302,29 +286,11 @@ function Update-CleanConsoleDisplay {
                 [Console]::SetCursorPosition(0, [Console]::CursorTop - $blankRowsNeeded)
             }
         } catch {
-            # A single SetCursorPosition failure here is transient, not "no
-            # console at all" - the upfront Test-CleanConsoleCursorAvailable
-            # probe already confirmed a real console, so reaching this catch
-            # means one rewind failed (the region scrolled, or a raw console
-            # write from elsewhere - a worker's log line, an abort message -
-            # moved the cursor out from under our saved row count). Do NOT
-            # latch $ccrCursorAvailable to $false permanently: that drops the
-            # whole rest of the run to append-only, which turns every later
-            # in-place update into a fresh appended copy of the entire live
-            # region - a flood in its own right (seen live on abort: one
-            # series reprinted once per completed chapter). Instead draw this
-            # frame fresh from the current position and leave the cursor path
-            # enabled; $ccrLiveRegionLineCount is still set to the live-row
-            # count below, and the live-region cap above guarantees the next
-            # redraw's rewind fits the buffer, so the cursor path self-heals
-            # on the following draw. Cost is at most one stale copy left on
-            # screen per transient failure, not a permanent regression.
+            # Transient rewind failure - redraw fresh, do not latch append-only. See Docs/function-notes.md.
             try {
                 foreach ($row in $newContentRows) { Write-ColoredConsoleRow -Text (Set-PadToDisplayWidth -Text $row.Text -Width $effectiveWidth) -Color $row.Color }
             } catch {
-                # Even a plain write threw - the console really is gone now;
-                # fall back permanently (the original behavior) for the rest
-                # of the run rather than throwing on every future redraw.
+                # Even a plain write threw - console is gone; fall back permanently.
                 $script:ccrCursorAvailable = $false
                 foreach ($row in $newContentRows) { Write-ColoredConsoleRow -Text $row.Text -Color $row.Color }
             }
