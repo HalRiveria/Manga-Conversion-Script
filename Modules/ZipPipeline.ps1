@@ -45,8 +45,10 @@ $script:zipOnlyWorker = {
         [System.Threading.CancellationToken]$CancelToken
     )
 
-    Add-Type -AssemblyName "Microsoft.VisualBasic"
-    Add-Type -AssemblyName "System.IO.Compression.FileSystem"
+    # Raw .NET, not Add-Type (Lint Rule 7) - a no-op when the main thread
+    # already loaded them (FileDeletion.ps1/ZipCreation.ps1 do at dot-source).
+    $null = [System.Reflection.Assembly]::LoadWithPartialName("Microsoft.VisualBasic")
+    $null = [System.Reflection.Assembly]::LoadWithPartialName("System.IO.Compression.FileSystem")
 
     # Only these two - worker log lines go through the queue; see Docs/function-notes.md (Get-WorkerRunspaceValue).
     $script:workerConsoleQueue = $ConsoleQueue
@@ -72,12 +74,14 @@ $script:zipOnlyWorker = {
     try {
         # Same orphaned-scratch-file regex trio as Invoke-LooseFolderZip's
         # own sweep below in this file - keep both in sync if either changes.
-        $orphanedScratchFiles = @(Get-ChildItem -LiteralPath $FolderPath -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object {
-                $_.Name -imatch '_tmp_iccstrip(-\d+)?\.png$' -or
-                $_.Name -imatch '_tmp_(webp|avif|bmp|heic|heif)2png\.png$' -or
-                $_.Name -imatch '_tmp_overwrite\.webp$'
-            })
+        $orphanedScratchFiles = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+        foreach ($f in (Get-FilesRecursiveSafe -ScanPath $FolderPath)) {
+            if ($f.Name -imatch '_tmp_iccstrip(-\d+)?\.png$' -or
+                $f.Name -imatch '_tmp_(webp|avif|bmp|heic|heif)2png\.png$' -or
+                $f.Name -imatch '_tmp_overwrite\.webp$') {
+                $orphanedScratchFiles.Add($f)
+            }
+        }
         foreach ($orphan in $orphanedScratchFiles) {
             try {
                 [System.IO.File]::Delete($orphan.FullName)
@@ -98,7 +102,7 @@ $script:zipOnlyWorker = {
         Write-Log ("FAILED to zip '" + $folderName + "': " + $_) -Level Error
         $result.Failed = 1
         try {
-            if (Test-Path -LiteralPath $ZipOutPath) { [System.IO.File]::Delete($ZipOutPath) }
+            if ([System.IO.File]::Exists($ZipOutPath)) { [System.IO.File]::Delete($ZipOutPath) }
         } catch { }
         return $result
     }
@@ -230,7 +234,7 @@ function Invoke-ZipOnlyPipeline {
                 Complete-CcrChapterProgressIfEnabled -SeriesName $r.SeriesName -ChapterName $r.FolderName -Status $zipStatus -Detail $zipDetail
             }.GetNewClosure()
 
-            $zipOnlyWorkerSharedFunctionNames = @(Get-LoggingSharedFunctionNames) + @(Get-FileDeletionSharedFunctionNames) + @(Get-ZipCreationSharedFunctionNames) + @(Get-ZipValidationSharedFunctionNames)
+            $zipOnlyWorkerSharedFunctionNames = @(Get-LoggingSharedFunctionNames) + @(Get-FileDeletionSharedFunctionNames) + @(Get-ZipCreationSharedFunctionNames) + @(Get-ZipValidationSharedFunctionNames) + @('Get-FilesRecursiveSafe')
             $zoOutcome = Invoke-ZipParallelProcessing -WorkerScript $script:zipOnlyWorker -NextJobProvider $zoJobProvider `
                 -SharedFunctionNames $zipOnlyWorkerSharedFunctionNames `
                 -MaxParallel $MaxParallel -Cts $script:zipOnlyCts -ResultHandler $zoResultHandler

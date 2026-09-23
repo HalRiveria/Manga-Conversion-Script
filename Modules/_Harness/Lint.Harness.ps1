@@ -60,6 +60,15 @@ $script:LintScriptVarAllowed = @(
        Why       = 'Only read after Test-AbortSignal''s own worker early-return (returns [ConsoleCtrl]::AbortRequested, never announces), i.e. main thread only.' }
 )
 
+# Rule 7 only: specific (function, cmdlet) pairs reviewed as safe on a
+# runspace-reachable path. Same bar as Rule 6's list - each entry must say
+# why the cmdlet can't actually run inside a worker.
+$script:LintCmdletAllowed = @(
+    @{ Function = 'Write-LogLineToHost'
+       Cmdlets  = @('Write-Host')
+       Why      = 'Only called from Write-Log past its worker early-return (worker lines go through the console queue) and from Flush-ConsoleQueue (main thread). Listed in Get-LoggingSharedFunctionNames only because Rule 5 walks Write-Log''s callees statically.' }
+)
+
 $script:passCount = 0
 $script:failCount = 0
 
@@ -67,6 +76,14 @@ function Test-IsScriptVarAllowed {
     param([string]$Function, [string]$Variable)
     foreach ($a in $script:LintScriptVarAllowed) {
         if ($a.Function -eq $Function -and ($a.Variables -contains $Variable)) { return $true }
+    }
+    return $false
+}
+
+function Test-IsCmdletAllowed {
+    param([string]$Function, [string]$Cmdlet)
+    foreach ($a in $script:LintCmdletAllowed) {
+        if ($a.Function -eq $Function -and ($a.Cmdlets -contains $Cmdlet)) { return $true }
     }
     return $false
 }
@@ -499,6 +516,50 @@ foreach ($workerVar in $runspaceWorkerBodies) {
 }
 Test-Assert (@($rule6).Count -eq 0) "no runspace-reachable function or nested worker scriptblock touches `$script: state"
 Show-Findings -Findings @($rule6)
+Write-Host ""
+
+# ------------------------------------------------------------------------
+#  Rule 7: cmdlet call on a runspace-reachable path
+# ------------------------------------------------------------------------
+# PS 5.1's cmdlet-first-invocation race: two fresh runspaces calling the
+# same cmdlet for the first time at the same moment can deadlock both
+# (Docs\lessons-learned.md, 2026-09-10). Runspace code paths use raw .NET
+# only. Same reachable set as Rule 6 (propagated functions + worker
+# bodies); any command name that isn't a user function defined in the scan
+# is a cmdlet. Deliberate, reviewed exceptions go in
+# $script:LintCmdletAllowed below with a reason.
+Write-Host "=== Lint: cmdlet call on a runspace-reachable path ===" -ForegroundColor Cyan
+
+$rule7 = @()
+$cmdletFinder = {
+    param($AstNode)
+    $found = [System.Collections.Generic.List[object]]::new()
+    foreach ($c in $AstNode.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+        $cmdName = $c.GetCommandName()
+        if ($cmdName -and -not $allFnNames.Contains($cmdName)) { $found.Add($c) }
+    }
+    return ,$found
+}
+foreach ($fname in $runspaceReachable) {
+    if (-not $fnAstByName.ContainsKey($fname)) { continue }
+    $fnAst = $fnAstByName[$fname]
+    $fnFile = $null
+    foreach ($name in $fileAsts.Keys) { if ($fileText[$name].Contains($fnAst.Extent.Text)) { $fnFile = $name; break } }
+    foreach ($c in (& $cmdletFinder $fnAst)) {
+        if (Test-IsCmdletAllowed -Function $fname -Cmdlet $c.GetCommandName()) { continue }
+        $rule7 += @{ File = $fnFile; Line = $c.Extent.StartLineNumber; Text = ($fname + " (runspace-reachable) calls cmdlet " + $c.GetCommandName()) }
+    }
+}
+foreach ($workerVar in $runspaceWorkerBodies) {
+    $body = $scriptBlockVars[$workerVar]
+    $workerFile = $null
+    foreach ($name in $fileAsts.Keys) { if ($fileText[$name].Contains($body.Extent.Text)) { $workerFile = $name; break } }
+    foreach ($c in (& $cmdletFinder $body)) {
+        $rule7 += @{ File = $workerFile; Line = $c.Extent.StartLineNumber; Text = ("worker `$" + $workerVar + " calls cmdlet " + $c.GetCommandName()) }
+    }
+}
+Test-Assert (@($rule7).Count -eq 0) "no runspace-reachable function or worker body calls a cmdlet"
+Show-Findings -Findings @($rule7)
 Write-Host ""
 
 # ==============================================================================

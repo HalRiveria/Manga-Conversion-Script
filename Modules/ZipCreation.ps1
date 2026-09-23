@@ -11,7 +11,7 @@ function Compress-FolderToZip {
         [string]$ZipOut
     )
 
-    if (Test-Path -LiteralPath $ZipOut) {
+    if ([System.IO.File]::Exists($ZipOut)) {
         $removed = Remove-Source -ItemPath $ZipOut
         if ($removed) {
             $deleteDesc = if (Get-WorkerRunspaceValue -Name PermanentDelete) { "permanently" } else { "Recycle Bin" }
@@ -29,12 +29,12 @@ function Compress-FolderToZip {
             $false
         )
 
-        if (-not (Test-Path -LiteralPath $ZipOut)) { throw ("ZIP was not created: '" + $ZipOut + "'") }
-        $zipSize = (Get-Item -LiteralPath $ZipOut).Length
+        if (-not [System.IO.File]::Exists($ZipOut)) { throw ("ZIP was not created: '" + $ZipOut + "'") }
+        $zipSize = [System.IO.FileInfo]::new($ZipOut).Length
         if ($zipSize -eq 0) { throw ("ZIP is 0 bytes: '" + $ZipOut + "'") }
         return $zipSize
     } catch {
-        if (Test-Path -LiteralPath $ZipOut) {
+        if ([System.IO.File]::Exists($ZipOut)) {
             # Swallowed deliberately - this is best-effort cleanup of a
             # zip that failed its own validation above; a failure to
             # delete it shouldn't mask the real error being rethrown
