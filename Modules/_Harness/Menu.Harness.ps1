@@ -1007,6 +1007,24 @@ Write-Host ""
 # ==============================================================================
 #  Summary
 # ==============================================================================
+# ==============================================================================
+#  Scenario W2 (2026-09-23 review fix): a default Run on the target folder
+#  must not overwrite LastCoverDeletionPath - that's the folder the user
+#  last typed in, offered again when "Ask for folder" is turned back on.
+# ==============================================================================
+Write-Host "=== Scenario W2: only a typed-in folder is remembered ===" -ForegroundColor Cyan
+$settingsW2 = Get-DefaultScriptSettings
+$settingsW2.LastCoverDeletionPath = "D:\typed-earlier"
+$runHandlerW2 = { param($ProfilesPath, $PromptFunc, $DefaultPath, $Path, $DryRun) $resolvedPathW2 = if ([string]::IsNullOrEmpty($Path)) { "D:\typed-now" } else { $Path }; return @{ Ran = $true; ResolvedPath = $resolvedPathW2; AllScannedFiles = $null } }
+$tzHandlerW2  = { param($PromptFunc, $DefaultPath, $Path) $resolvedPathW2 = if ([string]::IsNullOrEmpty($Path)) { "D:\typed-now" } else { $Path }; return @{ Ran = $true; ResolvedPath = $resolvedPathW2 } }
+$menuArgsW2 = @{ ProfilesPath = (Join-Path $scratchDir "scenario-w2-profiles.json"); Settings = $settingsW2; SettingsPath = (New-ScratchSettingsPath "scenario-w2"); TargetPath = "C:\fake\target"
+                 RunHandler = $runHandlerW2; TrailingZeroHandler = $tzHandlerW2; AutoTrailingZeroHandler = { param($Path, $PreScannedFiles) }; ClearScreenFunc = { } }
+Show-CoverDeletionMenu @menuArgsW2 -PromptFunc (New-ScriptedPrompt -Responses @('1', '5', '0')) 6>$null | Out-Null
+Test-Assert ($settingsW2.LastCoverDeletionPath -eq "D:\typed-earlier") ("runs on the target folder left the remembered folder alone (got '" + $settingsW2.LastCoverDeletionPath + "')")
+Show-CoverDeletionMenu @menuArgsW2 -PromptFunc (New-ScriptedPrompt -Responses @('7', '1', '0')) 6>$null | Out-Null
+Test-Assert ($settingsW2.LastCoverDeletionPath -eq "D:\typed-now") ("with Ask For Folder on, the typed-in folder is remembered (got '" + $settingsW2.LastCoverDeletionPath + "')")
+Write-Host ""
+
 Write-Host "==============================================="
 if ($script:failCount -eq 0) {
     Write-Host ("ALL PASSED  (" + $script:passCount + " assertions)") -ForegroundColor Green

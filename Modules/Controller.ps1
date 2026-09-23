@@ -394,9 +394,6 @@ $script:fullPipelineEngineWorker = {
             $classified = Get-OrCreateFullPipelineChapterClassification -Cache $ChapterClassificationCache -ChapterInfo $chapterInfo `
                 -MagickExe $MagickExe -LooseImageExtensions $LooseImageExtensions -EventQueue $EventQueue -ZipBlockReasons $ZipBlockReasons
 
-            # Animated engine off: this engine owns the chapter's animated
-            # AVIFs too, as skips (same as ImageConversionPipeline.ps1's
-            # jobBuilder). Unclassified ones (no magick) are already in Images.
             $skippedAnimated = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
             if (-not $AnimatedEnabled) {
                 $imagePathSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -1045,7 +1042,6 @@ function Invoke-FullPipeline {
                     'ChapterStarted' {
                         if ($cleanConsoleOutputEnabled) {
                             & $ensureSeriesStarted $evt.SeriesName
-                            # Queued unless a jobStarter already claimed it - its 'ChapterRunning' event can arrive first when the other engine starts the chapter.
                             Start-ChapterProgress -SeriesName $evt.SeriesName -ChapterName $evt.ChapterName -Queued:(-not $runningChapters.ContainsKey($evt.ChapterKey))
                         }
                     }
@@ -1317,7 +1313,7 @@ function Invoke-Mode {
                     -JpegLossless ([bool]$Settings.JpegLossless) -JpegQuality $Settings.JpegQuality -AnimatedLossless ([bool]$Settings.AnimatedLossless) -AnimatedQuality $Settings.AnimatedQuality `
                     -AnimatedOverwrite ([bool]$Settings.AnimatedOverwrite) -AnimatedDeleteSource ([bool]$Settings.AnimatedDeleteSource) -FullPipelineMaxConcurrentProcs $Settings.FullPipelineMaxConcurrentProcs `
                     -FullLogging $script:FullLogging -PermanentDelete ([bool]$Settings.PermanentDelete) `
-                    -RunCoverDeletionBeforeConversion ([bool]$Settings.RunCoverDeletionBeforeConversion) -CoverDeletionDryRun ([bool]$Settings.CoverDeletionDryRun) `
+                    -RunCoverDeletionBeforeConversion ([bool]$Settings.RunCoverDeletionBeforeConversion) -CoverDeletionDryRun $(if ($Settings.ContainsKey('CoverDeletionDryRun')) { [bool]$Settings.CoverDeletionDryRun } else { $true }) `
                     -AnimatedConversionEnabled $(if ($Settings.ContainsKey('FullPipelineAnimatedConversion')) { [bool]$Settings.FullPipelineAnimatedConversion } else { $true })
                 $stats.LooseImgConverted.Success      = $r.ConvertedImageSuccess;    $stats.LooseImgConverted.Fail      = $r.ConvertedImageFail;    $stats.LooseImgConverted.Skipped = $r.ConvertedImageSkipped
                 $stats.LooseImgDeleted.Success        = $r.DeletedImageSuccess;      $stats.LooseImgDeleted.Fail        = $r.DeletedImageFail

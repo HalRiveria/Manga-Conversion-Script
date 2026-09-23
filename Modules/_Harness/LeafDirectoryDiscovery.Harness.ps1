@@ -558,6 +558,34 @@ Test-Assert (-not (Test-SeriesCategoryFolder -Path (Join-Path $libraryQ2 "Series
 Write-Host ""
 
 # ==============================================================================
+#  Scenario Q3 (2026-09-23 review fix): New-SeriesProvider never descends
+#  into a junction. A junction back to the library root looks like a
+#  category (its children are series), so without the guard every series
+#  was yielded again under the junction path, recursively.
+# ==============================================================================
+Write-Host "=== Scenario Q3: New-SeriesProvider does not descend into a junction ===" -ForegroundColor Cyan
+$libraryQ3 = New-Dir "scenario-q3-library"
+New-FileIn -DirPath (New-Dir "scenario-q3-library\Series A\Chapter 1") -Name "page1.jpg" | Out-Null
+New-FileIn -DirPath (New-Dir "scenario-q3-library\Series B\Chapter 1") -Name "page1.jpg" | Out-Null
+$linkQ3 = Join-Path $libraryQ3 "Link"
+$null = cmd /c mklink /J "$linkQ3" "$libraryQ3" 2>&1
+try {
+    Test-Assert ([System.IO.Directory]::Exists($linkQ3)) "sanity check: the junction was created"
+    $providerQ3 = New-SeriesProvider -LibraryPath $libraryQ3 -QualifyingExtensions $imgExts
+    $foundQ3 = [System.Collections.Generic.List[string]]::new()
+    for ($i = 0; $i -lt 50; $i++) {
+        $next = & $providerQ3
+        if ($null -eq $next) { break }
+        $foundQ3.Add($next.FullName.Substring($libraryQ3.Length + 1))
+    }
+    Test-Assert (@($foundQ3 | Where-Object { $_ -like "Link\*" }).Count -eq 0) ("nothing was yielded from inside the junction (got: " + ($foundQ3 -join "|") + ")")
+    Test-Assert ((@($foundQ3 | Sort-Object) -join "|") -eq "Link|Series A|Series B") ("each folder yielded once; the junction itself is treated as a series, as before categories existed (got: " + ($foundQ3 -join "|") + ")")
+} finally {
+    $null = cmd /c rmdir "$linkQ3" 2>&1
+}
+Write-Host ""
+
+# ==============================================================================
 #  Scenario R: New-SeriesProvider edge cases - nonexistent library throws;
 #  an empty (0-series) library returns $null immediately, not an error.
 # ==============================================================================

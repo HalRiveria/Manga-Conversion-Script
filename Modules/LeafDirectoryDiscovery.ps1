@@ -88,8 +88,9 @@ function Get-FilesRecursiveSafe {
                 # one self-pointing junction produced 64 duplicate
                 # candidates for the same physical folder before the walk
                 # ran out of path length. DOCUMENTED DUPLICATE of the same
-                # guard in Get-ZippableLeafDirs/New-ZippableLeafDirProvider
-                # below - keep all three in sync.
+                # guard in Get-ZippableLeafDirs/New-ZippableLeafDirProvider/
+                # Test-SeriesCategoryFolder/New-SeriesProvider below - keep
+                # all five in sync.
                 if (([System.IO.File]::GetAttributes($d) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
                 $dirStack.Push($d)
             }
@@ -150,7 +151,7 @@ function Get-ZippableLeafDirs {
                 # junction/symlink isn't real content this location owns,
                 # so it's neither a leaf candidate nor safe to descend
                 # into. DOCUMENTED DUPLICATE, keep in sync with the other
-                # two copies in this file.
+                # four copies in this file.
                 if (($dirInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
                 $candidate = Test-ZippableLeafDirCandidate -Dir $dirInfo -QualifyingExtensions $QualifyingExtensions `
                     -ExcludeStagingDirs $ExcludeStagingDirs -ForceRezip $ForceRezip
@@ -221,7 +222,8 @@ function New-ZippableLeafDirProvider {
             $dirInfo = [System.IO.DirectoryInfo]::new($childPath)
             # Reparse-point guard (2026-09-15 fix, real bug) - DOCUMENTED
             # DUPLICATE of the same guard in Get-FilesRecursiveSafe/
-            # Get-ZippableLeafDirs above, keep all three in sync. See
+            # Get-ZippableLeafDirs above and Test-SeriesCategoryFolder/
+            # New-SeriesProvider below, keep all five in sync. See
             # Get-FilesRecursiveSafe's own comment for the live-reproduced
             # failure mode.
             if (($dirInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
@@ -249,6 +251,8 @@ function Test-SeriesCategoryFolder {
         }
         $hasSubfolder = $false
         foreach ($d in [System.IO.Directory]::EnumerateDirectories($Path)) {
+            # DOCUMENTED DUPLICATE of the reparse-point guard in
+            # Get-FilesRecursiveSafe (see there) - keep all five in sync.
             if (([System.IO.File]::GetAttributes($d) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
             $hasSubfolder = $true
             foreach ($f in [System.IO.Directory]::EnumerateFiles($d)) {
@@ -290,7 +294,10 @@ function New-SeriesProvider {
                 $null = $enumeratorStack.Pop()
                 continue
             }
-            if (Test-SeriesCategoryFolder -Path $dir -QualifyingExtensions $QualifyingExtensions) {
+            # DOCUMENTED DUPLICATE of the reparse-point guard in
+            # Get-FilesRecursiveSafe (see there) - keep all five in sync.
+            $isReparse = ([System.IO.File]::GetAttributes($dir) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+            if ((-not $isReparse) -and (Test-SeriesCategoryFolder -Path $dir -QualifyingExtensions $QualifyingExtensions)) {
                 try {
                     $enumeratorStack.Push([System.IO.Directory]::EnumerateDirectories($dir).GetEnumerator())
                 } catch {

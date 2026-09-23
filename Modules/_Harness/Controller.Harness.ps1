@@ -2477,6 +2477,26 @@ Test-Assert ($totalsD3e.ZipCreatedSuccess -eq 1 -and -not $totalsD3e.Aborted) "t
 Test-Assert (($entriesD3e -contains "anim.avif") -and ($entriesD3e -contains "page1.jxl") -and ($entriesD3e -contains "still.jxl")) ("the zip holds the raw animated .avif plus the converted pages (got: " + ($entriesD3e -join ", ") + ")")
 Write-Host ""
 
+# ==============================================================================
+#  Scenario AA7 (2026-09-23 review fix): Invoke-Mode with a $Settings that
+#  has no CoverDeletionDryRun key passes a dry run to Full Pipeline - a
+#  missing key must never turn into a real, deleting pre-scan.
+# ==============================================================================
+Write-Host "=== Scenario AA7: a missing CoverDeletionDryRun setting means a dry run ===" -ForegroundColor Cyan
+$capturedAA7 = @{ DryRun = $null }
+$fakeFullHandlerAA7 = { param($Path, $CjxlExe, $MagickExe, $CoverDeletionDryRun)
+    $capturedAA7.DryRun = $CoverDeletionDryRun
+    return @{ ConvertedImageSuccess = 0; ConvertedImageFail = 0; ConvertedImageSkipped = 0; DeletedImageSuccess = 0; DeletedImageFail = 0
+        StaleImageCleanedSuccess = 0; StaleImageCleanedFail = 0; ConvertedAnimatedSuccess = 0; ConvertedAnimatedFail = 0; ConvertedAnimatedSkipped = 0
+        DeletedAnimatedSuccess = 0; DeletedAnimatedFail = 0; ZipCreatedSuccess = 0; ZipCreatedFail = 0; ZipSkippedDueToError = 0
+        FolderDeletedSuccess = 0; FolderDeletedFail = 0; ForceKilledCount = 0; InspectFailedCount = 0; SeriesCount = 0; ChapterCount = 0; Aborted = $false }
+}.GetNewClosure()
+$settingsAA7 = $fakeSettings.Clone()
+if ($settingsAA7.ContainsKey('CoverDeletionDryRun')) { $settingsAA7.Remove('CoverDeletionDryRun') }
+$null = Invoke-Mode -Resolved @{ Mode = 'FullPipeline' } -TargetPath "C:\fake\lib" -Settings $settingsAA7 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -FullPipelineHandler $fakeFullHandlerAA7
+Test-Assert ($capturedAA7.DryRun -eq $true) ("a missing CoverDeletionDryRun key reached Full Pipeline as a dry run (got " + $capturedAA7.DryRun + ")")
+Write-Host ""
+
 Write-Host "==============================================="
 if ($script:failCount -eq 0) {
     Write-Host ("ALL PASSED  (" + $script:passCount + " assertions)") -ForegroundColor Green

@@ -482,8 +482,6 @@ function Show-CoverDeletionMenu {
 
     # DOCUMENTED DUPLICATE: the same clear/notice render loop is in
     # Show-ModeMenu and Show-OptionsMenuLevel - keep all three in sync.
-    # Options 1/2/5 print real work output, so the render right after them
-    # doesn't clear, and -ScreenState.HasOutput tells the caller not to clear either.
     $clearNext       = $ClearOnFirstRender
     $notice          = $null
     $screenHasOutput = $false
@@ -498,7 +496,6 @@ function Show-CoverDeletionMenu {
         if ($null -ne $Settings -and $Settings.ContainsKey('LastCoverDeletionPath')) {
             $defaultPath = [string]$Settings.LastCoverDeletionPath
         }
-        # Empty = prompt (prefilled with $defaultPath); otherwise scan the target folder directly.
         $runFolder = ""
         if (-not (Get-CoverDeletionSetting -Settings $Settings -Key 'CoverDeletionAskForFolder')) { $runFolder = $TargetPath }
         $dryRun = Get-CoverDeletionSetting -Settings $Settings -Key 'CoverDeletionDryRun'
@@ -508,7 +505,7 @@ function Show-CoverDeletionMenu {
             '1' {
                 $runResult = & $RunHandler $ProfilesPath $PromptFunc $defaultPath $runFolder $dryRun
                 if ($runResult -and $runResult.ResolvedPath) {
-                    Save-LastCoverDeletionPath -Settings $Settings -SettingsPath $SettingsPath -ResolvedPath $runResult.ResolvedPath
+                    if ([string]::IsNullOrWhiteSpace($runFolder)) { Save-LastCoverDeletionPath -Settings $Settings -SettingsPath $SettingsPath -ResolvedPath $runResult.ResolvedPath }
                     $survivingFiles = $null
                     if ($runResult.AllScannedFiles) {
                         $survivingFiles = @($runResult.AllScannedFiles | Where-Object { [System.IO.File]::Exists($_.FullName) })
@@ -522,7 +519,7 @@ function Show-CoverDeletionMenu {
             '4' { $null = & $ActionHandler 'OpenProfileLocation' $ProfilesPath }
             '5' {
                 $tzResult = & $TrailingZeroHandler $PromptFunc $defaultPath $runFolder
-                if ($tzResult -and $tzResult.ResolvedPath) {
+                if ($tzResult -and $tzResult.ResolvedPath -and [string]::IsNullOrWhiteSpace($runFolder)) {
                     Save-LastCoverDeletionPath -Settings $Settings -SettingsPath $SettingsPath -ResolvedPath $tzResult.ResolvedPath
                 }
                 Write-Host ""

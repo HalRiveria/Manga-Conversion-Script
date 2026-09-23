@@ -45,8 +45,6 @@ $script:zipOnlyWorker = {
         [System.Threading.CancellationToken]$CancelToken
     )
 
-    # Raw .NET, not Add-Type (Lint Rule 7) - a no-op when the main thread
-    # already loaded them (FileDeletion.ps1/ZipCreation.ps1 do at dot-source).
     $null = [System.Reflection.Assembly]::LoadWithPartialName("Microsoft.VisualBasic")
     $null = [System.Reflection.Assembly]::LoadWithPartialName("System.IO.Compression.FileSystem")
 
@@ -187,9 +185,6 @@ function Invoke-ZipOnlyPipeline {
                     $seriesName = $next.Dir.Name
                     $seriesRoot = $dirFullName
                 } else {
-                    # Same category-folder rule New-SeriesProvider uses
-                    # (Test-SeriesCategoryFolder): descend past category
-                    # folders to the real series folder.
                     $seriesRoot = [System.IO.Path]::Combine($trimmedPath, $segments[0])
                     for ($i = 1; $i -lt ($segments.Count - 1); $i++) {
                         if (-not $zoCategoryCache.ContainsKey($seriesRoot)) {
