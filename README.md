@@ -39,7 +39,7 @@ decisions made, bugs found and fixed, forward references - lives in
 | `Modules\LeafDirectoryDiscovery.ps1` | `Get-ZippableLeafDirs`/`New-ZippableLeafDirProvider` (incremental leaf-folder scan) plus `New-SeriesProvider`/`Get-SeriesChapters` (two-tier series/chapter discovery for Clean Console Output). |
 | `Modules\ZipParallelProcessing.ps1` | `Invoke-ZipParallelProcessing` - the shared runspace-pool dispatcher used by `ZipPipeline.ps1` and `Controller.ps1`. |
 | `Modules\CleanConsoleRendering.ps1` | The Clean Console Output renderer - live per-series/chapter progress display replacing per-file console spam (log files unaffected). |
-| `Modules\ZipPipeline.ps1` | `Invoke-ZipOnlyPipeline` (mode "Zip Folders") and `Invoke-LooseFolderZip` (mode "Image Conversion + Zip"'s zip step) - zip-domain orchestration. |
+| `Modules\ZipPipeline.ps1` | `Invoke-ZipOnlyPipeline` (mode "Zip Folders") - zip-domain orchestration. |
 | `Modules\ImageConversionPipeline.ps1` | `Invoke-LooseImageConversionPipeline` (mode "Image Conversion" end to end, Clean Console Output-integrated). |
 | `Modules\Config.ps1` | Settings schema + `Import-/Export-ScriptSettings` at `%LOCALAPPDATA%\ConversionScript\settings.json`, with per-key validation and corrupt-file recovery. |
 | `Modules\Menu.ps1` | `Get-SelectedMode`/`Show-ModeMenu` (mode-selection prompt, including the Cover Deletion submenu) and `Show-OptionsMenuLevel` (data-driven options-menu renderer). |

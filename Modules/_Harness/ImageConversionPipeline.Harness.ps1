@@ -133,7 +133,7 @@ function Test-AbortSignal {
     & $originalTestAbortSignal
 }
 
-# Spy for the -ZipStepCallback merge scenarios (Q onward) - same
+# Spy for the CCR status scenarios - same
 # call-straight-through-to-the-real-one pattern as the abort spies above.
 # Records every Status/Detail Complete-ChapterProgress is actually called
 # with, so a scenario can prove the merge happened in ONE call rather than
@@ -632,10 +632,6 @@ Test-Assert ((Get-Content -LiteralPath (Join-Path $chC2 "photo.jxl") -Raw) -eq $
 # counted into InspectFailedCount and used to force IsZippable=$false.
 Test-Assert ($totalsC2.InspectFailedCount -eq 1) ("the naming collision is now counted in InspectFailedCount, not invisible (got " + $totalsC2.InspectFailedCount + ")")
 
-$zipCallsC2 = [System.Collections.Generic.List[hashtable]]::new()
-$zipCallbackC2 = { param($payload) $zipCallsC2.Add($payload); return @{ Status = "Success"; Detail = $null } }
-$null = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-c2") -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false -ZipStepCallback $zipCallbackC2
-Test-Assert ($zipCallsC2.Count -eq 0) "the chapter holding the naming collision is never treated as zippable - ZipStepCallback (mode 8's own zip-step wiring) is never invoked for it"
 
 # ==============================================================================
 #  Scenario C2c (2026-09-09, zip-blocked-status fix): the live CCR display
@@ -731,14 +727,10 @@ $rootD2 = New-Dir "scenario-d2"
 $chD2 = New-Dir "scenario-d2\Series\Chapter 1"
 [System.IO.File]::WriteAllText((Join-Path $chD2 "page1.jxl"), "already converted on a prior run - source already deleted, nothing loose left")
 
-$zipCallsD2 = [System.Collections.Generic.List[hashtable]]::new()
-$zipStepD2 = { param($Info) $zipCallsD2.Add($Info); return @{ Status = "Success"; Detail = "1 entry" } }.GetNewClosure()
-
-$totalsD2 = Invoke-LooseImageConversionPipeline -Path $rootD2 -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false -ZipStepCallback $zipStepD2
+$totalsD2 = Invoke-LooseImageConversionPipeline -Path $rootD2 -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
 
 Test-Assert ($totalsD2.ChapterCount -eq 1) ("the all-.jxl chapter was discovered at all (got ChapterCount=" + $totalsD2.ChapterCount + ")")
 Test-Assert ($totalsD2.ConvertedSuccess -eq 0 -and $totalsD2.ConvertedFail -eq 0) "sanity check: nothing needed converting"
-Test-Assert ($zipCallsD2.Count -eq 1) ("the zip callback fired for the all-.jxl chapter - the exact discovery-level gap this fix closes (got " + $zipCallsD2.Count + ")")
 Write-Host ""
 
 # ==============================================================================
@@ -1206,61 +1198,6 @@ $totalsS = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "sce
 Test-Assert ($totalsS.InspectFailedCount -eq 1) ("inspect-failure counted (got InspectFailedCount=" + $totalsS.InspectFailedCount + ")")
 Test-Assert ($totalsS.ConvertedFail -eq 0) "NOT folded into ConvertedFail - a different kind of outcome"
 Test-Assert (Test-Path -LiteralPath $avifS) "the source was left untouched - never got far enough to convert or delete"
-Write-Host ""
-
-# ==============================================================================
-#  Scenario T: -ZipStepCallback (mode 8's decided CCR-fold, 2026-08-28) -
-#  fires only when IsZippable and conversion didn't already hit an Error,
-#  and its outcome is folded into the SAME Complete-ChapterProgress call
-#  conversion already makes, not a second one.
-# ==============================================================================
-Write-Host "=== Scenario T: -ZipStepCallback fires and folds into ONE CCR transition ===" -ForegroundColor Cyan
-Reset-AbortState
-$rootT = New-Dir "scenario-t"
-$chT = New-Dir "scenario-t\Series\Chapter 1"
-New-FakeImage -DirPath $chT -Name "page1.jpg" | Out-Null
-
-$zipCallsT = [System.Collections.Generic.List[hashtable]]::new()
-$zipStepT = {
-    param($Info)
-    $zipCallsT.Add($Info)
-    return @{ Status = "Success"; Detail = "1 entry" }
-}.GetNewClosure()
-
-$script:CleanConsoleOutputEnabled = $true
-try {
-    $totalsT = Invoke-LooseImageConversionPipeline -Path $rootT -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false -ZipStepCallback $zipStepT
-} finally {
-    $script:CleanConsoleOutputEnabled = $false
-}
-
-Test-Assert ($zipCallsT.Count -eq 1) ("the zip callback fired exactly once (got " + $zipCallsT.Count + ")")
-Test-Assert ($zipCallsT[0].ChapterResult.ConvertedCount -eq 1) "the zip callback saw the real ChapterResult, not a stub"
-Test-Assert ($script:completeChapterProgressCalls.Count -eq 1) ("exactly ONE Complete-ChapterProgress call for the chapter - not a separate second transition for the zip step (got " + $script:completeChapterProgressCalls.Count + ")")
-Test-Assert ($script:completeChapterProgressCalls[0].Status -eq "Success") "merged Status is Success (both halves clean)"
-Test-Assert ($script:completeChapterProgressCalls[0].Detail -eq "Convert: OK | Zip: 1 entry") ("merged Detail concatenates both halves (got '" + $script:completeChapterProgressCalls[0].Detail + "')")
-Reset-AbortState
-Write-Host ""
-
-# ==============================================================================
-#  Scenario U: -ZipStepCallback is NOT called for a non-zippable "extra"
-#  entry, and NOT called when conversion itself already hit an Error - both
-#  gates live in this module, not the callback (see .PARAMETER ZipStepCallback).
-# ==============================================================================
-Write-Host "=== Scenario U: -ZipStepCallback gated on IsZippable and non-Error ===" -ForegroundColor Cyan
-$rootU = New-Dir "scenario-u"
-# An "extra" entry: an image sitting directly in the series root, no real
-# chapter subfolder - never zippable, same construction as Scenario L.
-New-FakeImage -DirPath $rootU -Name "loose.jpg" | Out-Null
-$chU2 = New-Dir "scenario-u\Series\Chapter 1"
-New-FakeImage -DirPath $chU2 -Name "bad.jpg" -Fail $true | Out-Null
-
-$zipCallsU = [System.Collections.Generic.List[hashtable]]::new()
-$zipStepU = { param($Info) $zipCallsU.Add($Info); return @{ Status = "Success"; Detail = $null } }.GetNewClosure()
-
-$totalsU = Invoke-LooseImageConversionPipeline -Path $rootU -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false -ZipStepCallback $zipStepU
-
-Test-Assert ($zipCallsU.Count -eq 0) ("the zip callback never fired - neither entry qualified (extra=not zippable, Chapter 1=conversion Error) (got " + $zipCallsU.Count + " call(s))")
 Write-Host ""
 
 # ==============================================================================

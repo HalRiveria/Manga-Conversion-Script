@@ -56,7 +56,7 @@ Test-Assert (
     $defA2.ContainsKey('AnimatedLossless') -and $defA2.ContainsKey('AnimatedOverwrite') -and
     $defA2.ContainsKey('AnimatedDeleteSource')
 ) "schema includes all five Animated* keys"
-Test-Assert ($defA2.ContainsKey('ZipWithUnconvertedAnimated') -and $defA2.ZipWithUnconvertedAnimated -eq $false) "schema includes ZipWithUnconvertedAnimated, default `$false"
+Test-Assert (-not $defA2.ContainsKey('ZipWithUnconvertedAnimated')) "ZipWithUnconvertedAnimated is gone from the schema (retired with Mode 8)"
 # 2026-09-03 addition, real bug fix (see CHANGELOG.md) - dedicated Full
 # Pipeline shared-budget setting, defaults to match MaxCjxlProcs (8) so
 # upgrading doesn't silently change real concurrency.
@@ -363,15 +363,18 @@ Test-Assert ($settingsH3b.FullPipelineMaxConcurrentProcs -eq 12) "a valid FullPi
 Write-Host ""
 
 # ==============================================================================
-#  Scenario H4: ZipWithUnconvertedAnimated round-trips as a real bool
+#  Scenario H4: a retired key (ZipWithUnconvertedAnimated, Mode 8's, removed
+#  2026-09-23) in an older settings file is dropped silently - no "unknown
+#  setting" warning on every launch - and everything else still loads.
 # ==============================================================================
-Write-Host "=== Scenario H4: ZipWithUnconvertedAnimated round-trips ===" -ForegroundColor Cyan
+Write-Host "=== Scenario H4: a retired settings key is dropped silently ===" -ForegroundColor Cyan
 $pathH4 = Join-Path $scratchDir "zip-unconverted-settings.json"
-$toSaveH4 = Get-DefaultScriptSettings
-$toSaveH4.ZipWithUnconvertedAnimated = $true
-Export-ScriptSettings -Settings $toSaveH4 -Path $pathH4
+[System.IO.File]::WriteAllText($pathH4, '{ "ZipWithUnconvertedAnimated": true, "JpegQuality": 77 }')
+$script:logCalls.Clear()
 $loadedH4 = Import-ScriptSettings -Path $pathH4
-Test-Assert ($loadedH4.ZipWithUnconvertedAnimated -eq $true) "ZipWithUnconvertedAnimated round-tripped as `$true"
+Test-Assert (-not $loadedH4.ContainsKey('ZipWithUnconvertedAnimated')) "the retired key is not loaded"
+Test-Assert ($loadedH4.JpegQuality -eq 77) "the rest of the file still loads"
+Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*" }).Count -eq 0) "no warning was logged for the retired key"
 Write-Host ""
 
 # ==============================================================================

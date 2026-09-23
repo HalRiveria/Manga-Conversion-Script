@@ -42,15 +42,13 @@
     setting can express) so it's set to a fixed value: 8, matching
     MaxCjxlProcs and this machine's physical core count (Ryzen 7 7800X3D).
 
-    ZipWithUnconvertedAnimated (added 2026-08-27 alongside the Menu
-    redesign in Todo.md) gates the "Image Conversion + Zip" mode, which
-    runs no animated-conversion pass of its own: default $false means a
-    folder still holding unconverted .avif files does NOT get zipped by
-    that mode, so animated content doesn't silently end up shipped
-    unconverted inside a ZIP. $true zips anyway.
+    ZipWithUnconvertedAnimated (2026-08-27) gated the "Image Conversion +
+    Zip" mode (Mode 8). Mode 8 was retired 2026-09-23 in favor of Full
+    Pipeline's FullPipelineAnimatedConversion toggle, and this key went
+    with it - Import-ScriptSettings drops it silently from older files.
 
     TODO once AnimatedConversionPipeline.ps1 is actually built: re-check
-    these six keys (five Animated* plus ZipWithUnconvertedAnimated)
+    the five Animated* keys
     against its real functions' actual -Param names (the same "match the
     consuming function's param names" rule every other key in this
     schema follows) and check whether it needs any settings beyond these
@@ -140,7 +138,6 @@ function Get-DefaultScriptSettings {
         AnimatedLossless                 = $false
         AnimatedOverwrite                = $false
         AnimatedDeleteSource             = $true
-        ZipWithUnconvertedAnimated       = $false
         LastCoverDeletionPath            = ""
         CoverDeletionAskForFolder        = $false
         CoverDeletionDryRun              = $true
@@ -381,7 +378,12 @@ function Import-ScriptSettings {
     }
 
     $loaded = ConvertTo-SettingsHashtable -InputObject $parsed
+    # Keys this project used to write and has since removed - dropped
+    # silently rather than warning on every launch until the file is
+    # next saved. ZipWithUnconvertedAnimated: Mode 8 only, retired 2026-09-23.
+    $retiredKeys = @('ZipWithUnconvertedAnimated')
     foreach ($key in $loaded.Keys) {
+        if ($retiredKeys -contains $key) { continue }
         if (-not $settings.ContainsKey($key)) {
             Write-Log ("Ignoring unknown setting '" + $key + "' found in '" + $Path + "'.") -Level Warn
             continue

@@ -9,6 +9,8 @@ function Get-LooseImageExtensions {
 }
 
 function Test-OrphanedScratchFileName {
+    # DOCUMENTED DUPLICATE: ZipPipeline.ps1's $script:zipOnlyWorker keeps its
+    # own literal copy of this regex trio - keep both in sync.
     param([Parameter(Mandatory)][string]$Name)
     return (
         $Name -imatch '_tmp_iccstrip(-\d+)?\.png$' -or
@@ -367,7 +369,6 @@ function Invoke-LooseImageConversionPipeline {
         [string[]]$FolderQualifyingExtensions = ((Get-LooseImageExtensions) + @(".jxl")),
         [System.Collections.Generic.HashSet[string]]$FolderExcludeStagingDirs = $null,
         [scriptblock]$PostChapterCallback = $null,
-        [scriptblock]$ZipStepCallback = $null,
         [int]$AbortTimeoutSeconds = 60,
         [int]$MaxQueueAhead = 3
     )
@@ -773,20 +774,6 @@ function Invoke-LooseImageConversionPipeline {
             foreach ($p in $cr.SkippedPaths) { $totals.LastSkippedPaths.Add($p) }
 
             $chapterStatus, $chapterDetail = Get-ChapterProgressStatus -ChapterResult $chapterResultForCallback
-
-            if ($null -ne $ZipStepCallback -and $chapterInfo.IsZippable -and $chapterStatus -ne 'Error') {
-                $zipOutcome = & $ZipStepCallback @{ SeriesName = $chapterInfo.SeriesName; ChapterName = $chapterInfo.ChapterName; Dir = $chapterInfo.Dir; ChapterResult = $chapterResultForCallback; ZipOut = $chapterInfo.ZipOut }
-                if ($null -ne $zipOutcome) {
-                    $zipSeverity = switch ($zipOutcome.Status) { 'Fail' { 2 }; 'Skipped' { 1 }; default { 0 } }
-                    $chapterRank = @{ Success = 0; Warning = 1; Error = 2 }
-                    if ($zipSeverity -gt $chapterRank[$chapterStatus]) {
-                        $chapterStatus = switch ($zipSeverity) { 2 { 'Error' }; 1 { 'Warning' }; default { 'Success' } }
-                    }
-                    $convertDetailPart = if ($chapterDetail) { "Convert: " + $chapterDetail } else { "Convert: OK" }
-                    $zipDetailPart     = "Zip: " + $(if ($zipOutcome.Detail) { $zipOutcome.Detail } else { $zipOutcome.Status })
-                    $chapterDetail     = $convertDetailPart + " | " + $zipDetailPart
-                }
-            }
 
             if ((-not $chapterInfo.IsZippable) -and (-not $chapterInfo.IsExtra)) {
                 $chapterStatus, $chapterDetail = Get-ZipBlockedStatusOverride -Status $chapterStatus -Detail $chapterDetail -BlockedReason "naming collision"

@@ -316,6 +316,21 @@ Test-Assert ($invokeModeC.Calls -eq 1) "the loop went 5 -> Run -> back -> mode 2
 Write-Host ""
 
 # ==============================================================================
+#  Scenario D (2026-09-23): Mode 8 is retired - through the real main loop,
+#  picking 8 is an invalid selection (the menu redraws) and the next pick
+#  (2) is what actually gets dispatched.
+# ==============================================================================
+Write-Host "=== Scenario D: retired Mode 8 is rejected by the real menu ===" -ForegroundColor Cyan
+$promptD = New-ScriptedPrompt -Responses @('8', '2')
+$realGetModeD = { param($Settings, $SettingsPath, $ReinitLogPathsHandler, $TargetPath) Get-SelectedMode -Settings $Settings -SettingsPath $SettingsPath -PromptFunc $promptD -TargetPath $TargetPath -ClearScreenFunc { } }.GetNewClosure()
+$modesD = [System.Collections.Generic.List[string]]::new()
+$fakeInvokeModeD = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe) $modesD.Add([string]$Resolved.Mode); return $null }.GetNewClosure()
+Invoke-MainLoop -TargetPath $scratchDir -Settings $fakeSettings.Clone() -SettingsPath (Join-Path $scratchDir "scenario-d-settings.json") -CjxlExe "fake_cjxl.exe" `
+    -GetModeHandler $realGetModeD -InvokeModeHandler $fakeInvokeModeD -PostRunPromptHandler { return 'Exit' }
+Test-Assert (($modesD -join ",") -eq "ImageConversion") ("'8' was rejected and the follow-up '2' ran Image Conversion (got: " + ($modesD -join ",") + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

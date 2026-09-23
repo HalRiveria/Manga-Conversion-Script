@@ -1261,7 +1261,6 @@ function Invoke-Mode {
         [scriptblock]$AnimatedConversionHandler = ${function:Invoke-LooseAnimatedConversionPipeline},
         [scriptblock]$ZipFoldersHandler = ${function:Invoke-ZipOnlyPipeline},
         [scriptblock]$FullPipelineHandler = ${function:Invoke-FullPipeline},
-        [scriptblock]$ZipFolderHandler = ${function:Invoke-LooseFolderZip},
         [scriptblock]$LogHandler = { param($m) Write-Log $m -Level Error }
     )
 
@@ -1330,47 +1329,6 @@ function Invoke-Mode {
                 $stats.InspectFailed.Count            = $r.InspectFailedCount
                 $stats.Aborted                        = $r.Aborted
                 $stats.ForceKilledCount               = $r.ForceKilledCount
-            }
-            'ImageConversionZip' {
-                $zipLooseExtensions = if ($Settings.ZipWithUnconvertedAnimated) {
-                    @((Get-LooseImageExtensions) | Where-Object { $_ -ne ".avif" -and (Get-NeverConvertedExtensions) -inotcontains $_ })
-                } else {
-                    @((Get-LooseImageExtensions) | Where-Object { (Get-NeverConvertedExtensions) -inotcontains $_ })
-                }
-                $zipStatsBox = @{ Success = 0; Fail = 0; Skipped = 0; FolderDeletedSuccess = 0; FolderDeletedFail = 0 }
-                $zipStep = {
-                    param($Info)
-                    $imageActuallyConverted = ($null -ne $Info.ChapterResult -and $Info.ChapterResult.ConvertedCount -gt 0)
-                    $zipResult = & $ZipFolderHandler -FolderPath $Info.Dir.FullName -ZipOut $Info.ZipOut -LooseImageExtensions $zipLooseExtensions -RequireJxlEntry $imageActuallyConverted
-                    switch ($zipResult.Status) {
-                        'Success' { $zipStatsBox.Success++ }
-                        'Fail'    { $zipStatsBox.Fail++ }
-                        'Skipped' { $zipStatsBox.Skipped++ }
-                    }
-                    if ($zipResult.FolderDeleted)      { $zipStatsBox.FolderDeletedSuccess++ }
-                    if ($zipResult.FolderDeleteFailed) { $zipStatsBox.FolderDeletedFail++ }
-                    $detail = switch ($zipResult.Status) {
-                        'Success' { $zipResult.EntryCount.ToString() + " entries" }
-                        'Skipped' { "unconverted source(s) remain" }
-                        default   { $null }
-                    }
-                    return @{ Status = $zipResult.Status; Detail = $detail }
-                }.GetNewClosure()
-
-                $r = & $ImageConversionHandler -Path $TargetPath -CjxlExe $CjxlExe -MagickExe $MagickExe `
-                    -JpegLossless ([bool]$Settings.JpegLossless) -JpegQuality $Settings.JpegQuality -MaxCjxlProcs $Settings.MaxCjxlProcs -FullLogging $script:FullLogging `
-                    -ZipStepCallback $zipStep
-                $stats.LooseImgConverted.Success = $r.ConvertedSuccess; $stats.LooseImgConverted.Fail = $r.ConvertedFail; $stats.LooseImgConverted.Skipped = $r.ConvertedSkipped
-                $stats.LooseImgDeleted.Success   = $r.DeletedSuccess;   $stats.LooseImgDeleted.Fail   = $r.DeletedFail
-                $stats.LooseStaleCleaned.Success = $r.StaleCleanedSuccess; $stats.LooseStaleCleaned.Fail = $r.StaleCleanedFail
-                $stats.InspectFailed.Count       = $r.InspectFailedCount
-                $stats.LooseFolderZipped.Success  = $zipStatsBox.Success
-                $stats.LooseFolderZipped.Fail      = $zipStatsBox.Fail
-                $stats.LooseFolderZipped.Skipped   = $zipStatsBox.Skipped
-                $stats.LooseFolderDeleted.Success  = $zipStatsBox.FolderDeletedSuccess
-                $stats.LooseFolderDeleted.Fail      = $zipStatsBox.FolderDeletedFail
-                $stats.Aborted           = $r.Aborted
-                $stats.ForceKilledCount  = $r.ForceKilledCount
             }
             default {
                 throw ("Invoke-Mode: unrecognized mode '" + $Resolved.Mode + "'.")

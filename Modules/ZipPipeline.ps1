@@ -72,8 +72,10 @@ $script:zipOnlyWorker = {
     }
 
     try {
-        # Same orphaned-scratch-file regex trio as Invoke-LooseFolderZip's
-        # own sweep below in this file - keep both in sync if either changes.
+        # DOCUMENTED DUPLICATE of ImageConversionPipeline.ps1's
+        # Test-OrphanedScratchFileName regex trio, kept as a literal because
+        # this module's harness doesn't dot-source that module (ImageConversionPipeline.Harness.ps1's
+        # Scenario A0b checks this copy hasn't drifted) - keep both in sync.
         $orphanedScratchFiles = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
         foreach ($f in (Get-FilesRecursiveSafe -ScanPath $FolderPath)) {
             if ($f.Name -imatch '_tmp_iccstrip(-\d+)?\.png$' -or
@@ -289,131 +291,4 @@ function Invoke-ZipOnlyPipeline {
     }
 
     return $totals
-}
-
-# ==============================================================================
-#  PART 2 - mode 2's per-folder zip step
-# ==============================================================================
-
-function Invoke-LooseFolderZip {
-    param(
-        [Parameter(Mandatory)]
-        [string]$FolderPath,
-        [Parameter(Mandatory)]
-        [string]$ZipOut,
-        [Parameter(Mandatory)]
-        [string[]]$LooseImageExtensions,
-        [bool]$RequireJxlEntry = $true,
-        [string]$SeriesName = $null,
-        [string]$ChapterName = $null
-    )
-
-    $result = @{
-        Status            = $null
-        ZipSize           = 0
-        EntryCount        = 0
-        FolderDeleted     = $false
-        FolderDeleteFailed = $false
-    }
-
-    $folderName = Split-Path -Path $FolderPath -Leaf
-    $reportCcr  = ($PSBoundParameters.ContainsKey('SeriesName') -and $PSBoundParameters.ContainsKey('ChapterName'))
-    if ($reportCcr) { Start-CcrChapterProgressIfEnabled -SeriesName $SeriesName -ChapterName $ChapterName }
-
-    try {
-        # Same orphaned-scratch-file regex trio as $script:zipOnlyWorker's
-        # own sweep above in this file - keep both in sync if either changes.
-        # Kept as this module's own literal rather than calling
-        # ImageConversionPipeline.ps1's Test-OrphanedScratchFileName since
-        # this module's own harness deliberately doesn't dot-source that
-        # module - see Docs/function-notes.md.
-        #
-        # One walk, not two: each file is classified as it's seen - an
-        # orphan gets deleted and skipped; a failed delete falls through
-        # to the same extension check an ordinary file gets, so a scratch
-        # file that couldn't be removed still blocks the zip exactly like
-        # it did when this was two separate passes (delete-failure is the
-        # real, intended reason a leftover keeps blocking - see the Warn
-        # text below).
-        $remainingSrcImages = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-        foreach ($f in (Get-ChildItem -LiteralPath $FolderPath -Recurse -File -ErrorAction SilentlyContinue)) {
-            $isOrphan = $f.Name -imatch '_tmp_iccstrip(-\d+)?\.png$' -or
-                $f.Name -imatch '_tmp_(webp|avif|bmp|heic|heif)2png\.png$' -or
-                $f.Name -imatch '_tmp_overwrite\.webp$'
-            if ($isOrphan) {
-                try {
-                    [System.IO.File]::Delete($f.FullName)
-                    Write-Log ("Deleted orphaned scratch file (its owning cleanup could not run earlier): '" + $f.FullName + "'") -Level Warn
-                    continue
-                } catch {
-                    Write-Log ("Could not delete orphaned scratch file '" + $f.FullName + "' - it may still block this chapter's zip: " + $_) -Level Warn
-                }
-            }
-            if ($LooseImageExtensions -icontains $f.Extension) { $remainingSrcImages.Add($f) }
-        }
-
-        if ($remainingSrcImages.Count -gt 0) {
-            $nameList = ($remainingSrcImages | Select-Object -First 5 | ForEach-Object { $_.Name }) -join ", "
-            if ($remainingSrcImages.Count -gt 5) { $nameList += ", ..." }
-            Write-Log ("SKIPPING zip of '" + $folderName + "': " + $remainingSrcImages.Count + " unconverted source image(s) still present (" + $nameList + "). Resolve conversion failures before zipping.") -Level Warn
-            $result.Status = "Skipped"
-            return $result
-        }
-
-        try {
-            Write-Log ("Re-zipping '" + $FolderPath + "' -> '" + $ZipOut + "'")
-
-            $zipSize = Compress-FolderToZip -SourceDir $FolderPath -ZipOut $ZipOut
-            $verify  = Test-ZipArchive -ZipPath $ZipOut -RequireJxlEntry $RequireJxlEntry
-
-            Write-Log ("ZIP OK: '" + $ZipOut + "' (" + $zipSize + " bytes, " + $verify.EntryCount + " entries)")
-            $result.Status     = "Success"
-            $result.ZipSize    = $zipSize
-            $result.EntryCount = $verify.EntryCount
-        } catch {
-            Write-Log ("FAILED to zip folder '" + $FolderPath + "': " + $_) -Level Error
-            $result.Status = "Fail"
-            try {
-                if (Test-Path -LiteralPath $ZipOut) { [System.IO.File]::Delete($ZipOut) }
-            } catch { }
-            return $result
-        }
-
-        # Deliberately OUTSIDE the try/catch above (2026-09-15 fix, real bug
-        # - same species as $script:zipOnlyWorker's own copy earlier in this
-        # file, keep both in sync): that block's catch treats any exception
-        # as "the zip failed" and deletes $ZipOut - correct during zip
-        # creation, wrong once the zip is already built and verified. This
-        # step has its own inner try/catch for the one call that can
-        # legitimately fail (Remove-Source) - it doesn't need the outer one.
-        try {
-            $removed = Remove-Source -ItemPath $FolderPath
-            if ($removed) {
-                $deleteDesc = if ($script:PermanentDelete) { "permanently" } else { "Recycle Bin" }
-                Write-Log ("Deleted folder (" + $deleteDesc + "): '" + $FolderPath + "'")
-                $result.FolderDeleted = $true
-            } else {
-                Write-Log ("Folder already gone before deletion (not counted as deleted): '" + $FolderPath + "'") -Level Warn
-            }
-        } catch {
-            Write-Log ("FAILED to delete folder '" + $FolderPath + "': " + $_) -Level Error
-            $result.FolderDeleteFailed = $true
-        }
-
-        return $result
-    } finally {
-        if ($reportCcr) {
-            $ccrStatus = switch ($result.Status) {
-                "Success" { if ($result.FolderDeleteFailed) { "Warning" } else { "Success" } }
-                "Skipped" { "Warning" }
-                default   { "Error" }
-            }
-            $ccrDetail = switch ($result.Status) {
-                "Success" { if ($result.FolderDeleteFailed) { "zipped OK, but source folder delete failed" } else { $null } }
-                "Skipped" { "zip skipped: unconverted source image(s) still present" }
-                default   { "zip failed" }
-            }
-            Complete-CcrChapterProgressIfEnabled -SeriesName $SeriesName -ChapterName $ChapterName -Status $ccrStatus -Detail $ccrDetail
-        }
-    }
 }

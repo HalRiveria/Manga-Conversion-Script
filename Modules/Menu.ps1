@@ -8,7 +8,6 @@ function Get-ModeMenuLines {
         "  3 - Animated Conversion      (convert loose animated/avif files only; no zipping)"
         "  4 - Zip Folders              (no conversion; zips folders that are already ready)"
         "  5 - Cover Deletion           (submenu - unwanted-image profile scan/add)"
-        "  8 - Image Conversion + Zip   (convert loose images, then zip)"
         "  0 - Options                  (view/change settings - saved for future runs)"
         ""
         "  Ctrl+C aborts the current run at any point (finishes in-flight work, then stops cleanly)."
@@ -23,7 +22,6 @@ function Resolve-ModeSelection {
         '2' { return @{ Mode = 'ImageConversion';      RunImageConversion = $true;  RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false } }
         '3' { return @{ Mode = 'AnimatedConversion';   RunImageConversion = $false; RunAnimatedConversion = $true;  RunZip = $false; RunZipOnly = $false } }
         '4' { return @{ Mode = 'ZipFolders';           RunImageConversion = $false; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $true  } }
-        '8' { return @{ Mode = 'ImageConversionZip';   RunImageConversion = $true;  RunAnimatedConversion = $false; RunZip = $true;  RunZipOnly = $false } }
         default { return $null }
     }
 }
@@ -172,7 +170,6 @@ function Get-OptionsMenuSchema {
         ) }
         @{ Key = '4'; Label = 'Zip Settings'; Type = 'Submenu'; Items = @(
             @{ Key = '1'; Label = 'Zip Pipeline Threads';               Type = 'Int';  SettingsKey = 'ZipParallelThreads';         Min = 1; Max = [int]::MaxValue; Description = 'parallel ZIP workers for Zip Folders' }
-            @{ Key = '2'; Label = 'Zip with Unconverted Animated Files'; Type = 'Bool'; SettingsKey = 'ZipWithUnconvertedAnimated'; Description = 'off (default) = Image Conversion + Zip skips a folder with unconverted .avif files; on = zips anyway' }
         ) }
         @{ Key = '5'; Label = 'Logging'; Type = 'Submenu'; Items = @(
             @{ Key = '1'; Label = 'Full Logging';          Type = 'Bool'; SettingsKey = 'FullLogging';               Description = 'log every action, not just errors/summary' }
