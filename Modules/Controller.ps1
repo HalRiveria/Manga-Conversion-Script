@@ -398,19 +398,8 @@ $script:fullPipelineEngineWorker = {
 
             if ($cr.TotalFiles -eq 0) { return @() }
 
-            # Announce the chapter to CCR only once this engine actually has
-            # conversion work for it (A, 2026-09-22), NOT during the
-            # walk-ahead before the zero-file check above. A zero-job engine
-            # (e.g. the animated engine in a static-image library) walks the
-            # whole library unthrottled - announcing there made every chapter
-            # show as in-progress at once. Announcing here paces the
-            # announcement with whichever engine has real work (its dispatch
-            # is throttled to -MaxQueueAhead), so only in-flight chapters
-            # show. A chapter with zero conversion work in BOTH engines
-            # (already converted, zip-only) is never announced here by either
-            # engine - $finalizeChapterEntry announces it at the zip step
-            # instead. DOCUMENTED DUPLICATE: same move in the animated
-            # jobBuilder below - keep both in sync.
+            # Announce only once this engine has real work - see Docs/function-notes.md (Invoke-FullPipeline, "CCR announcement pacing").
+            # DOCUMENTED DUPLICATE: same move in the animated jobBuilder below - keep both in sync.
             if ($AnnouncedChapters.TryAdd($chapterInfo, 0)) {
                 $EventQueue.Enqueue(@{ Kind = 'ChapterStarted'; SeriesName = $chapterInfo.SeriesName; ChapterName = $chapterInfo.ChapterName })
             }
@@ -662,9 +651,8 @@ $script:fullPipelineEngineWorker = {
 
             if ($cr.TotalFiles -eq 0) { return @() }
 
-            # Announce only once this engine has real work - see the image
-            # jobBuilder above for the full reasoning (DOCUMENTED DUPLICATE,
-            # keep both in sync).
+            # Announce only once this engine has real work. DOCUMENTED DUPLICATE: same move
+            # in the image jobBuilder above - keep both in sync.
             if ($AnnouncedChapters.TryAdd($chapterInfo, 0)) {
                 $EventQueue.Enqueue(@{ Kind = 'ChapterStarted'; SeriesName = $chapterInfo.SeriesName; ChapterName = $chapterInfo.ChapterName })
             }
@@ -901,15 +889,7 @@ function Invoke-FullPipeline {
         $fullCts = [System.Threading.CancellationTokenSource]::new()
         Register-AbortCancellationSource -Cts $fullCts
 
-        # A series is shown in CCR only once real work reaches it (the
-        # series-level twin of A, 2026-09-22): the SeriesReady event records
-        # the series' chapter total here, but Start-SeriesProgress is
-        # deferred until the series' first chapter is actually announced or
-        # zipped. Otherwise a series whose bundle was resolved during the
-        # zero-job engine's unthrottled walk-ahead shows as "0/N" long before
-        # the run reaches it. $ensureSeriesStarted is the lazy start, shared
-        # by the ChapterStarted handler and $finalizeChapterEntry's zip-only
-        # path (both main-thread, so the plain hashtable/HashSet are safe).
+        # Deferred series start - see Docs/function-notes.md (Invoke-FullPipeline, "CCR announcement pacing").
         $seriesChapterTotals = @{}
         $startedSeries       = [System.Collections.Generic.HashSet[string]]::new()
         $ensureSeriesStarted = {
@@ -928,16 +908,7 @@ function Invoke-FullPipeline {
             param($key, $entry)
             $totals.ChapterCount++
 
-            # Zip-only chapter (no conversion work in either engine, so never
-            # announced during dispatch - see the jobBuilders' own note):
-            # announce it now, as it reaches the merge/zip step, so it shows
-            # briefly in CCR ("in progress") while it's zipped below and then
-            # completes. This also keeps Complete-ChapterProgress (further
-            # down) from throwing on an unannounced chapter, which would
-            # additionally stall the per-series bar short of its total. TryAdd
-            # is the same shared dedup the jobBuilders use, and $key is the
-            # same chapterInfo identity, so a chapter an engine already
-            # announced is not re-announced here.
+            # Zip-only chapter: announce it now - see Docs/function-notes.md (Invoke-FullPipeline, "CCR announcement pacing").
             if ($cleanConsoleOutputEnabled -and $announcedChapters.TryAdd($key, 0)) {
                 & $ensureSeriesStarted $entry.SeriesName
                 Start-ChapterProgress -SeriesName $entry.SeriesName -ChapterName $entry.ChapterName
@@ -1020,9 +991,7 @@ function Invoke-FullPipeline {
                     'SeriesReady' {
                         $totals.SeriesCount++
                         $totals.InspectFailedCount += $evt.InspectFailedCount
-                        # Record the total, but defer Start-SeriesProgress to
-                        # the series' first real chapter (see $ensureSeriesStarted)
-                        # so a not-yet-reached series doesn't show as "0/N".
+                        # Record the total only; Start-SeriesProgress is deferred to $ensureSeriesStarted.
                         if ($evt.TotalChapters -gt 0) {
                             $seriesChapterTotals[$evt.SeriesName] = $evt.TotalChapters
                         }
@@ -1164,16 +1133,7 @@ function Invoke-FullPipeline {
             # zipped and deleted anyway, reported as a clean run).
             if (-not ($leftoverEntry.GotImage -and $leftoverEntry.GotAnimated)) {
                 $totals.Aborted = $true
-                # Only warn about a chapter that was actually STARTED and left
-                # mid-work - that one may hold partial state a future run needs
-                # to know about. A chapter no engine ever started (the zero-job
-                # engine walked ahead and reported it done with nothing to do,
-                # but the working engine was aborted/crashed before reaching it)
-                # is untouched; warning per such chapter floods the console on
-                # any early abort of a large library (one line per not-yet-
-                # reached chapter, all -ForceConsole) for no real signal. The
-                # zip/delete skip and partial-credit below stay unconditional.
-                # $announcedChapters is the same shared dedup used above.
+                # Warn only for a chapter that was actually started - see Docs/function-notes.md (Invoke-FullPipeline, "CCR announcement pacing").
                 if ($announcedChapters.ContainsKey($leftoverKey)) {
                     Write-Log ("Full Pipeline: '" + $leftoverEntry.Dir.FullName + "' was left incomplete (an engine never finished reporting on it, likely due to the run stopping mid-way) - NOT zipped, NOT deleted, left exactly as-is for a future run to pick back up.") -Level Warn -ForceConsole
                 }
@@ -1210,20 +1170,7 @@ function Invoke-FullPipeline {
                     $totals.DeletedAnimatedFail      += $ar.DeleteFailedCount
                     $totals.InspectFailedCount       += $ar.InspectFailedCount
                 }
-                # Tell CCR this chapter is done (as a Warning, not a clean
-                # Success) so its live display doesn't leave it stuck
-                # showing "in progress" forever - same call shape
-                # $finalizeChapterEntry itself uses below. Only if it was
-                # actually announced though: since A (2026-09-22) a chapter
-                # is announced only once an engine has real work for it, so a
-                # leftover the run never got to (e.g. the zero-job engine
-                # walked ahead and reported it done, but the working engine
-                # was aborted before starting it) was never Start-ChapterProgress'd
-                # - calling Complete-ChapterProgress on it throws ("not an
-                # active chapter"). It was never shown, so there's nothing to
-                # complete; Complete-AllActiveSeriesProgress in the finally
-                # still freezes the series. $announcedChapters is the same
-                # shared dedup the jobBuilders and $finalizeChapterEntry use.
+                # Complete only an announced chapter (else Complete-ChapterProgress throws) - see Docs/function-notes.md (Invoke-FullPipeline, "CCR announcement pacing").
                 if ($cleanConsoleOutputEnabled -and $announcedChapters.ContainsKey($leftoverKey)) {
                     $null = Complete-ChapterProgress -SeriesName $leftoverEntry.SeriesName -ChapterName $leftoverEntry.ChapterName -Status 'Warning' -Detail "left incomplete - run stopped before both engines finished"
                 }
