@@ -22,7 +22,7 @@
 $ErrorActionPreference = "Stop"
 
 # Real Logging.ps1 too, for Test-AbortSignal's worker check
-# (Get-WorkerConsoleQueue) - the real one, since its $global: fallback is
+# (Get-WorkerRunspaceValue) - the real one, since its $global: fallback is
 # exactly what Scenario A3 exercises. Its Flush-ConsoleQueue is overridden
 # by the call-tracking stub below.
 . (Join-Path $PSScriptRoot "..\Logging.ps1")
@@ -220,7 +220,7 @@ function Invoke-HarnessAbortCheckFromClosure {
     return @((& $closure), (& $closure), (& $closure))
 }
 $a3Iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-foreach ($fn in @('Test-AbortSignal', 'Get-WorkerConsoleQueue', 'Invoke-HarnessAbortCheckFromClosure')) {
+foreach ($fn in @('Test-AbortSignal', 'Get-WorkerRunspaceValue', 'Invoke-HarnessAbortCheckFromClosure')) {
     $a3Iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList $fn, (Get-Item ("Function:\" + $fn)).Definition))
 }
 $a3Iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList 'Write-GatedConsoleMessage', 'param($Text, $Color, $CleanConsoleOutputEnabled) $global:announceLog.Enqueue($Text)'))

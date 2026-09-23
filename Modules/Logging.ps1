@@ -208,21 +208,18 @@ function Write-Log {
         [switch]$ForceConsole
     )
 
-    $line = Format-LogLine -Message $Message -Level $Level
-
-    # Worker runspace: hand the whole entry to the main thread, which owns
-    # the log files and the console policy (Flush-ConsoleQueue). Nothing
-    # below this point is safe in a worker - see Docs/function-notes.md.
-    $workerQueue = Get-WorkerConsoleQueue
+    $workerQueue = Get-WorkerRunspaceValue -Name workerConsoleQueue
     if ($null -ne $workerQueue) {
-        $workerQueue.Enqueue(@{ Message = $Message; Level = $Level; Line = $line; ForceConsole = [bool]$ForceConsole })
+        $workerQueue.Enqueue(@{ Message = $Message; Level = $Level; Line = (Format-LogLine -Message $Message -Level $Level); ForceConsole = [bool]$ForceConsole })
         return
     }
 
-    Write-LogLineToRunFiles -Line $line -Level $Level
-
-    if ($script:CleanConsoleOutputEnabled -and -not $ForceConsole) { return }
-    Write-LogLineToHost -Line $line -Level $Level
+    $writesFile = $script:FullLogging -or $Level -eq "Error" -or $Level -eq "Warn"
+    $echoes     = -not ($script:CleanConsoleOutputEnabled -and -not $ForceConsole)
+    if (-not ($writesFile -or $echoes)) { return }
+    $line = Format-LogLine -Message $Message -Level $Level
+    if ($writesFile) { Write-LogLineToRunFiles -Line $line -Level $Level }
+    if ($echoes) { Write-LogLineToHost -Line $line -Level $Level }
 }
 
 function Write-LogLineToRunFiles {
@@ -236,15 +233,16 @@ function Write-LogLineToRunFiles {
     }
 }
 
-function Get-WorkerConsoleQueue {
-    # $global: fallback: see Docs/function-notes.md (Logging.ps1) and
-    # Docs/lessons-learned.md - a -SharedFunctionNames function's $script:
-    # reads come back empty when called from a .GetNewClosure()'d block in
-    # a worker runspace. Same pattern as FileDeletion.ps1's
-    # Test-PermanentDeleteEnabled - keep the two in sync.
-    $queue = $script:workerConsoleQueue
-    if ($null -eq $queue) { $queue = $global:workerConsoleQueue }
-    return ,$queue
+function Get-WorkerRunspaceValue {
+    param([Parameter(Mandatory)][ValidateSet('workerConsoleQueue', 'PermanentDelete')][string]$Name)
+    if ($Name -eq 'workerConsoleQueue') {
+        $value = $script:workerConsoleQueue
+        if ($null -eq $value) { $value = $global:workerConsoleQueue }
+    } else {
+        $value = $script:PermanentDelete
+        if ($null -eq $value) { $value = $global:PermanentDelete }
+    }
+    return ,$value
 }
 
 function Write-SummaryLog {
@@ -315,5 +313,5 @@ function Write-LogFileSummary {
 }
 
 function Get-LoggingSharedFunctionNames {
-    return @('Write-Log', 'Get-WorkerConsoleQueue', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile', 'Write-LogLineToRunFiles')
+    return @('Write-Log', 'Get-WorkerRunspaceValue', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile', 'Write-LogLineToRunFiles')
 }

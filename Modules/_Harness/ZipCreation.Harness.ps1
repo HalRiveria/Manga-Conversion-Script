@@ -35,7 +35,7 @@ function Remove-ItemPermanently {
     return $true
 }
 $script:PermanentDelete = $false
-function Test-PermanentDeleteEnabled { return [bool]$script:PermanentDelete }
+function Get-WorkerRunspaceValue { param($Name) if ($Name -eq 'PermanentDelete') { return [bool]$script:PermanentDelete }; return $null }
 
 . (Join-Path $PSScriptRoot "..\ZipCreation.ps1")
 

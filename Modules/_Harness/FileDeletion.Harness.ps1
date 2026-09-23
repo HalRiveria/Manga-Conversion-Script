@@ -18,6 +18,9 @@
 
 $ErrorActionPreference = "Stop"
 
+# Real Logging.ps1 for Get-WorkerRunspaceValue (Remove-Source's Permanent
+# Delete lookup) - Scenario P needs the real $global: fallback, not a stub.
+. (Join-Path $PSScriptRoot "..\Logging.ps1")
 . (Join-Path $PSScriptRoot "..\FileDeletion.ps1")
 
 $script:passCount = 0
@@ -419,7 +422,7 @@ function Invoke-HarnessRemoveSourceFromClosure {
     return (& $closure)
 }
 $pIss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-foreach ($fn in @('Remove-Source', 'Test-PermanentDeleteEnabled', 'Invoke-HarnessRemoveSourceFromClosure')) {
+foreach ($fn in @('Remove-Source', 'Get-WorkerRunspaceValue', 'Invoke-HarnessRemoveSourceFromClosure')) {
     $pIss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList $fn, (Get-Item ("Function:\" + $fn)).Definition))
 }
 $pIss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList 'Remove-ItemPermanently', 'param($ItemPath) "permanent"'))

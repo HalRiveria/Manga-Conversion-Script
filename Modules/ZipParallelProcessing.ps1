@@ -138,10 +138,7 @@ function Invoke-ZipParallelProcessing {
             try { $h.PS.Dispose() } catch { }
         }
         if ($null -ne $localPool) { try { $localPool.Close() } catch { }; try { $localPool.Dispose() } catch { } }
-        # Worker log lines only reach the log files through this queue, so
-        # drain it even when the loop above threw - already empty on a
-        # normal exit. Swallowed: this is best-effort cleanup on a path
-        # that's already failing; the original exception is the one to surface.
+        # Best-effort drain on a failing path (see Docs/function-notes.md); the original exception is the one to surface.
         if ($null -ne $localConsoleQueue) { try { Flush-ConsoleQueue -Queue $localConsoleQueue } catch { } }
         $script:logMutex = $previousLogMutex
         if ($null -ne $localLogMutex) { try { $localLogMutex.Dispose() } catch { } }

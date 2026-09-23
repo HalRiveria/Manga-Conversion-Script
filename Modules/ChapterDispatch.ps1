@@ -371,7 +371,6 @@ function Invoke-ChapterDispatch {
 }
 
 function Initialize-ChildProcessReadThreadPool {
-    # Main thread only (not in Get-ChapterDispatchSharedFunctionNames). See Docs/function-notes.md.
     param([int]$MaxConcurrentProcesses = 0)
     $MinimumWorkerThreads = [Math]::Max(128, (2 * $MaxConcurrentProcesses) + 32)
     $worker = 0; $io = 0

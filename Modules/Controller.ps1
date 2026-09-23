@@ -351,7 +351,7 @@ $script:fullPipelineEngineWorker = {
     )
 
     $null = [System.Reflection.Assembly]::LoadWithPartialName("Microsoft.VisualBasic")
-    # Only these two - worker log lines go through the queue; see Docs/function-notes.md (Get-WorkerConsoleQueue).
+    # Only these two - worker log lines go through the queue; see Docs/function-notes.md (Get-WorkerRunspaceValue).
     $script:workerConsoleQueue = $ConsoleQueue
     $script:PermanentDelete    = $DoPermanentDelete
 

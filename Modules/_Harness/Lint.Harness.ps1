@@ -43,15 +43,12 @@ $script:LintKnownExceptions = @(
 # on a runspace-reachable path. Keep this tiny - each entry must say why the
 # read can't silently come back empty in a worker.
 $script:LintScriptVarAllowed = @(
-    @{ Function  = 'Get-WorkerConsoleQueue'
-       Variables = @('workerConsoleQueue')
-       Why       = 'The one sanctioned worker-state lookup: reads $script: first, falls back to $global: (the worker body seeds its $script: at top level, which IS the runspace''s global scope) when a closure context makes $script: come back empty.' }
-    @{ Function  = 'Test-PermanentDeleteEnabled'
-       Variables = @('PermanentDelete')
-       Why       = 'Same $script:-then-$global: fallback as Get-WorkerConsoleQueue - a user setting fixed for the whole run, not something the queue can carry.' }
+    @{ Function  = 'Get-WorkerRunspaceValue'
+       Variables = @('workerConsoleQueue', 'PermanentDelete')
+       Why       = 'The one sanctioned worker-state read: $script: first, $global: fallback (the worker body seeds its $script: at top level, which IS the runspace''s global scope) for when a closure context makes $script: come back empty. Explicit names only - a generic by-name lookup would be dynamically scoped and could pick up a caller''s same-named local.' }
     @{ Function  = 'Write-Log'
-       Variables = @('CleanConsoleOutputEnabled')
-       Why       = 'Only read after Write-Log''s own worker early-return (Get-WorkerConsoleQueue non-null -> enqueue + return), i.e. main thread only.' }
+       Variables = @('CleanConsoleOutputEnabled', 'FullLogging')
+       Why       = 'Only read after Write-Log''s own worker early-return (worker queue found -> enqueue + return), i.e. main thread only.' }
     @{ Function  = 'Write-LogLineToRunFiles'
        Variables = @('FullLogging', 'logFile', 'logErrorFile', 'logWarnFile')
        Why       = 'Only called from Write-Log past its worker early-return and from Flush-ConsoleQueue (main thread). Listed in Get-LoggingSharedFunctionNames only because Rule 5 walks Write-Log''s callees statically.' }
@@ -468,7 +465,7 @@ Write-Host ""
 # message. So: no runspace-reachable function, and no nested scriptblock
 # inside a worker body, may touch `$script:` at all. The worker body's own
 # top level is fine (it IS the runspace's script scope). Worker-side state
-# goes through the console queue (Logging.ps1's Get-WorkerConsoleQueue),
+# goes through the console queue (Logging.ps1's Get-WorkerRunspaceValue),
 # which the main thread drains. Deliberate, reviewed exceptions only - add
 # them to $script:LintScriptVarAllowed below with a reason.
 Write-Host "=== Lint: `$script: variable on a runspace-reachable path ===" -ForegroundColor Cyan

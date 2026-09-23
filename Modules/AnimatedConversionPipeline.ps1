@@ -218,7 +218,7 @@ function Complete-AnimatedDispatchJob {
         try {
             $removed = Remove-Source -ItemPath $Job.SrcPath
             if ($removed) {
-                $deleteDesc = if (Test-PermanentDeleteEnabled) { "permanently" } else { "Recycle Bin" }
+                $deleteDesc = if (Get-WorkerRunspaceValue -Name PermanentDelete) { "permanently" } else { "Recycle Bin" }
                 Write-Log ("Deleted source (" + $deleteDesc + "): '" + $Job.SrcPath + "'")
                 $ChapterResult.DeletedCount++
             } else {

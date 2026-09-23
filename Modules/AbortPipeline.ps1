@@ -262,10 +262,6 @@ function Register-AbortHandler {
 }
 
 function Initialize-ChildProcessJob {
-    # Bootstrap only. See Docs/function-notes.md - ties every child process
-    # (via [ChildProcessJob]::Assign at each Process.Start site) to this
-    # process's lifetime, so a force-killed/crashed parent can't orphan
-    # a running magick.exe/cjxl.exe.
     if ([ChildProcessJob]::Initialize()) { return $true }
     Write-Host ("[WARNING] Could not set up child-process cleanup (Win32 error " + [ChildProcessJob]::LastError + ") - if this window is force-closed mid-run, a running magick.exe/cjxl.exe may be left behind and need ending in Task Manager.") -ForegroundColor Yellow
     return $false
@@ -308,12 +304,7 @@ function Reset-AbortState {
 }
 
 function Test-AbortSignal {
-    # Worker runspace: react only, never announce - the main thread's own
-    # Test-AbortSignal (its dispatch loop polls it) is the single place the
-    # abort is announced and CTSs are cancelled. A per-runspace (or, inside
-    # a .GetNewClosure()'d block, per-closure) $script:abortRequested latch is
-    # what printed the message 2-3 times. See Docs/function-notes.md.
-    if ($null -ne (Get-WorkerConsoleQueue)) {
+    if ($null -ne (Get-WorkerRunspaceValue -Name workerConsoleQueue)) {
         return [ConsoleCtrl]::AbortRequested
     }
 

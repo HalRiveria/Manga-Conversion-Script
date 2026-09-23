@@ -48,7 +48,7 @@ $script:zipOnlyWorker = {
     Add-Type -AssemblyName "Microsoft.VisualBasic"
     Add-Type -AssemblyName "System.IO.Compression.FileSystem"
 
-    # Only these two - worker log lines go through the queue; see Docs/function-notes.md (Get-WorkerConsoleQueue).
+    # Only these two - worker log lines go through the queue; see Docs/function-notes.md (Get-WorkerRunspaceValue).
     $script:workerConsoleQueue = $ConsoleQueue
     $script:PermanentDelete    = $DoPermanentDelete
 
