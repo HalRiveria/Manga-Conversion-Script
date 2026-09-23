@@ -178,7 +178,10 @@ $null = Add-UnwantedImageProfile -Profile $profileA -ProfilesPath $profilesPathA
 $script:activeProfilesPath = $profilesPathA
 
 $fakeGetModeSettingsA = $fakeSettings.Clone()
-$promptA = New-ScriptedPrompt -Responses @('5', '1', $scanDirA, 'Y', '0', '2')
+# 2026-09-23: Run scans the loop's own -TargetPath (no folder prompt, no
+# confirmation); CoverDeletionDryRun off so the match is really deleted.
+$fakeGetModeSettingsA.CoverDeletionDryRun = $false
+$promptA = New-ScriptedPrompt -Responses @('5', '1', '0', '2')
 $invokeModeCallsA = 0
 $fakeInvokeModeA = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe) $script:invokeModeCallsA++; return $null }
 $postRunCallsA = 0
@@ -188,7 +191,7 @@ $fakePostRunA = { $script:postRunCallsA++; return 'Exit' }
 # -PostRunPromptHandler - Get-SelectedMode doesn't take -PromptFunc
 # through Invoke-MainLoop directly, so it's threaded via a real
 # -GetModeHandler closure that calls the real Get-SelectedMode with it.
-$realGetModeA = { param($Settings, $SettingsPath) Get-SelectedMode -Settings $Settings -SettingsPath $SettingsPath -PromptFunc $promptA }.GetNewClosure()
+$realGetModeA = { param($Settings, $SettingsPath, $ReinitLogPathsHandler, $TargetPath) Get-SelectedMode -Settings $Settings -SettingsPath $SettingsPath -PromptFunc $promptA -TargetPath $TargetPath }.GetNewClosure()
 
 Invoke-MainLoop -TargetPath $scanDirA -Settings $fakeGetModeSettingsA -SettingsPath (Join-Path $scratchDir "scenario-a\settings.json") -CjxlExe "fake_cjxl.exe" `
     -GetModeHandler $realGetModeA -InvokeModeHandler $fakeInvokeModeA -PostRunPromptHandler $fakePostRunA
@@ -284,6 +287,32 @@ Invoke-MainLoop -TargetPath $scratchDir -Settings $fakeSettings.Clone() -Setting
     -GetModeHandler $realGetModeB -InvokeModeHandler $fakeInvokeModeB -PostRunPromptHandler $fakePostRunB
 $expectedB = "PROMPT,CLEAR,PROMPT,CLEAR,PROMPT,CLEAR,PROMPT,RUN,PROMPT,RUN"
 Test-Assert (($seqB -join ",") -eq $expectedB) ("clears on Options entry, on going back, and on the invalid-pick redraw - but not on the first menu of either iteration (expected " + $expectedB + ", got " + ($seqB -join ",") + ")")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario C (2026-09-23): Cover Deletion's defaults through the real main
+#  loop - Run scans the loop's own target folder with no folder prompt and
+#  no confirmation, and the default CoverDeletionDryRun (on) deletes
+#  nothing. $fakeSettings has no CoverDeletion* keys, so this also proves
+#  the built-in defaults apply.
+# ==============================================================================
+Write-Host "=== Scenario C: Cover Deletion Run defaults - target folder, no prompts, dry run ===" -ForegroundColor Cyan
+$scanDirC = Join-Path $scratchDir "scenario-c\ToScan"
+New-Item -ItemType Directory -Path $scanDirC -Force | Out-Null
+$profilesPathC = Join-Path $scratchDir "scenario-c\profiles.json"
+$imgC = New-RealImage -Path (Join-Path $scanDirC "cover.png") -Width 50 -Height 30
+$hashC = (Get-FileHash -LiteralPath $imgC.FullName -Algorithm SHA256).Hash
+$null = Add-UnwantedImageProfile -Profile @{ Label = "Integration Test Cover C"; Width = 50; Height = 30; SizeBytes = $imgC.Length; SizeTolerance = 0; Hash = $hashC } -ProfilesPath $profilesPathC
+$script:activeProfilesPath = $profilesPathC
+$promptC = New-ScriptedPrompt -Responses @('5', '1', '0', '2')
+$realGetModeC = { param($Settings, $SettingsPath, $ReinitLogPathsHandler, $TargetPath) Get-SelectedMode -Settings $Settings -SettingsPath $SettingsPath -PromptFunc $promptC -TargetPath $TargetPath }.GetNewClosure()
+$invokeModeC = @{ Calls = 0 }
+$fakeInvokeModeC = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe) $invokeModeC.Calls++; return $null }.GetNewClosure()
+$fakePostRunC = { return 'Exit' }
+Invoke-MainLoop -TargetPath $scanDirC -Settings $fakeSettings.Clone() -SettingsPath (Join-Path $scratchDir "scenario-c\settings.json") -CjxlExe "fake_cjxl.exe" `
+    -GetModeHandler $realGetModeC -InvokeModeHandler $fakeInvokeModeC -PostRunPromptHandler $fakePostRunC
+Test-Assert (Test-Path -LiteralPath $imgC.FullName) "the matching file is still there - the default is a dry run, and the four scripted answers were enough (no folder or confirmation prompt)"
+Test-Assert ($invokeModeC.Calls -eq 1) "the loop went 5 -> Run -> back -> mode 2 with no extra prompts in between (Run asked for no folder and no confirmation)"
 Write-Host ""
 
 # ==============================================================================

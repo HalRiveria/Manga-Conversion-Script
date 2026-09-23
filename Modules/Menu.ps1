@@ -43,7 +43,8 @@ function Show-ModeMenu {
         [string]$SettingsPath,
         [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
         [scriptblock]$ReinitLogPathsHandler = $null,
-        [scriptblock]$ClearScreenFunc = { Clear-MenuScreen }
+        [scriptblock]$ClearScreenFunc = { Clear-MenuScreen },
+        [string]$TargetPath = ""
     )
 
     $lastFullLogging        = [bool]$Settings.FullLogging
@@ -110,7 +111,7 @@ function Show-ModeMenu {
             $null = Set-ConsoleQuickEditEnabled -Enabled $false
             $coverScreen = @{ HasOutput = $false }
             try {
-                $null = Show-CoverDeletionMenu -PromptFunc $PromptFunc -Settings $Settings -SettingsPath $SettingsPath -ClearScreenFunc $ClearScreenFunc -ClearOnFirstRender $true -ScreenState $coverScreen
+                $null = Show-CoverDeletionMenu -PromptFunc $PromptFunc -Settings $Settings -SettingsPath $SettingsPath -ClearScreenFunc $ClearScreenFunc -ClearOnFirstRender $true -ScreenState $coverScreen -TargetPath $TargetPath
             } finally {
                 $null = Set-ConsoleQuickEditEnabled -Enabled $true
                 Set-AbortHandlerRunActive -Active $false
@@ -141,10 +142,11 @@ function Get-SelectedMode {
         [string]$SettingsPath,
         [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
         [scriptblock]$ReinitLogPathsHandler = $null,
-        [scriptblock]$ClearScreenFunc = { Clear-MenuScreen }
+        [scriptblock]$ClearScreenFunc = { Clear-MenuScreen },
+        [string]$TargetPath = ""
     )
 
-    $resolved = Show-ModeMenu -Settings $Settings -SettingsPath $SettingsPath -PromptFunc $PromptFunc -ReinitLogPathsHandler $ReinitLogPathsHandler -ClearScreenFunc $ClearScreenFunc
+    $resolved = Show-ModeMenu -Settings $Settings -SettingsPath $SettingsPath -PromptFunc $PromptFunc -ReinitLogPathsHandler $ReinitLogPathsHandler -ClearScreenFunc $ClearScreenFunc -TargetPath $TargetPath
     Write-Log ("Mode selected: " + $resolved.Mode)
     return $resolved
 }
@@ -308,14 +310,33 @@ function Show-OptionsMenuLevel {
 }
 
 function Get-CoverDeletionMenuLines {
+    param(
+        [hashtable]$Settings = $null,
+        [string]$TargetPath = ""
+    )
+    $dryRun       = Get-CoverDeletionSetting -Settings $Settings -Key 'CoverDeletionDryRun'
+    $askForFolder = Get-CoverDeletionSetting -Settings $Settings -Key 'CoverDeletionAskForFolder'
+    $folderText = if ($askForFolder -or [string]::IsNullOrWhiteSpace($TargetPath)) { "asks for a folder each time" } else { "scans the target folder: '" + $TargetPath + "'" }
     return @(
         "Cover Deletion"
-        "  1 - Run                      (scan a folder for known unwanted covers)"
+        "  1 - Run                      (scan for known unwanted covers" + $(if ($dryRun) { " - dry run, nothing deleted)" } else { " and DELETE matches)" })
         "  2 - Add Image                (point at a real image to add as a new profile)"
         "  4 - Open Profile Location    (opens the unwanted-image-profiles.json folder)"
-        "  5 - Trailing-Zero Report     (scan a folder, write and open a report of trailing-zero filenames)"
+        "  5 - Trailing-Zero Report     (scan, write and open a report of trailing-zero filenames)"
+        ("  6 - Dry Run                  [" + $(if ($dryRun) { "On" } else { "Off" }) + "]  (on = report matches only; off = delete them)")
+        ("  7 - Ask For Folder           [" + $(if ($askForFolder) { "On" } else { "Off" }) + "]  (currently " + $folderText + ")")
         "  0 - Back"
     )
+}
+
+function Get-CoverDeletionSetting {
+    param(
+        [hashtable]$Settings,
+        [Parameter(Mandatory)]
+        [string]$Key
+    )
+    if ($null -ne $Settings -and $Settings.ContainsKey($Key)) { return [bool]$Settings[$Key] }
+    return [bool](Get-DefaultScriptSettings)[$Key]
 }
 
 function Invoke-CoverDeletionAction {
@@ -353,10 +374,16 @@ function Invoke-CoverDeletionRun {
     param(
         [string]$ProfilesPath = (Get-UnwantedImageProfilesPath),
         [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
-        [string]$DefaultPath = ""
+        [string]$DefaultPath = "",
+        [string]$FolderPath = "",
+        [bool]$DryRun = $true
     )
 
-    $path = Get-PathWithDefault -PromptFunc $PromptFunc -DefaultPath $DefaultPath
+    if (-not [string]::IsNullOrWhiteSpace($FolderPath)) {
+        $path = $FolderPath.Trim().Trim('"')
+    } else {
+        $path = Get-PathWithDefault -PromptFunc $PromptFunc -DefaultPath $DefaultPath
+    }
     if ($null -eq $path) {  # lint:ignore - $path here is a genuinely untyped local var (no [string]$path/$Path param in THIS function), Lint Rule 2's file-wide name match just collides with -Path elsewhere in Menu.ps1
         Write-Host "No path entered - cancelled." -ForegroundColor Yellow
         return @{ Ran = $false; Reason = "No path entered."; ResolvedPath = $null; AllScannedFiles = $null }
@@ -366,13 +393,7 @@ function Invoke-CoverDeletionRun {
         return @{ Ran = $false; Reason = "Folder not found."; ResolvedPath = $null; AllScannedFiles = $null }
     }
 
-    $confirmAnswer = (& $PromptFunc ("About to scan '" + $path + "' and delete any matching files (respecting your Recycle Bin/Permanent Delete setting). Enter Y to run for real, D for a dry run (reports matches, deletes nothing), or anything else to cancel"))
-    if ($null -ne $confirmAnswer) { $confirmAnswer = $confirmAnswer.Trim() }
-    if ($confirmAnswer -notin @('Y', 'y', 'D', 'd')) {
-        Write-Host "Cancelled - no scan was run." -ForegroundColor Yellow
-        return @{ Ran = $false; Reason = "Cancelled by user."; ResolvedPath = $null; AllScannedFiles = $null }
-    }
-    $isDryRun = $confirmAnswer -in @('D', 'd')
+    $isDryRun = $DryRun
 
     if (-not $isDryRun) {
         $refusal = Get-RecycleBinRefusalMessage -TargetPath $path -PermanentDelete ([bool](Get-WorkerRunspaceValue -Name PermanentDelete))
@@ -448,16 +469,17 @@ function Show-CoverDeletionMenu {
     param(
         [string]$ProfilesPath = (Get-UnwantedImageProfilesPath),
         [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
-        [scriptblock]$RunHandler = { param($ProfilesPath, $PromptFunc, $DefaultPath) Invoke-CoverDeletionRun -ProfilesPath $ProfilesPath -PromptFunc $PromptFunc -DefaultPath $DefaultPath },
+        [scriptblock]$RunHandler = { param($ProfilesPath, $PromptFunc, $DefaultPath, $Path, $DryRun) Invoke-CoverDeletionRun -ProfilesPath $ProfilesPath -PromptFunc $PromptFunc -DefaultPath $DefaultPath -FolderPath $Path -DryRun ([bool]$DryRun) },
         [scriptblock]$AddHandler = { param($ProfilesPath, $PromptFunc) Show-AddUnwantedImageProfileFlow -ProfilesPath $ProfilesPath -PromptFunc $PromptFunc },
         [scriptblock]$ActionHandler = { param($ActionName, $ProfilesPath) Invoke-CoverDeletionAction -ActionName $ActionName -ProfilesPath $ProfilesPath },
-        [scriptblock]$TrailingZeroHandler = { param($PromptFunc, $DefaultPath) Invoke-TrailingZeroAuditRun -PromptFunc $PromptFunc -DefaultPath $DefaultPath },
+        [scriptblock]$TrailingZeroHandler = { param($PromptFunc, $DefaultPath, $Path) Invoke-TrailingZeroAuditRun -PromptFunc $PromptFunc -DefaultPath $DefaultPath -Path $Path },
         [scriptblock]$AutoTrailingZeroHandler = { param($Path, $PreScannedFiles) Invoke-TrailingZeroAuditRun -Path $Path -PreScannedFiles $PreScannedFiles },
         [hashtable]$Settings = $null,
         [string]$SettingsPath,
         [scriptblock]$ClearScreenFunc = { Clear-MenuScreen },
         [bool]$ClearOnFirstRender = $false,
-        [hashtable]$ScreenState = $null
+        [hashtable]$ScreenState = $null,
+        [string]$TargetPath = ""
     )
 
     # DOCUMENTED DUPLICATE: the same clear/notice render loop is in
@@ -470,7 +492,7 @@ function Show-CoverDeletionMenu {
     while ($true) {
         if ($clearNext) { & $ClearScreenFunc; $screenHasOutput = $false }
         $clearNext = $true
-        foreach ($line in (Get-CoverDeletionMenuLines)) { Write-Host $line }
+        foreach ($line in (Get-CoverDeletionMenuLines -Settings $Settings -TargetPath $TargetPath)) { Write-Host $line }
         if ($null -ne $notice) { Write-Host $notice -ForegroundColor Yellow; $notice = $null }
         $choice = (& $PromptFunc "Enter a number").Trim()
 
@@ -478,11 +500,15 @@ function Show-CoverDeletionMenu {
         if ($null -ne $Settings -and $Settings.ContainsKey('LastCoverDeletionPath')) {
             $defaultPath = [string]$Settings.LastCoverDeletionPath
         }
+        # Empty = prompt (prefilled with $defaultPath); otherwise scan the target folder directly.
+        $runFolder = ""
+        if (-not (Get-CoverDeletionSetting -Settings $Settings -Key 'CoverDeletionAskForFolder')) { $runFolder = $TargetPath }
+        $dryRun = Get-CoverDeletionSetting -Settings $Settings -Key 'CoverDeletionDryRun'
 
         switch ($choice) {
             '0' { if ($null -ne $ScreenState) { $ScreenState.HasOutput = $screenHasOutput }; return }
             '1' {
-                $runResult = & $RunHandler $ProfilesPath $PromptFunc $defaultPath
+                $runResult = & $RunHandler $ProfilesPath $PromptFunc $defaultPath $runFolder $dryRun
                 if ($runResult -and $runResult.ResolvedPath) {
                     Save-LastCoverDeletionPath -Settings $Settings -SettingsPath $SettingsPath -ResolvedPath $runResult.ResolvedPath
                     $survivingFiles = $null
@@ -497,16 +523,30 @@ function Show-CoverDeletionMenu {
             '2' { $null = & $AddHandler $ProfilesPath $PromptFunc; Write-Host ""; $clearNext = $false; $screenHasOutput = $true }
             '4' { $null = & $ActionHandler 'OpenProfileLocation' $ProfilesPath }
             '5' {
-                $tzResult = & $TrailingZeroHandler $PromptFunc $defaultPath
+                $tzResult = & $TrailingZeroHandler $PromptFunc $defaultPath $runFolder
                 if ($tzResult -and $tzResult.ResolvedPath) {
                     Save-LastCoverDeletionPath -Settings $Settings -SettingsPath $SettingsPath -ResolvedPath $tzResult.ResolvedPath
                 }
                 Write-Host ""
                 $clearNext = $false; $screenHasOutput = $true
             }
+            '6' { Set-CoverDeletionToggle -Settings $Settings -SettingsPath $SettingsPath -Key 'CoverDeletionDryRun' }
+            '7' { Set-CoverDeletionToggle -Settings $Settings -SettingsPath $SettingsPath -Key 'CoverDeletionAskForFolder' }
             default { $notice = "Invalid selection." }
         }
     }
+}
+
+function Set-CoverDeletionToggle {
+    param(
+        [hashtable]$Settings,
+        [string]$SettingsPath,
+        [Parameter(Mandatory)]
+        [string]$Key
+    )
+    if (-not $Settings) { return }
+    $Settings[$Key] = -not (Get-CoverDeletionSetting -Settings $Settings -Key $Key)
+    if (-not [string]::IsNullOrWhiteSpace($SettingsPath)) { Export-ScriptSettings -Settings $Settings -Path $SettingsPath }
 }
 
 function Show-PostRunPrompt {

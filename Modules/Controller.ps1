@@ -848,6 +848,7 @@ function Invoke-FullPipeline {
         [int]$MaxQueueAhead = 3,
         [bool]$RunCoverDeletionBeforeConversion = $false,
         [scriptblock]$CoverDeletionScanHandler = ${function:Invoke-UnwantedImageScan},
+        [bool]$CoverDeletionDryRun = $true,
         [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
         # Injectable (2026-09-16, Todo.md's own tracked gap) - lets a test
         # substitute a scriptblock that deliberately throws, to genuinely
@@ -873,7 +874,7 @@ function Invoke-FullPipeline {
 
     if ($RunCoverDeletionBeforeConversion) {
         try {
-            $null = & $CoverDeletionScanHandler -Path $Path
+            $null = & $CoverDeletionScanHandler -Path $Path -DryRun $CoverDeletionDryRun
         } catch {
             $exMessage = $_.Exception.Message
             Write-Log ("Cover deletion pre-scan failed: " + $exMessage) -Level Error -ForceConsole
@@ -1296,7 +1297,7 @@ function Invoke-Mode {
                     -JpegLossless ([bool]$Settings.JpegLossless) -JpegQuality $Settings.JpegQuality -AnimatedLossless ([bool]$Settings.AnimatedLossless) -AnimatedQuality $Settings.AnimatedQuality `
                     -AnimatedOverwrite ([bool]$Settings.AnimatedOverwrite) -AnimatedDeleteSource ([bool]$Settings.AnimatedDeleteSource) -FullPipelineMaxConcurrentProcs $Settings.FullPipelineMaxConcurrentProcs `
                     -FullLogging $script:FullLogging -PermanentDelete ([bool]$Settings.PermanentDelete) `
-                    -RunCoverDeletionBeforeConversion ([bool]$Settings.RunCoverDeletionBeforeConversion)
+                    -RunCoverDeletionBeforeConversion ([bool]$Settings.RunCoverDeletionBeforeConversion) -CoverDeletionDryRun ([bool]$Settings.CoverDeletionDryRun)
                 $stats.LooseImgConverted.Success      = $r.ConvertedImageSuccess;    $stats.LooseImgConverted.Fail      = $r.ConvertedImageFail;    $stats.LooseImgConverted.Skipped = $r.ConvertedImageSkipped
                 $stats.LooseImgDeleted.Success        = $r.DeletedImageSuccess;      $stats.LooseImgDeleted.Fail        = $r.DeletedImageFail
                 $stats.LooseStaleCleaned.Success      = $r.StaleImageCleanedSuccess; $stats.LooseStaleCleaned.Fail      = $r.StaleImageCleanedFail
@@ -1424,7 +1425,7 @@ function Invoke-MainLoop {
 
         $resolved = $null
         try {
-            $resolved = & $GetModeHandler -Settings $Settings -SettingsPath $SettingsPath -ReinitLogPathsHandler $reinitLogPathsHandler
+            $resolved = & $GetModeHandler -Settings $Settings -SettingsPath $SettingsPath -ReinitLogPathsHandler $reinitLogPathsHandler -TargetPath $TargetPath
         } catch {
             $null = Invoke-AbortOrFatalHandler -ErrorRecord $_ -LogHandler $LogHandler
         }

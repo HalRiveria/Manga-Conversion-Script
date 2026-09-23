@@ -650,10 +650,12 @@ Test-Assert (-not $resultRunFileS2.Ran) "Invoke-CoverDeletionRun rejects a FILE 
 Test-Assert ($script:unwantedScanCallsS2.Count -eq 0) "the real scan function was never called for a rejected file path"
 
 $promptFolderS2 = { param($m) $realFolderS2 }
-$promptFolderConfirmYS2 = New-ScriptedPrompt -Responses @($realFolderS2, 'Y')
-$resultRunFolderS2 = Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc $promptFolderConfirmYS2
-Test-Assert ($resultRunFolderS2.Ran -and $script:unwantedScanCallsS2.Count -eq 1 -and $script:unwantedScanCallsS2[0] -eq $realFolderS2) "a real folder + Y confirmation is accepted and passed through to the real scan function"
-Test-Assert ($resultRunFolderS2.DryRun -eq $false -and $script:unwantedScanDryRunCallsS2[0] -eq $false) "a Y confirmation runs for real, not a dry run"
+# 2026-09-23: no confirmation prompt any more - the dry-run choice is the
+# saved CoverDeletionDryRun setting, passed in as -DryRun. A one-response
+# scripted prompt proves only the folder prompt is asked.
+$resultRunFolderS2 = Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc (New-ScriptedPrompt -Responses @($realFolderS2)) -DryRun $false
+Test-Assert ($resultRunFolderS2.Ran -and $script:unwantedScanCallsS2.Count -eq 1 -and $script:unwantedScanCallsS2[0] -eq $realFolderS2) "a prompted real folder is scanned straight away - no confirmation prompt"
+Test-Assert ($resultRunFolderS2.DryRun -eq $false -and $script:unwantedScanDryRunCallsS2[0] -eq $false) "-DryRun `$false runs for real"
 
 # 2026-09-23: a real (non-dry) run on a drive with no Recycle Bin, with
 # Permanent Delete off, is refused up front - same rule as Invoke-Mode.
@@ -663,9 +665,9 @@ try {
     [RecycleBinProbe]::ResetTestOverrides()
     [RecycleBinProbe]::TestDriveType = 4
     $callsBeforeS2r = $script:unwantedScanCallsS2.Count
-    $resultRefusedS2 = & { Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc (New-ScriptedPrompt -Responses @($realFolderS2, 'Y')) } 6>$null
+    $resultRefusedS2 = & { Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc (New-ScriptedPrompt -Responses @($realFolderS2)) -DryRun $false } 6>$null
     Test-Assert ((-not $resultRefusedS2.Ran) -and $script:unwantedScanCallsS2.Count -eq $callsBeforeS2r) "a real Cover Deletion run on a no-Recycle-Bin drive (Permanent Delete off) is refused, scan never called"
-    $resultDryOkS2 = & { Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc (New-ScriptedPrompt -Responses @($realFolderS2, 'D')) } 6>$null
+    $resultDryOkS2 = & { Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc (New-ScriptedPrompt -Responses @($realFolderS2)) -DryRun $true } 6>$null
     Test-Assert ($resultDryOkS2.Ran -and $resultDryOkS2.DryRun) "...but a dry run on the same drive still runs (it deletes nothing)"
 } finally {
     [RecycleBinProbe]::ResetTestOverrides()
@@ -676,19 +678,13 @@ try {
     }
 }
 
-# 2026-09-03 fix, Todo.md finding: Invoke-CoverDeletionRun used to go
-# straight from path validation into the real, permanent-deletion-capable
-# scan with no confirmation and no reachable dry-run. Now confirms first -
-# Y runs for real (covered above), D runs a dry run, anything else cancels.
-$promptFolderCancelS2 = New-ScriptedPrompt -Responses @($realFolderS2, 'N')
-$resultCancelS2 = Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc $promptFolderCancelS2
-Test-Assert (-not $resultCancelS2.Ran) "declining the confirmation (anything other than Y/D) cancels - no scan is run"
-Test-Assert ($script:unwantedScanCallsS2.Count -eq 1) "the real scan function was NOT called again after a declined confirmation"
-
-$promptFolderDryRunS2 = New-ScriptedPrompt -Responses @($realFolderS2, 'D')
-$resultDryRunS2 = Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc $promptFolderDryRunS2
-Test-Assert ($resultDryRunS2.Ran -and $resultDryRunS2.DryRun -eq $true) "entering D runs a dry run, not a real deletion"
-Test-Assert ($script:unwantedScanCallsS2.Count -eq 2 -and $script:unwantedScanDryRunCallsS2[1] -eq $true) "the real scan function WAS called for the dry run, with -DryRun `$true"
+# 2026-09-23: -FolderPath (the target folder, when "Ask for folder" is
+# off) skips the prompt entirely, and an omitted -DryRun defaults to a
+# dry run - nothing is deleted unless the setting is explicitly off.
+$noPromptS2 = { param($m) throw ("unexpected prompt: " + $m) }
+$resultTargetS2 = Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc $noPromptS2 -FolderPath $realFolderS2
+Test-Assert ($resultTargetS2.Ran -and $resultTargetS2.ResolvedPath -eq $realFolderS2) "-FolderPath scans that folder without prompting"
+Test-Assert ($script:unwantedScanCallsS2.Count -eq 2 -and $script:unwantedScanDryRunCallsS2[1] -eq $true) "an omitted -DryRun defaults to a dry run"
 
 function Invoke-TrailingZeroAudit {
     param($Path, $ReportPath)
@@ -969,6 +965,38 @@ Show-CoverDeletionMenu -ProfilesPath (Join-Path $scratchDir "scenario-v3-profile
     -RunHandler { param($ProfilesPath, $PromptFunc, $DefaultPath) return $null } | Out-Null
 Test-Assert (($seqV3 -join ",") -eq "CLEAR,PROMPT,PROMPT") ("backing out right after Run doesn't clear (got " + ($seqV3 -join ",") + ")")
 Test-Assert ($screenV3.HasOutput -eq $true) "-ScreenState tells Show-ModeMenu the Run output is still on screen, so it won't clear it either"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario W (2026-09-23): Cover Deletion's saved settings. Run and the
+#  trailing-zero report get the target folder (no prompt) while "Ask for
+#  folder" is off, and "" (= prompt) once it's on; Run gets the saved
+#  dry-run value. 6/7 toggle and persist both settings, and the menu shows
+#  their current state.
+# ==============================================================================
+Write-Host "=== Scenario W: Cover Deletion dry-run / ask-for-folder settings ===" -ForegroundColor Cyan
+$settingsW = Get-DefaultScriptSettings
+$settingsPathW = New-ScratchSettingsPath "scenario-w"
+$runCallsW = New-Object System.Collections.Generic.List[hashtable]
+$tzCallsW  = New-Object System.Collections.Generic.List[string]
+$runHandlerW = { param($ProfilesPath, $PromptFunc, $DefaultPath, $Path, $DryRun) $runCallsW.Add(@{ Path = $Path; DryRun = $DryRun }); return $null }.GetNewClosure()
+$tzHandlerW  = { param($PromptFunc, $DefaultPath, $Path) $tzCallsW.Add([string]$Path); return $null }.GetNewClosure()
+$linesW = New-Object System.Collections.Generic.List[string]
+function Write-Host { param([Parameter(Position = 0)]$Object, $ForegroundColor, [switch]$NoNewline) $linesW.Add([string]$Object) }
+try {
+    Show-CoverDeletionMenu -ProfilesPath (Join-Path $scratchDir "scenario-w-profiles.json") -Settings $settingsW -SettingsPath $settingsPathW -TargetPath "C:\fake\target" `
+        -PromptFunc (New-ScriptedPrompt -Responses @('1', '5', '6', '7', '1', '5', '0')) -RunHandler $runHandlerW -TrailingZeroHandler $tzHandlerW -ClearScreenFunc { } | Out-Null
+} finally {
+    Remove-Item -Path function:\Write-Host
+}
+Test-Assert ($runCallsW.Count -eq 2 -and $runCallsW[0].Path -eq "C:\fake\target" -and $runCallsW[0].DryRun -eq $true) "by default Run gets the target folder (no prompt) and a dry run"
+Test-Assert ($tzCallsW.Count -eq 2 -and $tzCallsW[0] -eq "C:\fake\target") "the trailing-zero report follows the same folder logic"
+Test-Assert ($runCallsW.Count -eq 2 -and [string]::IsNullOrEmpty($runCallsW[1].Path) -and $runCallsW[1].DryRun -eq $false) "after toggling 6 and 7, Run asks for a folder and runs for real"
+Test-Assert ($tzCallsW.Count -eq 2 -and [string]::IsNullOrEmpty($tzCallsW[1])) "...and so does the trailing-zero report"
+$savedW = Import-ScriptSettings -Path $settingsPathW
+Test-Assert ($savedW.CoverDeletionDryRun -eq $false -and $savedW.CoverDeletionAskForFolder -eq $true) "both toggles were saved to the settings file"
+Test-Assert (@($linesW | Where-Object { $_ -like "*6 - Dry Run*[On]*" }).Count -ge 1 -and @($linesW | Where-Object { $_ -like "*6 - Dry Run*[Off]*" }).Count -ge 1) "the menu shows Dry Run's current state, before and after the toggle"
+Test-Assert (@($linesW | Where-Object { $_ -like "*7 - Ask For Folder*[Off]*C:\fake\target*" }).Count -ge 1) "with Ask For Folder off, the menu names the target folder it will scan"
 Write-Host ""
 
 # ==============================================================================

@@ -142,6 +142,8 @@ function Get-DefaultScriptSettings {
         AnimatedDeleteSource             = $true
         ZipWithUnconvertedAnimated       = $false
         LastCoverDeletionPath            = ""
+        CoverDeletionAskForFolder        = $false
+        CoverDeletionDryRun              = $true
         # Placeholder (2026-09-09, options-menu redesign) - exposed as a
         # real, persisted toggle under the new "Full Pipeline Settings"
         # submenu (Menu.ps1's Get-OptionsMenuSchema), but not yet read by

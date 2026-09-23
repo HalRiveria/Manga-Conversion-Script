@@ -1049,7 +1049,7 @@ $fakeZipHandlerN2 = { param([string]$Path, [int]$MaxParallel, [bool]$DeleteFolde
 $statsN2Zip = Invoke-Mode -Resolved @{ Mode = 'ZipFolders' } -TargetPath "C:\fake\lib" -Settings $fakeSettingsN2 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ZipFoldersHandler $fakeZipHandlerN2
 Test-Assert ($null -ne $statsN2Zip -and $statsN2Zip.ZipOnlyZipped.Success -eq 3) "ZipFolders completes normally (not swallowed into the fatal-handler `$null path) despite `$Settings missing FullLogging/PermanentDelete"
 
-$fakeFullHandlerN2 = { param([string]$Path, [string]$CjxlExe, [string]$MagickExe, [bool]$JpegLossless, [int]$JpegQuality, [bool]$AnimatedLossless, [int]$AnimatedQuality, [bool]$AnimatedOverwrite, [bool]$AnimatedDeleteSource, [int]$FullPipelineMaxConcurrentProcs, [Parameter(Mandatory)][bool]$FullLogging, [Parameter(Mandatory)][bool]$PermanentDelete, [bool]$RunCoverDeletionBeforeConversion)
+$fakeFullHandlerN2 = { param([string]$Path, [string]$CjxlExe, [string]$MagickExe, [bool]$JpegLossless, [int]$JpegQuality, [bool]$AnimatedLossless, [int]$AnimatedQuality, [bool]$AnimatedOverwrite, [bool]$AnimatedDeleteSource, [int]$FullPipelineMaxConcurrentProcs, [Parameter(Mandatory)][bool]$FullLogging, [Parameter(Mandatory)][bool]$PermanentDelete, [bool]$RunCoverDeletionBeforeConversion, [bool]$CoverDeletionDryRun)
     return @{
         ConvertedImageSuccess = 7; ConvertedImageFail = 0; ConvertedImageSkipped = 0; DeletedImageSuccess = 7; DeletedImageFail = 0
         StaleImageCleanedSuccess = 0; StaleImageCleanedFail = 0
@@ -1263,6 +1263,16 @@ $fakeScanAA = { param($Path) $script:calledAA = $true; return @{ ScannedCount = 
 $totalsAA = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-aa") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true -RunCoverDeletionBeforeConversion $false -CoverDeletionScanHandler $fakeScanAA
 Test-Assert ($calledAA -eq $false) "the scan handler was never invoked when the toggle is off"
 Test-Assert ($totalsAA.SeriesCount -eq 1) "the pipeline still ran normally"
+Write-Host ""
+
+Write-Host "=== Scenario AA6: the Full Pipeline pre-scan honors the Cover Deletion dry-run setting ===" -ForegroundColor Cyan
+New-Dir "scenario-aa6\Empty Series" | Out-Null
+$capturedAA6 = New-Object System.Collections.Generic.List[object]
+$fakeScanAA6 = { param($Path, $DryRun) $capturedAA6.Add($DryRun); return @{ ScannedCount = 0 } }.GetNewClosure()
+$null = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-aa6") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true -RunCoverDeletionBeforeConversion $true -CoverDeletionScanHandler $fakeScanAA6
+$null = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-aa6") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true -RunCoverDeletionBeforeConversion $true -CoverDeletionScanHandler $fakeScanAA6 -CoverDeletionDryRun $false
+Test-Assert ($capturedAA6.Count -eq 2 -and $capturedAA6[0] -eq $true) "with -CoverDeletionDryRun omitted, the pre-scan is a dry run"
+Test-Assert ($capturedAA6.Count -eq 2 -and $capturedAA6[1] -eq $false) "-CoverDeletionDryRun `$false passes a real run through to the scan"
 Write-Host ""
 
 Write-Host "=== Scenario AA2: RunCoverDeletionBeforeConversion=`$true calls the scan handler once, with -Path, before dispatch ===" -ForegroundColor Cyan
