@@ -372,7 +372,8 @@ function Invoke-ChapterDispatch {
 
 function Initialize-ChildProcessReadThreadPool {
     param([int]$MaxConcurrentProcesses = 0)
-    $MinimumWorkerThreads = [Math]::Max(128, (2 * $MaxConcurrentProcesses) + 32)
+    $clampedProcs = [Math]::Min([Math]::Max($MaxConcurrentProcesses, 0), 16000)
+    $MinimumWorkerThreads = [Math]::Max(128, (2 * $clampedProcs) + 32)
     $worker = 0; $io = 0
     [System.Threading.ThreadPool]::GetMinThreads([ref]$worker, [ref]$io)
     if ($worker -ge $MinimumWorkerThreads) { return $true }

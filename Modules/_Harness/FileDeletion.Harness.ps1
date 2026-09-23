@@ -504,15 +504,27 @@ $capQ = [RecycleBinProbe]::GetCapacityBytes($scratchDir)
 if ($capQ -le 0) {
     Write-Host "  [SKIP] this drive's Recycle Bin size limit isn't readable here - Q1/Q2 need it to size a too-big file" -ForegroundColor DarkYellow
 } else {
+    # Returns $false (and leaves nothing behind) unless the file really is
+    # sparse - SetLength on a non-sparse file would allocate ~100 GB for real.
     function New-SparseFileQ {
         param([string]$Path, [long]$Length)
         [System.IO.File]::WriteAllBytes($Path, [byte[]]@())
-        $null = & fsutil.exe sparse setflag $Path
+        $null = & fsutil.exe sparse setflag $Path 2>$null
+        if (-not ([System.IO.File]::GetAttributes($Path) -band [System.IO.FileAttributes]::SparseFile)) {
+            [System.IO.File]::Delete($Path)
+            return $false
+        }
         $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite)
         try { $fs.SetLength($Length) } finally { $fs.Dispose() }
+        return $true
     }
     $bigQ = Join-Path $scratchDir "scenario-q-too-big.bin"
-    New-SparseFileQ -Path $bigQ -Length ($capQ + 1GB)
+    if (-not (New-SparseFileQ -Path $bigQ -Length ($capQ + 1GB))) {
+        Write-Host "  [SKIP] %TEMP%'s volume can't make sparse files - skipping rather than allocate a real over-the-limit file" -ForegroundColor DarkYellow
+        $capQ = 0
+    }
+}
+if ($capQ -gt 0) {
     $threwQ1 = $null
     try { $null = Move-ToRecycleBin -ItemPath $bigQ } catch { $threwQ1 = "$_" }
     Test-Assert ($threwQ1 -like "Left in place*bigger than this drive*") ("a file over this drive's Recycle Bin limit is refused with a clear reason (got: " + $threwQ1 + ")")
@@ -520,7 +532,7 @@ if ($capQ -le 0) {
     if (Test-Path -LiteralPath $bigQ) { [System.IO.File]::Delete($bigQ) }
 
     $dirQ = New-ScratchDir -Name "scenario-q-too-big-dir"
-    New-SparseFileQ -Path (Join-Path $dirQ "huge.bin") -Length ($capQ + 1GB)
+    $null = New-SparseFileQ -Path (Join-Path $dirQ "huge.bin") -Length ($capQ + 1GB)
     "small" | Out-File -FilePath (Join-Path $dirQ "small.txt") -Encoding UTF8
     $threwQ2 = $null
     try { $null = Move-ToRecycleBin -ItemPath $dirQ } catch { $threwQ2 = "$_" }
@@ -533,6 +545,59 @@ $smallQ = Join-Path $scratchDir "scenario-q-small.txt"
 "small" | Out-File -FilePath $smallQ -Encoding UTF8
 Test-Assert ($null -eq [RecycleBinProbe]::GetUnrecyclableReason($smallQ)) "a normal small local file is still considered recyclable (no false refusals)"
 [System.IO.File]::Delete($smallQ)
+Write-Host ""
+
+# ==============================================================================
+#  Scenario R (2026-09-23, /code-review findings): RecycleBinProbe's
+#  network / removable / delete-immediately / policy branches, driven by
+#  its test-only overrides (this PC has only fixed NTFS drives and none of
+#  those settings), plus the up-front run refusal and the vanished-path
+#  classifier the tree walk now uses.
+# ==============================================================================
+Write-Host "=== Scenario R: RecycleBinProbe branches via test overrides; run refusal; vanished-path classifier ===" -ForegroundColor Cyan
+$smallR = Join-Path $scratchDir "scenario-r-small.txt"
+"small" | Out-File -FilePath $smallR -Encoding UTF8
+try {
+    [RecycleBinProbe]::ResetTestOverrides()
+    [RecycleBinProbe]::TestDriveType = 4
+    Test-Assert ([RecycleBinProbe]::GetUnrecyclableReason($smallR) -like "*network drive*") "DRIVE_REMOTE (4) -> 'network drive' reason"
+    [RecycleBinProbe]::TestDriveType = 2
+    Test-Assert ([RecycleBinProbe]::GetUnrecyclableReason($smallR) -like "*removable drive*") "DRIVE_REMOVABLE (2) -> 'removable drive' reason"
+    $threwR = $null
+    try { $null = Move-ToRecycleBin -ItemPath $smallR } catch { $threwR = "$_" }
+    Test-Assert ($threwR -like "Left in place*removable drive*" -and (Test-Path -LiteralPath $smallR)) "Move-ToRecycleBin leaves a file on a removable drive in place"
+    [RecycleBinProbe]::TestDriveType = 3
+    [RecycleBinProbe]::TestNukeOnDelete = $true
+    Test-Assert ([RecycleBinProbe]::GetUnrecyclableReason($smallR) -like "*delete files immediately*") "a drive set to 'delete immediately' is refused"
+    [RecycleBinProbe]::TestNukeOnDelete = $false
+    [RecycleBinProbe]::TestPolicyNoRecycle = $true
+    Test-Assert ([RecycleBinProbe]::GetUnrecyclableReason($smallR) -like "*turned off by policy*") "the NoRecycleFiles policy is refused"
+    [RecycleBinProbe]::TestPolicyNoRecycle = $false
+    [RecycleBinProbe]::TestCapacityBytes = 1
+    Test-Assert ([RecycleBinProbe]::GetUnrecyclableReason($smallR) -like "*bigger than this drive*") "an item over a (forced tiny) size limit is refused"
+    [RecycleBinProbe]::TestCapacityBytes = $null
+    Test-Assert ($null -eq [RecycleBinProbe]::GetUnrecyclableReason($smallR)) "a fixed drive with none of those set is fine"
+
+    [RecycleBinProbe]::TestDriveType = 4
+    $refusalR = Get-RecycleBinRefusalMessage -TargetPath $scratchDir -PermanentDelete $false
+    Test-Assert ($refusalR -like "Not starting*network drive*Permanent Delete*") ("a no-Recycle-Bin library with Permanent Delete off gets a refusal that says why and what to do (got: " + $refusalR + ")")
+    Test-Assert ($null -eq (Get-RecycleBinRefusalMessage -TargetPath $scratchDir -PermanentDelete $true)) "...but not when Permanent Delete is on"
+    [RecycleBinProbe]::TestDriveType = $null
+    Test-Assert ($null -eq (Get-RecycleBinRefusalMessage -TargetPath $scratchDir -PermanentDelete $false)) "a local fixed-drive library is never refused"
+} finally {
+    [RecycleBinProbe]::ResetTestOverrides()
+    if (Test-Path -LiteralPath $smallR) { [System.IO.File]::Delete($smallR) }
+}
+
+# Remove-DirectoryTreePermanently treats a child that vanishes mid-walk as
+# already done (only the TOP-level item missing means "already gone"). The
+# race itself can't be staged reliably here; this pins the classifier the
+# walk and Invoke-DeleteTreatingVanishedAsFalse both use.
+function New-ErrorRecordR { param([System.Exception]$Ex) return [System.Management.Automation.ErrorRecord]::new($Ex, "R", [System.Management.Automation.ErrorCategory]::NotSpecified, $null) }
+$wrappedR = [System.Management.Automation.MethodInvocationException]::new("wrapped", [System.IO.FileNotFoundException]::new("gone"))
+Test-Assert (Test-VanishedPathException -ErrorRecord (New-ErrorRecordR $wrappedR)) "a .NET FileNotFound wrapped in MethodInvocationException counts as vanished"
+Test-Assert (Test-VanishedPathException -ErrorRecord (New-ErrorRecordR ([System.IO.DirectoryNotFoundException]::new("gone")))) "a bare DirectoryNotFound counts as vanished"
+Test-Assert (-not (Test-VanishedPathException -ErrorRecord (New-ErrorRecordR ([System.UnauthorizedAccessException]::new("locked"))))) "access denied does NOT count as vanished - it still fails the delete"
 Write-Host ""
 
 # ==============================================================================

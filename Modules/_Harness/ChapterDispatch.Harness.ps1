@@ -811,6 +811,9 @@ $null = Initialize-ChildProcessReadThreadPool -MaxConcurrentProcesses 1
 $worker15b = 0; $io15b = 0
 [System.Threading.ThreadPool]::GetMinThreads([ref]$worker15b, [ref]$io15b)
 Test-Assert ($worker15b -eq $worker15) "a later, smaller setting never LOWERS an existing floor"
+$threw15 = $false
+try { $null = Initialize-ChildProcessReadThreadPool -MaxConcurrentProcesses ([int]::MaxValue) } catch { $threw15 = $true }
+Test-Assert (-not $threw15) "a max-int concurrency setting (the menu allows it) doesn't overflow and throw"
 Write-Host ""
 
 # ==============================================================================

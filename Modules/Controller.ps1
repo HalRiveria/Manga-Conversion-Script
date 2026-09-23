@@ -1217,6 +1217,15 @@ function Invoke-Mode {
         [scriptblock]$LogHandler = { param($m) Write-Log $m -Level Error }
     )
 
+    # Every mode deletes something except animated conversion with source deletion off.
+    if (-not ($Resolved.Mode -eq 'AnimatedConversion' -and -not [bool]$Settings.AnimatedDeleteSource)) {
+        $refusal = Get-RecycleBinRefusalMessage -TargetPath $TargetPath -PermanentDelete ([bool]$Settings.PermanentDelete)
+        if ($refusal) {
+            Write-Log $refusal -Level Error -ForceConsole
+            return $null
+        }
+    }
+
     try {
         if ($Resolved.Mode -in @('AnimatedConversion', 'FullPipeline') -and [string]::IsNullOrWhiteSpace($MagickExe)) {
             throw ("Mode '" + $Resolved.Mode + "' requires magick.exe, which was not found or configured.")

@@ -3,10 +3,11 @@
 # ---- Required assembly (Recycle Bin support) ----
 Add-Type -AssemblyName "Microsoft.VisualBasic"
 
-# See Docs/function-notes.md (Move-ToRecycleBin) for why this exists.
+# See Docs/function-notes.md (Move-ToRecycleBin / RecycleBinProbe).
 if (-not ([System.Management.Automation.PSTypeName]'RecycleBinProbe').Type) {
     Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Text;
 using System.Runtime.InteropServices;
@@ -23,63 +24,98 @@ public static class RecycleBinProbe
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
     private static extern uint GetDriveType(string lpRootPathName);
 
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool GetDiskFreeSpaceEx(string lpDirectoryName, out ulong lpFreeBytesAvailable, out ulong lpTotalNumberOfBytes, out ulong lpTotalNumberOfFreeBytes);
+
     private const uint DRIVE_REMOVABLE = 2;
     private const uint DRIVE_REMOTE    = 4;
     private const string BitBucketVolumeKey = @"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\";
     private const string ExplorerPolicyKey  = @"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer";
 
-    // Null = recyclable, or couldn't tell (falls back to the old behavior
-    // rather than blocking deletes on a probe failure). Otherwise a
-    // human-readable reason the Shell would delete the item permanently.
+    private sealed class VolumeFacts
+    {
+        public uint DriveType;
+        public bool NukeOnDelete;
+        public long CapacityBytes = -1;
+        public long TotalBytes = -1;
+    }
+
+    private static readonly ConcurrentDictionary<string, VolumeFacts> Cache =
+        new ConcurrentDictionary<string, VolumeFacts>(StringComparer.OrdinalIgnoreCase);
+
+    public static uint? TestDriveType;
+    public static bool? TestNukeOnDelete;
+    public static long? TestCapacityBytes;
+    public static bool? TestPolicyNoRecycle;
+
+    public static void ResetCache() { Cache.Clear(); }
+
+    public static void ResetTestOverrides()
+    {
+        TestDriveType = null; TestNukeOnDelete = null; TestCapacityBytes = null; TestPolicyNoRecycle = null;
+        Cache.Clear();
+    }
+
+    public static string GetVolumeUnrecyclableReason(string path)
+    {
+        try { return GetVolumeReason(path); }
+        catch { return null; }
+    }
+
     public static string GetUnrecyclableReason(string path)
     {
         try
         {
-            if (path.StartsWith(@"\\")) { return "it's on a network share, which has no Recycle Bin"; }
-
-            using (RegistryKey policy = Registry.CurrentUser.OpenSubKey(ExplorerPolicyKey))
-            {
-                if (policy != null && Convert.ToInt32(policy.GetValue("NoRecycleFiles", 0)) == 1)
-                {
-                    return "the Recycle Bin is turned off by policy on this PC";
-                }
-            }
-
+            string reason = GetVolumeReason(path);
+            if (reason != null) { return reason; }
             string root = GetVolumeRoot(path);
             if (root == null) { return null; }
-            uint driveType = GetDriveType(root);
-            if (driveType == DRIVE_REMOTE)    { return "it's on a network drive, which has no Recycle Bin"; }
-            if (driveType == DRIVE_REMOVABLE) { return "it's on a removable drive, which has no Recycle Bin"; }
-
-            long capacityBytes;
-            bool nukeOnDelete;
-            if (!TryReadVolumeSettings(root, out capacityBytes, out nukeOnDelete)) { return null; }
-            if (nukeOnDelete) { return "this drive's Recycle Bin is set to delete files immediately"; }
-            if (capacityBytes >= 0)
+            VolumeFacts facts = GetFacts(root);
+            long capacity = TestCapacityBytes.HasValue ? TestCapacityBytes.Value : facts.CapacityBytes;
+            if (capacity < 0) { return null; }
+            if (!TestCapacityBytes.HasValue && facts.TotalBytes > 0 && capacity >= facts.TotalBytes) { return null; }
+            long size = GetItemSize(path);
+            if (size > capacity)
             {
-                long size = GetItemSize(path);
-                if (size > capacityBytes)
-                {
-                    return "it's " + (size / (1024L * 1024L)) + " MB, bigger than this drive's " + (capacityBytes / (1024L * 1024L)) + " MB Recycle Bin limit";
-                }
+                return "it's " + (size / (1024L * 1024L)) + " MB, bigger than this drive's " + (capacity / (1024L * 1024L)) + " MB Recycle Bin limit";
             }
             return null;
         }
         catch { return null; }
     }
 
-    // -1 = unknown. Exposed for the harness (sizing a real too-big test file).
     public static long GetCapacityBytes(string path)
     {
         try
         {
             string root = GetVolumeRoot(path);
-            long capacityBytes;
-            bool nukeOnDelete;
-            if (root == null || !TryReadVolumeSettings(root, out capacityBytes, out nukeOnDelete)) { return -1; }
-            return capacityBytes;
+            return root == null ? -1 : GetFacts(root).CapacityBytes;
         }
         catch { return -1; }
+    }
+
+    private static string GetVolumeReason(string path)
+    {
+        if (path.StartsWith(@"\\")) { return "it's on a network share, which has no Recycle Bin"; }
+        bool policy = TestPolicyNoRecycle.HasValue ? TestPolicyNoRecycle.Value : (ReadPolicy(Registry.CurrentUser) || ReadPolicy(Registry.LocalMachine));
+        if (policy) { return "the Recycle Bin is turned off by policy on this PC"; }
+        string root = GetVolumeRoot(path);
+        if (root == null) { return null; }
+        VolumeFacts facts = GetFacts(root);
+        uint driveType = TestDriveType.HasValue ? TestDriveType.Value : facts.DriveType;
+        if (driveType == DRIVE_REMOTE)    { return "it's on a network drive, which has no Recycle Bin"; }
+        if (driveType == DRIVE_REMOVABLE) { return "it's on a removable drive, which has no Recycle Bin"; }
+        bool nuke = TestNukeOnDelete.HasValue ? TestNukeOnDelete.Value : facts.NukeOnDelete;
+        if (nuke) { return "this drive's Recycle Bin is set to delete files immediately"; }
+        return null;
+    }
+
+    private static bool ReadPolicy(RegistryKey hive)
+    {
+        using (RegistryKey key = hive.OpenSubKey(ExplorerPolicyKey))
+        {
+            return key != null && Convert.ToInt32(key.GetValue("NoRecycleFiles", 0)) == 1;
+        }
     }
 
     private static string GetVolumeRoot(string path)
@@ -88,30 +124,33 @@ public static class RecycleBinProbe
         return GetVolumePathName(path, sb, (uint)sb.Capacity) ? sb.ToString() : null;
     }
 
-    private static bool TryReadVolumeSettings(string root, out long capacityBytes, out bool nukeOnDelete)
+    private static VolumeFacts GetFacts(string root)
     {
-        capacityBytes = -1;
-        nukeOnDelete  = false;
+        return Cache.GetOrAdd(root, ReadFacts);
+    }
+
+    private static VolumeFacts ReadFacts(string root)
+    {
+        VolumeFacts facts = new VolumeFacts();
+        facts.DriveType = GetDriveType(root);
+        ulong free, total, totalFree;
+        if (GetDiskFreeSpaceEx(root, out free, out total, out totalFree)) { facts.TotalBytes = (long)total; }
         StringBuilder vn = new StringBuilder(1024);
-        if (!GetVolumeNameForVolumeMountPoint(root, vn, (uint)vn.Capacity)) { return false; }
+        if (!GetVolumeNameForVolumeMountPoint(root, vn, (uint)vn.Capacity)) { return facts; }
         string volume = vn.ToString();
         int open = volume.IndexOf('{');
         int close = volume.IndexOf('}');
-        if (open < 0 || close < open) { return false; }
+        if (open < 0 || close < open) { return facts; }
         using (RegistryKey key = Registry.CurrentUser.OpenSubKey(BitBucketVolumeKey + volume.Substring(open, close - open + 1)))
         {
-            // No key = this volume's bin was never configured; Windows'
-            // defaults apply (recycling on, generous size), so treat it as fine.
-            if (key == null) { return true; }
-            nukeOnDelete = Convert.ToInt32(key.GetValue("NukeOnDelete", 0)) == 1;
+            if (key == null) { return facts; }
+            facts.NukeOnDelete = Convert.ToInt32(key.GetValue("NukeOnDelete", 0)) == 1;
             object cap = key.GetValue("MaxCapacity");
-            if (cap != null) { capacityBytes = Convert.ToInt64(cap) * 1024L * 1024L; }
-            return true;
+            if (cap != null) { facts.CapacityBytes = Convert.ToInt64(cap) * 1024L * 1024L; }
         }
+        return facts;
     }
 
-    // Never follows a reparse point - a junction's target isn't recycled
-    // with the folder, so it doesn't count toward its size.
     private static long GetItemSize(string path)
     {
         FileAttributes attr = File.GetAttributes(path);
@@ -143,19 +182,23 @@ function Initialize-FileDeletion {
     $script:PermanentDelete = $PermanentDelete
 }
 
+function Test-VanishedPathException {
+    param([Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord)
+    $ex = $ErrorRecord.Exception
+    return ($ex -is [System.Management.Automation.ItemNotFoundException] -or
+            $ex -is [System.IO.FileNotFoundException] -or $ex -is [System.IO.DirectoryNotFoundException] -or
+            $ex.InnerException -is [System.IO.FileNotFoundException] -or
+            $ex.InnerException -is [System.IO.DirectoryNotFoundException])
+}
+
 function Invoke-DeleteTreatingVanishedAsFalse {
     param([Parameter(Mandatory)][scriptblock]$Action)
 
     try {
         & $Action
         return $true
-    } catch [System.Management.Automation.ItemNotFoundException] {
-        return $false
     } catch {
-        if ($_.Exception.InnerException -is [System.IO.FileNotFoundException] -or
-            $_.Exception.InnerException -is [System.IO.DirectoryNotFoundException]) {
-            return $false
-        }
+        if (Test-VanishedPathException -ErrorRecord $_) { return $false }
         throw
     }
 }
@@ -247,17 +290,22 @@ function Remove-DirectoryTreePermanently {
     param([Parameter(Mandatory)][string]$DirectoryPath)
     $readOnly = [System.IO.FileAttributes]::ReadOnly
     foreach ($entry in ([System.IO.DirectoryInfo]::new($DirectoryPath)).GetFileSystemInfos()) {
-        $attr = $entry.Attributes
-        if ($attr -band [System.IO.FileAttributes]::ReparsePoint) {
-            if ($attr -band [System.IO.FileAttributes]::Directory) { [System.IO.Directory]::Delete($entry.FullName, $false) }
-            else { [System.IO.File]::Delete($entry.FullName) }
-            continue
-        }
-        if ($attr -band $readOnly) { $entry.Attributes = $attr -bxor $readOnly }
-        if ($attr -band [System.IO.FileAttributes]::Directory) {
-            Remove-DirectoryTreePermanently -DirectoryPath $entry.FullName
-        } else {
-            [System.IO.File]::Delete($entry.FullName)
+        try {
+            $attr = $entry.Attributes
+            if ($attr -band [System.IO.FileAttributes]::ReparsePoint) {
+                if ($attr -band [System.IO.FileAttributes]::Directory) { [System.IO.Directory]::Delete($entry.FullName, $false) }
+                else { [System.IO.File]::Delete($entry.FullName) }
+                continue
+            }
+            if ($attr -band $readOnly) { $entry.Attributes = $attr -bxor $readOnly }
+            if ($attr -band [System.IO.FileAttributes]::Directory) {
+                Remove-DirectoryTreePermanently -DirectoryPath $entry.FullName
+            } else {
+                [System.IO.File]::Delete($entry.FullName)
+            }
+        } catch {
+            if (-not (Test-VanishedPathException -ErrorRecord $_)) { throw }
+            # A child that vanished mid-walk is already deleted - keep going.
         }
     }
     [System.IO.Directory]::Delete($DirectoryPath, $false)
@@ -275,6 +323,15 @@ function Remove-Source {
     }
 }
 
+function Get-RecycleBinRefusalMessage {
+    param([Parameter(Mandatory)][string]$TargetPath, [Parameter(Mandatory)][bool]$PermanentDelete)
+    if ($PermanentDelete) { return $null }
+    [RecycleBinProbe]::ResetCache()
+    $reason = [RecycleBinProbe]::GetVolumeUnrecyclableReason($TargetPath)
+    if (-not $reason) { return $null }
+    return ("Not starting: files under '" + $TargetPath + "' can't go to the Recycle Bin - " + $reason + ". With Permanent Delete off, nothing would be deleted: every converted source and zipped folder would be left in place and reported as a failure, and no chapter would get zipped. Either turn on Permanent Delete in the options menu (deleted files are then gone for good, not recoverable from a Recycle Bin), or run on a copy of the library on a local drive.")
+}
+
 function Get-FileDeletionSharedFunctionNames {
-    return @('Remove-Source', 'Move-ToRecycleBin', 'Remove-ItemPermanently', 'Remove-DirectoryTreePermanently', 'Invoke-DeleteTreatingVanishedAsFalse', 'Resolve-ItemPathOrNull')
+    return @('Remove-Source', 'Move-ToRecycleBin', 'Remove-ItemPermanently', 'Remove-DirectoryTreePermanently', 'Test-VanishedPathException', 'Invoke-DeleteTreatingVanishedAsFalse', 'Resolve-ItemPathOrNull')
 }

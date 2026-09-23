@@ -655,6 +655,27 @@ $resultRunFolderS2 = Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc 
 Test-Assert ($resultRunFolderS2.Ran -and $script:unwantedScanCallsS2.Count -eq 1 -and $script:unwantedScanCallsS2[0] -eq $realFolderS2) "a real folder + Y confirmation is accepted and passed through to the real scan function"
 Test-Assert ($resultRunFolderS2.DryRun -eq $false -and $script:unwantedScanDryRunCallsS2[0] -eq $false) "a Y confirmation runs for real, not a dry run"
 
+# 2026-09-23: a real (non-dry) run on a drive with no Recycle Bin, with
+# Permanent Delete off, is refused up front - same rule as Invoke-Mode.
+# A dry run deletes nothing, so it still runs. Drive type forced via
+# RecycleBinProbe's test override.
+try {
+    [RecycleBinProbe]::ResetTestOverrides()
+    [RecycleBinProbe]::TestDriveType = 4
+    $callsBeforeS2r = $script:unwantedScanCallsS2.Count
+    $resultRefusedS2 = & { Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc (New-ScriptedPrompt -Responses @($realFolderS2, 'Y')) } 6>$null
+    Test-Assert ((-not $resultRefusedS2.Ran) -and $script:unwantedScanCallsS2.Count -eq $callsBeforeS2r) "a real Cover Deletion run on a no-Recycle-Bin drive (Permanent Delete off) is refused, scan never called"
+    $resultDryOkS2 = & { Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc (New-ScriptedPrompt -Responses @($realFolderS2, 'D')) } 6>$null
+    Test-Assert ($resultDryOkS2.Ran -and $resultDryOkS2.DryRun) "...but a dry run on the same drive still runs (it deletes nothing)"
+} finally {
+    [RecycleBinProbe]::ResetTestOverrides()
+    # Undo this block's own dry-run call so the call-count assertions below see the same state as before.
+    while ($script:unwantedScanCallsS2.Count -gt $callsBeforeS2r) {
+        $script:unwantedScanCallsS2.RemoveAt($script:unwantedScanCallsS2.Count - 1)
+        $script:unwantedScanDryRunCallsS2.RemoveAt($script:unwantedScanDryRunCallsS2.Count - 1)
+    }
+}
+
 # 2026-09-03 fix, Todo.md finding: Invoke-CoverDeletionRun used to go
 # straight from path validation into the real, permanent-deletion-capable
 # scan with no confirmation and no reachable dry-run. Now confirms first -

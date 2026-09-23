@@ -2141,6 +2141,37 @@ Test-Assert (-not (Test-Path -LiteralPath $zipOutY2)) "the broken 0-entry zip it
 Write-Host ""
 
 # ==============================================================================
+#  Scenario Z1c (2026-09-23): Invoke-Mode refuses to START a run that
+#  would delete anything when the library's drive has no Recycle Bin and
+#  Permanent Delete is off (owner decision) - one clear message instead of
+#  every item failing one by one. Drive type forced via RecycleBinProbe's
+#  test override; the handler must never be called.
+# ==============================================================================
+Write-Host "=== Scenario Z1c: Invoke-Mode refuses a no-Recycle-Bin library up front ===" -ForegroundColor Cyan
+$script:handlerCallsZ1c = 0
+$fakeImageHandlerZ1c = { param($Path) $script:handlerCallsZ1c++; return @{ ConvertedSuccess = 0; ConvertedFail = 0; ConvertedSkipped = 0; DeletedSuccess = 0; DeletedFail = 0; StaleCleanedSuccess = 0; StaleCleanedFail = 0; InspectFailedCount = 0 } }
+$fakeAnimHandlerZ1c  = { param($Path) $script:handlerCallsZ1c++; return @{ ConvertedSuccess = 0; ConvertedFail = 0; ConvertedSkipped = 0; DeletedSuccess = 0; DeletedFail = 0; InspectFailedCount = 0; ForceKilledCount = 0; Aborted = $false } }
+$settingsZ1c = $fakeSettings.Clone(); $settingsZ1c.PermanentDelete = $false; $settingsZ1c.AnimatedDeleteSource = $false
+try {
+    [RecycleBinProbe]::ResetTestOverrides()
+    [RecycleBinProbe]::TestDriveType = 4
+    $outZ1c = & { Invoke-Mode -Resolved @{ Mode = 'ImageConversion' } -TargetPath $scratchDir -Settings $settingsZ1c -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ImageConversionHandler $fakeImageHandlerZ1c } 6>&1
+    $statsZ1c = @($outZ1c | Where-Object { $_ -isnot [System.Management.Automation.InformationRecord] })
+    Test-Assert ($script:handlerCallsZ1c -eq 0) "the mode handler never ran - nothing was converted or touched"
+    Test-Assert ($statsZ1c.Count -eq 0 -or $null -eq $statsZ1c[0]) "Invoke-Mode returned `$null (a failed run, like any other refusal)"
+    Test-Assert (@($outZ1c | Where-Object { "$_" -like "*Not starting*Permanent Delete*" }).Count -eq 1) "the reason and the way out were printed once"
+    $settingsZ1c.PermanentDelete = $true
+    $null = Invoke-Mode -Resolved @{ Mode = 'ImageConversion' } -TargetPath $scratchDir -Settings $settingsZ1c -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ImageConversionHandler $fakeImageHandlerZ1c
+    Test-Assert ($script:handlerCallsZ1c -eq 1) "with Permanent Delete on, the same library runs"
+    $settingsZ1c.PermanentDelete = $false
+    $null = Invoke-Mode -Resolved @{ Mode = 'AnimatedConversion' } -TargetPath $scratchDir -Settings $settingsZ1c -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -AnimatedConversionHandler $fakeAnimHandlerZ1c
+    Test-Assert ($script:handlerCallsZ1c -eq 2) "animated conversion with source deletion OFF deletes nothing, so it isn't refused"
+} finally {
+    [RecycleBinProbe]::ResetTestOverrides()
+}
+Write-Host ""
+
+# ==============================================================================
 #  Scenario Z2 (2026-08-31 fix, caught by a same-day /code-review
 #  full-codebase pass): every -FullLogging/-DoFullLogging argument Invoke-Mode
 #  passes now reads $script:FullLogging (the value Initialize-LogPaths froze

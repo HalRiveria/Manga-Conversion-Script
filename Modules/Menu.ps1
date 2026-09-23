@@ -346,6 +346,14 @@ function Invoke-CoverDeletionRun {
     }
     $isDryRun = $confirmAnswer -in @('D', 'd')
 
+    if (-not $isDryRun) {
+        $refusal = Get-RecycleBinRefusalMessage -TargetPath $path -PermanentDelete ([bool](Get-WorkerRunspaceValue -Name PermanentDelete))
+        if ($refusal) {
+            Write-Host $refusal -ForegroundColor Red
+            return @{ Ran = $false; Reason = "No Recycle Bin on this drive and Permanent Delete is off."; ResolvedPath = $null; AllScannedFiles = $null }
+        }
+    }
+
     $result = Invoke-UnwantedImageScan -Path $path -Profiles (Get-AllUnwantedImageProfiles -ProfilesPath $ProfilesPath) -DryRun $isDryRun
     if ($isDryRun) { Write-Host "Dry run complete - nothing was deleted." -ForegroundColor Cyan }
     return @{ Ran = $true; Reason = $null; Result = $result; DryRun = $isDryRun; ResolvedPath = $path; AllScannedFiles = $result.AllScannedFiles }
