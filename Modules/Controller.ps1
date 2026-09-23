@@ -1417,11 +1417,7 @@ function Invoke-MainLoop {
         $currentFullLogging        = [bool]$Settings.FullLogging
         $currentDisableSummaryFile = [bool]$Settings.DisableSummaryFile
         if ($currentFullLogging -ne $lastFullLogging -or $currentDisableSummaryFile -ne $lastDisableSummaryFile) {
-            & $InitializeLogPathsHandler -TargetPath $TargetPath -FullLogging $currentFullLogging -DisableSummaryFile $currentDisableSummaryFile -ScriptDir $ScriptDir
-            $previousLogMutexForDispose = $script:logMutex
-            & $InitializeLogMutexHandler
-            # A failed Dispose() on the OLD mutex is harmless - see $reinitLogPathsHandler above for the same pattern/reasoning.
-            if ($null -ne $previousLogMutexForDispose) { try { $previousLogMutexForDispose.Dispose() } catch { } }
+            & $reinitLogPathsHandler
             $lastFullLogging        = $currentFullLogging
             $lastDisableSummaryFile = $currentDisableSummaryFile
         }

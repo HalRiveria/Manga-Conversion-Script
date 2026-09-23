@@ -413,11 +413,10 @@ function Invoke-UnwantedImageScan {
     if ($totals.DeleteFailedCount -gt 0) { $failureSuffix += ", " + $totals.DeleteFailedCount + " delete failure(s)" }
     if ($totals.AlreadyGoneCount -gt 0) { $failureSuffix += ", " + $totals.AlreadyGoneCount + " already gone" }
     if ($totals.HashFailureCount -gt 0) { $failureSuffix += ", " + $totals.HashFailureCount + " hash failure(s)" }
-    if ($DryRun) {
-        Write-Log ("Unwanted-image scan complete (dry run): " + $totals.WouldDeleteCount + " would delete, " + $totals.HashMismatchCount + " hash mismatch(es), " + $totals.ScannedCount + " image(s) scanned." + $failureSuffix + $abortedSuffix) -Level Summary -ForceConsole
-    } else {
-        Write-Log ("Unwanted-image scan complete: " + $totals.DeletedCount + " deleted, " + $totals.HashMismatchCount + " hash mismatch(es), " + $totals.ScannedCount + " image(s) scanned." + $failureSuffix + $abortedSuffix) -Level Summary -ForceConsole
-    }
+    $dryRunLabel = if ($DryRun) { " (dry run)" } else { "" }
+    $deleteCount = if ($DryRun) { $totals.WouldDeleteCount } else { $totals.DeletedCount }
+    $deleteVerb  = if ($DryRun) { " would delete, " } else { " deleted, " }
+    Write-Log ("Unwanted-image scan complete" + $dryRunLabel + ": " + $deleteCount + $deleteVerb + $totals.HashMismatchCount + " hash mismatch(es), " + $totals.ScannedCount + " image(s) scanned." + $failureSuffix + $abortedSuffix) -Level Summary -ForceConsole
     $totals.AllScannedFiles = $allScannedFiles
     return $totals
 }
