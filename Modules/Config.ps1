@@ -152,6 +152,7 @@ function Get-DefaultScriptSettings {
         # before Full Pipeline conversion" entry for the real feature this
         # is scaffolding toward.
         RunCoverDeletionBeforeConversion = $false
+        FullPipelineAnimatedConversion   = $true
     }
 }
 

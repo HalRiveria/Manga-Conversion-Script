@@ -156,6 +156,7 @@ function Get-OptionsMenuSchema {
         @{ Key = '1'; Label = 'Full Pipeline Settings'; Type = 'Submenu'; Items = @(
             @{ Key = '1'; Label = 'Max Concurrent Processes'; Type = 'Int'; SettingsKey = 'FullPipelineMaxConcurrentProcs'; Min = 1; Max = [int]::MaxValue; Description = 'shared cjxl+magick process budget (independent of CJXL Processes/Animated Threads)' }
             @{ Key = '2'; Label = 'Run Cover Deletion Before Conversion'; Type = 'Bool'; SettingsKey = 'RunCoverDeletionBeforeConversion'; Description = 'runs a Cover Deletion pre-scan before Full Pipeline conversion starts' }
+            @{ Key = '3'; Label = 'Animated Conversion'; Type = 'Bool'; SettingsKey = 'FullPipelineAnimatedConversion'; Description = 'off = skip animated AVIFs (left as-is, still zipped) and run the image engine only' }
         ) }
         @{ Key = '2'; Label = 'Image Conversion Settings'; Type = 'Submenu'; Items = @(
             @{ Key = '1'; Label = 'CJXL Processes'; Type = 'Int';  SettingsKey = 'MaxCjxlProcs'; Min = 1; Max = [int]::MaxValue; Description = 'how many cjxl.exe run at once per batch' }

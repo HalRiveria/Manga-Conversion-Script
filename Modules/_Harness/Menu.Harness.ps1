@@ -231,7 +231,12 @@ $schemaI = Get-OptionsMenuSchema
 Test-Assert ($schemaI.Count -eq 7) "seven top-level items (Full Pipeline, Image Conversion, Animated Conversion, Zip, Logging, Permanent Delete, Open Settings Location)"
 # 2026-09-09 reorganization (see CHANGELOG.md) - a new top-level Full
 # Pipeline Settings submenu, everything else shifted down by one.
-Test-Assert ($schemaI[0].Type -eq 'Submenu' -and $schemaI[0].Items.Count -eq 2) "Full Pipeline Settings is a 2-item submenu"
+Test-Assert ($schemaI[0].Type -eq 'Submenu' -and $schemaI[0].Items.Count -eq 3) "Full Pipeline Settings is a 3-item submenu"
+$animToggleI = @($schemaI[0].Items | Where-Object { $_.SettingsKey -eq 'FullPipelineAnimatedConversion' })
+Test-Assert ($animToggleI.Count -eq 1 -and $animToggleI[0].Type -eq 'Bool' -and $animToggleI[0].Key -eq '3') "Full Pipeline Settings item 3 is the Animated Conversion toggle (FullPipelineAnimatedConversion)"
+Test-Assert ((Get-DefaultScriptSettings).FullPipelineAnimatedConversion -eq $true) "Animated Conversion defaults to ON (today's behavior)"
+$fpLinesI = @(Format-OptionsMenuLines -Items $schemaI[0].Items -Settings (Get-DefaultScriptSettings) -Title "Full Pipeline Settings")
+Test-Assert (@($fpLinesI | Where-Object { $_ -match "Animated Conversion.*\[On\]" }).Count -eq 1) "the Full Pipeline Settings menu shows Animated Conversion's current state"
 Test-Assert ($schemaI[0].Items[0].SettingsKey -eq 'FullPipelineMaxConcurrentProcs') "Full Pipeline Settings item 1 is Max Concurrent Processes"
 Test-Assert ($schemaI[0].Items[1].SettingsKey -eq 'RunCoverDeletionBeforeConversion') "Full Pipeline Settings item 2 is the Run Cover Deletion Before Conversion placeholder"
 Test-Assert ($schemaI[1].Type -eq 'Submenu' -and $schemaI[1].Items.Count -eq 3) "Image Conversion Settings is a 3-item submenu"

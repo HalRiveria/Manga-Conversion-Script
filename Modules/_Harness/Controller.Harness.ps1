@@ -1049,7 +1049,7 @@ $fakeZipHandlerN2 = { param([string]$Path, [int]$MaxParallel, [bool]$DeleteFolde
 $statsN2Zip = Invoke-Mode -Resolved @{ Mode = 'ZipFolders' } -TargetPath "C:\fake\lib" -Settings $fakeSettingsN2 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ZipFoldersHandler $fakeZipHandlerN2
 Test-Assert ($null -ne $statsN2Zip -and $statsN2Zip.ZipOnlyZipped.Success -eq 3) "ZipFolders completes normally (not swallowed into the fatal-handler `$null path) despite `$Settings missing FullLogging/PermanentDelete"
 
-$fakeFullHandlerN2 = { param([string]$Path, [string]$CjxlExe, [string]$MagickExe, [bool]$JpegLossless, [int]$JpegQuality, [bool]$AnimatedLossless, [int]$AnimatedQuality, [bool]$AnimatedOverwrite, [bool]$AnimatedDeleteSource, [int]$FullPipelineMaxConcurrentProcs, [Parameter(Mandatory)][bool]$FullLogging, [Parameter(Mandatory)][bool]$PermanentDelete, [bool]$RunCoverDeletionBeforeConversion, [bool]$CoverDeletionDryRun)
+$fakeFullHandlerN2 = { param([string]$Path, [string]$CjxlExe, [string]$MagickExe, [bool]$JpegLossless, [int]$JpegQuality, [bool]$AnimatedLossless, [int]$AnimatedQuality, [bool]$AnimatedOverwrite, [bool]$AnimatedDeleteSource, [int]$FullPipelineMaxConcurrentProcs, [Parameter(Mandatory)][bool]$FullLogging, [Parameter(Mandatory)][bool]$PermanentDelete, [bool]$RunCoverDeletionBeforeConversion, [bool]$CoverDeletionDryRun, [bool]$AnimatedConversionEnabled)
     return @{
         ConvertedImageSuccess = 7; ConvertedImageFail = 0; ConvertedImageSkipped = 0; DeletedImageSuccess = 7; DeletedImageFail = 0
         StaleImageCleanedSuccess = 0; StaleImageCleanedFail = 0
@@ -2541,6 +2541,41 @@ Test-Assert (@($script:flipsD3d | Where-Object { $_ -eq "Chapter 1" }).Count -eq
 Test-Assert (@($script:flipsD3d | Where-Object { $_ -eq "Chapter 2" }).Count -eq 1) ("Chapter 2 got exactly one in-progress flip (got " + ($script:flipsD3d -join ", ") + ")")
 Test-Assert ($script:queuedAtCompleteD3d.Count -eq 0) ("no chapter was still showing as queued when it completed (got: " + ($script:queuedAtCompleteD3d -join ", ") + ")")
 Test-Assert ($totalsD3d.ZipCreatedSuccess -eq 2) ("both chapters still converted and zipped (got ZipCreatedSuccess=" + $totalsD3d.ZipCreatedSuccess + ")")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario D3e (2026-09-23): Full Pipeline with animated conversion OFF.
+#  Only the image engine runs; the chapter's animated AVIF is skipped with a
+#  warning (counted like Mode 8's skip), the static AVIF and the JPEG still
+#  convert, and the chapter still zips - with the raw animated .avif inside.
+#  A chapter must not be left waiting for an animated-engine report that
+#  never comes (that would leave it unzipped as "left incomplete").
+# ==============================================================================
+Write-Host "=== Scenario D3e: animated conversion OFF - image engine only, animated AVIF skipped and zipped raw ===" -ForegroundColor Cyan
+$chD3e = New-Dir "scenario-d3e\Series D3e\Chapter 1"
+$null = New-FakeImageIn -DirPath $chD3e -Name "page1.jpg"
+$null = New-FakeAvifIn -DirPath $chD3e -Name "anim.avif" -Frames 8
+$null = New-FakeAvifIn -DirPath $chD3e -Name "still.avif" -Frames 1
+$hostLinesD3e = New-Object System.Collections.Generic.List[string]
+$realHostD3e = ${function:Write-LogLineToHost}
+function Write-LogLineToHost { param([string]$Line, [string]$Level) $hostLinesD3e.Add($Line) }
+try {
+    $totalsD3e = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-d3e") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $true -PermanentDelete $true -AnimatedConversionEnabled $false
+} finally {
+    ${function:Write-LogLineToHost} = $realHostD3e
+}
+$zipD3e = Join-Path $scratchDir "scenario-d3e\Series D3e\Chapter 1.zip"
+$entriesD3e = @()
+if (Test-Path -LiteralPath $zipD3e) {
+    $zD3e = [System.IO.Compression.ZipFile]::OpenRead($zipD3e)
+    try { $entriesD3e = @($zD3e.Entries | ForEach-Object { $_.Name }) } finally { $zD3e.Dispose() }
+}
+Test-Assert ($totalsD3e.ConvertedImageSuccess -eq 2 -and $totalsD3e.ConvertedImageSkipped -eq 1) ("the JPEG and the static AVIF converted, the animated AVIF was counted as skipped (got converted=" + $totalsD3e.ConvertedImageSuccess + ", skipped=" + $totalsD3e.ConvertedImageSkipped + ")")
+Test-Assert ($totalsD3e.ConvertedAnimatedSuccess -eq 0 -and $totalsD3e.ConvertedAnimatedFail -eq 0) "nothing went through the animated engine"
+Test-Assert (@($hostLinesD3e | Where-Object { $_ -like "*(animated engine)*" }).Count -eq 0) "the animated engine never started (no 'animated engine' chapter lines)"
+Test-Assert (@($hostLinesD3e | Where-Object { $_ -like "*SKIPPING animated AVIF*anim.avif*" }).Count -eq 1) "the skipped animated AVIF was logged as a warning"
+Test-Assert ($totalsD3e.ZipCreatedSuccess -eq 1 -and -not $totalsD3e.Aborted) "the chapter still zipped - it wasn't left waiting for an animated report"
+Test-Assert (($entriesD3e -contains "anim.avif") -and ($entriesD3e -contains "page1.jxl") -and ($entriesD3e -contains "still.jxl")) ("the zip holds the raw animated .avif plus the converted pages (got: " + ($entriesD3e -join ", ") + ")")
 Write-Host ""
 
 Write-Host "==============================================="

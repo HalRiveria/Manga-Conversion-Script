@@ -342,6 +342,7 @@ $script:fullPipelineEngineWorker = {
         [System.Collections.Concurrent.ConcurrentDictionary[object,string]]$ZipBlockReasons,
         [System.Collections.Concurrent.ConcurrentDictionary[object,byte]]$AnnouncedChapters,
         [System.Collections.Concurrent.ConcurrentDictionary[object,byte]]$RunningChapters,
+        [bool]$AnimatedEnabled = $true,
         [System.Collections.Concurrent.ConcurrentQueue[hashtable]]$EventQueue,
         [string[]]$LooseImageExtensions,
         [string[]]$AnimatedFileExtensions,
@@ -393,11 +394,21 @@ $script:fullPipelineEngineWorker = {
             $classified = Get-OrCreateFullPipelineChapterClassification -Cache $ChapterClassificationCache -ChapterInfo $chapterInfo `
                 -MagickExe $MagickExe -LooseImageExtensions $LooseImageExtensions -EventQueue $EventQueue -ZipBlockReasons $ZipBlockReasons
 
+            # Animated engine off: this engine owns the chapter's animated
+            # AVIFs too, as skips (same as ImageConversionPipeline.ps1's
+            # jobBuilder). Unclassified ones (no magick) are already in Images.
+            $skippedAnimated = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+            if (-not $AnimatedEnabled) {
+                $imagePathSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                foreach ($f in $classified.Images) { $null = $imagePathSet.Add($f.FullName) }
+                foreach ($f in $classified.AnimatedFiles) { if (-not $imagePathSet.Contains($f.FullName)) { $skippedAnimated.Add($f) } }
+            }
+
             $cr = @{
                 ConvertedCount = 0; FailedCount = 0; SkippedCount = 0; DeletedCount = 0; DeleteFailedCount = 0
                 InspectFailedCount = 0; ForceKilledCount = 0
                 SkippedPaths = [System.Collections.Generic.List[string]]::new()
-                TotalFiles = $classified.Images.Count
+                TotalFiles = $classified.Images.Count + $skippedAnimated.Count
             }
             $chapterResults[$chapterInfo] = $cr
 
@@ -409,6 +420,12 @@ $script:fullPipelineEngineWorker = {
                 $EventQueue.Enqueue(@{ Kind = 'ChapterStarted'; ChapterKey = $chapterInfo; SeriesName = $chapterInfo.SeriesName; ChapterName = $chapterInfo.ChapterName })
             }
             Write-Log ("Processing chapter (image engine): '" + $chapterInfo.Dir.FullName + "' (" + $cr.TotalFiles + " image(s))")
+
+            foreach ($f in $skippedAnimated) {
+                Write-Log ("SKIPPING animated AVIF '" + $f.FullName + "': animated conversion is turned off for Full Pipeline - file left as-is (it will be zipped unconverted).") -Level Warn
+                $cr.SkippedCount++
+                $cr.SkippedPaths.Add($f.FullName)
+            }
 
             $allJobs = [System.Collections.Generic.List[hashtable]]::new()
             foreach ($img in $classified.Images) {
@@ -849,6 +866,7 @@ function Invoke-FullPipeline {
         [bool]$RunCoverDeletionBeforeConversion = $false,
         [scriptblock]$CoverDeletionScanHandler = ${function:Invoke-UnwantedImageScan},
         [bool]$CoverDeletionDryRun = $true,
+        [bool]$AnimatedConversionEnabled = $true,
         [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
         # Injectable (2026-09-16, Todo.md's own tracked gap) - lets a test
         # substitute a scriptblock that deliberately throws, to genuinely
@@ -1045,7 +1063,7 @@ function Invoke-FullPipeline {
                             $mergeState[$key] = @{
                                 SeriesName = $evt.SeriesName; ChapterName = $evt.ChapterName; Dir = $evt.Dir
                                 ZipOut = $evt.ZipOut; IsZippable = $evt.IsZippable
-                                ImageResult = $null; AnimatedResult = $null; GotImage = $false; GotAnimated = $false
+                                ImageResult = $null; AnimatedResult = $null; GotImage = $false; GotAnimated = (-not $AnimatedConversionEnabled)
                             }
                         }
                         $entry = $mergeState[$key]
@@ -1069,7 +1087,9 @@ function Invoke-FullPipeline {
         }.GetNewClosure()
 
         $jobParamsWorker = [System.Collections.Generic.List[hashtable]]::new()
-        foreach ($engineType in @('Image', 'Animated')) {
+        $engineTypes = @('Image')
+        if ($AnimatedConversionEnabled) { $engineTypes += 'Animated' }
+        foreach ($engineType in $engineTypes) {
             $jobParamsWorker.Add(@{
                 EngineType = $engineType; Path = $Path; CjxlExe = $CjxlExe; MagickExe = $MagickExe
                 DoJpegLossless = $JpegLossless; DoJpegQuality = $JpegQuality
@@ -1078,6 +1098,7 @@ function Invoke-FullPipeline {
                 DoFullLogging = $FullLogging; DoPermanentDelete = $PermanentDelete
                 SharedBudget = $sharedBudget; SeriesBundleCache = $seriesBundleCache; ChapterClassificationCache = $chapterClassificationCache; ZipBlockReasons = $zipBlockReasons
                 AnnouncedChapters = $announcedChapters; RunningChapters = $runningChapters; EventQueue = $eventQueue
+                AnimatedEnabled = $AnimatedConversionEnabled
                 LooseImageExtensions = $LooseImageExtensions; AnimatedFileExtensions = $AnimatedFileExtensions
                 KnownZipPaths = $KnownZipPaths; FolderQualifyingExtensions = $FolderQualifyingExtensions
                 FolderExcludeStagingDirs = $FolderExcludeStagingDirs
@@ -1136,7 +1157,7 @@ function Invoke-FullPipeline {
               'Get-LooseImageExtensions', 'Test-OrphanedScratchFileName')
 
         $null = Invoke-ZipParallelProcessing -WorkerScript $EngineWorkerScript -JobParams $jobParamsWorker `
-            -SharedFunctionNames $engineWorkerSharedFunctionNames -MaxParallel 2 -Cts $fullCts -ResultHandler $engineResultHandler `
+            -SharedFunctionNames $engineWorkerSharedFunctionNames -MaxParallel $engineTypes.Count -Cts $fullCts -ResultHandler $engineResultHandler `
             -AbortWaitMessage "[ABORT] Waiting for current image/animated jobs to finish (up to 60s)..." -PollCallback $pollCallback `
             -JobCrashedHandler $jobCrashedHandler
 
@@ -1297,7 +1318,8 @@ function Invoke-Mode {
                     -JpegLossless ([bool]$Settings.JpegLossless) -JpegQuality $Settings.JpegQuality -AnimatedLossless ([bool]$Settings.AnimatedLossless) -AnimatedQuality $Settings.AnimatedQuality `
                     -AnimatedOverwrite ([bool]$Settings.AnimatedOverwrite) -AnimatedDeleteSource ([bool]$Settings.AnimatedDeleteSource) -FullPipelineMaxConcurrentProcs $Settings.FullPipelineMaxConcurrentProcs `
                     -FullLogging $script:FullLogging -PermanentDelete ([bool]$Settings.PermanentDelete) `
-                    -RunCoverDeletionBeforeConversion ([bool]$Settings.RunCoverDeletionBeforeConversion) -CoverDeletionDryRun ([bool]$Settings.CoverDeletionDryRun)
+                    -RunCoverDeletionBeforeConversion ([bool]$Settings.RunCoverDeletionBeforeConversion) -CoverDeletionDryRun ([bool]$Settings.CoverDeletionDryRun) `
+                    -AnimatedConversionEnabled $(if ($Settings.ContainsKey('FullPipelineAnimatedConversion')) { [bool]$Settings.FullPipelineAnimatedConversion } else { $true })
                 $stats.LooseImgConverted.Success      = $r.ConvertedImageSuccess;    $stats.LooseImgConverted.Fail      = $r.ConvertedImageFail;    $stats.LooseImgConverted.Skipped = $r.ConvertedImageSkipped
                 $stats.LooseImgDeleted.Success        = $r.DeletedImageSuccess;      $stats.LooseImgDeleted.Fail        = $r.DeletedImageFail
                 $stats.LooseStaleCleaned.Success      = $r.StaleImageCleanedSuccess; $stats.LooseStaleCleaned.Fail      = $r.StaleImageCleanedFail
