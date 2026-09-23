@@ -180,7 +180,7 @@ $script:activeProfilesPath = $profilesPathA
 $fakeGetModeSettingsA = $fakeSettings.Clone()
 $promptA = New-ScriptedPrompt -Responses @('5', '1', $scanDirA, 'Y', '0', '2')
 $invokeModeCallsA = 0
-$fakeInvokeModeA = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) $script:invokeModeCallsA++; return $null }
+$fakeInvokeModeA = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe) $script:invokeModeCallsA++; return $null }
 $postRunCallsA = 0
 $fakePostRunA = { $script:postRunCallsA++; return 'Exit' }
 # Get-SelectedMode's own -PromptFunc is the ONLY handler this scenario
@@ -233,7 +233,7 @@ $fakeGetModeSettingsB = $fakeSettings.Clone()
 # possible call.
 $promptB = New-ThrowingPromptAfter -Responses @('5', '1')
 $invokeModeCallsB = 0
-$fakeInvokeModeB = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) $script:invokeModeCallsB++; return $null }
+$fakeInvokeModeB = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe) $script:invokeModeCallsB++; return $null }
 $postRunCallsB = 0
 $fakePostRunB = { $script:postRunCallsB++; if ($script:postRunCallsB -ge 2) { return 'Exit' }; return 'ReturnToMenu' }
 $loggedErrorsB = [System.Collections.Generic.List[string]]::new()

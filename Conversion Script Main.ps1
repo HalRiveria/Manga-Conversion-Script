@@ -194,8 +194,7 @@ try {
     #  MAIN LOOP - lives in Controller.ps1's Invoke-MainLoop
     # ==========================================================================
 
-    Invoke-MainLoop -TargetPath $Path -Settings $settings -SettingsPath $settingsPath -CjxlExe $resolvedCjxlPath -MagickExe $resolvedMagickPath -ScriptDir $scriptDir `
-        -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile
+    Invoke-MainLoop -TargetPath $Path -Settings $settings -SettingsPath $settingsPath -CjxlExe $resolvedCjxlPath -MagickExe $resolvedMagickPath -ScriptDir $scriptDir
 } catch {
     $wasOwnAbort = $false
     if (Get-Command Invoke-AbortOrFatalHandler -ErrorAction SilentlyContinue) {

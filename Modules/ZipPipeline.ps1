@@ -38,13 +38,8 @@ $script:zipOnlyWorker = {
         [string]$FolderPath,
         [string]$ZipOutPath,
         [string]$SeriesName,
-        [string]$LogFile,
-        [string]$LogErrorFile,
-        [string]$LogWarnFile,
-        [bool]$DoFullLogging,
         [bool]$DeleteFolders,
         [bool]$DoPermanentDelete,
-        [bool]$CleanConsoleOutputEnabled,
         [System.Threading.Mutex]$LogMutex,
         [System.Collections.Concurrent.ConcurrentQueue[object]]$ConsoleQueue,
         [System.Threading.CancellationToken]$CancelToken
@@ -53,14 +48,9 @@ $script:zipOnlyWorker = {
     Add-Type -AssemblyName "Microsoft.VisualBasic"
     Add-Type -AssemblyName "System.IO.Compression.FileSystem"
 
-    $script:logMutex           = $LogMutex
+    # Only these two - worker log lines go through the queue; see Docs/function-notes.md (Get-WorkerConsoleQueue).
     $script:workerConsoleQueue = $ConsoleQueue
-    $script:FullLogging        = $DoFullLogging
-    $script:logFile            = $LogFile
-    $script:logErrorFile       = $LogErrorFile
-    $script:logWarnFile        = $LogWarnFile
     $script:PermanentDelete    = $DoPermanentDelete
-    $script:CleanConsoleOutputEnabled = $CleanConsoleOutputEnabled
 
     $folderName = [System.IO.Path]::GetFileName($FolderPath)
     $result = @{
@@ -156,11 +146,6 @@ function Invoke-ZipOnlyPipeline {
         [int]$MaxParallel,
         [bool]$DeleteFolders = $false,
         [Parameter(Mandatory)]
-        [bool]$FullLogging,
-        [string]$LogFile,
-        [string]$LogErrorFile,
-        [string]$LogWarnFile,
-        [Parameter(Mandatory)]
         [bool]$PermanentDelete
     )
 
@@ -227,13 +212,8 @@ function Invoke-ZipOnlyPipeline {
                 FolderPath        = $next.Dir.FullName
                 ZipOutPath        = $next.ZipOut
                 SeriesName        = $seriesName
-                LogFile           = $LogFile
-                LogErrorFile      = $LogErrorFile
-                LogWarnFile       = $LogWarnFile
-                DoFullLogging     = $FullLogging
                 DeleteFolders     = $DeleteFolders
                 DoPermanentDelete = $PermanentDelete
-                CleanConsoleOutputEnabled = (Test-CcrEnabledForZipOnly)
             }
         }.GetNewClosure()
 

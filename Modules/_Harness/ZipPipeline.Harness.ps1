@@ -85,7 +85,7 @@ New-FileIn -DirPath $leaf1A -Name "page2.jpg" | Out-Null
 $leaf2A = New-Dir "scenario-a\Chapter 2"
 New-FileIn -DirPath $leaf2A -Name "page1.jpg" | Out-Null
 
-$totalsA = Invoke-ZipOnlyPipeline -Path $rootA -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -DeleteFolders $true -FullLogging $false -PermanentDelete $true
+$totalsA = Invoke-ZipOnlyPipeline -Path $rootA -MaxParallel 2 -DeleteFolders $true -PermanentDelete $true
 
 Test-Assert ($totalsA.CandidateCount -eq 2) ("2 candidates found (got " + $totalsA.CandidateCount + ")")
 Test-Assert ($totalsA.ZippedSuccess -eq 2) ("both zipped successfully (got " + $totalsA.ZippedSuccess + ")")
@@ -134,7 +134,7 @@ function Write-LogLineToHost {
 }
 $script:CleanConsoleOutputEnabled = $true
 try {
-    $totalsA2 = Invoke-ZipOnlyPipeline -Path $rootA2 -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -DeleteFolders $true -FullLogging $false -PermanentDelete $true
+    $totalsA2 = Invoke-ZipOnlyPipeline -Path $rootA2 -MaxParallel 2 -DeleteFolders $true -PermanentDelete $true
 } finally {
     $script:CleanConsoleOutputEnabled = $false
     ${function:Write-LogLineToHost} = $realWriteLogLineToHostA2
@@ -160,7 +160,7 @@ New-FileIn -DirPath $leafA3 -Name "photo_tmp_iccstrip.png" | Out-Null
 New-FileIn -DirPath $leafA3 -Name "photo_tmp_webp2png.png" | Out-Null
 New-FileIn -DirPath $leafA3 -Name "photo_tmp_overwrite.webp" | Out-Null
 
-$totalsA3 = Invoke-ZipOnlyPipeline -Path $rootA3 -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -DeleteFolders $true -FullLogging $false -PermanentDelete $true
+$totalsA3 = Invoke-ZipOnlyPipeline -Path $rootA3 -MaxParallel 2 -DeleteFolders $true -PermanentDelete $true
 
 Test-Assert ($totalsA3.ZippedSuccess -eq 1) ("the chapter still zipped successfully (got ZippedSuccess=" + $totalsA3.ZippedSuccess + ")")
 $zipA3 = Join-Path $rootA3 "Chapter 1.zip"
@@ -181,7 +181,7 @@ Write-Host ""
 Write-Host "=== Scenario B: no candidates found ===" -ForegroundColor Cyan
 $rootB = New-Dir "scenario-b-empty"
 
-$totalsB = Invoke-ZipOnlyPipeline -Path $rootB -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -FullLogging $false -PermanentDelete $true
+$totalsB = Invoke-ZipOnlyPipeline -Path $rootB -MaxParallel 2 -PermanentDelete $true
 Test-Assert ($totalsB.CandidateCount -eq 0) "0 candidates found in an empty tree"
 Test-Assert ($totalsB.ZippedSuccess -eq 0 -and $totalsB.ZippedFail -eq 0) "no zip attempts were made"
 Write-Host ""
@@ -200,7 +200,7 @@ $rootB2 = New-Dir "scenario-b2"
 [ConsoleCtrl]::AbortRequested = $true
 [ConsoleCtrl]::DrainComplete.Set()
 try {
-    $totalsB2 = Invoke-ZipOnlyPipeline -Path $rootB2 -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -FullLogging $false -PermanentDelete $true
+    $totalsB2 = Invoke-ZipOnlyPipeline -Path $rootB2 -MaxParallel 2 -PermanentDelete $true
 } finally {
     Reset-AbortState
 }
@@ -219,7 +219,7 @@ $rootC = New-Dir "scenario-c"
 $leafC = New-Dir "scenario-c\Chapter 1"
 New-FileIn -DirPath $leafC -Name "page1.jpg" | Out-Null
 
-$totalsC = Invoke-ZipOnlyPipeline -Path $rootC -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -DeleteFolders $false -FullLogging $false -PermanentDelete $true
+$totalsC = Invoke-ZipOnlyPipeline -Path $rootC -MaxParallel 2 -DeleteFolders $false -PermanentDelete $true
 Test-Assert ($totalsC.ZippedSuccess -eq 1) "the folder was zipped"
 Test-Assert ($totalsC.FolderDeletedSuccess -eq 0 -and $totalsC.FolderDeletedFail -eq 0) "no delete was attempted at all"
 Test-Assert (Test-Path -LiteralPath $leafC) "the source folder still exists"
@@ -238,7 +238,7 @@ $zipOutD = Join-Path $rootD "Chapter 1.zip"
 "fake pre-existing zip" | Out-File -FilePath $zipOutD -Encoding UTF8
 (Get-Item -LiteralPath $zipOutD).LastWriteTimeUtc = (Get-Date).ToUniversalTime()   # newer than the source file
 
-$totalsD = Invoke-ZipOnlyPipeline -Path $rootD -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -FullLogging $false -PermanentDelete $true
+$totalsD = Invoke-ZipOnlyPipeline -Path $rootD -MaxParallel 2 -PermanentDelete $true
 Test-Assert ($totalsD.CandidateCount -eq 0) "the up-to-date leaf was excluded before even reaching the zip step"
 Write-Host ""
 
@@ -265,7 +265,7 @@ $zipOutD2 = Join-Path (Split-Path -Parent $leafD2Stale) "Chapter 2.zip"
 (Get-Item -LiteralPath $zipOutD2).LastWriteTimeUtc = (Get-Date).ToUniversalTime()
 
 Test-Assert (-not $script:CleanConsoleOutputEnabled) "sanity check: Clean Console Output is off (the default) for this scenario"
-$totalsD2 = Invoke-ZipOnlyPipeline -Path $rootD2 -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -FullLogging $false -PermanentDelete $true
+$totalsD2 = Invoke-ZipOnlyPipeline -Path $rootD2 -MaxParallel 2 -PermanentDelete $true
 $warnLinesD2 = @(Get-Content -LiteralPath $script:logWarnFile | Where-Object { $_ -like "*Chapter 2*" -and $_ -like "*up to date*" })
 Test-Assert ($totalsD2.CandidateCount -eq 1) "only the one real leaf was a candidate, the up-to-date one excluded"
 Test-Assert ($warnLinesD2.Count -eq 1) ("the up-to-date-zip skip Warn was logged exactly once, not duplicated by the CCR-only side-scan (got " + $warnLinesD2.Count + ")")
@@ -297,7 +297,7 @@ New-FileIn -DirPath $leafD3 -Name "page1.jpg" | Out-Null
 
 $script:CleanConsoleOutputEnabled = $true
 try {
-    $totalsD3 = Invoke-ZipOnlyPipeline -Path ($rootD3 + "\.") -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -FullLogging $false -PermanentDelete $true
+    $totalsD3 = Invoke-ZipOnlyPipeline -Path ($rootD3 + "\.") -MaxParallel 2 -PermanentDelete $true
 } finally {
     $script:CleanConsoleOutputEnabled = $false
 }
@@ -319,7 +319,7 @@ $onlyImagesE = New-Dir "scenario-e\Only Images"
 New-FileIn -DirPath $onlyImagesE -Name "08 - Chapter 8.zip" | Out-Null
 New-FileIn -DirPath $onlyImagesE -Name "09 - Chapter 9.zip" | Out-Null
 
-$totalsE = Invoke-ZipOnlyPipeline -Path $rootE -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -FullLogging $false -PermanentDelete $true
+$totalsE = Invoke-ZipOnlyPipeline -Path $rootE -MaxParallel 2 -PermanentDelete $true
 Test-Assert ($totalsE.CandidateCount -eq 0) "'Only Images' (zero subdirs, only .zip files) was never a zip candidate through the full pipeline"
 Test-Assert (Test-Path -LiteralPath (Join-Path $onlyImagesE "08 - Chapter 8.zip")) "the existing chapter zips were left completely untouched"
 Write-Host ""
@@ -557,7 +557,7 @@ New-FileIn -DirPath $ch2I -Name "page1.jpg" | Out-Null
 
 $script:CleanConsoleOutputEnabled = $true
 try {
-    $totalsI = Invoke-ZipOnlyPipeline -Path $rootI -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -FullLogging $false -PermanentDelete $true
+    $totalsI = Invoke-ZipOnlyPipeline -Path $rootI -MaxParallel 2 -PermanentDelete $true
 } finally {
     $script:CleanConsoleOutputEnabled = $false
 }
@@ -579,7 +579,7 @@ New-FileIn -DirPath $leafJ -Name "page1.jpg" | Out-Null
 
 $script:CleanConsoleOutputEnabled = $true
 try {
-    $totalsJ = Invoke-ZipOnlyPipeline -Path $rootJ -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -FullLogging $false -PermanentDelete $true
+    $totalsJ = Invoke-ZipOnlyPipeline -Path $rootJ -MaxParallel 2 -PermanentDelete $true
 } finally {
     $script:CleanConsoleOutputEnabled = $false
 }
@@ -604,7 +604,7 @@ $lockK  = [System.IO.File]::Open($imgK, [System.IO.FileMode]::Open, [System.IO.F
 
 $script:CleanConsoleOutputEnabled = $true
 try {
-    $totalsK = Invoke-ZipOnlyPipeline -Path $rootK -MaxParallel 2 -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -FullLogging $false -PermanentDelete $true
+    $totalsK = Invoke-ZipOnlyPipeline -Path $rootK -MaxParallel 2 -PermanentDelete $true
 } finally {
     $script:CleanConsoleOutputEnabled = $false
     $lockK.Dispose()

@@ -295,7 +295,7 @@ $chA = New-Dir "scenario-a\Series\Chapter 1"
 New-FakeImageIn -DirPath $chA -Name "page1.jpg" | Out-Null
 New-FakeAvifIn -DirPath $chA -Name "anim1.avif" | Out-Null
 
-$totalsA = Invoke-FullPipeline -Path $rootA -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+$totalsA = Invoke-FullPipeline -Path $rootA -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 
 Test-Assert ($totalsA.SeriesCount -eq 1 -and $totalsA.ChapterCount -eq 1) "1 series, 1 chapter"
 Test-Assert ($totalsA.ConvertedImageSuccess -eq 1 -and $totalsA.ConvertedImageFail -eq 0) "the image converted"
@@ -315,7 +315,7 @@ $chB = New-Dir "scenario-b\Series\Chapter 1"
 New-FakeImageIn -DirPath $chB -Name "page1.jpg" | Out-Null
 New-FakeAvifIn -DirPath $chB -Name "anim1.avif" -Fail $true | Out-Null
 
-$totalsB = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-b") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+$totalsB = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-b") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 
 Test-Assert ($totalsB.ConvertedImageSuccess -eq 1) "the image half still converted successfully"
 Test-Assert ($totalsB.ConvertedAnimatedFail -eq 1) "the animated half failed"
@@ -332,7 +332,7 @@ $chC = New-Dir "scenario-c\Series\Chapter 1"
 New-FakeImageIn -DirPath $chC -Name "page1.jpg" -Fail $true | Out-Null
 New-FakeAvifIn -DirPath $chC -Name "anim1.avif" | Out-Null
 
-$totalsC = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-c") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+$totalsC = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-c") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 
 Test-Assert ($totalsC.ConvertedImageFail -eq 1) "the image half failed"
 Test-Assert ($totalsC.ConvertedAnimatedSuccess -eq 1) "the animated half still converted successfully"
@@ -357,7 +357,7 @@ Write-Host "=== Scenario C2: a crashed (not just failed) engine still blocks zip
 $chC2 = New-Dir "scenario-c2\Series\Chapter 1"
 New-FakeImageIn -DirPath $chC2 -Name "page1.jpg" | Out-Null
 
-$totalsC2 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-c2") -CjxlExe (Join-Path $scratchDir "does_not_exist_cjxl.exe") -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+$totalsC2 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-c2") -CjxlExe (Join-Path $scratchDir "does_not_exist_cjxl.exe") -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 
 Test-Assert ($totalsC2.ConvertedImageFail -eq 1 -and $totalsC2.ConvertedImageSuccess -eq 0) ("the crashed image engine is counted as a failure, not silently dropped (got Fail=" + $totalsC2.ConvertedImageFail + ", Success=" + $totalsC2.ConvertedImageSuccess + ")")
 Test-Assert ($totalsC2.ZipCreatedSuccess -eq 0 -and $totalsC2.ZipSkippedDueToError -eq 1) "zipping was skipped - the crashed engine correctly blocked it instead of reading as a clean Success"
@@ -387,7 +387,7 @@ $chC2b = New-Dir "scenario-c2b\Series\Chapter 1"
 New-FakeImageIn -DirPath $chC2b -Name "page1.jpg" | Out-Null
 $crashingWorkerC2b = { throw "simulated engine runspace crash" }
 
-$totalsC2b = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-c2b") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true -EngineWorkerScript $crashingWorkerC2b
+$totalsC2b = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-c2b") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true -EngineWorkerScript $crashingWorkerC2b
 
 Test-Assert ($totalsC2b.Aborted -eq $true) "the run's own totals record the crash as an abort (got Aborted=$($totalsC2b.Aborted))"
 Write-Host ""
@@ -412,7 +412,7 @@ New-FakeAvifIn -DirPath $chC3 -Name "anim1.avif" -Frames 5 | Out-Null
 # exactly what makes Get-LooseImageCandidates classify anim1.avif as stale.
 New-FakeImageIn -DirPath $chC3 -Name "anim1.jxl" | Out-Null
 
-$totalsC3 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-c3") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+$totalsC3 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-c3") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 
 Test-Assert ($totalsC3.ConvertedAnimatedSuccess -eq 1 -and $totalsC3.ConvertedAnimatedFail -eq 0) ("the animated AVIF was actually converted by the animated engine, not deleted out from under it (got Success=" + $totalsC3.ConvertedAnimatedSuccess + ", Fail=" + $totalsC3.ConvertedAnimatedFail + ")")
 Test-Assert ($totalsC3.StaleImageCleanedSuccess -eq 0) "the AVIF was NOT deleted as a stale image source despite sharing a basename with an unrelated pre-existing .jxl"
@@ -546,7 +546,7 @@ try {
     # for a real run's graceful-drain window, not a test scenario; bounds
     # the worst case if the marker-polling background runspace below ever
     # slips its timing.
-    $totalsC6 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-c6") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true -AbortTimeoutSeconds 3
+    $totalsC6 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-c6") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true -AbortTimeoutSeconds 3
 } finally {
     $cancelPsC6.EndInvoke($cancelHandleC6)
     $cancelPsC6.Dispose()
@@ -574,7 +574,7 @@ Write-Host "=== Scenario D: image-only chapter - animated engine never dispatche
 $chD = New-Dir "scenario-d\Series\Chapter 1"
 New-FakeImageIn -DirPath $chD -Name "page1.jpg" | Out-Null
 
-$totalsD = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-d") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+$totalsD = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-d") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 
 Test-Assert ($totalsD.ConvertedImageSuccess -eq 1) "the image converted"
 Test-Assert ($totalsD.ConvertedAnimatedSuccess -eq 0 -and $totalsD.ConvertedAnimatedFail -eq 0 -and $totalsD.ConvertedAnimatedSkipped -eq 0) "zero animated activity of any kind - the engine was never run, not run against nothing"
@@ -602,7 +602,7 @@ New-FakeImageIn -DirPath $chD2 -Name "page1.jpg" | Out-Null
 Start-Sleep -Milliseconds 50
 [System.IO.File]::WriteAllText((Join-Path $chD2 "page1.jxl"), "already converted - source deletion failed on a prior run")
 
-$totalsD2 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-d2") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+$totalsD2 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-d2") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 
 Test-Assert ($totalsD2.ConvertedImageSuccess -eq 0 -and $totalsD2.ConvertedImageFail -eq 0) ("sanity check: nothing was actually converted this run - the chapter had 0 NeedsConversion candidates (got Success=" + $totalsD2.ConvertedImageSuccess + ", Fail=" + $totalsD2.ConvertedImageFail + ")")
 Test-Assert ($totalsD2.StaleImageCleanedSuccess -eq 1) "the stale leftover source was cleaned up"
@@ -631,7 +631,7 @@ Write-Host "=== Scenario D3: a chapter with ONLY already-converted .jxl (zero lo
 $chD3 = New-Dir "scenario-d3\Series\Chapter 1"
 [System.IO.File]::WriteAllText((Join-Path $chD3 "page1.jxl"), "already converted on a prior run - source already deleted, nothing loose left")
 
-$totalsD3 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-d3") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+$totalsD3 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-d3") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 
 Test-Assert ($totalsD3.ChapterCount -eq 1) ("the all-.jxl chapter was discovered at all (got ChapterCount=" + $totalsD3.ChapterCount + ")")
 Test-Assert ($totalsD3.ConvertedImageSuccess -eq 0 -and $totalsD3.ConvertedImageFail -eq 0) "sanity check: nothing needed converting"
@@ -675,7 +675,7 @@ function Complete-ChapterProgress {
 $script:CleanConsoleOutputEnabled = $true
 $d3bThrew = $false
 try {
-    $totalsD3b = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-d3b") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+    $totalsD3b = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-d3b") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 } catch {
     $d3bThrew = $true
 } finally {
@@ -742,7 +742,7 @@ $script:CleanConsoleOutputEnabled = $true
 $d3cThrew = $false
 $cancelHandleD3c = $cancelPsD3c.BeginInvoke()
 try {
-    $totalsD3c = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-d3c") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true -AbortTimeoutSeconds 3
+    $totalsD3c = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-d3c") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true -AbortTimeoutSeconds 3
 } catch {
     $d3cThrew = $true
 } finally {
@@ -769,7 +769,7 @@ Write-Host "=== Scenario E: animated-only chapter - image engine never dispatche
 $chE = New-Dir "scenario-e\Series\Chapter 1"
 New-FakeAvifIn -DirPath $chE -Name "anim1.avif" | Out-Null
 
-$totalsE = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-e") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+$totalsE = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-e") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 
 Test-Assert ($totalsE.ConvertedAnimatedSuccess -eq 1) "the animated file converted"
 Test-Assert ($totalsE.ConvertedImageSuccess -eq 0 -and $totalsE.ConvertedImageFail -eq 0 -and $totalsE.ConvertedImageSkipped -eq 0) "zero image activity of any kind - the engine was never run"
@@ -783,7 +783,7 @@ Write-Host ""
 Write-Host "=== Scenario F: chapter with no unconverted content of either type ===" -ForegroundColor Cyan
 New-Dir "scenario-f\Empty Series" | Out-Null
 
-$totalsF = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-f") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+$totalsF = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-f") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 
 Test-Assert ($totalsF.SeriesCount -eq 1 -and $totalsF.ChapterCount -eq 0) "the empty series was walked, zero chapters counted"
 Write-Host ""
@@ -811,7 +811,7 @@ $rootG = New-Dir "scenario-g"
 }
 
 try {
-    $totalsG = Invoke-FullPipeline -Path $rootG -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 2 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+    $totalsG = Invoke-FullPipeline -Path $rootG -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 2 -FullLogging $false -PermanentDelete $true
 } finally {
     $env:HARNESS_PEAK_DIR = $null
 }
@@ -835,7 +835,7 @@ $webpH = [System.IO.Path]::ChangeExtension((New-FakeAvifIn -DirPath $chH -Name "
 
 $script:CleanConsoleOutputEnabled = $true
 try {
-    $totalsH = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-h") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+    $totalsH = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-h") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 } finally {
     $script:CleanConsoleOutputEnabled = $false
 }
@@ -874,7 +874,7 @@ function Start-SeriesProgress {
 
 $script:CleanConsoleOutputEnabled = $true
 try {
-    $totalsH2 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-h2") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+    $totalsH2 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-h2") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 } finally {
     $script:CleanConsoleOutputEnabled = $false
     ${function:Start-SeriesProgress} = $realStartSeriesProgressH2
@@ -911,7 +911,7 @@ $animatedWebpBytes[20] = 0x02
 [System.IO.File]::WriteAllBytes((Join-Path $chI "animated.webp"), $animatedWebpBytes)
 New-FakeAvifIn -DirPath $chI -Name "anim1.avif" | Out-Null
 
-$totalsI = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-i") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+$totalsI = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-i") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 
 Test-Assert ($totalsI.ConvertedImageSkipped -eq 1 -and $totalsI.ConvertedImageSuccess -eq 0) "the animated WebP was skipped, not converted - zero real .jxl entries despite having an image file queued"
 Test-Assert ($totalsI.ConvertedAnimatedSuccess -eq 1) "the real animated file still converted successfully"
@@ -982,7 +982,7 @@ Test-Assert ($statsK.Aborted -eq $true -and $statsK.ForceKilledCount -eq 2) "Ani
 Write-Host ""
 
 Write-Host "=== Scenario L: Invoke-Mode / ZipFolders - result mapping ===" -ForegroundColor Cyan
-$fakeZipHandlerL = { param($Path, $MaxParallel, $DeleteFolders, $FullLogging, $LogFile, $LogErrorFile, $LogWarnFile, $PermanentDelete)
+$fakeZipHandlerL = { param($Path, $MaxParallel, $DeleteFolders, $PermanentDelete)
     return @{ CandidateCount = 5; ZippedSuccess = 4; ZippedFail = 1; FolderDeletedSuccess = 4; FolderDeletedFail = 0; ForceStoppedCount = 3; Aborted = $true }
 }
 $statsL = Invoke-Mode -Resolved @{ Mode = 'ZipFolders' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ZipFoldersHandler $fakeZipHandlerL
@@ -995,7 +995,7 @@ Write-Host ""
 
 Write-Host "=== Scenario N: Invoke-Mode / FullPipeline - all three stat groups populated at once ===" -ForegroundColor Cyan
 $capturedN = @{ FullPipelineMaxConcurrentProcs = $null; RunCoverDeletionBeforeConversion = $null }
-$fakeFullHandlerN = { param($Path, $CjxlExe, $MagickExe, $JpegLossless, $JpegQuality, $AnimatedLossless, $AnimatedQuality, $AnimatedOverwrite, $AnimatedDeleteSource, $FullPipelineMaxConcurrentProcs, $FullLogging, $LogFile, $LogErrorFile, $LogWarnFile, $PermanentDelete, $RunCoverDeletionBeforeConversion)
+$fakeFullHandlerN = { param($Path, $CjxlExe, $MagickExe, $JpegLossless, $JpegQuality, $AnimatedLossless, $AnimatedQuality, $AnimatedOverwrite, $AnimatedDeleteSource, $FullPipelineMaxConcurrentProcs, $FullLogging, $PermanentDelete, $RunCoverDeletionBeforeConversion)
     $capturedN.FullPipelineMaxConcurrentProcs = $FullPipelineMaxConcurrentProcs
     $capturedN.RunCoverDeletionBeforeConversion = $RunCoverDeletionBeforeConversion
     return @{
@@ -1043,13 +1043,13 @@ Write-Host ""
 Write-Host "=== Scenario N2: Invoke-Mode completes normally despite a `$Settings missing FullLogging/PermanentDelete (ZipFolders/FullPipeline) ===" -ForegroundColor Cyan
 $fakeSettingsN2 = @{ ZipParallelThreads = 2; MaxCjxlProcs = 2; JpegLossless = $false; JpegQuality = 90; AnimatedLossless = $false; AnimatedQuality = 90; AnimatedThreads = 2; AnimatedOverwrite = $false; AnimatedDeleteSource = $true }
 
-$fakeZipHandlerN2 = { param([string]$Path, [int]$MaxParallel, [bool]$DeleteFolders, [Parameter(Mandatory)][bool]$FullLogging, [string]$LogFile, [string]$LogErrorFile, [string]$LogWarnFile, [Parameter(Mandatory)][bool]$PermanentDelete)
+$fakeZipHandlerN2 = { param([string]$Path, [int]$MaxParallel, [bool]$DeleteFolders, [Parameter(Mandatory)][bool]$PermanentDelete)
     return @{ CandidateCount = 3; ZippedSuccess = 3; ZippedFail = 0; FolderDeletedSuccess = 3; FolderDeletedFail = 0; ForceStoppedCount = 0 }
 }
 $statsN2Zip = Invoke-Mode -Resolved @{ Mode = 'ZipFolders' } -TargetPath "C:\fake\lib" -Settings $fakeSettingsN2 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ZipFoldersHandler $fakeZipHandlerN2
 Test-Assert ($null -ne $statsN2Zip -and $statsN2Zip.ZipOnlyZipped.Success -eq 3) "ZipFolders completes normally (not swallowed into the fatal-handler `$null path) despite `$Settings missing FullLogging/PermanentDelete"
 
-$fakeFullHandlerN2 = { param([string]$Path, [string]$CjxlExe, [string]$MagickExe, [bool]$JpegLossless, [int]$JpegQuality, [bool]$AnimatedLossless, [int]$AnimatedQuality, [bool]$AnimatedOverwrite, [bool]$AnimatedDeleteSource, [int]$FullPipelineMaxConcurrentProcs, [Parameter(Mandatory)][bool]$FullLogging, [string]$LogFile, [string]$LogErrorFile, [string]$LogWarnFile, [Parameter(Mandatory)][bool]$PermanentDelete, [bool]$RunCoverDeletionBeforeConversion)
+$fakeFullHandlerN2 = { param([string]$Path, [string]$CjxlExe, [string]$MagickExe, [bool]$JpegLossless, [int]$JpegQuality, [bool]$AnimatedLossless, [int]$AnimatedQuality, [bool]$AnimatedOverwrite, [bool]$AnimatedDeleteSource, [int]$FullPipelineMaxConcurrentProcs, [Parameter(Mandatory)][bool]$FullLogging, [Parameter(Mandatory)][bool]$PermanentDelete, [bool]$RunCoverDeletionBeforeConversion)
     return @{
         ConvertedImageSuccess = 7; ConvertedImageFail = 0; ConvertedImageSkipped = 0; DeletedImageSuccess = 7; DeletedImageFail = 0
         StaleImageCleanedSuccess = 0; StaleImageCleanedFail = 0
@@ -1243,7 +1243,7 @@ Write-Host "=== Scenario S: Invoke-FullPipeline sums a classification failure in
 $chS = New-Dir "scenario-s\Series\Chapter 1"
 [System.IO.File]::WriteAllText((Join-Path $chS "corrupt.avif"), "FAIL_IDENTIFY")
 
-$totalsS = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-s") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+$totalsS = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-s") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 
 Test-Assert ($totalsS.InspectFailedCount -eq 1) ("the image engine's inspect-failure was summed into Invoke-FullPipeline's own totals (got " + $totalsS.InspectFailedCount + ")")
 Write-Host ""
@@ -1260,7 +1260,7 @@ Write-Host "=== Scenario AA: RunCoverDeletionBeforeConversion=`$false never call
 New-Dir "scenario-aa\Empty Series" | Out-Null
 $calledAA = $false
 $fakeScanAA = { param($Path) $script:calledAA = $true; return @{ ScannedCount = 0 } }.GetNewClosure()
-$totalsAA = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-aa") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true -RunCoverDeletionBeforeConversion $false -CoverDeletionScanHandler $fakeScanAA
+$totalsAA = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-aa") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true -RunCoverDeletionBeforeConversion $false -CoverDeletionScanHandler $fakeScanAA
 Test-Assert ($calledAA -eq $false) "the scan handler was never invoked when the toggle is off"
 Test-Assert ($totalsAA.SeriesCount -eq 1) "the pipeline still ran normally"
 Write-Host ""
@@ -1270,7 +1270,7 @@ New-Dir "scenario-aa2\Empty Series" | Out-Null
 $capturedAA2 = @{ Path = $null; CallCount = 0 }
 $fakeScanAA2 = { param($Path) $script:capturedAA2.Path = $Path; $script:capturedAA2.CallCount++; return @{ ScannedCount = 3; DeletedCount = 1 } }.GetNewClosure()
 $rootAA2 = Join-Path $scratchDir "scenario-aa2"
-$totalsAA2 = Invoke-FullPipeline -Path $rootAA2 -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true -RunCoverDeletionBeforeConversion $true -CoverDeletionScanHandler $fakeScanAA2
+$totalsAA2 = Invoke-FullPipeline -Path $rootAA2 -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true -RunCoverDeletionBeforeConversion $true -CoverDeletionScanHandler $fakeScanAA2
 Test-Assert ($capturedAA2.CallCount -eq 1 -and $capturedAA2.Path -eq $rootAA2) "the scan handler was called exactly once, with the pipeline's own -Path"
 Test-Assert ($totalsAA2.SeriesCount -eq 1 -and $totalsAA2.Aborted -eq $false) "a successful scan does not block the pipeline from running normally afterward"
 Write-Host ""
@@ -1283,7 +1283,7 @@ $fakeScanAA3 = { param($Path) throw "fake scan failure AA3" }
 # breaks-$script:-writes gotcha CLAUDE.md's lessons learned documents).
 $capturedAA3 = @{ Message = $null; CallCount = 0 }
 $fakePromptAA3 = { param($Message) $script:capturedAA3.Message = $Message; $script:capturedAA3.CallCount++; return "Y" }.GetNewClosure()
-$totalsAA3 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-aa3") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true -RunCoverDeletionBeforeConversion $true -CoverDeletionScanHandler $fakeScanAA3 -PromptFunc $fakePromptAA3
+$totalsAA3 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-aa3") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true -RunCoverDeletionBeforeConversion $true -CoverDeletionScanHandler $fakeScanAA3 -PromptFunc $fakePromptAA3
 Test-Assert ($capturedAA3.CallCount -eq 1 -and $capturedAA3.Message -like "*fake scan failure AA3*") "the prompt message named the real scan failure"
 Test-Assert ($totalsAA3.SeriesCount -eq 1 -and $totalsAA3.Aborted -eq $false) "answering Y continues into a normal pipeline run despite the scan failure"
 Write-Host ""
@@ -1292,7 +1292,7 @@ Write-Host "=== Scenario AA4: a failed scan + declining (default/blank) at the p
 New-Dir "scenario-aa4\Empty Series" | Out-Null
 $fakeScanAA4 = { param($Path) throw "fake scan failure AA4" }
 $fakePromptAA4 = { param($Message) return "" }
-$totalsAA4 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-aa4") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true -RunCoverDeletionBeforeConversion $true -CoverDeletionScanHandler $fakeScanAA4 -PromptFunc $fakePromptAA4
+$totalsAA4 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-aa4") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true -RunCoverDeletionBeforeConversion $true -CoverDeletionScanHandler $fakeScanAA4 -PromptFunc $fakePromptAA4
 Test-Assert ($totalsAA4.Aborted -eq $true) "blank input at the prompt defaults to abort, not continue"
 Test-Assert ($totalsAA4.SeriesCount -eq 0) "chapter discovery/dispatch never started - the abort happened before it"
 Write-Host ""
@@ -1314,7 +1314,7 @@ $fakePromptAA5 = { param($Message) return $null }
 $threwAA5 = $false
 $totalsAA5 = $null
 try {
-    $totalsAA5 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-aa5") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true -RunCoverDeletionBeforeConversion $true -CoverDeletionScanHandler $fakeScanAA5 -PromptFunc $fakePromptAA5
+    $totalsAA5 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-aa5") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true -RunCoverDeletionBeforeConversion $true -CoverDeletionScanHandler $fakeScanAA5 -PromptFunc $fakePromptAA5
 } catch {
     $threwAA5 = $true
 }
@@ -1333,7 +1333,7 @@ Write-Host "=== Scenario T: Invoke-MainLoop runs until Show-PostRunPrompt return
 $getModeCallsT = 0
 $fakeGetModeT = { param($Settings, $SettingsPath) $script:getModeCallsT++; return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false } }
 $invokeModeCallsT = 0
-$fakeInvokeModeT = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile)
+$fakeInvokeModeT = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe)
     $script:invokeModeCallsT++
     $s = New-StatsTracker
     $s.LooseImgConverted.Success = $script:invokeModeCallsT
@@ -1380,7 +1380,7 @@ Test-Assert ($script:abortRequested -eq $true) "sanity check: an abort is genuin
 
 $pollsT2 = [System.Collections.Generic.List[bool]]::new()
 $fakeGetModeT2 = { param($Settings, $SettingsPath) $script:pollsT2.Add($script:abortRequested); return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false } }
-$fakeInvokeModeT2 = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) return New-StatsTracker }
+$fakeInvokeModeT2 = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe) return New-StatsTracker }
 $callsT2 = 0
 $fakePostRunT2 = { $script:callsT2++; if ($script:callsT2 -ge 1) { return 'Exit' }; return 'ReturnToMenu' }
 $script:pollsT2 = [System.Collections.Generic.List[bool]]::new()
@@ -1413,7 +1413,7 @@ Write-Host "=== Scenario T3: a `$Settings hashtable missing CleanConsoleOutputEn
 # scenario throw for the wrong reason.
 $fakeSettingsT3 = @{ FullLogging = $false }
 $fakeGetModeT3 = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false } }
-$fakeInvokeModeT3 = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) return New-StatsTracker }
+$fakeInvokeModeT3 = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe) return New-StatsTracker }
 $script:callsT3 = 0
 $fakePostRunT3 = { $script:callsT3++; return 'Exit' }
 $threwT3 = $false
@@ -1453,7 +1453,7 @@ $rootT4 = New-Dir "scenario-t4"
 New-Dir "scenario-t4\Series\Chapter 1" | Out-Null
 $threwT4 = $false
 try {
-    $null = Invoke-FullPipeline -Path $rootT4 -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+    $null = Invoke-FullPipeline -Path $rootT4 -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 } catch {
     $threwT4 = $true
 }
@@ -1485,7 +1485,7 @@ Write-Host ""
 Write-Host "=== Scenario T5: Invoke-MainLoop's own Write-SummaryReport call does not crash on a `$Settings missing FullLogging ===" -ForegroundColor Cyan
 $fakeSettingsT5 = @{}
 $fakeGetModeT5 = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false } }
-$fakeInvokeModeT5 = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) return New-StatsTracker }
+$fakeInvokeModeT5 = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe) return New-StatsTracker }
 $script:callsT5 = 0
 $fakePostRunT5 = { $script:callsT5++; return 'Exit' }
 $threwT5 = $false
@@ -1506,7 +1506,7 @@ Write-Host ""
 # ==============================================================================
 Write-Host "=== Scenario U: Invoke-MainLoop handles a `$null Invoke-Mode result without crashing the loop ===" -ForegroundColor Cyan
 $fakeGetModeU = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false } }
-$fakeInvokeModeU = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) return $null }
+$fakeInvokeModeU = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe) return $null }
 $script:postRunCallsU = 0
 $fakePostRunU = { $script:postRunCallsU++; return 'Exit' }
 Invoke-MainLoop -TargetPath "C:\fake\lib" -Settings $fakeSettings -SettingsPath "C:\fake\settings.json" -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" `
@@ -1530,7 +1530,7 @@ $script:permDeleteSeenU2 = [System.Collections.Generic.List[bool]]::new()
 $script:ccrSeenU2        = [System.Collections.Generic.List[bool]]::new()
 $fakeGetModeU2 = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false } }
 $fakeInvokeModeU2 = {
-    param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile)
+    param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe)
     # Record what the module-level state actually is AT THE TIME this
     # iteration's mode runs - the real bug was these staying stuck at
     # their bootstrap values across iterations.
@@ -1557,9 +1557,9 @@ Write-Host ""
 #  Initialize-LogPaths when FullLogging/DisableSummaryFile actually
 #  changed since the last iteration, not on every one (unlike
 #  PermanentDelete/CleanConsoleOutput above, which ARE safe to re-apply
-#  unconditionally) - and when it does, $LogFile/$LogErrorFile/$LogWarnFile
-#  passed to THIS and every later iteration's InvokeModeHandler reflect
-#  the refreshed paths, not the ones frozen at bootstrap.
+#  unconditionally). (Until 2026-09-22 it also checked the refreshed log
+#  paths were threaded into Invoke-Mode; nothing downstream reads them any
+#  more - worker log lines reach the files via the main thread's queue.)
 # ==============================================================================
 Write-Host "=== Scenario U2b: FullLogging/DisableSummaryFile re-sync only fires on an actual change ===" -ForegroundColor Cyan
 $fakeSettingsU2b = @{ PermanentDelete = $false; CleanConsoleOutputEnabled = $false; FullLogging = $false; DisableSummaryFile = $false }
@@ -1578,14 +1578,14 @@ $fakeInitLogMutexU2b   = { $script:initLogMutexCallsU2b++ }
 $fakeCompleteLogRunU2b = { $script:completeLogRunCallsU2b++ }
 $fakeStartLogRunU2b    = { $script:startLogRunCallsU2b++ }
 $fakeGetModeU2b = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false } }
-$script:logFilesSeenU2b = [System.Collections.Generic.List[string]]::new()
+$script:invokeModeCallsU2b = 0
 $fakeInvokeModeU2b = {
-    param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile)
-    $script:logFilesSeenU2b.Add($LogFile)
+    param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe)
+    $script:invokeModeCallsU2b++
     # Iteration 1: no change (baseline). Iteration 2: flip FullLogging on.
     # Iteration 3: leave it on - proves the handler is skipped again once
     # things are stable at the new value, not just re-triggered forever.
-    if ($script:logFilesSeenU2b.Count -eq 1) { $Settings.FullLogging = $true }
+    if ($script:invokeModeCallsU2b -eq 1) { $Settings.FullLogging = $true }
     return New-StatsTracker
 }
 $script:postRunCallsU2b = 0
@@ -1597,9 +1597,6 @@ Invoke-MainLoop -TargetPath "C:\fake\lib" -Settings $fakeSettingsU2b -SettingsPa
 
 Test-Assert ($script:initLogPathsCallsU2b.Count -eq 1 -and @($script:initLogPathsCallsU2b)[0] -eq $true) ("Initialize-LogPaths was re-called exactly once, only on the iteration where FullLogging actually changed (got " + (@($script:initLogPathsCallsU2b) -join ',') + ")")
 Test-Assert ($script:initLogMutexCallsU2b -eq 1) "Initialize-LogMutex was re-called the same one time"
-Test-Assert (@($script:logFilesSeenU2b)[0] -notlike "fake-log-*") "iteration 1 (no change yet) saw the ORIGINAL LogFile, not a re-synced one"
-Test-Assert (@($script:logFilesSeenU2b)[1] -eq "fake-log-True.log") "iteration 2 (FullLogging just flipped true) saw the REFRESHED LogFile from the re-sync"
-Test-Assert (@($script:logFilesSeenU2b)[2] -eq "fake-log-True.log") "iteration 3 (no further change) still sees the SAME refreshed LogFile, not reset or re-fetched again"
 Test-Assert ($script:completeLogRunCallsU2b -eq 3) "Complete-LogRun runs every iteration regardless of whether the toggle changed"
 # 2026-09-03 fix, real bug caught by a same-session /code-review pass:
 # Start-LogRun must ALSO run every iteration (paired with Complete-LogRun),
@@ -1636,7 +1633,7 @@ $mutexBeforeU2c = $script:logMutex
 
 $fakeGetModeU2c = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false } }
 $fakeInvokeModeU2c = {
-    param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile)
+    param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe)
     $Settings.FullLogging = $true
     return New-StatsTracker
 }
@@ -1691,7 +1688,7 @@ $fakeGetModeU2c2 = {
     if ($null -ne $ReinitLogPathsHandler) { & $ReinitLogPathsHandler; $script:reinitInvokedU2c2 = $true }
     return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false }
 }
-$fakeInvokeModeU2c2 = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) return New-StatsTracker }
+$fakeInvokeModeU2c2 = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe) return New-StatsTracker }
 $fakePostRunU2c2 = { return 'Exit' }
 
 Invoke-MainLoop -TargetPath $scratchDirU2c2 -Settings $fakeSettingsU2c2 -SettingsPath "C:\fake\settings.json" -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ScriptDir $scratchDirU2c2 `
@@ -1728,7 +1725,7 @@ $script:realWriteLogU2dRef = $realWriteLogU2d
 
 $fakeSettingsU2d = @{ PermanentDelete = $false; CleanConsoleOutputEnabled = $false; FullLogging = $false; DisableSummaryFile = $false }
 $fakeGetModeU2d = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false } }
-$fakeInvokeModeU2d = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) return $null }
+$fakeInvokeModeU2d = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe) return $null }
 $fakeStartLogRunU2d    = { }
 $fakeCompleteLogRunU2d = { $script:eventOrderU2d.Add("COMPLETE") }
 $script:postRunCallsU2d = 0
@@ -1758,7 +1755,7 @@ $fakeSettingsU2e = @{ PermanentDelete = $false; CleanConsoleOutputEnabled = $fal
 $fakeGetModeU2e = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConversion'; RunImageConversion = $true; RunAnimatedConversion = $false; RunZip = $false; RunZipOnly = $false } }
 $script:quickEditCallsU2e = [System.Collections.Generic.List[bool]]::new()
 $fakeSetQuickEditU2e = { param($Enabled) $script:quickEditCallsU2e.Add($Enabled) }.GetNewClosure()
-$fakeInvokeModeU2e = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) throw "simulated crash mid-run" }
+$fakeInvokeModeU2e = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe) throw "simulated crash mid-run" }
 $script:postRunCallsU2e = 0
 $fakePostRunU2e = { $script:postRunCallsU2e++; return 'Exit' }
 
@@ -1795,7 +1792,7 @@ Write-Host ""
 Write-Host "=== Scenario U3: Invoke-MainLoop handles a throwing GetModeHandler without crashing the loop ===" -ForegroundColor Cyan
 $fakeGetModeU3 = { param($Settings, $SettingsPath) throw "simulated crash inside mode 5's own Cover Deletion work" }
 $script:invokeModeCallsU3 = 0
-$fakeInvokeModeU3 = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe, $LogFile, $LogErrorFile, $LogWarnFile) $script:invokeModeCallsU3++; return New-StatsTracker }
+$fakeInvokeModeU3 = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe) $script:invokeModeCallsU3++; return New-StatsTracker }
 $script:postRunCallsU3 = 0
 $fakePostRunU3 = { $script:postRunCallsU3++; return 'Exit' }
 $loggedErrorsU3 = [System.Collections.Generic.List[string]]::new()
@@ -1820,7 +1817,7 @@ $chV = New-Dir "scenario-v\Series\Chapter 1"
 New-FakeAvifIn -DirPath $chV -Name "static.avif" -Frames 1 | Out-Null
 New-FakeAvifIn -DirPath $chV -Name "animated.avif" -Frames 5 | Out-Null
 
-$totalsV = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-v") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+$totalsV = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-v") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 
 Test-Assert ($totalsV.ConvertedImageSuccess -eq 1) ("exactly one file converted by the IMAGE engine - the static one (got " + $totalsV.ConvertedImageSuccess + ")")
 Test-Assert ($totalsV.ConvertedAnimatedSuccess -eq 1) ("exactly one file converted by the ANIMATED engine - the animated one (got " + $totalsV.ConvertedAnimatedSuccess + ")")
@@ -1846,7 +1843,7 @@ $chV2 = New-Dir "scenario-v2\Series\Chapter 1"
 New-FakeAvifIn -DirPath $chV2 -Name "animated.avif" -Frames 5 | Out-Null
 
 try {
-    $totalsV2 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-v2") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+    $totalsV2 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-v2") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 } finally {
     $env:HARNESS_IDENTIFY_LOG = $null
 }
@@ -1873,7 +1870,7 @@ $chV3 = New-Dir "scenario-v3\Series\Chapter 1"
 New-FakeAvifIn -DirPath $chV3 -Name "static.avif" -Frames 1 | Out-Null
 
 try {
-    $totalsV3 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-v3") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+    $totalsV3 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-v3") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 } finally {
     $env:HARNESS_IDENTIFY_LOG = $null
 }
@@ -1893,7 +1890,7 @@ $chW = New-Dir "scenario-w\Series\Chapter 1"
 [System.IO.File]::WriteAllText((Join-Path $chW "corrupt.avif"), "FAIL_IDENTIFY")
 New-FakeAvifIn -DirPath $chW -Name "animated.avif" -Frames 5 | Out-Null
 
-$totalsW = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-w") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+$totalsW = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-w") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 
 Test-Assert ($totalsW.ConvertedImageSuccess -eq 0 -and $totalsW.ConvertedImageFail -eq 0 -and $totalsW.ConvertedImageSkipped -eq 0) "the unclassifiable file was NOT dispatched to the image engine at all"
 Test-Assert ($totalsW.ConvertedAnimatedSuccess -eq 1) "the OTHER, real animated file in the same chapter still converted normally"
@@ -1928,7 +1925,7 @@ $chX = New-Dir "scenario-x\Series\Chapter 1"
 Start-Sleep -Milliseconds 50
 New-FakeImageIn -DirPath $chX -Name "photo.png" | Out-Null
 
-$totalsX = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-x") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+$totalsX = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-x") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 
 Test-Assert ($totalsX.ConvertedImageSuccess -eq 0 -and $totalsX.ConvertedImageFail -eq 0) "the colliding source was neither converted nor counted as a failure - just left alone"
 Test-Assert ($totalsX.InspectFailedCount -eq 1) ("the naming collision was counted in Invoke-FullPipeline's own InspectFailedCount, not invisible (got " + $totalsX.InspectFailedCount + ")")
@@ -1966,7 +1963,7 @@ $script:realCompleteChapterProgressX2Ref = $realCompleteChapterProgressX2
 $script:CleanConsoleOutputEnabled = $true
 
 try {
-    $totalsX2 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-x2") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+    $totalsX2 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-x2") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 } finally {
     $script:CleanConsoleOutputEnabled = $false
     ${function:Complete-ChapterProgress} = $realCompleteChapterProgressX2
@@ -2008,7 +2005,7 @@ $script:realCompleteChapterProgressX3Ref = $realCompleteChapterProgressX3
 $script:CleanConsoleOutputEnabled = $true
 
 try {
-    $totalsX3 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-x3") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+    $totalsX3 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-x3") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 } finally {
     $script:CleanConsoleOutputEnabled = $false
     ${function:Complete-ChapterProgress} = $realCompleteChapterProgressX3
@@ -2066,7 +2063,7 @@ $script:realCompleteChapterProgressX4Ref = $realCompleteChapterProgressX4
 $script:CleanConsoleOutputEnabled = $true
 
 try {
-    $totalsX4 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-x4") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+    $totalsX4 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-x4") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 } finally {
     ${function:Get-SeriesChapters} = $realGetSeriesChaptersX4
     $script:CleanConsoleOutputEnabled = $false
@@ -2101,7 +2098,7 @@ New-FakeImageIn -DirPath $chY -Name "page1.jpg" | Out-Null
 [System.IO.File]::WriteAllText((Join-Path $chY "photo_tmp_heif2png.png"), "orphaned heif scratch")
 [System.IO.File]::WriteAllText((Join-Path $chY "photo_tmp_overwrite.webp"), "orphaned overwrite scratch")
 
-$totalsY = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-y") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+$totalsY = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-y") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 
 # 2026-09-02 review fix: the BMP/HEIC/HEIF scratch patterns (and the
 # numbered iccstrip variant) were confirmed live to be missed by the
@@ -2136,7 +2133,7 @@ Write-Host "=== Scenario Y2: a chapter emptied by the scratch sweep produces a 0
 $chY2 = New-Dir "scenario-y2\Series\Chapter 1"
 [System.IO.File]::WriteAllText((Join-Path $chY2 "photo_tmp_iccstrip.png"), "orphaned strip scratch, nothing else in this chapter")
 
-$totalsY2 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-y2") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+$totalsY2 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-y2") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 
 $zipOutY2 = Join-Path $scratchDir "scenario-y2\Series\Chapter 1.zip"
 Test-Assert ($totalsY2.ZipCreatedFail -eq 1) ("the 0-entry zip was correctly counted as a failure, not a success (got ZipCreatedFail=" + $totalsY2.ZipCreatedFail + ")")
@@ -2286,7 +2283,7 @@ $avifZ4 = Join-Path $chZ4b "anim1.avif"
 Initialize-LogPaths -TargetPath (Join-Path $scratchDir "scenario-z4") -FullLogging $true -ScriptDir $scratchDir
 $logFileZ4 = $script:logFile
 try {
-    $totalsZ4 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-z4") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $true -LogFile $logFileZ4 -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+    $totalsZ4 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-z4") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $true -PermanentDelete $true
 } finally {
     Initialize-LogPaths -TargetPath $scratchDir -FullLogging $false -ScriptDir $scratchDir
 }
@@ -2351,7 +2348,7 @@ function Get-SeriesChapters {
 "@
 
 try {
-    $totalsZ5 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-z5") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true
+    $totalsZ5 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-z5") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 } finally {
     ${function:Get-SeriesChapters} = $realGetSeriesChaptersZ5
 }
@@ -2440,7 +2437,7 @@ try {
     # not a test scenario. If the background poller above ever DOES miss
     # its window despite the fix just above, this bounds the resulting
     # wait to a few seconds instead of the real 60s default.
-    $totalsZ6 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-z6") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -LogFile $script:logFile -LogErrorFile $script:logErrorFile -LogWarnFile $script:logWarnFile -PermanentDelete $true -AbortTimeoutSeconds 3
+    $totalsZ6 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-z6") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true -AbortTimeoutSeconds 3
 } finally {
     $abortPsZ6.EndInvoke($abortHandleZ6)
     $abortPsZ6.Dispose()

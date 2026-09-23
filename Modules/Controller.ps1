@@ -331,11 +331,7 @@ $script:fullPipelineEngineWorker = {
         [bool]$DoAnimatedOverwrite,
         [bool]$DoAnimatedDeleteSource = $true,
         [bool]$DoFullLogging,
-        [string]$LogFile,
-        [string]$LogErrorFile,
-        [string]$LogWarnFile,
         [bool]$DoPermanentDelete,
-        [bool]$CleanConsoleOutputEnabled,
         [System.Threading.SemaphoreSlim]$SharedBudget,
         [System.Collections.Concurrent.ConcurrentDictionary[string, System.Lazy[hashtable]]]$SeriesBundleCache,
         [System.Collections.Concurrent.ConcurrentDictionary[object, System.Lazy[hashtable]]]$ChapterClassificationCache,
@@ -355,14 +351,9 @@ $script:fullPipelineEngineWorker = {
     )
 
     $null = [System.Reflection.Assembly]::LoadWithPartialName("Microsoft.VisualBasic")
-    $script:logMutex                  = $LogMutex
-    $script:workerConsoleQueue        = $ConsoleQueue
-    $script:FullLogging               = $DoFullLogging
-    $script:logFile                   = $LogFile
-    $script:logErrorFile              = $LogErrorFile
-    $script:logWarnFile               = $LogWarnFile
-    $script:PermanentDelete           = $DoPermanentDelete
-    $script:CleanConsoleOutputEnabled = $CleanConsoleOutputEnabled
+    # Only these two - worker log lines go through the queue; see Docs/function-notes.md (Get-WorkerConsoleQueue).
+    $script:workerConsoleQueue = $ConsoleQueue
+    $script:PermanentDelete    = $DoPermanentDelete
 
     $seriesProvider  = New-SeriesProvider -LibraryPath $Path
     $chapterQueue    = [System.Collections.Generic.Queue[hashtable]]::new()
@@ -839,9 +830,6 @@ function Invoke-FullPipeline {
         [int]$FullPipelineMaxConcurrentProcs,
         [Parameter(Mandatory)]
         [bool]$FullLogging,
-        [string]$LogFile,
-        [string]$LogErrorFile,
-        [string]$LogWarnFile,
         [Parameter(Mandatory)]
         [bool]$PermanentDelete,
         [string[]]$LooseImageExtensions = (Get-LooseImageExtensions),
@@ -1091,8 +1079,7 @@ function Invoke-FullPipeline {
                 DoJpegLossless = $JpegLossless; DoJpegQuality = $JpegQuality
                 DoAnimatedLossless = $AnimatedLossless; AnimatedQuality = $AnimatedQuality
                 DoAnimatedOverwrite = $AnimatedOverwrite; DoAnimatedDeleteSource = $AnimatedDeleteSource
-                DoFullLogging = $FullLogging; LogFile = $LogFile; LogErrorFile = $LogErrorFile; LogWarnFile = $LogWarnFile
-                DoPermanentDelete = $PermanentDelete; CleanConsoleOutputEnabled = $cleanConsoleOutputEnabled
+                DoFullLogging = $FullLogging; DoPermanentDelete = $PermanentDelete
                 SharedBudget = $sharedBudget; SeriesBundleCache = $seriesBundleCache; ChapterClassificationCache = $chapterClassificationCache; ZipBlockReasons = $zipBlockReasons
                 AnnouncedChapters = $announcedChapters; EventQueue = $eventQueue
                 LooseImageExtensions = $LooseImageExtensions; AnimatedFileExtensions = $AnimatedFileExtensions
@@ -1275,9 +1262,6 @@ function Invoke-Mode {
         [Parameter(Mandatory)]
         [string]$CjxlExe,
         [string]$MagickExe,
-        [string]$LogFile,
-        [string]$LogErrorFile,
-        [string]$LogWarnFile,
         [scriptblock]$ImageConversionHandler = ${function:Invoke-LooseImageConversionPipeline},
         [scriptblock]$AnimatedConversionHandler = ${function:Invoke-LooseAnimatedConversionPipeline},
         [scriptblock]$ZipFoldersHandler = ${function:Invoke-ZipOnlyPipeline},
@@ -1319,7 +1303,7 @@ function Invoke-Mode {
             }
             'ZipFolders' {
                 $r = & $ZipFoldersHandler -Path $TargetPath -MaxParallel $Settings.ZipParallelThreads -DeleteFolders $true `
-                    -FullLogging $script:FullLogging -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete ([bool]$Settings.PermanentDelete)
+                    -PermanentDelete ([bool]$Settings.PermanentDelete)
                 $stats.ZipOnlyZipped.Success        = $r.ZippedSuccess;        $stats.ZipOnlyZipped.Fail        = $r.ZippedFail
                 $stats.ZipOnlyFolderDeleted.Success = $r.FolderDeletedSuccess; $stats.ZipOnlyFolderDeleted.Fail = $r.FolderDeletedFail
                 $stats.Aborted           = $r.Aborted
@@ -1329,7 +1313,7 @@ function Invoke-Mode {
                 $r = & $FullPipelineHandler -Path $TargetPath -CjxlExe $CjxlExe -MagickExe $MagickExe `
                     -JpegLossless ([bool]$Settings.JpegLossless) -JpegQuality $Settings.JpegQuality -AnimatedLossless ([bool]$Settings.AnimatedLossless) -AnimatedQuality $Settings.AnimatedQuality `
                     -AnimatedOverwrite ([bool]$Settings.AnimatedOverwrite) -AnimatedDeleteSource ([bool]$Settings.AnimatedDeleteSource) -FullPipelineMaxConcurrentProcs $Settings.FullPipelineMaxConcurrentProcs `
-                    -FullLogging $script:FullLogging -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile -PermanentDelete ([bool]$Settings.PermanentDelete) `
+                    -FullLogging $script:FullLogging -PermanentDelete ([bool]$Settings.PermanentDelete) `
                     -RunCoverDeletionBeforeConversion ([bool]$Settings.RunCoverDeletionBeforeConversion)
                 $stats.LooseImgConverted.Success      = $r.ConvertedImageSuccess;    $stats.LooseImgConverted.Fail      = $r.ConvertedImageFail;    $stats.LooseImgConverted.Skipped = $r.ConvertedImageSkipped
                 $stats.LooseImgDeleted.Success        = $r.DeletedImageSuccess;      $stats.LooseImgDeleted.Fail        = $r.DeletedImageFail
@@ -1407,9 +1391,6 @@ function Invoke-MainLoop {
         [string]$CjxlExe,
         [string]$MagickExe,
         [string]$ScriptDir,
-        [string]$LogFile,
-        [string]$LogErrorFile,
-        [string]$LogWarnFile,
         [scriptblock]$GetModeHandler = ${function:Get-SelectedMode},
         [scriptblock]$InvokeModeHandler = ${function:Invoke-Mode},
         [scriptblock]$PostRunPromptHandler = ${function:Show-PostRunPrompt},
@@ -1481,9 +1462,6 @@ function Invoke-MainLoop {
             & $InitializeLogMutexHandler
             # A failed Dispose() on the OLD mutex is harmless - see $reinitLogPathsHandler above for the same pattern/reasoning.
             if ($null -ne $previousLogMutexForDispose) { try { $previousLogMutexForDispose.Dispose() } catch { } }
-            $LogFile        = $script:logFile
-            $LogErrorFile   = $script:logErrorFile
-            $LogWarnFile    = $script:logWarnFile
             $lastFullLogging        = $currentFullLogging
             $lastDisableSummaryFile = $currentDisableSummaryFile
         }
@@ -1500,8 +1478,7 @@ function Invoke-MainLoop {
         $null = & $SetQuickEditHandler -Enabled $false
         $runStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         try {
-            $stats = & $InvokeModeHandler -Resolved $resolved -TargetPath $TargetPath -Settings $Settings -CjxlExe $CjxlExe -MagickExe $MagickExe `
-                -LogFile $LogFile -LogErrorFile $LogErrorFile -LogWarnFile $LogWarnFile
+            $stats = & $InvokeModeHandler -Resolved $resolved -TargetPath $TargetPath -Settings $Settings -CjxlExe $CjxlExe -MagickExe $MagickExe
         } finally {
             $null = & $SetQuickEditHandler -Enabled $true
             & $SetRunActiveHandler -Active $false
