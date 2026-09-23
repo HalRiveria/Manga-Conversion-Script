@@ -265,6 +265,28 @@ Test-Assert ($postRunCallsB -eq 2) "Show-PostRunPrompt was reached both after th
 Write-Host ""
 
 # ==============================================================================
+#  Scenario B (2026-09-23): menu clear/redraw through the real main loop.
+#  Iteration 1 goes mode menu -> Options -> back -> invalid pick -> mode 2;
+#  iteration 2 picks mode 2 straight away. Prompts, clears and the (fake)
+#  run are logged into one sequence. Every menu-to-menu step clears; the
+#  first menu after a run does NOT (it would wipe the run's summary).
+# ==============================================================================
+Write-Host "=== Scenario B: menu navigation clears, the first menu after a run doesn't ===" -ForegroundColor Cyan
+$seqB = [System.Collections.Generic.List[string]]::new()
+$innerPromptB = New-ScriptedPrompt -Responses @('0', '0', 'x', '2', '2')
+$promptB = { param($Message) $seqB.Add("PROMPT"); & $innerPromptB $Message }.GetNewClosure()
+$clearB  = { $seqB.Add("CLEAR") }.GetNewClosure()
+$realGetModeB = { param($Settings, $SettingsPath) Get-SelectedMode -Settings $Settings -SettingsPath $SettingsPath -PromptFunc $promptB -ClearScreenFunc $clearB }.GetNewClosure()
+$fakeInvokeModeB = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe) $seqB.Add("RUN"); return $null }.GetNewClosure()
+$postRunB = @{ Calls = 0 }
+$fakePostRunB = { $postRunB.Calls++; if ($postRunB.Calls -ge 2) { return 'Exit' }; return 'ReturnToMenu' }.GetNewClosure()
+Invoke-MainLoop -TargetPath $scratchDir -Settings $fakeSettings.Clone() -SettingsPath (Join-Path $scratchDir "scenario-b-settings.json") -CjxlExe "fake_cjxl.exe" `
+    -GetModeHandler $realGetModeB -InvokeModeHandler $fakeInvokeModeB -PostRunPromptHandler $fakePostRunB
+$expectedB = "PROMPT,CLEAR,PROMPT,CLEAR,PROMPT,CLEAR,PROMPT,RUN,PROMPT,RUN"
+Test-Assert (($seqB -join ",") -eq $expectedB) ("clears on Options entry, on going back, and on the invalid-pick redraw - but not on the first menu of either iteration (expected " + $expectedB + ", got " + ($seqB -join ",") + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

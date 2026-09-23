@@ -28,6 +28,13 @@ function Resolve-ModeSelection {
     }
 }
 
+function Clear-MenuScreen {
+    if ([Console]::IsOutputRedirected) { return }
+    # Swallowed deliberately - a host with no real console buffer (ISE,
+    # remoting) throws here; the menu still renders, just below the old one.
+    try { [Console]::Clear() } catch { }
+}
+
 function Show-ModeMenu {
     param(
         [Parameter(Mandatory)]
@@ -35,19 +42,26 @@ function Show-ModeMenu {
         [Parameter(Mandatory)]
         [string]$SettingsPath,
         [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
-        [scriptblock]$ReinitLogPathsHandler = $null
+        [scriptblock]$ReinitLogPathsHandler = $null,
+        [scriptblock]$ClearScreenFunc = { Clear-MenuScreen }
     )
 
     $lastFullLogging        = [bool]$Settings.FullLogging
     $lastDisableSummaryFile = [bool]$Settings.DisableSummaryFile
 
+    # DOCUMENTED DUPLICATE: the same clear/notice render loop is in
+    # Show-OptionsMenuLevel and Show-CoverDeletionMenu - keep all three in sync.
+    $clearNext = $false
+    $notice    = $null
     while ($true) {
+        if ($clearNext) { & $ClearScreenFunc }
+        $clearNext = $true
         foreach ($line in (Get-ModeMenuLines)) { Write-Host $line }
+        if ($null -ne $notice) { Write-Host $notice -ForegroundColor Yellow; $notice = $null }
         $choice = (& $PromptFunc "Enter a number").Trim()
 
         if ($choice -eq '0') {
-            $null = Show-OptionsMenuLevel -Items (Get-OptionsMenuSchema) -Settings $Settings -SettingsPath $SettingsPath -PromptFunc $PromptFunc -Title "Options"
-            Write-Host ""
+            $null = Show-OptionsMenuLevel -Items (Get-OptionsMenuSchema) -Settings $Settings -SettingsPath $SettingsPath -PromptFunc $PromptFunc -Title "Options" -ClearScreenFunc $ClearScreenFunc -ClearOnFirstRender $true
             continue
         }
 
@@ -94,21 +108,25 @@ function Show-ModeMenu {
             # ordering corruption that would otherwise cause.
             Set-AbortHandlerRunActive -Active $true
             $null = Set-ConsoleQuickEditEnabled -Enabled $false
+            $coverScreen = @{ HasOutput = $false }
             try {
-                $null = Show-CoverDeletionMenu -PromptFunc $PromptFunc -Settings $Settings -SettingsPath $SettingsPath
+                $null = Show-CoverDeletionMenu -PromptFunc $PromptFunc -Settings $Settings -SettingsPath $SettingsPath -ClearScreenFunc $ClearScreenFunc -ClearOnFirstRender $true -ScreenState $coverScreen
             } finally {
                 $null = Set-ConsoleQuickEditEnabled -Enabled $true
                 Set-AbortHandlerRunActive -Active $false
                 Complete-AbortDrain
                 Complete-LogRun
             }
-            Write-Host ""
+            if ($coverScreen.HasOutput) {
+                $clearNext = $false
+                Write-Host ""
+            }
             continue
         }
 
         $resolved = Resolve-ModeSelection -Choice $choice
         if ($null -eq $resolved) {
-            Write-Host "Invalid selection." -ForegroundColor Yellow
+            $notice = "Invalid selection."
             continue
         }
         return $resolved
@@ -122,10 +140,11 @@ function Get-SelectedMode {
         [Parameter(Mandatory)]
         [string]$SettingsPath,
         [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
-        [scriptblock]$ReinitLogPathsHandler = $null
+        [scriptblock]$ReinitLogPathsHandler = $null,
+        [scriptblock]$ClearScreenFunc = { Clear-MenuScreen }
     )
 
-    $resolved = Show-ModeMenu -Settings $Settings -SettingsPath $SettingsPath -PromptFunc $PromptFunc -ReinitLogPathsHandler $ReinitLogPathsHandler
+    $resolved = Show-ModeMenu -Settings $Settings -SettingsPath $SettingsPath -PromptFunc $PromptFunc -ReinitLogPathsHandler $ReinitLogPathsHandler -ClearScreenFunc $ClearScreenFunc
     Write-Log ("Mode selected: " + $resolved.Mode)
     return $resolved
 }
@@ -235,24 +254,33 @@ function Show-OptionsMenuLevel {
         [string]$SettingsPath,
         [string]$Title = "Options",
         [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
-        [scriptblock]$ActionHandler = { param($ActionName, $Settings, $SettingsPath) Invoke-OptionsMenuAction -ActionName $ActionName -Settings $Settings -SettingsPath $SettingsPath }
+        [scriptblock]$ActionHandler = { param($ActionName, $Settings, $SettingsPath) Invoke-OptionsMenuAction -ActionName $ActionName -Settings $Settings -SettingsPath $SettingsPath },
+        [scriptblock]$ClearScreenFunc = { Clear-MenuScreen },
+        [bool]$ClearOnFirstRender = $false
     )
 
+    # DOCUMENTED DUPLICATE: the same clear/notice render loop is in
+    # Show-ModeMenu and Show-CoverDeletionMenu - keep all three in sync.
+    $clearNext = $ClearOnFirstRender
+    $notice    = $null
     while ($true) {
+        if ($clearNext) { & $ClearScreenFunc }
+        $clearNext = $true
         foreach ($line in (Format-OptionsMenuLines -Items $Items -Settings $Settings -Title $Title)) { Write-Host $line }
+        if ($null -ne $notice) { Write-Host $notice -ForegroundColor Yellow; $notice = $null }
         $choice = (& $PromptFunc "Enter a number").Trim()
 
         if ($choice -eq '0') { return }
 
         $match = $Items | Where-Object { $_.Key -eq $choice } | Select-Object -First 1
         if (-not $match) {
-            Write-Host "Invalid selection." -ForegroundColor Yellow
+            $notice = "Invalid selection."
             continue
         }
 
         switch ($match.Type) {
             'Submenu' {
-                $null = Show-OptionsMenuLevel -Items $match.Items -Settings $Settings -SettingsPath $SettingsPath -Title $match.Label -PromptFunc $PromptFunc -ActionHandler $ActionHandler
+                $null = Show-OptionsMenuLevel -Items $match.Items -Settings $Settings -SettingsPath $SettingsPath -Title $match.Label -PromptFunc $PromptFunc -ActionHandler $ActionHandler -ClearScreenFunc $ClearScreenFunc -ClearOnFirstRender $true
             }
             'Bool' {
                 $Settings[$match.SettingsKey] = -not [bool]$Settings[$match.SettingsKey]
@@ -269,7 +297,7 @@ function Show-OptionsMenuLevel {
                     $Settings[$match.SettingsKey] = $parsed
                     Export-ScriptSettings -Settings $Settings -Path $SettingsPath
                 } else {
-                    Write-Host "Invalid value." -ForegroundColor Yellow
+                    $notice = "Invalid value."
                 }
             }
             'Action' {
@@ -426,11 +454,24 @@ function Show-CoverDeletionMenu {
         [scriptblock]$TrailingZeroHandler = { param($PromptFunc, $DefaultPath) Invoke-TrailingZeroAuditRun -PromptFunc $PromptFunc -DefaultPath $DefaultPath },
         [scriptblock]$AutoTrailingZeroHandler = { param($Path, $PreScannedFiles) Invoke-TrailingZeroAuditRun -Path $Path -PreScannedFiles $PreScannedFiles },
         [hashtable]$Settings = $null,
-        [string]$SettingsPath
+        [string]$SettingsPath,
+        [scriptblock]$ClearScreenFunc = { Clear-MenuScreen },
+        [bool]$ClearOnFirstRender = $false,
+        [hashtable]$ScreenState = $null
     )
 
+    # DOCUMENTED DUPLICATE: the same clear/notice render loop is in
+    # Show-ModeMenu and Show-OptionsMenuLevel - keep all three in sync.
+    # Options 1/2/5 print real work output, so the render right after them
+    # doesn't clear, and -ScreenState.HasOutput tells the caller not to clear either.
+    $clearNext       = $ClearOnFirstRender
+    $notice          = $null
+    $screenHasOutput = $false
     while ($true) {
+        if ($clearNext) { & $ClearScreenFunc; $screenHasOutput = $false }
+        $clearNext = $true
         foreach ($line in (Get-CoverDeletionMenuLines)) { Write-Host $line }
+        if ($null -ne $notice) { Write-Host $notice -ForegroundColor Yellow; $notice = $null }
         $choice = (& $PromptFunc "Enter a number").Trim()
 
         $defaultPath = ""
@@ -439,7 +480,7 @@ function Show-CoverDeletionMenu {
         }
 
         switch ($choice) {
-            '0' { return }
+            '0' { if ($null -ne $ScreenState) { $ScreenState.HasOutput = $screenHasOutput }; return }
             '1' {
                 $runResult = & $RunHandler $ProfilesPath $PromptFunc $defaultPath
                 if ($runResult -and $runResult.ResolvedPath) {
@@ -451,8 +492,9 @@ function Show-CoverDeletionMenu {
                     $null = & $AutoTrailingZeroHandler $runResult.ResolvedPath $survivingFiles
                 }
                 Write-Host ""
+                $clearNext = $false; $screenHasOutput = $true
             }
-            '2' { $null = & $AddHandler $ProfilesPath $PromptFunc; Write-Host "" }
+            '2' { $null = & $AddHandler $ProfilesPath $PromptFunc; Write-Host ""; $clearNext = $false; $screenHasOutput = $true }
             '4' { $null = & $ActionHandler 'OpenProfileLocation' $ProfilesPath }
             '5' {
                 $tzResult = & $TrailingZeroHandler $PromptFunc $defaultPath
@@ -460,8 +502,9 @@ function Show-CoverDeletionMenu {
                     Save-LastCoverDeletionPath -Settings $Settings -SettingsPath $SettingsPath -ResolvedPath $tzResult.ResolvedPath
                 }
                 Write-Host ""
+                $clearNext = $false; $screenHasOutput = $true
             }
-            default { Write-Host "Invalid selection." -ForegroundColor Yellow }
+            default { $notice = "Invalid selection." }
         }
     }
 }

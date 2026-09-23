@@ -921,6 +921,57 @@ Test-Assert ($resultU2.Mode -eq 'ImageConversion') "the real mode selection ('2'
 Write-Host ""
 
 # ==============================================================================
+#  Scenario V: menu-to-menu navigation clears and redraws (2026-09-23).
+#  A spy -ClearScreenFunc and -PromptFunc log into one sequence, plus a
+#  temporary Write-Host override so a carried notice's position is visible.
+#  V1: Show-ModeMenu's first render never clears (it follows startup/run
+#  output); an invalid pick clears, redraws, and shows "Invalid selection."
+#  under the redrawn menu. V2/V3: Cover Deletion clears on entry, never
+#  right after a work option (1/2/5), and reports via -ScreenState whether
+#  work output is still on screen when it returns.
+# ==============================================================================
+Write-Host "=== Scenario V: menu navigation clears/redraws, never right after output ===" -ForegroundColor Cyan
+
+$seqV1 = New-Object System.Collections.Generic.List[string]
+$innerPromptV1 = New-ScriptedPrompt -Responses @('x', '2')
+$promptV1 = { param($Message) $seqV1.Add("PROMPT"); & $innerPromptV1 $Message }.GetNewClosure()
+$clearV1  = { $seqV1.Add("CLEAR") }.GetNewClosure()
+function Write-Host { param([Parameter(Position = 0)]$Object, $ForegroundColor, [switch]$NoNewline) $seqV1.Add("OUT:" + $Object) }
+try {
+    $resolvedV1 = Show-ModeMenu -Settings (Get-DefaultScriptSettings) -SettingsPath (New-ScratchSettingsPath "scenario-v1") -PromptFunc $promptV1 -ClearScreenFunc $clearV1
+} finally {
+    Remove-Item -Path function:\Write-Host
+}
+$lastClearV1  = $seqV1.LastIndexOf("CLEAR")
+$noticeV1     = $seqV1.IndexOf("OUT:Invalid selection.")
+$lastPromptV1 = $seqV1.LastIndexOf("PROMPT")
+Test-Assert ($seqV1[0] -ne "CLEAR") "Show-ModeMenu's first render does not clear (keeps startup/run output above it)"
+Test-Assert (@($seqV1 | Where-Object { $_ -eq "CLEAR" }).Count -eq 1) ("exactly one clear - for the redraw after the invalid pick (got " + @($seqV1 | Where-Object { $_ -eq "CLEAR" }).Count + ")")
+Test-Assert ($noticeV1 -gt $lastClearV1 -and $noticeV1 -lt $lastPromptV1) "'Invalid selection.' is printed after the clear, under the redrawn menu, before the next prompt"
+Test-Assert ($resolvedV1.Mode -eq 'ImageConversion') "the menu still resolves the valid pick after the redraw"
+
+$seqV2 = New-Object System.Collections.Generic.List[string]
+$innerPromptV2 = New-ScriptedPrompt -Responses @('1', 'x', '0')
+$promptV2 = { param($Message) $seqV2.Add("PROMPT"); & $innerPromptV2 $Message }.GetNewClosure()
+$clearV2  = { $seqV2.Add("CLEAR") }.GetNewClosure()
+$screenV2 = @{ HasOutput = $null }
+Show-CoverDeletionMenu -ProfilesPath (Join-Path $scratchDir "scenario-v2-profiles.json") -PromptFunc $promptV2 -ClearScreenFunc $clearV2 -ClearOnFirstRender $true -ScreenState $screenV2 `
+    -RunHandler { param($ProfilesPath, $PromptFunc, $DefaultPath) return $null } | Out-Null
+Test-Assert (($seqV2 -join ",") -eq "CLEAR,PROMPT,PROMPT,CLEAR,PROMPT") ("Cover Deletion clears on entry, NOT right after Run, then clears again after the invalid pick (got " + ($seqV2 -join ",") + ")")
+Test-Assert ($screenV2.HasOutput -eq $false) "once a later redraw has cleared, -ScreenState reports no work output left on screen"
+
+$seqV3 = New-Object System.Collections.Generic.List[string]
+$innerPromptV3 = New-ScriptedPrompt -Responses @('1', '0')
+$promptV3 = { param($Message) $seqV3.Add("PROMPT"); & $innerPromptV3 $Message }.GetNewClosure()
+$clearV3  = { $seqV3.Add("CLEAR") }.GetNewClosure()
+$screenV3 = @{ HasOutput = $null }
+Show-CoverDeletionMenu -ProfilesPath (Join-Path $scratchDir "scenario-v3-profiles.json") -PromptFunc $promptV3 -ClearScreenFunc $clearV3 -ClearOnFirstRender $true -ScreenState $screenV3 `
+    -RunHandler { param($ProfilesPath, $PromptFunc, $DefaultPath) return $null } | Out-Null
+Test-Assert (($seqV3 -join ",") -eq "CLEAR,PROMPT,PROMPT") ("backing out right after Run doesn't clear (got " + ($seqV3 -join ",") + ")")
+Test-Assert ($screenV3.HasOutput -eq $true) "-ScreenState tells Show-ModeMenu the Run output is still on screen, so it won't clear it either"
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="
