@@ -263,6 +263,47 @@ Test-Assert (Test-Path -LiteralPath $canaryK) "the canary file inside the real t
 Write-Host ""
 
 # ==============================================================================
+#  Scenario K2 (2026-09-23, Todo.md item): a junction or read-only file
+#  NESTED inside a folder being permanently deleted. Before the fix,
+#  Directory.Delete($path, $true) threw part-way ("Access to the path
+#  'link' is denied") and left the folder behind with the read-only file
+#  still in it - confirmed live against the pre-fix module. The junction's
+#  target was never deleted-through even then; this scenario proves the
+#  replacement walk (Remove-DirectoryTreePermanently) keeps it that way:
+#  unlinks nested reparse points, never recurses into them, and clears
+#  ReadOnly only on real entries.
+# ==============================================================================
+Write-Host "=== Scenario K2: permanent delete of a folder with a nested junction + read-only files ===" -ForegroundColor Cyan
+$targetK2 = New-ScratchDir -Name "scenario-k2-real-target"
+$canaryK2 = Join-Path $targetK2 "canary.txt"
+"do not delete me" | Out-File -FilePath $canaryK2 -Encoding UTF8
+$victimK2 = New-ScratchDir -Name "scenario-k2-victim"
+$subK2    = Join-Path $victimK2 "sub"
+$roDirK2  = Join-Path $victimK2 "readonly-dir"
+$null = [System.IO.Directory]::CreateDirectory($subK2)
+$null = [System.IO.Directory]::CreateDirectory($roDirK2)
+"a" | Out-File -FilePath (Join-Path $victimK2 "a.txt") -Encoding UTF8
+"top ro" | Out-File -FilePath (Join-Path $victimK2 "top-ro.txt") -Encoding UTF8
+"deep ro" | Out-File -FilePath (Join-Path $subK2 "deep-ro.txt") -Encoding UTF8
+"in ro dir" | Out-File -FilePath (Join-Path $roDirK2 "x.txt") -Encoding UTF8
+[System.IO.File]::SetAttributes((Join-Path $victimK2 "top-ro.txt"), [System.IO.FileAttributes]::ReadOnly)
+[System.IO.File]::SetAttributes((Join-Path $subK2 "deep-ro.txt"), [System.IO.FileAttributes]::ReadOnly)
+(New-Object System.IO.DirectoryInfo $roDirK2).Attributes = [System.IO.FileAttributes]::Directory -bor [System.IO.FileAttributes]::ReadOnly
+New-Item -ItemType Junction -Path (Join-Path $subK2 "link") -Target $targetK2 | Out-Null
+$targetAttrBeforeK2 = [System.IO.File]::GetAttributes($targetK2)
+
+$threwK2 = $null
+$resultK2 = $null
+try { $resultK2 = Remove-ItemPermanently -ItemPath $victimK2 } catch { $threwK2 = $_ }
+
+Test-Assert ($null -eq $threwK2) ("the delete did not throw (got: " + $threwK2 + ")")
+Test-Assert ($resultK2 -eq $true) "Remove-ItemPermanently returned `$true"
+Test-Assert (-not (Test-Path -LiteralPath $victimK2)) "the whole folder is gone, nested junction and read-only entries included"
+Test-Assert (Test-Path -LiteralPath $canaryK2) "the junction's real target and its canary file survive (never recursed into)"
+Test-Assert ([System.IO.File]::GetAttributes($targetK2) -eq $targetAttrBeforeK2) "the junction target's own attributes were not touched"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario L: same concern, checked against Move-ToRecycleBin. Unlike
 #  Remove-ItemPermanently's raw Directory.Delete, this goes through the
 #  Shell-based VB FileIO Recycle Bin API - untested assumption otherwise,
@@ -443,6 +484,55 @@ $pPool.Close(); $pPool.Dispose()
 Test-Assert ($pErrors.Count -eq 0) ("the worker ran without errors (got " + $pErrors.Count + ": " + ($pErrors -join '; ') + ")")
 Test-Assert ($pResult.Direct -eq "permanent") "a direct worker Remove-Source call takes the permanent-delete branch"
 Test-Assert ($pResult.Closure -eq "permanent") ("a worker Remove-Source call from inside a .GetNewClosure()'d block ALSO takes the permanent-delete branch (got '" + $pResult.Closure + "')")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario Q (2026-09-23, Todo.md item): Move-ToRecycleBin must NOT
+#  silently delete permanently when an item can't actually be recycled.
+#  The VB FileIO call with OnlyErrorDialogs (= no confirmation) deletes
+#  such an item outright and returns normally - confirmed live 2026-09-23
+#  with a 100 GB sparse file (over C:'s 97,350 MB Recycle Bin limit): the
+#  call succeeded, the file was gone, and it was NOT in the Recycle Bin
+#  (a small control file sent the same way WAS). Owner decision: leave it
+#  in place instead. Uses a real sparse file just over this drive's
+#  limit (logical size only - no real disk space) so the check runs
+#  against the real Shell behavior boundary. Confirmed failing against the
+#  pre-fix module (the file was deleted outright).
+# ==============================================================================
+Write-Host "=== Scenario Q: Move-ToRecycleBin leaves an unrecyclable item in place ===" -ForegroundColor Cyan
+$capQ = [RecycleBinProbe]::GetCapacityBytes($scratchDir)
+if ($capQ -le 0) {
+    Write-Host "  [SKIP] this drive's Recycle Bin size limit isn't readable here - Q1/Q2 need it to size a too-big file" -ForegroundColor DarkYellow
+} else {
+    function New-SparseFileQ {
+        param([string]$Path, [long]$Length)
+        [System.IO.File]::WriteAllBytes($Path, [byte[]]@())
+        $null = & fsutil.exe sparse setflag $Path
+        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite)
+        try { $fs.SetLength($Length) } finally { $fs.Dispose() }
+    }
+    $bigQ = Join-Path $scratchDir "scenario-q-too-big.bin"
+    New-SparseFileQ -Path $bigQ -Length ($capQ + 1GB)
+    $threwQ1 = $null
+    try { $null = Move-ToRecycleBin -ItemPath $bigQ } catch { $threwQ1 = "$_" }
+    Test-Assert ($threwQ1 -like "Left in place*bigger than this drive*") ("a file over this drive's Recycle Bin limit is refused with a clear reason (got: " + $threwQ1 + ")")
+    Test-Assert (Test-Path -LiteralPath $bigQ) "...and the file is still on disk, NOT silently deleted permanently"
+    if (Test-Path -LiteralPath $bigQ) { [System.IO.File]::Delete($bigQ) }
+
+    $dirQ = New-ScratchDir -Name "scenario-q-too-big-dir"
+    New-SparseFileQ -Path (Join-Path $dirQ "huge.bin") -Length ($capQ + 1GB)
+    "small" | Out-File -FilePath (Join-Path $dirQ "small.txt") -Encoding UTF8
+    $threwQ2 = $null
+    try { $null = Move-ToRecycleBin -ItemPath $dirQ } catch { $threwQ2 = "$_" }
+    Test-Assert ($threwQ2 -like "Left in place*") "a folder whose total size is over the limit is refused too"
+    Test-Assert ((Test-Path -LiteralPath (Join-Path $dirQ "huge.bin")) -and (Test-Path -LiteralPath (Join-Path $dirQ "small.txt"))) "...and every file in it is still there"
+    Remove-ItemPermanently -ItemPath $dirQ | Out-Null
+}
+Test-Assert ([RecycleBinProbe]::GetUnrecyclableReason('\\server\share\chapter\001.jpg') -like "*network share*") "a UNC path is recognized as having no Recycle Bin"
+$smallQ = Join-Path $scratchDir "scenario-q-small.txt"
+"small" | Out-File -FilePath $smallQ -Encoding UTF8
+Test-Assert ($null -eq [RecycleBinProbe]::GetUnrecyclableReason($smallQ)) "a normal small local file is still considered recyclable (no false refusals)"
+[System.IO.File]::Delete($smallQ)
 Write-Host ""
 
 # ==============================================================================
