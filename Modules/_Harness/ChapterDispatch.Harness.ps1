@@ -800,12 +800,17 @@ Remove-Item -LiteralPath $probeScript15 -Force -ErrorAction SilentlyContinue
 $result15 = @($out15 | Where-Object { "$_" -like "RESULT *" }) -join ""
 Test-Assert ($result15 -like "RESULT done=True*") ("with the floor raised, an exited process's stream reads finish within 3s despite 2x-cores+8 pinned readers (got '" + $result15 + "')")
 
+# The floor scales with the configured concurrency (2 readers per process +
+# 32 headroom, never under 128) - a fixed 128 would starve again at 64+
+# concurrent processes, which the settings menu allows.
+$null = Initialize-ChildProcessReadThreadPool -MaxConcurrentProcesses 200
 $worker15 = 0; $io15 = 0
 [System.Threading.ThreadPool]::GetMinThreads([ref]$worker15, [ref]$io15)
-$null = Initialize-ChildProcessReadThreadPool -MinimumWorkerThreads ([Math]::Max(1, $worker15 - 1))
+Test-Assert ($worker15 -ge 432) ("200 concurrent processes raise the floor to at least 2x200+32 = 432 (got " + $worker15 + ")")
+$null = Initialize-ChildProcessReadThreadPool -MaxConcurrentProcesses 1
 $worker15b = 0; $io15b = 0
 [System.Threading.ThreadPool]::GetMinThreads([ref]$worker15b, [ref]$io15b)
-Test-Assert ($worker15b -eq $worker15) "never LOWERS an existing floor"
+Test-Assert ($worker15b -eq $worker15) "a later, smaller setting never LOWERS an existing floor"
 Write-Host ""
 
 # ==============================================================================

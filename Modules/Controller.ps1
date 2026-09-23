@@ -1291,6 +1291,9 @@ function Invoke-Mode {
             throw ("Mode '" + $Resolved.Mode + "' requires magick.exe, which was not found or configured.")
         }
 
+        $maxProcs = [Math]::Max([int]$Settings.FullPipelineMaxConcurrentProcs, [Math]::Max([int]$Settings.MaxCjxlProcs, [int]$Settings.AnimatedThreads))
+        $null = Initialize-ChildProcessReadThreadPool -MaxConcurrentProcesses $maxProcs
+
         $stats = New-StatsTracker
 
         switch ($Resolved.Mode) {

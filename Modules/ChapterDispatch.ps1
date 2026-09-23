@@ -371,11 +371,9 @@ function Invoke-ChapterDispatch {
 }
 
 function Initialize-ChildProcessReadThreadPool {
-    # Main-thread bootstrap only (not in Get-ChapterDispatchSharedFunctionNames).
-    # See Docs/function-notes.md - every child process's ReadToEndAsync pins a
-    # thread-pool worker for the process's whole lifetime, so the default floor
-    # (= core count) starves short identify calls' reads for 10-30s under load.
-    param([int]$MinimumWorkerThreads = 128)
+    # Main thread only (not in Get-ChapterDispatchSharedFunctionNames). See Docs/function-notes.md.
+    param([int]$MaxConcurrentProcesses = 0)
+    $MinimumWorkerThreads = [Math]::Max(128, (2 * $MaxConcurrentProcesses) + 32)
     $worker = 0; $io = 0
     [System.Threading.ThreadPool]::GetMinThreads([ref]$worker, [ref]$io)
     if ($worker -ge $MinimumWorkerThreads) { return $true }
