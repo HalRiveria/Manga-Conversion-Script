@@ -398,7 +398,7 @@ function Invoke-LooseImageConversionPipeline {
         $looseCts = [System.Threading.CancellationTokenSource]::new()
         Register-AbortCancellationSource -Cts $looseCts
 
-        $seriesProvider  = New-SeriesProvider -LibraryPath $Path
+        $seriesProvider  = New-SeriesProvider -LibraryPath $Path -QualifyingExtensions $FolderQualifyingExtensions
         $chapterQueue    = [System.Collections.Generic.Queue[hashtable]]::new()
         # Hashtable, not a plain scalar (2026-09-14 code-review finding - a
         # second, unfixed instance of the same closure-latch bug this

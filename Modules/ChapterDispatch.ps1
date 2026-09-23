@@ -9,7 +9,7 @@ function New-LibraryChapterProvider {
         [System.Collections.Generic.HashSet[string]]$ExcludeStagingDirs = $null,
         [bool]$ForceRezip = $false
     )
-    $seriesProvider = New-SeriesProvider -LibraryPath $LibraryPath
+    $seriesProvider = New-SeriesProvider -LibraryPath $LibraryPath -QualifyingExtensions $QualifyingExtensions
     $chapterQueue   = [System.Collections.Generic.Queue[hashtable]]::new()
     # Hashtable, not a plain scalar (2026-09-14 fix, Todo.md finding) - a
     # plain $seriesExhausted assigned inside this .GetNewClosure()'d

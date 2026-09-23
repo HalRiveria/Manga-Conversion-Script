@@ -145,6 +145,34 @@ Test-Assert (@($script:hostLinesA2 | Where-Object { $_ -like "*Zipping*" -or $_ 
 Write-Host ""
 
 # ==============================================================================
+#  Scenario A4 (2026-09-23): Zip Folders' CCR series grouping skips category
+#  folders, same rule as New-SeriesProvider - 'Complete\Series Z' shows as
+#  series 'Series Z' with its own 2-chapter total, not one 'Complete' series.
+# ==============================================================================
+Write-Host "=== Scenario A4: Zip Folders groups by the real series folder under a category ===" -ForegroundColor Cyan
+$rootA4 = New-Dir "scenario-a4"
+New-FileIn -DirPath (New-Dir "scenario-a4\Complete\Series Z\Chapter 1") -Name "page1.jpg" | Out-Null
+New-FileIn -DirPath (New-Dir "scenario-a4\Complete\Series Z\Chapter 2") -Name "page1.jpg" | Out-Null
+$script:seriesStartsA4 = [System.Collections.Generic.List[string]]::new()
+$realStartSeriesA4 = ${function:Start-SeriesProgress}
+function Start-SeriesProgress {
+    param([string]$SeriesName, [int]$TotalChapters)
+    $script:seriesStartsA4.Add($SeriesName + ":" + $TotalChapters)
+    & $realStartSeriesA4 -SeriesName $SeriesName -TotalChapters $TotalChapters
+}
+$script:CleanConsoleOutputEnabled = $true
+try {
+    $totalsA4 = Invoke-ZipOnlyPipeline -Path $rootA4 -MaxParallel 2 -DeleteFolders $true -PermanentDelete $true
+} finally {
+    $script:CleanConsoleOutputEnabled = $false
+    ${function:Start-SeriesProgress} = $realStartSeriesA4
+    $null = Complete-AllActiveSeriesProgress
+}
+Test-Assert ($totalsA4.ZippedSuccess -eq 2) ("sanity check: both chapters zipped (got " + $totalsA4.ZippedSuccess + ")")
+Test-Assert (($script:seriesStartsA4 -join ",") -eq "Series Z:2") ("CCR got one series 'Series Z' with 2 chapters, not 'Complete' (got: " + ($script:seriesStartsA4 -join ",") + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario A3 (2026-09-04 fix, real bug): mode 3's own worker had NO
 #  orphaned-"_tmp_*"-scratch-file sweep at all, unlike Invoke-LooseFolderZip
 #  (Scenario G2) and Invoke-FullPipelineChapter - a leftover scratch file

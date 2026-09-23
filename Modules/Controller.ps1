@@ -360,7 +360,7 @@ $script:fullPipelineEngineWorker = {
     $script:workerConsoleQueue = $ConsoleQueue
     $script:PermanentDelete    = $DoPermanentDelete
 
-    $seriesProvider  = New-SeriesProvider -LibraryPath $Path
+    $seriesProvider  = New-SeriesProvider -LibraryPath $Path -QualifyingExtensions $FolderQualifyingExtensions
     $chapterQueue    = [System.Collections.Generic.Queue[hashtable]]::new()
     # Hashtable, not a plain scalar (2026-09-14 fix, Todo.md finding) - see
     # ChapterDispatch.ps1's New-LibraryChapterProvider for why a plain

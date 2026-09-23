@@ -169,6 +169,7 @@ function Invoke-ZipOnlyPipeline {
         $leafProvider = New-ZippableLeafDirProvider -ScanPath $Path -QualifyingExtensions $QualifyingExtensions -ForceRezip $false
 
         $zoSeenSeriesNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $zoCategoryCache   = [System.Collections.Generic.Dictionary[string,bool]]::new([System.StringComparer]::OrdinalIgnoreCase)
         $trimmedPath = $Path.TrimEnd([System.IO.Path]::DirectorySeparatorChar)
 
         $zoJobProvider = {
@@ -179,11 +180,28 @@ function Invoke-ZipOnlyPipeline {
             $dirFullName = $next.Dir.FullName
             if ($dirFullName.StartsWith($trimmedPath, [System.StringComparison]::OrdinalIgnoreCase)) {
                 $relativePath = $dirFullName.Substring($trimmedPath.Length).TrimStart([System.IO.Path]::DirectorySeparatorChar)
-                $topLevelName = ($relativePath -split [regex]::Escape([System.IO.Path]::DirectorySeparatorChar))[0]
-                $seriesName = if ([string]::IsNullOrEmpty($topLevelName)) { $next.Dir.Name } else { $topLevelName }
+                $segments = @($relativePath -split [regex]::Escape([System.IO.Path]::DirectorySeparatorChar))
+                if ([string]::IsNullOrEmpty($segments[0])) {
+                    $seriesName = $next.Dir.Name
+                    $seriesRoot = $dirFullName
+                } else {
+                    # Same category-folder rule New-SeriesProvider uses
+                    # (Test-SeriesCategoryFolder): descend past category
+                    # folders to the real series folder.
+                    $seriesRoot = [System.IO.Path]::Combine($trimmedPath, $segments[0])
+                    for ($i = 1; $i -lt ($segments.Count - 1); $i++) {
+                        if (-not $zoCategoryCache.ContainsKey($seriesRoot)) {
+                            $zoCategoryCache[$seriesRoot] = Test-SeriesCategoryFolder -Path $seriesRoot -QualifyingExtensions $QualifyingExtensions
+                        }
+                        if (-not $zoCategoryCache[$seriesRoot]) { break }
+                        $seriesRoot = [System.IO.Path]::Combine($seriesRoot, $segments[$i])
+                    }
+                    $seriesName = [System.IO.Path]::GetFileName($seriesRoot)
+                }
             } else {
                 Write-Log ("Zip-only: '" + $dirFullName + "' does not start with the scan root '" + $trimmedPath + "' as expected - using its own folder name for the Clean Console Output series display instead of deriving one.") -Level Warn
                 $seriesName = $next.Dir.Name
+                $seriesRoot = $dirFullName
             }
 
             # Wrapped in try/catch (2026-09-15 fix, real bug) - this whole
@@ -199,7 +217,6 @@ function Invoke-ZipOnlyPipeline {
             try {
                 if ((Test-CcrEnabledForZipOnly) -and -not $zoSeenSeriesNames.Contains($seriesName)) {
                     $null = $zoSeenSeriesNames.Add($seriesName)
-                    $seriesRoot  = Join-Path $trimmedPath $seriesName
                     $seriesTotal = 1
                     if (Test-Path -LiteralPath $seriesRoot -PathType Container) {
                         $seriesLeaves = Get-ZippableLeafDirs -ScanPath $seriesRoot -QualifyingExtensions $QualifyingExtensions -ForceRezip $false

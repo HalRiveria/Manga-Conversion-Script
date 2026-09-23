@@ -505,7 +505,7 @@ $null = New-Dir "scenario-q-library\Series A"
 $null = New-Dir "scenario-q-library\Series B"
 $null = New-Dir "scenario-q-library\Series C"
 
-$seriesProviderQ = New-SeriesProvider -LibraryPath $libraryQ
+$seriesProviderQ = New-SeriesProvider -LibraryPath $libraryQ -QualifyingExtensions $imgExts
 $foundSeriesQ = [System.Collections.Generic.List[string]]::new()
 $callCountQ = 0
 while ($true) {
@@ -526,16 +526,48 @@ Test-Assert ($null -eq $postExhaustionQ1 -and $null -eq $postExhaustionQ2) "call
 Write-Host ""
 
 # ==============================================================================
+#  Scenario Q2 (2026-09-23): category folders are containers, not series.
+#  A direct child with no qualifying images/zips of its own and no chapter
+#  subfolder (a subfolder with qualifying images directly inside) is a
+#  category - its subfolders become the series, recursively. Series with
+#  chapters, images directly inside, or only zips stay series.
+# ==============================================================================
+Write-Host "=== Scenario Q2: New-SeriesProvider descends into category folders ===" -ForegroundColor Cyan
+$libraryQ2 = New-Dir "scenario-q2-library"
+New-FileIn -DirPath (New-Dir "scenario-q2-library\Complete\Series A\Chapter 1") -Name "page1.jpg" | Out-Null
+New-FileIn -DirPath (New-Dir "scenario-q2-library\Complete\Series B") -Name "Chapter 1.zip" | Out-Null
+New-FileIn -DirPath (New-Dir "scenario-q2-library\Ongoing\Nested\Series C\Chapter 1") -Name "page1.jxl" | Out-Null
+New-FileIn -DirPath (New-Dir "scenario-q2-library\Series D\Chapter 1") -Name "page1.png" | Out-Null
+New-FileIn -DirPath (New-Dir "scenario-q2-library\Series E") -Name "page1.jpg" | Out-Null
+$null = New-Dir "scenario-q2-library\Series F"
+
+$seriesProviderQ2 = New-SeriesProvider -LibraryPath $libraryQ2 -QualifyingExtensions $imgExts
+$foundQ2 = [System.Collections.Generic.List[string]]::new()
+for ($i = 0; $i -lt 30; $i++) {
+    $next = & $seriesProviderQ2
+    if ($null -eq $next) { break }
+    $foundQ2.Add($next.FullName.Substring($libraryQ2.Length + 1))
+}
+$foundQ2Sorted = @($foundQ2 | Sort-Object)
+$expectedQ2 = "Complete\Series A|Complete\Series B|Ongoing\Nested\Series C|Series D|Series E|Series F"
+Test-Assert (($foundQ2Sorted -join "|") -eq $expectedQ2) ("categories (Complete, Ongoing, Ongoing\Nested) are descended into; everything else is a series (got: " + ($foundQ2Sorted -join "|") + ")")
+Test-Assert ($null -eq (& $seriesProviderQ2)) "the exhausted provider keeps returning `$null"
+Test-Assert (Test-SeriesCategoryFolder -Path (Join-Path $libraryQ2 "Complete") -QualifyingExtensions $imgExts) "Test-SeriesCategoryFolder: 'Complete' is a category"
+Test-Assert (-not (Test-SeriesCategoryFolder -Path (Join-Path $libraryQ2 "Series D") -QualifyingExtensions $imgExts)) "Test-SeriesCategoryFolder: a series with a chapter subfolder is not a category"
+Test-Assert (-not (Test-SeriesCategoryFolder -Path (Join-Path $libraryQ2 "Series F") -QualifyingExtensions $imgExts)) "Test-SeriesCategoryFolder: an empty folder (no subfolders) is not a category"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario R: New-SeriesProvider edge cases - nonexistent library throws;
 #  an empty (0-series) library returns $null immediately, not an error.
 # ==============================================================================
 Write-Host "=== Scenario R: New-SeriesProvider edge cases ===" -ForegroundColor Cyan
 $threwMissingLibraryR = $false
-try { New-SeriesProvider -LibraryPath (Join-Path $scratchDir "does-not-exist-library") } catch { $threwMissingLibraryR = $true }
+try { New-SeriesProvider -LibraryPath (Join-Path $scratchDir "does-not-exist-library") -QualifyingExtensions $imgExts } catch { $threwMissingLibraryR = $true }
 Test-Assert $threwMissingLibraryR "a nonexistent -LibraryPath throws immediately, at setup time"
 
 $emptyLibraryR = New-Dir "scenario-r-empty-library"
-$emptyProviderR = New-SeriesProvider -LibraryPath $emptyLibraryR
+$emptyProviderR = New-SeriesProvider -LibraryPath $emptyLibraryR -QualifyingExtensions $imgExts
 $firstCallR = & $emptyProviderR
 Test-Assert ($null -eq $firstCallR) "an empty (0-series) library's first call returns `$null, not an error"
 Write-Host ""
@@ -627,7 +659,7 @@ New-Dir "scenario-u-library\Series One\Chapter 3" | ForEach-Object { New-FileIn 
 $seriesU2 = New-Dir "scenario-u-library\Series Two"
 New-Dir "scenario-u-library\Series Two\Chapter 1" | ForEach-Object { New-FileIn -DirPath $_ -Name "page1.jpg" | Out-Null }
 
-$seriesProviderU = New-SeriesProvider -LibraryPath $libraryU
+$seriesProviderU = New-SeriesProvider -LibraryPath $libraryU -QualifyingExtensions $imgExts
 $perSeriesCountsU = @{}
 while ($true) {
     $series = & $seriesProviderU

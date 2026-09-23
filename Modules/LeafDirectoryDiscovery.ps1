@@ -234,28 +234,72 @@ function New-ZippableLeafDirProvider {
     }.GetNewClosure()
 }
 
+function Test-SeriesCategoryFolder {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+        [Parameter(Mandatory)]
+        [string[]]$QualifyingExtensions
+    )
+    $extSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$QualifyingExtensions, [System.StringComparer]::OrdinalIgnoreCase)
+    try {
+        foreach ($f in [System.IO.Directory]::EnumerateFiles($Path)) {
+            $ext = [System.IO.Path]::GetExtension($f)
+            if ($ext -ieq ".zip" -or $extSet.Contains($ext)) { return $false }
+        }
+        $hasSubfolder = $false
+        foreach ($d in [System.IO.Directory]::EnumerateDirectories($Path)) {
+            if (([System.IO.File]::GetAttributes($d) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+            $hasSubfolder = $true
+            foreach ($f in [System.IO.Directory]::EnumerateFiles($d)) {
+                if ($extSet.Contains([System.IO.Path]::GetExtension($f))) { return $false }
+            }
+        }
+        return $hasSubfolder
+    } catch {
+        Write-Log ("Could not check whether '" + $Path + "' is a category folder - treating it as a series: " + $_) -Level Warn
+        return $false
+    }
+}
+
 function New-SeriesProvider {
     param(
         [Parameter(Mandatory)]
-        [string]$LibraryPath
+        [string]$LibraryPath,
+        [Parameter(Mandatory)]
+        [string[]]$QualifyingExtensions
     )
     if (-not [System.IO.Directory]::Exists($LibraryPath)) {
         throw ("New-SeriesProvider: -LibraryPath does not exist or is not a directory: '" + $LibraryPath + "'")
     }
 
-    $enumerator = [System.IO.Directory]::EnumerateDirectories($LibraryPath).GetEnumerator()
+    $enumeratorStack = [System.Collections.Generic.Stack[object]]::new()
+    $enumeratorStack.Push([System.IO.Directory]::EnumerateDirectories($LibraryPath).GetEnumerator())
 
     return {
-        try {
-            if ($enumerator.MoveNext()) {
-                return [System.IO.DirectoryInfo]::new($enumerator.Current)
+        while ($enumeratorStack.Count -gt 0) {
+            $top = $enumeratorStack.Peek()
+            $dir = $null
+            try {
+                if ($top.MoveNext()) { $dir = $top.Current }
+            } catch {
+                Write-Log ("Series scan stopped early for this folder level: " + $_) -Level Error
             }
-        } catch {
-            Write-Log ("Series scan stopped early: " + $_) -Level Error
-            $enumerator.Dispose()
-            return $null
+            if ($null -eq $dir) {
+                $top.Dispose()
+                $null = $enumeratorStack.Pop()
+                continue
+            }
+            if (Test-SeriesCategoryFolder -Path $dir -QualifyingExtensions $QualifyingExtensions) {
+                try {
+                    $enumeratorStack.Push([System.IO.Directory]::EnumerateDirectories($dir).GetEnumerator())
+                } catch {
+                    Write-Log ("Could not list category folder '" + $dir + "' - skipping it: " + $_) -Level Warn
+                }
+                continue
+            }
+            return [System.IO.DirectoryInfo]::new($dir)
         }
-        $enumerator.Dispose()
         return $null
     }.GetNewClosure()
 }
@@ -290,5 +334,5 @@ function Get-SeriesChapters {
 }
 
 function Get-LeafDirectoryDiscoverySharedFunctionNames {
-    return @('New-SeriesProvider', 'Get-SeriesChapters', 'Get-ZippableLeafDirs', 'Test-ZippableLeafDirCandidate', 'Get-FilesRecursiveSafe')
+    return @('New-SeriesProvider', 'Test-SeriesCategoryFolder', 'Get-SeriesChapters', 'Get-ZippableLeafDirs', 'Test-ZippableLeafDirCandidate', 'Get-FilesRecursiveSafe')
 }
