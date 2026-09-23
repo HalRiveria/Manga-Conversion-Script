@@ -986,6 +986,36 @@ Write-Host ""
 # ==============================================================================
 #  Summary
 # ==============================================================================
+#  Scenario AM: an abort raised mid-jobBuilder stops per-file AVIF
+#  classification - no further magick identify spawns for the rest of the
+#  chapter. The fake magick.exe leaves a <path>.identify-args.txt marker
+#  per identify call; Test-AbortSignal flips the abort as soon as the
+#  first marker exists, so exactly 1 of the 3 AVIFs gets classified.
+# ==============================================================================
+Write-Host "=== Scenario AM: abort mid-chapter stops per-file AVIF identify spawns ===" -ForegroundColor Cyan
+Reset-AbortState
+$chAM = New-Dir "scenario-am\Series\Chapter 1"
+foreach ($n in 1..3) { $null = New-FakeAvifIn -DirPath $chAM -Name ("p" + $n + ".avif") -Frames 8 }
+function Test-AbortSignal {
+    if (@([System.IO.Directory]::GetFiles($chAM, "*.identify-args.txt")).Count -ge 1) {
+        [ConsoleCtrl]::AbortRequested = $true
+    }
+    & $originalTestAbortSignal
+}
+try {
+    $totalsAM = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-am") -MagickExe $fakeMagickExe -AnimatedThreads 2 -FullLogging $false -AbortTimeoutSeconds 1
+} finally {
+    ${function:Test-AbortSignal} = $originalTestAbortSignal
+    Reset-AbortState
+}
+$identifyCountAM = @([System.IO.Directory]::GetFiles($chAM, "*.identify-args.txt")).Count
+Test-Assert ($totalsAM.Aborted) "sanity check: the run was actually aborted"
+Test-Assert ($identifyCountAM -eq 1) ("only the AVIF classified before the abort spawned magick identify (got " + $identifyCountAM + " identify call(s), expected 1)")
+Test-Assert ($totalsAM.ConvertedSuccess -eq 0) ("nothing converted after the abort (got ConvertedSuccess=" + $totalsAM.ConvertedSuccess + ")")
+Test-Assert (@([System.IO.Directory]::GetFiles($chAM, "*.avif")).Count -eq 3) "all 3 AVIF sources left untouched"
+Write-Host ""
+
+# ==============================================================================
 Write-Host "==============================================="
 if ($script:failCount -eq 0) {
     Write-Host ("ALL PASSED  (" + $script:passCount + " assertions)") -ForegroundColor Green

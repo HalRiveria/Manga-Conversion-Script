@@ -520,7 +520,11 @@ function Invoke-LooseImageConversionPipeline {
                         $cr.SkippedPaths.Add($srcPath)
                         continue
                     }
-                } elseif ($MagickExe -and $srcPath -imatch '\.avif$') {
+                } elseif ($MagickExe -and $srcPath -imatch '\.avif$' -and -not (Test-AbortSignal)) {
+                    # DOCUMENTED DUPLICATE: the same Test-AbortSignal check before each
+                    # per-file Test-AvifAnimated spawn also lives in
+                    # AnimatedConversionPipeline.ps1's jobBuilder and Controller.ps1's
+                    # Get-OrCreateFullPipelineChapterClassification - keep all three in sync.
                     try {
                         $isAnimatedAvif = Test-AvifAnimated -AvifPath $srcPath -MagickExe $MagickExe
                     } catch {

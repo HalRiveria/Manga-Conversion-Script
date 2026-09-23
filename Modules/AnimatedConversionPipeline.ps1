@@ -384,18 +384,24 @@ function Invoke-LooseAnimatedConversionPipeline {
                     continue
                 }
 
-                try {
-                    $isAnimated = Test-AvifAnimated -AvifPath $srcPath -MagickExe $MagickExe
-                } catch {
-                    Write-Log ("Could not determine if '" + $srcPath + "' is animated - skipping: " + $_) -Level Warn
-                    $cr.InspectFailedCount++
-                    continue
-                }
-                if (-not $isAnimated) {
-                    Write-Log ("'" + $srcPath + "' is a static AVIF (not animated) - left unconverted.")
-                    $cr.StaticSkippedCount++
-                    $cr.StaticSkippedPaths.Add($srcPath)
-                    continue
+                # DOCUMENTED DUPLICATE: the same Test-AbortSignal check before each
+                # per-file Test-AvifAnimated spawn also lives in
+                # ImageConversionPipeline.ps1's jobBuilder and Controller.ps1's
+                # Get-OrCreateFullPipelineChapterClassification - keep all three in sync.
+                if (-not (Test-AbortSignal)) {
+                    try {
+                        $isAnimated = Test-AvifAnimated -AvifPath $srcPath -MagickExe $MagickExe
+                    } catch {
+                        Write-Log ("Could not determine if '" + $srcPath + "' is animated - skipping: " + $_) -Level Warn
+                        $cr.InspectFailedCount++
+                        continue
+                    }
+                    if (-not $isAnimated) {
+                        Write-Log ("'" + $srcPath + "' is a static AVIF (not animated) - left unconverted.")
+                        $cr.StaticSkippedCount++
+                        $cr.StaticSkippedPaths.Add($srcPath)
+                        continue
+                    }
                 }
 
                 $tempOverwritePath = if ($webpPathExists) {

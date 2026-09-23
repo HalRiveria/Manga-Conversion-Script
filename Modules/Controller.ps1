@@ -151,6 +151,10 @@ function Get-OrCreateFullPipelineChapterClassification {
             $chAvifClassification = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             $inspectFailedCount = 0
             foreach ($img in (@($images) + @($staleSources))) {
+                # DOCUMENTED DUPLICATE: the same Test-AbortSignal check before each
+                # per-file Test-AvifAnimated spawn also lives in
+                # ImageConversionPipeline.ps1's and AnimatedConversionPipeline.ps1's
+                # jobBuilders - keep all three in sync.
                 if (Test-AbortSignal) { break }
                 if ($img.Extension -ine ".avif" -or -not $chAnimatedPathSet.Contains($img.FullName) -or $chAvifClassification.ContainsKey($img.FullName)) { continue }
                 try {

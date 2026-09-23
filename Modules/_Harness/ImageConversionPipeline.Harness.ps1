@@ -1824,6 +1824,38 @@ if ($completedAL) {
 }
 Write-Host ""
 
+# ==============================================================================
+#  Scenario AM: an abort raised mid-jobBuilder stops per-file AVIF
+#  classification - no further magick identify spawns for the rest of the
+#  chapter. Test-AbortSignal flips the abort as soon as the first identify
+#  call has been logged, so exactly 1 of the 3 AVIFs gets classified.
+# ==============================================================================
+Write-Host "=== Scenario AM: abort mid-chapter stops per-file AVIF identify spawns ===" -ForegroundColor Cyan
+Reset-AbortState
+$chAM = New-Dir "scenario-am\Series\Chapter 1"
+foreach ($n in 1..3) { $null = New-FakeAvif -DirPath $chAM -Name ("p" + $n + ".avif") -Content "FRAMES:1" }
+$identifyLogAM = Join-Path $scratchDir "scenario-am-identify.log"
+$env:HARNESS_IDENTIFY_LOG = $identifyLogAM
+function Test-AbortSignal {
+    if ([System.IO.File]::Exists($identifyLogAM) -and [System.IO.File]::ReadAllLines($identifyLogAM).Count -ge 1) {
+        [ConsoleCtrl]::AbortRequested = $true
+    }
+    & $originalTestAbortSignal
+}
+try {
+    $totalsAM = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir "scenario-am") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -MaxCjxlProcs 2 -FullLogging $false -AbortTimeoutSeconds 1
+} finally {
+    ${function:Test-AbortSignal} = $originalTestAbortSignal
+    Remove-Item Env:\HARNESS_IDENTIFY_LOG -ErrorAction SilentlyContinue
+    Reset-AbortState
+}
+$identifyCountAM = if ([System.IO.File]::Exists($identifyLogAM)) { [System.IO.File]::ReadAllLines($identifyLogAM).Count } else { 0 }
+Test-Assert ($totalsAM.Aborted) "sanity check: the run was actually aborted"
+Test-Assert ($identifyCountAM -eq 1) ("only the AVIF classified before the abort spawned magick identify (got " + $identifyCountAM + " identify call(s), expected 1)")
+Test-Assert ($totalsAM.ConvertedSuccess -eq 0) ("nothing converted after the abort (got ConvertedSuccess=" + $totalsAM.ConvertedSuccess + ")")
+Test-Assert (@([System.IO.Directory]::GetFiles($chAM, "*.avif")).Count -eq 3) "all 3 AVIF sources left untouched"
+Write-Host ""
+
 if ($script:failCount -eq 0) {
     Write-Host ("ALL PASSED  (" + $script:passCount + " assertions)") -ForegroundColor Green
     exit 0
