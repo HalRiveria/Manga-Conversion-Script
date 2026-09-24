@@ -58,7 +58,8 @@ function Invoke-ChapterDispatch {
         [Parameter(Mandatory)]
         [System.Threading.CancellationToken]$CancelToken,
         [int]$AbortTimeoutSeconds = 60,
-        [int]$MaxQueueAhead = 3
+        [int]$MaxQueueAhead = 3,
+        [scriptblock]$ChapterReleaseCheck = $null
     )
 
     $isSharedBudget = ($MaxConcurrent -is [System.Threading.SemaphoreSlim])
@@ -67,6 +68,7 @@ function Invoke-ChapterDispatch {
     $chapterResults     = [System.Collections.Generic.List[hashtable]]::new()
     $activeChapterCount = 0
     $providerExhausted  = $false
+    $heldChapters       = [System.Collections.Generic.List[object]]::new()
 
     $pending = [System.Collections.Generic.Queue[hashtable]]::new()
     $running = [System.Collections.Generic.List[hashtable]]::new()
@@ -81,6 +83,13 @@ function Invoke-ChapterDispatch {
     try {
     while ((-not $CancelToken.IsCancellationRequested) -and `
            (-not $providerExhausted -or $activeChapterCount -gt 0 -or $pending.Count -gt 0 -or $running.Count -gt 0)) {
+
+        for ($h = $heldChapters.Count - 1; $h -ge 0; $h--) {
+            if ([bool](& $ChapterReleaseCheck $heldChapters[$h])) {
+                $heldChapters.RemoveAt($h)
+                $activeChapterCount--
+            }
+        }
 
         while ((-not $providerExhausted) -and $activeChapterCount -lt $MaxQueueAhead -and (-not $CancelToken.IsCancellationRequested)) {
             $chapterInfo = & $ChapterProvider
@@ -114,7 +123,7 @@ function Invoke-ChapterDispatch {
             if ($state.Outstanding -le 0) {
                 & $ChapterCompleteCallback $chapterInfo
                 $state.Completed = $true
-                $activeChapterCount--
+                if ($null -ne $ChapterReleaseCheck) { $heldChapters.Add($chapterInfo) } else { $activeChapterCount-- }
                 $chapterResults.Add(@{ ChapterInfo = $chapterInfo; Completed = $true; Aborted = $false })
             }
         }

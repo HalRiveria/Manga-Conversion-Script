@@ -363,6 +363,7 @@ $script:fullPipelineEngineWorker = {
         [System.Collections.Concurrent.ConcurrentDictionary[object,string]]$ZipBlockReasons,
         [System.Collections.Concurrent.ConcurrentDictionary[object,byte]]$AnnouncedChapters,
         [System.Collections.Concurrent.ConcurrentDictionary[object,byte]]$RunningChapters,
+        [System.Collections.Concurrent.ConcurrentDictionary[object,byte]]$MergedChapters = $null,
         [bool]$AnimatedEnabled = $true,
         [System.Collections.Concurrent.ConcurrentQueue[hashtable]]$EventQueue,
         [string[]]$LooseImageExtensions,
@@ -846,11 +847,16 @@ $script:fullPipelineEngineWorker = {
         }
     }.GetNewClosure()
 
+    $chapterReleaseCheck = $null
+    if ($null -ne $MergedChapters) {
+        $chapterReleaseCheck = { param($chapterInfo) return $MergedChapters.ContainsKey($chapterInfo) }.GetNewClosure()
+    }
+
     $dispatchResult = Invoke-ChapterDispatch -ChapterProvider $chapterProvider -JobBuilder $jobBuilder `
         -JobStarter $jobStarter -JobPollCompleted $jobPollCompleted -JobFinalize $jobFinalize `
         -JobAbortCleanup $jobAbortCleanup -ChapterCompleteCallback $chapterCompleteCallback `
         -MaxConcurrent $SharedBudget -AbortPollCallback $abortPollCallback -CancelToken $CancelToken `
-        -AbortTimeoutSeconds $AbortTimeoutSeconds -MaxQueueAhead $MaxQueueAhead
+        -AbortTimeoutSeconds $AbortTimeoutSeconds -MaxQueueAhead $MaxQueueAhead -ChapterReleaseCheck $chapterReleaseCheck
 
     return @{ EngineType = $EngineType; ForceKilledCount = $dispatchResult.ForceKilledCount; Aborted = $dispatchResult.Aborted }
 }
@@ -942,6 +948,7 @@ function Invoke-FullPipeline {
         $zipBlockReasons   = [System.Collections.Concurrent.ConcurrentDictionary[object,string]]::new()
         $announcedChapters = [System.Collections.Concurrent.ConcurrentDictionary[object,byte]]::new()
         $runningChapters   = [System.Collections.Concurrent.ConcurrentDictionary[object,byte]]::new()
+        $mergedChapters    = [System.Collections.Concurrent.ConcurrentDictionary[object,byte]]::new()
         $eventQueue        = [System.Collections.Concurrent.ConcurrentQueue[hashtable]]::new()
         $fullCts = [System.Threading.CancellationTokenSource]::new()
         Register-AbortCancellationSource -Cts $fullCts
@@ -1097,7 +1104,11 @@ function Invoke-FullPipeline {
                         # ZipParallelProcessing's own caller - not a reason
                         # to leave it uncaptured.
                         $null = $mergeState.Remove($key)
-                        & $finalizeChapterEntry $key $entry
+                        try {
+                            & $finalizeChapterEntry $key $entry
+                        } finally {
+                            $null = $mergedChapters.TryAdd($key, 0)
+                        }
                     }
                 }
             }
@@ -1114,7 +1125,7 @@ function Invoke-FullPipeline {
                 DoAnimatedOverwrite = $AnimatedOverwrite; DoAnimatedDeleteSource = $AnimatedDeleteSource
                 DoFullLogging = $FullLogging; DoPermanentDelete = $PermanentDelete
                 SharedBudget = $sharedBudget; SeriesBundleCache = $seriesBundleCache; ChapterClassificationCache = $chapterClassificationCache; ZipBlockReasons = $zipBlockReasons
-                AnnouncedChapters = $announcedChapters; RunningChapters = $runningChapters; EventQueue = $eventQueue
+                AnnouncedChapters = $announcedChapters; RunningChapters = $runningChapters; MergedChapters = $mergedChapters; EventQueue = $eventQueue
                 AnimatedEnabled = $AnimatedConversionEnabled
                 LooseImageExtensions = $LooseImageExtensions; AnimatedFileExtensions = $AnimatedFileExtensions
                 KnownZipPaths = $KnownZipPaths; FolderQualifyingExtensions = $FolderQualifyingExtensions

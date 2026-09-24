@@ -817,6 +817,71 @@ Test-Assert (-not $threw15) "a max-int concurrency setting (the menu allows it) 
 Write-Host ""
 
 # ==============================================================================
+#  Scenario 16: -ChapterReleaseCheck keeps a zero-job chapter counted
+#  against -MaxQueueAhead until the check says it's released - the Full
+#  Pipeline idle-engine walk-ahead fix. Six zero-job chapters,
+#  -MaxQueueAhead 2. The check releases a chapter only once a
+#  "downstream" counter (advanced one step per check call) has reached
+#  it, so pulls must stay within 2 of releases. Without the param
+#  (16b) the same feed is pulled all at once, same as before. 16c:
+#  a check that never releases doesn't hang - cancellation still ends it.
+# ==============================================================================
+Write-Host "=== Scenario 16: -ChapterReleaseCheck holds zero-job chapters against -MaxQueueAhead ===" -ForegroundColor Cyan
+$state16 = @{ Pulled = 0; Released = 0; MaxAhead = 0; Completed = 0 }
+$provider16 = {
+    if ($state16.Pulled -ge 6) { return $null }
+    $state16.Pulled++
+    $ahead = $state16.Pulled - $state16.Released
+    if ($ahead -gt $state16.MaxAhead) { $state16.MaxAhead = $ahead }
+    return ("Chapter" + $state16.Pulled)
+}
+$release16 = {
+    param($chapterInfo)
+    $n = [int]($chapterInfo -replace '\D', '')
+    if ($n -eq $state16.Released + 1) { $state16.Released++; return $true }
+    return $false
+}
+$cts16 = [System.Threading.CancellationTokenSource]::new()
+$result16 = Invoke-ChapterDispatch -ChapterProvider $provider16 -JobBuilder { param($c) return @() } `
+    -JobStarter { param($job) return $job } -JobPollCompleted { param($job) return $true } -JobFinalize { param($job, $pendingQueue) return @{ Success = $true } } `
+    -JobAbortCleanup { param($job) } -ChapterCompleteCallback { param($c) $state16.Completed++ } `
+    -MaxConcurrent 10 -MaxQueueAhead 2 -CancelToken $cts16.Token -ChapterReleaseCheck $release16
+Test-Assert ($state16.Pulled -eq 6 -and $state16.Released -eq 6 -and $state16.Completed -eq 6) ("all 6 chapters pulled, completed and released (pulled " + $state16.Pulled + ", released " + $state16.Released + ", completed " + $state16.Completed + ")")
+Test-Assert ($state16.MaxAhead -le 2) ("pulled-but-unreleased zero-job chapters never exceeded -MaxQueueAhead (2) (max seen: " + $state16.MaxAhead + ")")
+Test-Assert ($result16.ChapterResults.Count -eq 6 -and -not $result16.Aborted) "each held chapter is still reported Completed, not aborted"
+
+$state16b = @{ Pulled = 0; Completed = 0 }
+$provider16b = {
+    if ($state16b.Pulled -ge 6) { return $null }
+    $state16b.Pulled++
+    return ("Chapter" + $state16b.Pulled)
+}
+$cts16b = [System.Threading.CancellationTokenSource]::new()
+$null = Invoke-ChapterDispatch -ChapterProvider $provider16b -JobBuilder { param($c) return @() } `
+    -JobStarter { param($job) return $job } -JobPollCompleted { param($job) return $true } -JobFinalize { param($job, $pendingQueue) return @{ Success = $true } } `
+    -JobAbortCleanup { param($job) } -ChapterCompleteCallback { param($c) $state16b.Completed++ } `
+    -MaxConcurrent 10 -MaxQueueAhead 2 -CancelToken $cts16b.Token
+Test-Assert ($state16b.Pulled -eq 6 -and $state16b.Completed -eq 6) "16b: without -ChapterReleaseCheck, zero-job chapters still free their slot at once (modes 2/3 behavior unchanged)"
+
+$state16c = @{ Pulled = 0; Checks = 0 }
+$cts16c = [System.Threading.CancellationTokenSource]::new()
+$release16c = {
+    param($chapterInfo)
+    $state16c.Checks++
+    if ($state16c.Checks -ge 20) { $cts16c.Cancel() }
+    return $false
+}
+$sw16c = [System.Diagnostics.Stopwatch]::StartNew()
+$result16c = Invoke-ChapterDispatch -ChapterProvider { if ($state16c.Pulled -ge 10) { return $null }; $state16c.Pulled++; return ("Chapter" + $state16c.Pulled) } -JobBuilder { param($c) return @() } `
+    -JobStarter { param($job) return $job } -JobPollCompleted { param($job) return $true } -JobFinalize { param($job, $pendingQueue) return @{ Success = $true } } `
+    -JobAbortCleanup { param($job) } -ChapterCompleteCallback { param($c) } `
+    -MaxConcurrent 10 -MaxQueueAhead 2 -CancelToken $cts16c.Token -ChapterReleaseCheck $release16c
+$sw16c.Stop()
+Test-Assert ($state16c.Pulled -eq 2) ("16c: a never-releasing check stops the pull at -MaxQueueAhead (pulled " + $state16c.Pulled + ")")
+Test-Assert ($sw16c.Elapsed.TotalSeconds -lt 15) ("16c: cancellation still ends the loop while chapters are held (took " + [int]$sw16c.Elapsed.TotalSeconds + "s)")
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

@@ -1790,6 +1790,46 @@ Test-Assert ($identifyCallsV3.Count -eq 1) ("the file was identified exactly onc
 Write-Host ""
 
 # ==============================================================================
+#  Scenario QP: the idle engine's walk-ahead is paced to merged completion.
+#  Five static chapters, each a slow JPG plus a static AVIF (so each
+#  chapter's classification shows up as one identify call). The animated
+#  engine has zero jobs everywhere; before the fix it classified every
+#  chapter while the image engine was still on chapter 1. With
+#  -MaxQueueAhead 1 it may now hold only one unmerged chapter, so when the
+#  first chapter merges at most two chapters have been classified (the
+#  held one, plus the image engine's next pull).
+# ==============================================================================
+Write-Host "=== Scenario QP: Full Pipeline idle engine stays within -MaxQueueAhead of merged chapters ===" -ForegroundColor Cyan
+$identifyLogQP = Join-Path $scratchDir "scenario-qp-identify.log"
+[System.IO.File]::WriteAllText($identifyLogQP, "")
+foreach ($nQP in 1..5) {
+    $chQP = New-Dir ("scenario-qp\Series\Chapter " + $nQP)
+    New-FakeImageIn -DirPath $chQP -Name "page1.jpg" -SleepMs 1000 | Out-Null
+    New-FakeAvifIn -DirPath $chQP -Name "static.avif" -Frames 1 | Out-Null
+}
+$stateQP = @{ IdentifiedAtFirstMerge = -1; Merges = 0 }
+$realCompleteMergedQP = ${function:Complete-MergedFullPipelineChapter}
+function Complete-MergedFullPipelineChapter {
+    param($ChapterDir, $ZipOut, $IsZippable, $ImageResult, $AnimatedResult, $Cts)
+    $stateQP.Merges++
+    if ($stateQP.IdentifiedAtFirstMerge -lt 0) {
+        $stateQP.IdentifiedAtFirstMerge = @([System.IO.File]::ReadAllLines($identifyLogQP) | Where-Object { $_ }).Count
+    }
+    return & $realCompleteMergedQP @PSBoundParameters
+}
+$env:HARNESS_IDENTIFY_LOG = $identifyLogQP
+try {
+    $totalsQP = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-qp") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe `
+        -FullPipelineMaxConcurrentProcs 1 -MaxQueueAhead 1 -FullLogging $false -PermanentDelete $true
+} finally {
+    $env:HARNESS_IDENTIFY_LOG = $null
+    ${function:Complete-MergedFullPipelineChapter} = $realCompleteMergedQP
+}
+Test-Assert ($totalsQP.ZipCreatedSuccess -eq 5 -and $stateQP.Merges -eq 5 -and -not $totalsQP.Aborted) ("sanity check: all 5 chapters merged and zipped, run not aborted (zips " + $totalsQP.ZipCreatedSuccess + ", merges " + $stateQP.Merges + ")")
+Test-Assert ($stateQP.IdentifiedAtFirstMerge -ge 1 -and $stateQP.IdentifiedAtFirstMerge -le 2) ("at the first merge, at most 2 chapters had been classified, not the whole library (got " + $stateQP.IdentifiedAtFirstMerge + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario W: a file the reconciliation can't classify is excluded from
 #  BOTH engines for that run, not guessed at or left to race - the
 #  "fail safe" half of the same fix.
