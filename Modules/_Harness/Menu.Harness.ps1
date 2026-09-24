@@ -685,11 +685,11 @@ try {
 
 # 2026-09-23: -FolderPath (the target folder, when "Ask for folder" is
 # off) skips the prompt entirely, and an omitted -DryRun defaults to a
-# dry run - nothing is deleted unless the setting is explicitly off.
+# real run (2026-09-23: the owner set the dry-run default to off).
 $noPromptS2 = { param($m) throw ("unexpected prompt: " + $m) }
 $resultTargetS2 = Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc $noPromptS2 -FolderPath $realFolderS2
 Test-Assert ($resultTargetS2.Ran -and $resultTargetS2.ResolvedPath -eq $realFolderS2) "-FolderPath scans that folder without prompting"
-Test-Assert ($script:unwantedScanCallsS2.Count -eq 2 -and $script:unwantedScanDryRunCallsS2[1] -eq $true) "an omitted -DryRun defaults to a dry run"
+Test-Assert ($script:unwantedScanCallsS2.Count -eq 2 -and $script:unwantedScanDryRunCallsS2[1] -eq $false) "an omitted -DryRun defaults to a real run"
 
 function Invoke-TrailingZeroAudit {
     param($Path, $ReportPath)
@@ -994,12 +994,12 @@ try {
 } finally {
     Remove-Item -Path function:\Write-Host
 }
-Test-Assert ($runCallsW.Count -eq 2 -and $runCallsW[0].Path -eq "C:\fake\target" -and $runCallsW[0].DryRun -eq $true) "by default Run gets the target folder (no prompt) and a dry run"
+Test-Assert ($runCallsW.Count -eq 2 -and $runCallsW[0].Path -eq "C:\fake\target" -and $runCallsW[0].DryRun -eq $false) "by default Run gets the target folder (no prompt) and a real run"
 Test-Assert ($tzCallsW.Count -eq 2 -and $tzCallsW[0] -eq "C:\fake\target") "the trailing-zero report follows the same folder logic"
-Test-Assert ($runCallsW.Count -eq 2 -and [string]::IsNullOrEmpty($runCallsW[1].Path) -and $runCallsW[1].DryRun -eq $false) "after toggling 6 and 7, Run asks for a folder and runs for real"
+Test-Assert ($runCallsW.Count -eq 2 -and [string]::IsNullOrEmpty($runCallsW[1].Path) -and $runCallsW[1].DryRun -eq $true) "after toggling 6 and 7, Run asks for a folder and does a dry run"
 Test-Assert ($tzCallsW.Count -eq 2 -and [string]::IsNullOrEmpty($tzCallsW[1])) "...and so does the trailing-zero report"
 $savedW = Import-ScriptSettings -Path $settingsPathW
-Test-Assert ($savedW.CoverDeletionDryRun -eq $false -and $savedW.CoverDeletionAskForFolder -eq $true) "both toggles were saved to the settings file"
+Test-Assert ($savedW.CoverDeletionDryRun -eq $true -and $savedW.CoverDeletionAskForFolder -eq $true) "both toggles were saved to the settings file"
 Test-Assert (@($linesW | Where-Object { $_ -like "*6 - Dry Run*[On]*" }).Count -ge 1 -and @($linesW | Where-Object { $_ -like "*6 - Dry Run*[Off]*" }).Count -ge 1) "the menu shows Dry Run's current state, before and after the toggle"
 Test-Assert (@($linesW | Where-Object { $_ -like "*7 - Ask For Folder*[Off]*C:\fake\target*" }).Count -ge 1) "with Ask For Folder off, the menu names the target folder it will scan"
 Write-Host ""

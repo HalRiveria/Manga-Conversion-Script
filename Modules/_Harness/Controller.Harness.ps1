@@ -1170,7 +1170,7 @@ $capturedAA6 = New-Object System.Collections.Generic.List[object]
 $fakeScanAA6 = { param($Path, $DryRun) $capturedAA6.Add($DryRun); return @{ ScannedCount = 0 } }.GetNewClosure()
 $null = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-aa6") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true -RunCoverDeletionBeforeConversion $true -CoverDeletionScanHandler $fakeScanAA6
 $null = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-aa6") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true -RunCoverDeletionBeforeConversion $true -CoverDeletionScanHandler $fakeScanAA6 -CoverDeletionDryRun $false
-Test-Assert ($capturedAA6.Count -eq 2 -and $capturedAA6[0] -eq $true) "with -CoverDeletionDryRun omitted, the pre-scan is a dry run"
+Test-Assert ($capturedAA6.Count -eq 2 -and $capturedAA6[0] -eq $false) "with -CoverDeletionDryRun omitted, the pre-scan is a real run (the default)"
 Test-Assert ($capturedAA6.Count -eq 2 -and $capturedAA6[1] -eq $false) "-CoverDeletionDryRun `$false passes a real run through to the scan"
 Write-Host ""
 
@@ -2478,11 +2478,12 @@ Test-Assert (($entriesD3e -contains "anim.avif") -and ($entriesD3e -contains "pa
 Write-Host ""
 
 # ==============================================================================
-#  Scenario AA7 (2026-09-23 review fix): Invoke-Mode with a $Settings that
-#  has no CoverDeletionDryRun key passes a dry run to Full Pipeline - a
-#  missing key must never turn into a real, deleting pre-scan.
+#  Scenario AA7 (2026-09-23 review fix, default flipped the same day by
+#  the owner): Invoke-Mode with a $Settings that has no
+#  CoverDeletionDryRun key passes the built-in default (off = real run)
+#  to Full Pipeline, matching Config.ps1's default.
 # ==============================================================================
-Write-Host "=== Scenario AA7: a missing CoverDeletionDryRun setting means a dry run ===" -ForegroundColor Cyan
+Write-Host "=== Scenario AA7: a missing CoverDeletionDryRun setting follows the default (off) ===" -ForegroundColor Cyan
 $capturedAA7 = @{ DryRun = $null }
 $fakeFullHandlerAA7 = { param($Path, $CjxlExe, $MagickExe, $CoverDeletionDryRun)
     $capturedAA7.DryRun = $CoverDeletionDryRun
@@ -2494,7 +2495,7 @@ $fakeFullHandlerAA7 = { param($Path, $CjxlExe, $MagickExe, $CoverDeletionDryRun)
 $settingsAA7 = $fakeSettings.Clone()
 if ($settingsAA7.ContainsKey('CoverDeletionDryRun')) { $settingsAA7.Remove('CoverDeletionDryRun') }
 $null = Invoke-Mode -Resolved @{ Mode = 'FullPipeline' } -TargetPath "C:\fake\lib" -Settings $settingsAA7 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -FullPipelineHandler $fakeFullHandlerAA7
-Test-Assert ($capturedAA7.DryRun -eq $true) ("a missing CoverDeletionDryRun key reached Full Pipeline as a dry run (got " + $capturedAA7.DryRun + ")")
+Test-Assert ($capturedAA7.DryRun -eq $false) ("a missing CoverDeletionDryRun key reached Full Pipeline as the default real run (got " + $capturedAA7.DryRun + ")")
 Write-Host ""
 
 # ==============================================================================

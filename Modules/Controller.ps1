@@ -883,7 +883,7 @@ function Invoke-FullPipeline {
         [int]$MaxQueueAhead = 3,
         [bool]$RunCoverDeletionBeforeConversion = $false,
         [scriptblock]$CoverDeletionScanHandler = ${function:Invoke-UnwantedImageScan},
-        [bool]$CoverDeletionDryRun = $true,
+        [bool]$CoverDeletionDryRun = $false,
         [bool]$AnimatedConversionEnabled = $true,
         [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
         # Injectable (2026-09-16, Todo.md's own tracked gap) - lets a test
@@ -1334,7 +1334,7 @@ function Invoke-Mode {
                     -JpegLossless ([bool]$Settings.JpegLossless) -JpegQuality $Settings.JpegQuality -AnimatedLossless ([bool]$Settings.AnimatedLossless) -AnimatedQuality $Settings.AnimatedQuality `
                     -AnimatedOverwrite ([bool]$Settings.AnimatedOverwrite) -AnimatedDeleteSource ([bool]$Settings.AnimatedDeleteSource) -FullPipelineMaxConcurrentProcs $Settings.FullPipelineMaxConcurrentProcs `
                     -FullLogging $script:FullLogging -PermanentDelete ([bool]$Settings.PermanentDelete) `
-                    -RunCoverDeletionBeforeConversion ([bool]$Settings.RunCoverDeletionBeforeConversion) -CoverDeletionDryRun $(if ($Settings.ContainsKey('CoverDeletionDryRun')) { [bool]$Settings.CoverDeletionDryRun } else { $true }) `
+                    -RunCoverDeletionBeforeConversion ([bool]$Settings.RunCoverDeletionBeforeConversion) -CoverDeletionDryRun $(if ($Settings.ContainsKey('CoverDeletionDryRun')) { [bool]$Settings.CoverDeletionDryRun } else { $false }) `
                     -AnimatedConversionEnabled $(if ($Settings.ContainsKey('FullPipelineAnimatedConversion')) { [bool]$Settings.FullPipelineAnimatedConversion } else { $true })
                 $stats.LooseImgConverted.Success      = $r.ConvertedImageSuccess;    $stats.LooseImgConverted.Fail      = $r.ConvertedImageFail;    $stats.LooseImgConverted.Skipped = $r.ConvertedImageSkipped
                 $stats.LooseImgDeleted.Success        = $r.DeletedImageSuccess;      $stats.LooseImgDeleted.Fail        = $r.DeletedImageFail

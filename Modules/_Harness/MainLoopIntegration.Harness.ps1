@@ -292,11 +292,11 @@ Write-Host ""
 # ==============================================================================
 #  Scenario C (2026-09-23): Cover Deletion's defaults through the real main
 #  loop - Run scans the loop's own target folder with no folder prompt and
-#  no confirmation, and the default CoverDeletionDryRun (on) deletes
-#  nothing. $fakeSettings has no CoverDeletion* keys, so this also proves
+#  no confirmation, and the default CoverDeletionDryRun (off) really
+#  deletes the match. $fakeSettings has no CoverDeletion* keys, so this also proves
 #  the built-in defaults apply.
 # ==============================================================================
-Write-Host "=== Scenario C: Cover Deletion Run defaults - target folder, no prompts, dry run ===" -ForegroundColor Cyan
+Write-Host "=== Scenario C: Cover Deletion Run defaults - target folder, no prompts, real run ===" -ForegroundColor Cyan
 $scanDirC = Join-Path $scratchDir "scenario-c\ToScan"
 New-Item -ItemType Directory -Path $scanDirC -Force | Out-Null
 $profilesPathC = Join-Path $scratchDir "scenario-c\profiles.json"
@@ -311,7 +311,7 @@ $fakeInvokeModeC = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickE
 $fakePostRunC = { return 'Exit' }
 Invoke-MainLoop -TargetPath $scanDirC -Settings $fakeSettings.Clone() -SettingsPath (Join-Path $scratchDir "scenario-c\settings.json") -CjxlExe "fake_cjxl.exe" `
     -GetModeHandler $realGetModeC -InvokeModeHandler $fakeInvokeModeC -PostRunPromptHandler $fakePostRunC
-Test-Assert (Test-Path -LiteralPath $imgC.FullName) "the matching file is still there - the default is a dry run, and the four scripted answers were enough (no folder or confirmation prompt)"
+Test-Assert (-not (Test-Path -LiteralPath $imgC.FullName)) "the matching file was deleted - the default is a real run, and the four scripted answers were enough (no folder or confirmation prompt)"
 Test-Assert ($invokeModeC.Calls -eq 1) "the loop went 5 -> Run -> back -> mode 2 with no extra prompts in between (Run asked for no folder and no confirmation)"
 Write-Host ""
 

@@ -374,7 +374,7 @@ function Invoke-CoverDeletionRun {
         [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
         [string]$DefaultPath = "",
         [string]$FolderPath = "",
-        [bool]$DryRun = $true
+        [bool]$DryRun = $false
     )
 
     if (-not [string]::IsNullOrWhiteSpace($FolderPath)) {
