@@ -2137,8 +2137,8 @@ function New-FullPipelineTestSharedObjects {
        than one scenario invoking $script:fullPipelineEngineWorker
        directly doesn't have to hand-build all six separately. #>
     return @{
-        SeriesBundleCache          = [System.Collections.Concurrent.ConcurrentDictionary[string, System.Lazy[hashtable]]]::new()
-        ChapterClassificationCache = [System.Collections.Concurrent.ConcurrentDictionary[object, System.Lazy[hashtable]]]::new()
+        SeriesBundleCache          = [System.Collections.Concurrent.ConcurrentDictionary[string, hashtable]]::new()
+        ChapterClassificationCache = [System.Collections.Concurrent.ConcurrentDictionary[object, hashtable]]::new()
         ZipBlockReasons            = [System.Collections.Concurrent.ConcurrentDictionary[object,string]]::new()
         AnnouncedChapters          = [System.Collections.Concurrent.ConcurrentDictionary[object,byte]]::new()
         RunningChapters            = [System.Collections.Concurrent.ConcurrentDictionary[object,byte]]::new()
@@ -2495,6 +2495,33 @@ $settingsAA7 = $fakeSettings.Clone()
 if ($settingsAA7.ContainsKey('CoverDeletionDryRun')) { $settingsAA7.Remove('CoverDeletionDryRun') }
 $null = Invoke-Mode -Resolved @{ Mode = 'FullPipeline' } -TargetPath "C:\fake\lib" -Settings $settingsAA7 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -FullPipelineHandler $fakeFullHandlerAA7
 Test-Assert ($capturedAA7.DryRun -eq $true) ("a missing CoverDeletionDryRun key reached Full Pipeline as a dry run (got " + $capturedAA7.DryRun + ")")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario HX (2026-09-23 hang fix): the delegate-free replacements for
+#  System.Lazy and ConcurrentDictionary.AddOrUpdate keep their semantics -
+#  a cache entry's factory runs once, a factory exception is cached and
+#  rethrown to later callers (like Lazy's ExecutionAndPublication), and
+#  zip-block reasons append without duplicating.
+# ==============================================================================
+Write-Host "=== Scenario HX: delegate-free cache entry / zip-block reason helpers ===" -ForegroundColor Cyan
+$cacheHX = [System.Collections.Concurrent.ConcurrentDictionary[string, hashtable]]::new()
+$callsHX = @{ Count = 0 }
+$factoryHX = { $callsHX.Count++; return @{ Answer = 42 } }.GetNewClosure()
+$firstHX  = Get-OrCreateFullPipelineCacheEntry -Cache $cacheHX -Key "k" -Factory $factoryHX
+$secondHX = Get-OrCreateFullPipelineCacheEntry -Cache $cacheHX -Key "k" -Factory $factoryHX
+Test-Assert ($callsHX.Count -eq 1 -and $firstHX.Answer -eq 42 -and [object]::ReferenceEquals($firstHX, $secondHX)) "the factory runs once; later callers get the same value"
+$throwCallsHX = @{ Count = 0 }
+$throwingHX = { $throwCallsHX.Count++; throw "boom" }.GetNewClosure()
+$threwHX = 0
+foreach ($i in 1..2) { try { $null = Get-OrCreateFullPipelineCacheEntry -Cache $cacheHX -Key "bad" -Factory $throwingHX } catch { if ("$_" -like "*boom*") { $threwHX++ } } }
+Test-Assert ($threwHX -eq 2 -and $throwCallsHX.Count -eq 1) "a factory exception is cached and rethrown to every caller, without re-running the factory"
+$reasonsHX = [System.Collections.Concurrent.ConcurrentDictionary[object,string]]::new()
+$keyHX = @{ Name = "chapter" }
+Add-FullPipelineZipBlockReason -Dict $reasonsHX -ChapterKey $keyHX -Reason "naming collision"
+Add-FullPipelineZipBlockReason -Dict $reasonsHX -ChapterKey $keyHX -Reason "AVIF classification failure"
+Add-FullPipelineZipBlockReason -Dict $reasonsHX -ChapterKey $keyHX -Reason "naming collision"
+Test-Assert ($reasonsHX[$keyHX] -eq "naming collision, AVIF classification failure") ("zip-block reasons append once each (got '" + $reasonsHX[$keyHX] + "')")
 Write-Host ""
 
 Write-Host "==============================================="

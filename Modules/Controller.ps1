@@ -14,17 +14,43 @@ function Add-FullPipelineZipBlockReason {
         [Parameter(Mandatory)]
         [string]$Reason
     )
-    $updateFn = {
-        param($key, $existing)
-        if ($existing -like ("*" + $Reason + "*")) { $existing } else { $existing + ", " + $Reason }
-    }.GetNewClosure()
-    $null = $Dict.AddOrUpdate($ChapterKey, $Reason, [Func[object,string,string]]$updateFn)
+    while ($true) {
+        if ($Dict.TryAdd($ChapterKey, $Reason)) { return }
+        $existing = $null
+        if ($Dict.TryGetValue($ChapterKey, [ref]$existing)) {
+            if ($existing -like ("*" + $Reason + "*")) { return }
+            if ($Dict.TryUpdate($ChapterKey, $existing + ", " + $Reason, $existing)) { return }
+        }
+    }
+}
+
+function Get-OrCreateFullPipelineCacheEntry {
+    param(
+        [Parameter(Mandatory)]
+        $Cache,
+        [Parameter(Mandatory)]
+        $Key,
+        [Parameter(Mandatory)]
+        [scriptblock]$Factory
+    )
+    $slot = $Cache.GetOrAdd($Key, @{ Gate = [object]::new(); Done = $false; Value = $null; Error = $null })
+    [System.Threading.Monitor]::Enter($slot.Gate)
+    try {
+        if (-not $slot.Done) {
+            try { $slot.Value = & $Factory } catch { $slot.Error = $_ }
+            $slot.Done = $true
+        }
+    } finally {
+        [System.Threading.Monitor]::Exit($slot.Gate)
+    }
+    if ($null -ne $slot.Error) { throw $slot.Error }
+    return $slot.Value
 }
 
 function Get-OrCreateFullPipelineSeriesBundle {
     param(
         [Parameter(Mandatory)]
-        [System.Collections.Concurrent.ConcurrentDictionary[string, System.Lazy[hashtable]]]$Cache,
+        [System.Collections.Concurrent.ConcurrentDictionary[string, hashtable]]$Cache,
         [Parameter(Mandatory)]
         [System.IO.DirectoryInfo]$Series,
         [string]$MagickExe,
@@ -120,15 +146,13 @@ function Get-OrCreateFullPipelineSeriesBundle {
         return @{ ChapterEntries = $chapterEntries }
     }.GetNewClosure()
 
-    $freshLazy = [System.Lazy[hashtable]]::new([Func[hashtable]]$factory, [System.Threading.LazyThreadSafetyMode]::ExecutionAndPublication)
-    $lazy = $Cache.GetOrAdd($Series.FullName, $freshLazy)
-    return $lazy.Value
+    return Get-OrCreateFullPipelineCacheEntry -Cache $Cache -Key $Series.FullName -Factory $factory
 }
 
 function Get-OrCreateFullPipelineChapterClassification {
     param(
         [Parameter(Mandatory)]
-        [System.Collections.Concurrent.ConcurrentDictionary[object, System.Lazy[hashtable]]]$Cache,
+        [System.Collections.Concurrent.ConcurrentDictionary[object, hashtable]]$Cache,
         [Parameter(Mandatory)]
         [hashtable]$ChapterInfo,
         [string]$MagickExe,
@@ -199,10 +223,7 @@ function Get-OrCreateFullPipelineChapterClassification {
         return @{ Images = $images; AnimatedFiles = $animated }
     }.GetNewClosure()
 
-    $freshLazy = [System.Lazy[hashtable]]::new([Func[hashtable]]$factory, [System.Threading.LazyThreadSafetyMode]::ExecutionAndPublication)
-    $lazy = $Cache.GetOrAdd($ChapterInfo, $freshLazy)
-    $result = $lazy.Value
-    return $result
+    return Get-OrCreateFullPipelineCacheEntry -Cache $Cache -Key $ChapterInfo -Factory $factory
 }
 
 function Complete-MergedFullPipelineChapter {
@@ -337,8 +358,8 @@ $script:fullPipelineEngineWorker = {
         [bool]$DoFullLogging,
         [bool]$DoPermanentDelete,
         [System.Threading.SemaphoreSlim]$SharedBudget,
-        [System.Collections.Concurrent.ConcurrentDictionary[string, System.Lazy[hashtable]]]$SeriesBundleCache,
-        [System.Collections.Concurrent.ConcurrentDictionary[object, System.Lazy[hashtable]]]$ChapterClassificationCache,
+        [System.Collections.Concurrent.ConcurrentDictionary[string, hashtable]]$SeriesBundleCache,
+        [System.Collections.Concurrent.ConcurrentDictionary[object, hashtable]]$ChapterClassificationCache,
         [System.Collections.Concurrent.ConcurrentDictionary[object,string]]$ZipBlockReasons,
         [System.Collections.Concurrent.ConcurrentDictionary[object,byte]]$AnnouncedChapters,
         [System.Collections.Concurrent.ConcurrentDictionary[object,byte]]$RunningChapters,
@@ -916,8 +937,8 @@ function Invoke-FullPipeline {
 
     try {
         $sharedBudget      = [System.Threading.SemaphoreSlim]::new($FullPipelineMaxConcurrentProcs, $FullPipelineMaxConcurrentProcs)
-        $seriesBundleCache = [System.Collections.Concurrent.ConcurrentDictionary[string, System.Lazy[hashtable]]]::new()
-        $chapterClassificationCache = [System.Collections.Concurrent.ConcurrentDictionary[object, System.Lazy[hashtable]]]::new()
+        $seriesBundleCache = [System.Collections.Concurrent.ConcurrentDictionary[string, hashtable]]::new()
+        $chapterClassificationCache = [System.Collections.Concurrent.ConcurrentDictionary[object, hashtable]]::new()
         $zipBlockReasons   = [System.Collections.Concurrent.ConcurrentDictionary[object,string]]::new()
         $announcedChapters = [System.Collections.Concurrent.ConcurrentDictionary[object,byte]]::new()
         $runningChapters   = [System.Collections.Concurrent.ConcurrentDictionary[object,byte]]::new()
@@ -1148,7 +1169,7 @@ function Invoke-FullPipeline {
         $engineWorkerSharedFunctionNames = @(Get-LoggingSharedFunctionNames) + @(Get-FileDeletionSharedFunctionNames) +
             @(Get-ImageConversionSharedFunctionNames) + @(Get-AnimatedConversionSharedFunctionNames) +
             @(Get-LeafDirectoryDiscoverySharedFunctionNames) + @(Get-ChapterDispatchSharedFunctionNames) +
-            @('Get-OrCreateFullPipelineSeriesBundle', 'Get-OrCreateFullPipelineChapterClassification', 'Add-FullPipelineZipBlockReason', 'Complete-ImageDispatchJob', 'Complete-AnimatedDispatchJob',
+            @('Get-OrCreateFullPipelineSeriesBundle', 'Get-OrCreateFullPipelineChapterClassification', 'Get-OrCreateFullPipelineCacheEntry', 'Add-FullPipelineZipBlockReason', 'Complete-ImageDispatchJob', 'Complete-AnimatedDispatchJob',
               'Test-AbortSignal', 'Get-LooseImageCandidates', 'Remove-StaleLooseSources', 'Get-LooseAnimatedCandidates',
               'Get-LooseImageExtensions', 'Test-OrphanedScratchFileName')
 

@@ -562,6 +562,49 @@ Test-Assert (@($rule7).Count -eq 0) "no runspace-reachable function or worker bo
 Show-Findings -Findings @($rule7)
 Write-Host ""
 
+# ------------------------------------------------------------------------
+#  Rule 8: scriptblock converted to a delegate on a runspace-reachable path
+# ------------------------------------------------------------------------
+# A PowerShell scriptblock cast to a .NET delegate ([Func[...]], [Action[...]],
+# ...) and invoked by .NET code is routed through its home runspace's event
+# manager. Nested inside another such invocation (a [System.Lazy] factory
+# calling ConcurrentDictionary.AddOrUpdate with a scriptblock update
+# function), it waits for an event only its own, already-busy thread can
+# process - and the other engine then blocks on the lock the first one
+# holds. Live-caught in dumps 2026-09-23 (Docs\full-pipeline-hang-investigation.md,
+# round 7). Runspace code uses plain loops/locks instead.
+Write-Host "=== Lint: scriptblock-to-delegate cast on a runspace-reachable path ===" -ForegroundColor Cyan
+
+$rule8 = @()
+$delegateCastFinder = {
+    param($AstNode)
+    $found = [System.Collections.Generic.List[object]]::new()
+    foreach ($cv in $AstNode.FindAll({ param($n) $n -is [System.Management.Automation.Language.ConvertExpressionAst] }, $true)) {
+        if ($cv.Type.TypeName.Name -match '^(System\.)?(Func|Action|Predicate|Comparison|Converter)(\[|$)') { $found.Add($cv) }
+    }
+    return ,$found
+}
+foreach ($fname in $runspaceReachable) {
+    if (-not $fnAstByName.ContainsKey($fname)) { continue }
+    $fnAst = $fnAstByName[$fname]
+    $fnFile = $null
+    foreach ($name in $fileAsts.Keys) { if ($fileText[$name].Contains($fnAst.Extent.Text)) { $fnFile = $name; break } }
+    foreach ($cv in (& $delegateCastFinder $fnAst)) {
+        $rule8 += @{ File = $fnFile; Line = $cv.Extent.StartLineNumber; Text = ($fname + " (runspace-reachable) casts to delegate " + $cv.Type.TypeName.Name) }
+    }
+}
+foreach ($workerVar in $runspaceWorkerBodies) {
+    $body = $scriptBlockVars[$workerVar]
+    $workerFile = $null
+    foreach ($name in $fileAsts.Keys) { if ($fileText[$name].Contains($body.Extent.Text)) { $workerFile = $name; break } }
+    foreach ($cv in (& $delegateCastFinder $body)) {
+        $rule8 += @{ File = $workerFile; Line = $cv.Extent.StartLineNumber; Text = ("worker `$" + $workerVar + " casts to delegate " + $cv.Type.TypeName.Name) }
+    }
+}
+Test-Assert (@($rule8).Count -eq 0) "no runspace-reachable function or worker body casts a scriptblock to a delegate"
+Show-Findings -Findings @($rule8)
+Write-Host ""
+
 # ==============================================================================
 #  Summary
 # ==============================================================================
