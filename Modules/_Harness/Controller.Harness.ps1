@@ -1830,6 +1830,26 @@ Test-Assert ($stateQP.IdentifiedAtFirstMerge -ge 1 -and $stateQP.IdentifiedAtFir
 Write-Host ""
 
 # ==============================================================================
+#  Scenario ZB: Full Pipeline's animated engine treats a 0-byte .webp (left
+#  by a force-killed run) as not converted, with Overwrite off - it
+#  reconverts instead of skipping and zipping the unconverted AVIF. A real
+#  (non-empty) .webp in a second chapter is still skipped.
+# ==============================================================================
+Write-Host "=== Scenario ZB: a 0-byte .webp from a killed run is reconverted, not skipped (Full Pipeline) ===" -ForegroundColor Cyan
+$chZB1 = New-Dir "scenario-zb\Series\Chapter 1"
+New-FakeAvifIn -DirPath $chZB1 -Name "p03.avif" -Frames 5 | Out-Null
+$webpZB1 = Join-Path $chZB1 "p03.webp"
+[System.IO.File]::WriteAllBytes($webpZB1, [byte[]]@())
+$chZB2 = New-Dir "scenario-zb\Series\Chapter 2"
+New-FakeAvifIn -DirPath $chZB2 -Name "p01.avif" -Frames 5 | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $chZB2 "p01.webp"), "real earlier output")
+$totalsZB = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-zb") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe `
+    -FullPipelineMaxConcurrentProcs 2 -FullLogging $false -PermanentDelete $true -AnimatedOverwrite $false
+Test-Assert ($totalsZB.ConvertedAnimatedSuccess -eq 1) ("the 0-byte .webp's source was reconverted (converted " + $totalsZB.ConvertedAnimatedSuccess + ")")
+Test-Assert ($totalsZB.ConvertedAnimatedSkipped -eq 1) ("only the chapter with a real, non-empty .webp was skipped (skipped " + $totalsZB.ConvertedAnimatedSkipped + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario W: a file the reconciliation can't classify is excluded from
 #  BOTH engines for that run, not guessed at or left to race - the
 #  "fail safe" half of the same fix.

@@ -296,7 +296,13 @@ function New-SeriesProvider {
             }
             # DOCUMENTED DUPLICATE of the reparse-point guard in
             # Get-FilesRecursiveSafe (see there) - keep all five in sync.
-            $isReparse = ([System.IO.File]::GetAttributes($dir) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+            try {
+                $isReparse = ([System.IO.File]::GetAttributes($dir) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+            } catch {
+                # Folder moved/deleted since it was listed - skip it, same as Test-SeriesCategoryFolder's catch.
+                Write-Log ("Series folder '" + $dir + "' vanished during the scan - skipping it: " + $_) -Level Warn
+                continue
+            }
             if ((-not $isReparse) -and (Test-SeriesCategoryFolder -Path $dir -QualifyingExtensions $QualifyingExtensions)) {
                 try {
                     $enumeratorStack.Push([System.IO.Directory]::EnumerateDirectories($dir).GetEnumerator())

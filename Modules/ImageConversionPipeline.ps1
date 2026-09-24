@@ -443,8 +443,8 @@ function Invoke-LooseImageConversionPipeline {
                     $chapterImages = @()
                     if ($imagesByDir.ContainsKey($c.Dir.FullName)) { $chapterImages = @($imagesByDir[$c.Dir.FullName]) }
                     $chapterQueue.Enqueue(@{
-                        SeriesName = $series.Name; ChapterName = $c.Dir.Name; Dir = $c.Dir; ZipOut = $c.ZipOut
-                        IsZippable = (-not $namingCollisionDirs.Contains($c.Dir.FullName)); IsExtra = $false
+                        SeriesName = $series.Name; ChapterName = $c.Dir.Name; Dir = $c.Dir
+                        HasNamingCollision = $namingCollisionDirs.Contains($c.Dir.FullName)
                         Images = $chapterImages
                     })
                     $seriesChapterCount++
@@ -453,8 +453,8 @@ function Invoke-LooseImageConversionPipeline {
                     if ($chapterDirSet.Contains($extraDirPath)) { continue }
                     $extraDir = $imagesByDir[$extraDirPath][0].Directory
                     $chapterQueue.Enqueue(@{
-                        SeriesName = $series.Name; ChapterName = $extraDir.Name; Dir = $extraDir; ZipOut = $null
-                        IsZippable = $false; IsExtra = $true
+                        SeriesName = $series.Name; ChapterName = $extraDir.Name; Dir = $extraDir
+                        HasNamingCollision = $namingCollisionDirs.Contains($extraDir.FullName)
                         Images = $imagesByDir[$extraDirPath]
                     })
                     $seriesChapterCount++
@@ -775,15 +775,17 @@ function Invoke-LooseImageConversionPipeline {
 
             $chapterStatus, $chapterDetail = Get-ChapterProgressStatus -ChapterResult $chapterResultForCallback
 
-            if ((-not $chapterInfo.IsZippable) -and (-not $chapterInfo.IsExtra)) {
-                $chapterStatus, $chapterDetail = Get-ZipBlockedStatusOverride -Status $chapterStatus -Detail $chapterDetail -BlockedReason "naming collision"
+            if ($chapterInfo.HasNamingCollision -and $chapterStatus -ne 'Error') {
+                $chapterStatus = 'Warning'
+                $collisionNote = "naming collision: a source was left unconverted (see log)"
+                $chapterDetail = if ($chapterDetail) { $chapterDetail + " | " + $collisionNote } else { $collisionNote }
             }
 
             if ($cleanConsoleOutputEnabled) {
                 $null = Complete-ChapterProgress -SeriesName $chapterInfo.SeriesName -ChapterName $chapterInfo.ChapterName -Status $chapterStatus -Detail $chapterDetail
             }
             if ($null -ne $PostChapterCallback) {
-                & $PostChapterCallback @{ SeriesName = $chapterInfo.SeriesName; ChapterName = $chapterInfo.ChapterName; Dir = $chapterInfo.Dir; ChapterResult = $chapterResultForCallback; ZipOut = $chapterInfo.ZipOut; IsZippable = $chapterInfo.IsZippable }
+                & $PostChapterCallback @{ SeriesName = $chapterInfo.SeriesName; ChapterName = $chapterInfo.ChapterName; Dir = $chapterInfo.Dir; ChapterResult = $chapterResultForCallback; HasNamingCollision = $chapterInfo.HasNamingCollision }
             }
             $null = $chapterResults.Remove($chapterInfo)
         }.GetNewClosure()

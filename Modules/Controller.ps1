@@ -711,7 +711,9 @@ $script:fullPipelineEngineWorker = {
                 $srcPath  = $f.FullName
                 $webpPath = [System.IO.Path]::ChangeExtension($srcPath, ".webp")
 
-                $webpPathExists = [System.IO.File]::Exists($webpPath)
+                # DOCUMENTED DUPLICATE: a 0-byte .webp (force-killed run) doesn't count as
+                # existing - same check in AnimatedConversionPipeline.ps1's jobBuilder, keep both in sync.
+                $webpPathExists = [System.IO.File]::Exists($webpPath) -and ([System.IO.FileInfo]::new($webpPath).Length -gt 0)
                 if ($webpPathExists -and -not $DoAnimatedOverwrite) {
                     Write-Log ("SKIPPING '" + $srcPath + "': output '" + $webpPath + "' already exists (Overwrite is off).")
                     $cr.SkippedCount++

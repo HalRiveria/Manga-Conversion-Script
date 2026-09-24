@@ -375,7 +375,8 @@ function Invoke-LooseAnimatedConversionPipeline {
                 # A 0-byte webp is a leftover from a force-killed/interrupted
                 # run, not a real conversion - treating it as "already
                 # converted" would skip the source AVIF forever with no way
-                # to tell it apart from a genuine success.
+                # to tell it apart from a genuine success. DOCUMENTED DUPLICATE: same
+                # check in Controller.ps1's Full Pipeline animated jobBuilder, keep both in sync.
                 $webpPathExists = [System.IO.File]::Exists($webpPath) -and ([System.IO.FileInfo]::new($webpPath).Length -gt 0)
                 if ($webpPathExists -and -not $AnimatedOverwrite) {
                     Write-Log ("SKIPPING '" + $srcPath + "': output '" + $webpPath + "' already exists (Overwrite is off).")

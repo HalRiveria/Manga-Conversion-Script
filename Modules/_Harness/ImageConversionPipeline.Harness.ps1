@@ -634,12 +634,11 @@ Test-Assert ($totalsC2.InspectFailedCount -eq 1) ("the naming collision is now c
 
 
 # ==============================================================================
-#  Scenario C2c (2026-09-09, zip-blocked-status fix): the live CCR display
-#  actually shows "Zip skipped: naming collision" for a real chapter
-#  blocked this way (same fixture as Scenario C2), and does NOT show a
-#  spurious override for an "extra" entry (Scenario M's own fixture
-#  shape - a stray image directly in the series root) that was never
-#  zippable by design in the first place.
+#  Scenario C2c: the live CCR display shows a naming-collision chapter
+#  (same fixture as Scenario C2) as a Warning that names the collision -
+#  and, since mode 2 never zips, says nothing about a zip (2026-09-24: it
+#  used to say "zip skipped", a Mode 8 leftover). An "extra" entry with
+#  no collision (a stray image in the series root) gets no warning.
 # ==============================================================================
 Write-Host "=== Scenario C2c: live CCR status names the real zip-block reason, and skips extras ===" -ForegroundColor Cyan
 $rootC2c = New-Dir "scenario-c2c"
@@ -669,7 +668,7 @@ try {
 $callC2cChapter = $script:ccrCallsC2c | Where-Object { $_.ChapterName -eq 'Chapter 1' } | Select-Object -First 1
 $callC2cExtra   = $script:ccrCallsC2c | Where-Object { $_.ChapterName -eq 'Series' } | Select-Object -First 1
 Test-Assert ($totalsC2c.ConvertedSuccess -eq 1) "sanity check: the extra's own image still converted normally"
-Test-Assert ($null -ne $callC2cChapter -and $callC2cChapter.Status -eq 'Warning' -and $callC2cChapter.Detail -like '*Zip skipped: naming collision*') ("the real chapter's live CCR status names the naming collision (got Status='" + $(if ($callC2cChapter) { $callC2cChapter.Status } else { '<none>' }) + "', Detail='" + $(if ($callC2cChapter) { $callC2cChapter.Detail } else { '<none>' }) + "')")
+Test-Assert ($null -ne $callC2cChapter -and $callC2cChapter.Status -eq 'Warning' -and $callC2cChapter.Detail -like '*naming collision*' -and $callC2cChapter.Detail -notlike '*zip*') ("the real chapter's live CCR status names the naming collision, with no zip wording (got Status='" + $(if ($callC2cChapter) { $callC2cChapter.Status } else { '<none>' }) + "', Detail='" + $(if ($callC2cChapter) { $callC2cChapter.Detail } else { '<none>' }) + "')")
 Test-Assert ($null -ne $callC2cExtra -and $callC2cExtra.Status -eq 'Success' -and $callC2cExtra.Detail -notlike '*Zip skipped*') ("the extra entry (never zippable by design) does NOT get a spurious override (got Status='" + $(if ($callC2cExtra) { $callC2cExtra.Status } else { '<none>' }) + "', Detail='" + $(if ($callC2cExtra) { $callC2cExtra.Detail } else { '<none>' }) + "')")
 Write-Host ""
 
@@ -755,8 +754,8 @@ Test-Assert ($callbackCallsE[0].SeriesName -eq "My Series") "callback saw the ri
 Test-Assert ($callbackCallsE[0].ChapterName -eq "Ch 1") "callback saw the right ChapterName"
 Test-Assert ($callbackCallsE[0].Dir.FullName -eq $chE) "callback saw the right Dir"
 Test-Assert ($callbackCallsE[0].ChapterResult.ConvertedCount -eq 1) "callback saw the real ChapterResult"
-Test-Assert ($callbackCallsE[0].IsZippable -eq $true) "a real (non-extra) chapter is marked IsZippable"
-Test-Assert ($callbackCallsE[0].ZipOut -eq (Join-Path (Split-Path $chE -Parent) "Ch 1.zip")) "a real chapter carries its ZipOut path"
+Test-Assert ($callbackCallsE[0].HasNamingCollision -eq $false) "a chapter with no naming collision reports HasNamingCollision=false"
+Test-Assert (-not $callbackCallsE[0].ContainsKey('ZipOut') -and -not $callbackCallsE[0].ContainsKey('IsZippable')) "mode 2 never zips - the callback carries no zip fields"
 
 # ==============================================================================
 #  Scenario F: Get-ChapterProgressStatus mapping, tested directly (unit-level,
@@ -986,15 +985,11 @@ Test-Assert ($totalsL.ConvertedSuccess -eq 1) ("series-root image converted (got
 Test-Assert (Test-Path -LiteralPath (Join-Path $seriesDirL "cover.jxl")) "cover.jxl created directly in the series root"
 
 # ==============================================================================
-#  Scenario M: an "extra" merged-in directory is never treated as zippable -
-#  a real second-review finding. Without IsZippable=$false, a caller wiring
-#  -PostChapterCallback to ZipPipeline.ps1's Invoke-LooseFolderZip (exactly as
-#  this function's own docs describe for mode 2) would wrapper-zip the whole
-#  series once its real chapters are already zipped and deleted - precisely
-#  what the former-container guard exists to prevent, reached through the
-#  merge's back door.
+#  Scenario M: an "extra" merged-in directory (a stray image in the series
+#  root) is converted and reported through its own callback, alongside
+#  the real chapters.
 # ==============================================================================
-Write-Host "=== Scenario M: extra entries are never marked zippable ===" -ForegroundColor Cyan
+Write-Host "=== Scenario M: extra entries are converted and get their own callback ===" -ForegroundColor Cyan
 $rootM = New-Dir "scenario-m"
 $seriesDirM = New-Dir "scenario-m\Series"
 $ch1M = New-Dir "scenario-m\Series\Ch1"
@@ -1011,9 +1006,9 @@ $totalsM = Invoke-LooseImageConversionPipeline -Path $rootM -CjxlExe $fakeCjxlEx
 Test-Assert ($totalsM.ConvertedSuccess -eq 3) ("all 3 images converted, including the extra (got " + $totalsM.ConvertedSuccess + ")")
 $realCallbacksM  = @($callbackInfoM | Where-Object { $_.ChapterName -ne "Series" })
 $extraCallbackM  = @($callbackInfoM | Where-Object { $_.ChapterName -eq "Series" })
-Test-Assert ($realCallbacksM.Count -eq 2 -and ($realCallbacksM | ForEach-Object { $_.IsZippable }) -notcontains $false) "both real chapters are marked IsZippable"
+Test-Assert ($realCallbacksM.Count -eq 2) "both real chapters fired their own callback"
 Test-Assert ($extraCallbackM.Count -eq 1) "the series-root extra fired its own callback"
-Test-Assert ($extraCallbackM[0].IsZippable -eq $false -and $null -eq $extraCallbackM[0].ZipOut) "the extra is marked IsZippable=false with no ZipOut - a caller must not zip it"
+Test-Assert ($extraCallbackM[0].ChapterResult.ConvertedCount -eq 1 -and $extraCallbackM[0].HasNamingCollision -eq $false) "the extra's callback carries its own result, no collision"
 
 # ==============================================================================
 #  Scenario N: -FolderExcludeStagingDirs must still exclude a staging directory

@@ -586,6 +586,39 @@ try {
 Write-Host ""
 
 # ==============================================================================
+#  Scenario Q4 (2026-09-24 review fix): a series folder deleted after the
+#  provider's enumerator listed it but before the provider reached it is
+#  skipped with a Warn, not thrown out of the provider. Many siblings so
+#  the vanished one is already in the OS's directory-listing buffer when
+#  it's deleted (a lazy enumerator that re-read the disk would just never
+#  return it, which proves nothing).
+# ==============================================================================
+Write-Host "=== Scenario Q4: New-SeriesProvider skips a series folder that vanishes mid-scan ===" -ForegroundColor Cyan
+$libraryQ4 = New-Dir "scenario-q4-library"
+foreach ($nQ4 in 1..40) { New-FileIn -DirPath (New-Dir ("scenario-q4-library\Series " + $nQ4.ToString("00") + "\Chapter 1")) -Name "page1.jpg" | Out-Null }
+$providerQ4 = New-SeriesProvider -LibraryPath $libraryQ4 -QualifyingExtensions $imgExts
+$firstQ4 = & $providerQ4
+$logCountBeforeQ4 = $script:logMessages.Count
+$deletedQ4 = @()
+foreach ($dQ4 in [System.IO.Directory]::GetDirectories($libraryQ4)) {
+    if ($dQ4 -ne $firstQ4.FullName) { [System.IO.Directory]::Delete($dQ4, $true); $deletedQ4 += $dQ4 }
+}
+$threwQ4 = $null
+$yieldedQ4 = [System.Collections.Generic.List[string]]::new()
+try {
+    for ($i = 0; $i -lt 50; $i++) {
+        $next = & $providerQ4
+        if ($null -eq $next) { break }
+        $yieldedQ4.Add($next.FullName)
+    }
+} catch { $threwQ4 = $_ }
+$vanishWarnsQ4 = @($script:logMessages | Select-Object -Skip $logCountBeforeQ4 | Where-Object { $_ -like "*vanished during the scan*" })
+Test-Assert ($null -eq $threwQ4) ("the provider didn't throw for vanished folders (got: " + $threwQ4 + ")")
+Test-Assert ($yieldedQ4.Count -eq 0) ("no vanished folder was yielded as a series (got " + $yieldedQ4.Count + ")")
+Test-Assert ($vanishWarnsQ4.Count -ge 1) ("at least one vanished folder was reached and logged as skipped (got " + $vanishWarnsQ4.Count + " of " + $deletedQ4.Count + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario R: New-SeriesProvider edge cases - nonexistent library throws;
 #  an empty (0-series) library returns $null immediately, not an error.
 # ==============================================================================
