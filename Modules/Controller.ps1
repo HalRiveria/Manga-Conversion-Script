@@ -1002,6 +1002,10 @@ function Invoke-FullPipeline {
             $isExtra = -not $entry.IsZippable
             $blockedReasonForChapter = $null
             $hasBlockReason = $zipBlockReasons.TryGetValue($key, [ref]$blockedReasonForChapter)
+            if ($entry.IsZippable -and -not $hasBlockReason -and (Test-AvifWebpPairPresent -DirPath $entry.Dir.FullName)) {
+                $hasBlockReason = $true
+                $blockedReasonForChapter = "animated originals kept (.avif and .webp both present)"
+            }
             $isZippableNow = $entry.IsZippable -and -not $hasBlockReason
 
             $chapterOutcome = Complete-MergedFullPipelineChapter -ChapterDir $entry.Dir.FullName -ZipOut $entry.ZipOut `

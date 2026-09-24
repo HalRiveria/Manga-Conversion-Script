@@ -144,6 +144,23 @@ function Get-LooseAnimatedCandidates {
     return ,$candidates
 }
 
+function Test-AvifWebpPairPresent {
+    param(
+        [Parameter(Mandatory)]
+        [string]$DirPath
+    )
+    try {
+        foreach ($avif in [System.IO.Directory]::EnumerateFiles($DirPath, "*.avif")) {
+            $webp = [System.IO.Path]::ChangeExtension($avif, ".webp")
+            if ([System.IO.File]::Exists($webp) -and ([System.IO.FileInfo]::new($webp).Length -gt 0)) { return $true }
+        }
+    } catch {
+        # Folder unreadable/gone - no pair can be proven; the zip step itself reports the real failure.
+        return $false
+    }
+    return $false
+}
+
 function Get-ChapterAnimatedStatus {
     param(
         [hashtable]$ChapterResult

@@ -1850,6 +1850,74 @@ Test-Assert ($totalsZB.ConvertedAnimatedSkipped -eq 1) ("only the chapter with a
 Write-Host ""
 
 # ==============================================================================
+#  Scenario AP: Full Pipeline never zips a chapter holding an .avif together
+#  with its non-empty same-basename .webp (animated originals kept) - it's
+#  left unzipped and untouched, counted as ZipSkippedDueToError and shown
+#  as a Warning. Covers both ways a chapter gets there (Delete Original
+#  off; Overwrite off with an existing .webp) plus controls: only .webp,
+#  and only .avif (Animated Conversion off), still zip.
+# ==============================================================================
+Write-Host "=== Scenario AP: a chapter with an .avif/.webp pair is not zipped ===" -ForegroundColor Cyan
+$script:completeCallsAP = New-Object System.Collections.Generic.List[hashtable]
+$realCompleteAP = ${function:Complete-ChapterProgress}
+$script:realCompleteAPRef = $realCompleteAP
+function Complete-ChapterProgress {
+    param([string]$SeriesName, [string]$ChapterName, [string]$Status, [string]$Detail = "")
+    $script:completeCallsAP.Add(@{ ChapterName = $ChapterName; Status = $Status; Detail = $Detail })
+    & $script:realCompleteAPRef -SeriesName $SeriesName -ChapterName $ChapterName -Status $Status -Detail $Detail
+}
+function Invoke-APRun {
+    param([string]$Root, [hashtable]$Extra)
+    $script:completeCallsAP.Clear()
+    $script:CleanConsoleOutputEnabled = $true
+    try {
+        return Invoke-FullPipeline -Path (Join-Path $scratchDir $Root) -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe `
+            -FullPipelineMaxConcurrentProcs 2 -FullLogging $false -PermanentDelete $true @Extra
+    } finally {
+        $script:CleanConsoleOutputEnabled = $false
+    }
+}
+function Get-APStatus { param([string]$ChapterName) return @($script:completeCallsAP | Where-Object { $_.ChapterName -eq $ChapterName })[0] }
+
+try {
+    # Run 1: Delete Original off. "Delete Off" converts its AVIF and keeps it -> blocked. "Only Webp" -> zips.
+    $chAP1 = New-Dir "scenario-ap1\Series\Delete Off"
+    New-FakeImageIn -DirPath $chAP1 -Name "page1.jpg" | Out-Null
+    New-FakeAvifIn -DirPath $chAP1 -Name "anim.avif" -Frames 5 | Out-Null
+    $chAP1w = New-Dir "scenario-ap1\Series\Only Webp"
+    New-FakeImageIn -DirPath $chAP1w -Name "page1.jpg" | Out-Null
+    [System.IO.File]::WriteAllBytes((Join-Path $chAP1w "anim.webp"), $animatedWebpBytes)
+    $totalsAP1 = Invoke-APRun -Root "scenario-ap1" -Extra @{ AnimatedDeleteSource = $false }
+    $stAP1 = Get-APStatus "Delete Off"
+    Test-Assert ($totalsAP1.ConvertedAnimatedSuccess -eq 1 -and (Test-Path -LiteralPath (Join-Path $chAP1 "anim.avif")) -and (Test-Path -LiteralPath (Join-Path $chAP1 "anim.webp"))) "delete-off: sanity - the AVIF converted and was kept alongside its .webp"
+    Test-Assert (-not (Test-Path -LiteralPath ($chAP1 + ".zip")) -and (Test-Path -LiteralPath $chAP1)) "delete-off: the chapter was NOT zipped and its folder is untouched"
+    Test-Assert ($null -ne $stAP1 -and $stAP1.Status -eq 'Warning' -and $stAP1.Detail -like '*zip skipped: animated originals kept*') ("delete-off: shown as a Warning naming the reason (got " + $(if ($stAP1) { $stAP1.Status + " / " + $stAP1.Detail } else { '<none>' }) + ")")
+    Test-Assert ((Test-Path -LiteralPath ($chAP1w + ".zip")) -and -not (Test-Path -LiteralPath $chAP1w)) "control: a chapter with only a .webp still zips (and its folder is deleted)"
+    Test-Assert ($totalsAP1.ZipSkippedDueToError -eq 1 -and $totalsAP1.ZipCreatedSuccess -eq 1) ("delete-off run: 1 zip skipped, 1 zip created (got " + $totalsAP1.ZipSkippedDueToError + " / " + $totalsAP1.ZipCreatedSuccess + ")")
+
+    # Run 2: defaults (Delete Original on, Overwrite off). An existing non-empty .webp makes the engine skip the AVIF -> blocked.
+    $chAP2 = New-Dir "scenario-ap2\Series\Overwrite Off"
+    New-FakeImageIn -DirPath $chAP2 -Name "page1.jpg" | Out-Null
+    New-FakeAvifIn -DirPath $chAP2 -Name "anim.avif" -Frames 5 | Out-Null
+    [System.IO.File]::WriteAllBytes((Join-Path $chAP2 "anim.webp"), $animatedWebpBytes)   # animated, like a real earlier conversion - a static one would be converted to .jxl by the image engine
+    $totalsAP2 = Invoke-APRun -Root "scenario-ap2" -Extra @{ AnimatedOverwrite = $false }
+    $stAP2 = Get-APStatus "Overwrite Off"
+    Test-Assert ($totalsAP2.ConvertedAnimatedSkipped -eq 1) "overwrite-off: sanity - the AVIF was skipped because its .webp exists"
+    Test-Assert (-not (Test-Path -LiteralPath ($chAP2 + ".zip")) -and (Test-Path -LiteralPath (Join-Path $chAP2 "anim.avif"))) "overwrite-off: the chapter was NOT zipped and its folder is untouched"
+    Test-Assert ($totalsAP2.ZipSkippedDueToError -eq 1 -and $null -ne $stAP2 -and $stAP2.Status -eq 'Warning' -and $stAP2.Detail -like '*animated originals kept*') ("overwrite-off: counted as a zip skip and shown as a Warning (got " + $totalsAP2.ZipSkippedDueToError + ", " + $(if ($stAP2) { $stAP2.Status + " / " + $stAP2.Detail } else { '<none>' }) + ")")
+
+    # Run 3: Animated Conversion off - an .avif with no .webp still zips.
+    $chAP3 = New-Dir "scenario-ap3\Series\Only Avif"
+    New-FakeImageIn -DirPath $chAP3 -Name "page1.jpg" | Out-Null
+    New-FakeAvifIn -DirPath $chAP3 -Name "anim.avif" -Frames 5 | Out-Null
+    $totalsAP3 = Invoke-APRun -Root "scenario-ap3" -Extra @{ AnimatedConversionEnabled = $false }
+    Test-Assert ((Test-Path -LiteralPath ($chAP3 + ".zip")) -and $totalsAP3.ZipSkippedDueToError -eq 0) ("control: a chapter with only an .avif (Animated Conversion off) still zips (zip skips: " + $totalsAP3.ZipSkippedDueToError + ")")
+} finally {
+    ${function:Complete-ChapterProgress} = $realCompleteAP
+}
+Write-Host ""
+
+# ==============================================================================
 #  Scenario W: a file the reconciliation can't classify is excluded from
 #  BOTH engines for that run, not guessed at or left to race - the
 #  "fail safe" half of the same fix.
