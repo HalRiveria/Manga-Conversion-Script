@@ -983,10 +983,10 @@ Write-Host ""
 
 Write-Host "=== Scenario L: Invoke-Mode / ZipFolders - result mapping ===" -ForegroundColor Cyan
 $fakeZipHandlerL = { param($Path, $MaxParallel, $DeleteFolders, $PermanentDelete)
-    return @{ CandidateCount = 5; ZippedSuccess = 4; ZippedFail = 1; FolderDeletedSuccess = 4; FolderDeletedFail = 0; ForceStoppedCount = 3; Aborted = $true }
+    return @{ CandidateCount = 6; ZippedSuccess = 4; ZippedFail = 1; PairBlocked = 1; FolderDeletedSuccess = 4; FolderDeletedFail = 0; ForceStoppedCount = 3; Aborted = $true }
 }
 $statsL = Invoke-Mode -Resolved @{ Mode = 'ZipFolders' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ZipFoldersHandler $fakeZipHandlerL
-Test-Assert ($statsL.ZipOnlyZipped.Success -eq 4 -and $statsL.ZipOnlyZipped.Fail -eq 1) "ZipFolders: ZipOnlyZipped mapped correctly"
+Test-Assert ($statsL.ZipOnlyZipped.Success -eq 4 -and $statsL.ZipOnlyZipped.Fail -eq 1 -and $statsL.ZipOnlyZipped.Skipped -eq 1) "ZipFolders: ZipOnlyZipped mapped correctly, including pair-blocked folders as Skipped"
 Test-Assert ($statsL.ZipOnlyFolderDeleted.Success -eq 4) "ZipFolders: ZipOnlyFolderDeleted mapped correctly"
 # 2026-09-03 fix, real bug caught by a same-session /code-review pass:
 # ZipFolders used to map neither Aborted nor a force-killed count at all.

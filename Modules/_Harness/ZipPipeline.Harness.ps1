@@ -254,6 +254,39 @@ Test-Assert (Test-Path -LiteralPath $leafC) "the source folder still exists"
 Write-Host ""
 
 # ==============================================================================
+#  Scenario P: a folder holding an .avif and its non-empty same-basename
+#  .webp (animated originals kept) is not zipped or deleted - same rule as
+#  Full Pipeline. Controls: .webp only, .avif only, and an .avif with a
+#  0-byte .webp (a killed conversion, not a real pair) all still zip.
+# ==============================================================================
+Write-Host "=== Scenario P: an .avif/.webp pair blocks Zip Folders; controls still zip ===" -ForegroundColor Cyan
+$rootP = New-Dir "scenario-p"
+$pairP  = New-Dir "scenario-p\Series\Pair"
+New-FileIn -DirPath $pairP -Name "page1.jpg" | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $pairP "anim.avif"), "avif")
+[System.IO.File]::WriteAllText((Join-Path $pairP "anim.webp"), "webp")
+$webpOnlyP = New-Dir "scenario-p\Series\Webp Only"
+New-FileIn -DirPath $webpOnlyP -Name "page1.jpg" | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $webpOnlyP "anim.webp"), "webp")
+$avifOnlyP = New-Dir "scenario-p\Series\Avif Only"
+New-FileIn -DirPath $avifOnlyP -Name "page1.jpg" | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $avifOnlyP "anim.avif"), "avif")
+$emptyWebpP = New-Dir "scenario-p\Series\Empty Webp"
+New-FileIn -DirPath $emptyWebpP -Name "page1.jpg" | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $emptyWebpP "anim.avif"), "avif")
+[System.IO.File]::WriteAllBytes((Join-Path $emptyWebpP "anim.webp"), [byte[]]@())
+
+$totalsP = Invoke-ZipOnlyPipeline -Path $rootP -MaxParallel 2 -DeleteFolders $true -PermanentDelete $true
+Test-Assert (-not (Test-Path -LiteralPath ($pairP + ".zip")) -and (Test-Path -LiteralPath (Join-Path $pairP "anim.avif")) -and (Test-Path -LiteralPath (Join-Path $pairP "anim.webp"))) "a folder with an .avif/.webp pair is not zipped, and the folder is left alone"
+Test-Assert ((Test-Path -LiteralPath ($webpOnlyP + ".zip")) -and -not (Test-Path -LiteralPath $webpOnlyP)) "control: .webp only still zips"
+Test-Assert ((Test-Path -LiteralPath ($avifOnlyP + ".zip")) -and -not (Test-Path -LiteralPath $avifOnlyP)) "control: .avif only still zips"
+Test-Assert ((Test-Path -LiteralPath ($emptyWebpP + ".zip")) -and -not (Test-Path -LiteralPath $emptyWebpP)) "control: an .avif with a 0-byte .webp still zips (not a real pair)"
+Test-Assert ($totalsP.PairBlocked -eq 1 -and $totalsP.ZippedSuccess -eq 3 -and $totalsP.ZippedFail -eq 0) ("totals: 1 pair-blocked, 3 zipped, 0 failed (got " + $totalsP.PairBlocked + " / " + $totalsP.ZippedSuccess + " / " + $totalsP.ZippedFail + ")")
+$statusP, $detailP = Get-ZipChapterProgressStatus -ZipResult @{ Success = 0; Failed = 0; FolderDeleted = 0; FolderDeleteFailed = 0; Cancelled = 0; PairBlocked = 1 }
+Test-Assert ($statusP -eq "Warning" -and $detailP -eq "zip skipped: animated originals kept (.avif and .webp both present)") ("a pair-blocked folder shows as a Warning with Full Pipeline's wording (got " + $statusP + " / " + $detailP + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario D: a leaf with an already-up-to-date same-named zip is
 #  correctly excluded - confirms real wiring to Get-ZippableLeafDirs's
 #  own staleness check, not just that function in isolation.

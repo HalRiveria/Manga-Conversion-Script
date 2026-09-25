@@ -28,6 +28,7 @@ function Get-ZipChapterProgressStatus {
         [hashtable]$ZipResult
     )
     if ($ZipResult.Cancelled -eq 1) { return "Warning", "cancelled before starting - not zipped" }
+    if ($ZipResult.PairBlocked -eq 1) { return "Warning", "zip skipped: animated originals kept (.avif and .webp both present)" }
     if ($ZipResult.Failed -eq 1) { return "Error", "zip failed" }
     if ($ZipResult.FolderDeleteFailed -eq 1) { return "Warning", "zipped OK, but source folder delete failed" }
     return "Success", $null
@@ -61,11 +62,30 @@ $script:zipOnlyWorker = {
         FolderDeleted      = 0
         FolderDeleteFailed = 0
         Cancelled          = 0
+        PairBlocked        = 0
     }
 
     if ($CancelToken.IsCancellationRequested) {
         Write-Log ("Cancelled before starting '" + $folderName + "'") -Level Warn
         $result.Cancelled = 1
+        return $result
+    }
+
+    # DOCUMENTED DUPLICATE of AnimatedConversionPipeline.ps1's Test-AvifWebpPairPresent
+    # (inline because this module's harness doesn't dot-source that module) - keep both in sync.
+    $pairFound = $false
+    try {
+        foreach ($avif in [System.IO.Directory]::EnumerateFiles($FolderPath, "*.avif")) {
+            $webp = [System.IO.Path]::ChangeExtension($avif, ".webp")
+            if ([System.IO.File]::Exists($webp) -and ([System.IO.FileInfo]::new($webp).Length -gt 0)) { $pairFound = $true; break }
+        }
+    } catch {
+        # Folder unreadable/gone - no pair can be proven; the zip step below reports the real failure.
+        $pairFound = $false
+    }
+    if ($pairFound) {
+        Write-Log ("Not zipping '" + $FolderPath + "': it holds an .avif and its converted .webp (animated originals kept). Delete one of each pair, then zip again.") -Level Warn
+        $result.PairBlocked = 1
         return $result
     }
 
@@ -157,6 +177,7 @@ function Invoke-ZipOnlyPipeline {
         CandidateCount       = 0
         ZippedSuccess        = 0
         ZippedFail           = 0
+        PairBlocked          = 0
         FolderDeletedSuccess = 0
         FolderDeletedFail    = 0
         ForceStoppedCount    = 0
@@ -242,6 +263,7 @@ function Invoke-ZipOnlyPipeline {
                 param($r)
                 $totals.ZippedSuccess        += $r.Success
                 $totals.ZippedFail           += $r.Failed
+                $totals.PairBlocked          += $r.PairBlocked
                 $totals.FolderDeletedSuccess += $r.FolderDeleted
                 $totals.FolderDeletedFail    += $r.FolderDeleteFailed
                 $zipStatus, $zipDetail = Get-ZipChapterProgressStatus -ZipResult $r

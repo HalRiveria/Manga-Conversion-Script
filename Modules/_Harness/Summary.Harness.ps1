@@ -118,6 +118,9 @@ $flagsE = Get-AllModeFlagsFalse
 $flagsE.RunZipOnly = $true
 $blobE = (Get-SummaryLines -Stats $statsE -ElapsedString "00h 00m 01s" -ModeFlags $flagsE) -join "`n"
 Test-Assert ($blobE -match "Zip-only Zipped") "shows zip-only rows"
+$statsE.ZipOnlyZipped.Skipped = 2
+$blobE2 = (Get-SummaryLines -Stats $statsE -ElapsedString "00h 00m 01s" -ModeFlags $flagsE) -join "`n"
+Test-Assert ($blobE2 -match "Skipped \(animated originals kept\) = 2") "the zip-only row shows folders skipped for an .avif/.webp pair"
 Test-Assert ($blobE -notmatch "Loose") "shows nothing from any loose-pipeline group"
 Test-Assert ($blobE -notmatch "ZIPs Extracted") "shows nothing from the rezip/ZIP-pipeline group"
 Test-Assert ($blobE -notmatch "Inspect Failed") "does not show Inspect Failed - RunZipOnly alone doesn't touch either conversion engine"

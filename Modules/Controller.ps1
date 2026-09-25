@@ -1342,6 +1342,7 @@ function Invoke-Mode {
                 $r = & $ZipFoldersHandler -Path $TargetPath -MaxParallel $Settings.ZipParallelThreads -DeleteFolders $true `
                     -PermanentDelete ([bool]$Settings.PermanentDelete)
                 $stats.ZipOnlyZipped.Success        = $r.ZippedSuccess;        $stats.ZipOnlyZipped.Fail        = $r.ZippedFail
+                $stats.ZipOnlyZipped.Skipped        = [int]$r.PairBlocked
                 $stats.ZipOnlyFolderDeleted.Success = $r.FolderDeletedSuccess; $stats.ZipOnlyFolderDeleted.Fail = $r.FolderDeletedFail
                 $stats.Aborted           = $r.Aborted
                 $stats.ForceKilledCount  = $r.ForceStoppedCount

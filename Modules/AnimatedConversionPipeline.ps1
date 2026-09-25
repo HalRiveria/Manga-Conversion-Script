@@ -149,6 +149,8 @@ function Test-AvifWebpPairPresent {
         [Parameter(Mandatory)]
         [string]$DirPath
     )
+    # DOCUMENTED DUPLICATE: ZipPipeline.ps1's zip-only worker has an inline copy of this
+    # check (its harness doesn't dot-source this module) - keep both in sync.
     try {
         foreach ($avif in [System.IO.Directory]::EnumerateFiles($DirPath, "*.avif")) {
             $webp = [System.IO.Path]::ChangeExtension($avif, ".webp")

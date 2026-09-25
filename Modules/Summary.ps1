@@ -9,7 +9,7 @@ function New-StatsTracker {
         LooseAnimatedDeleted   = @{ Success = 0; Fail = 0 }
         LooseFolderZipped      = @{ Success = 0; Fail = 0; Skipped = 0 }
         LooseFolderDeleted     = @{ Success = 0; Fail = 0 }
-        ZipOnlyZipped          = @{ Success = 0; Fail = 0 }
+        ZipOnlyZipped          = @{ Success = 0; Fail = 0; Skipped = 0 }
         ZipOnlyFolderDeleted   = @{ Success = 0; Fail = 0 }
         InspectFailed          = @{ Count = 0 }
         Aborted                = $false
@@ -57,7 +57,7 @@ function Get-SummaryLines {
     }
 
     if ($ModeFlags.RunZipOnly) {
-        $lines.Add("Zip-only Zipped     : Success = " + $Stats.ZipOnlyZipped.Success       + "  |  Failed = " + $Stats.ZipOnlyZipped.Fail)
+        $lines.Add("Zip-only Zipped     : Success = " + $Stats.ZipOnlyZipped.Success       + "  |  Failed = " + $Stats.ZipOnlyZipped.Fail + "  |  Skipped (animated originals kept) = " + $Stats.ZipOnlyZipped.Skipped)
         $lines.Add("Zip-only Fldr Del.  : Success = " + $Stats.ZipOnlyFolderDeleted.Success + "  |  Failed = " + $Stats.ZipOnlyFolderDeleted.Fail)
     }
 
