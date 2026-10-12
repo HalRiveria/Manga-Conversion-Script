@@ -1657,7 +1657,8 @@ Write-Host ""
 #  $false right before InvokeModeHandler and $true right after, even when
 #  InvokeModeHandler throws - same try/finally bracketing as
 #  SetRunActiveHandler, proving Console QuickEdit mode can never be left
-#  disabled by a crashed run.
+#  disabled by a crashed run. -GetQuickEditHandler says QuickEdit was on
+#  here; Scenario U2f covers a console that had it off.
 # ==============================================================================
 Write-Host "=== Scenario U2e: SetQuickEditHandler brackets InvokeModeHandler, even on a throw ===" -ForegroundColor Cyan
 $fakeSettingsU2e = @{ PermanentDelete = $false; CleanConsoleOutputEnabled = $false; FullLogging = $false; DisableSummaryFile = $false }
@@ -1677,7 +1678,7 @@ $fakePostRunU2e = { $script:postRunCallsU2e++; return 'Exit' }
 $threwU2e = $false
 try {
     Invoke-MainLoop -TargetPath "C:\fake\lib" -Settings $fakeSettingsU2e -SettingsPath "C:\fake\settings.json" -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ScriptDir "C:\fake\scriptdir" `
-        -GetModeHandler $fakeGetModeU2e -InvokeModeHandler $fakeInvokeModeU2e -PostRunPromptHandler $fakePostRunU2e -SetQuickEditHandler $fakeSetQuickEditU2e
+        -GetModeHandler $fakeGetModeU2e -InvokeModeHandler $fakeInvokeModeU2e -PostRunPromptHandler $fakePostRunU2e -SetQuickEditHandler $fakeSetQuickEditU2e -GetQuickEditHandler { return 1 }
 } catch {
     $threwU2e = $true
 }
@@ -1685,6 +1686,24 @@ try {
 Test-Assert $threwU2e "sanity check: the simulated crash really did propagate out of Invoke-MainLoop (this fake bypasses Invoke-Mode's own catch)"
 Test-Assert ($script:quickEditCallsU2e.Count -eq 2) ("SetQuickEditHandler fired exactly twice, even though InvokeModeHandler threw (got " + $script:quickEditCallsU2e.Count + ")")
 Test-Assert ((@($script:quickEditCallsU2e)[0] -eq $false) -and (@($script:quickEditCallsU2e)[1] -eq $true)) ("QuickEdit was disabled ($false) before the run and re-enabled ($true) after, in that order (got " + ($script:quickEditCallsU2e -join ',') + ")")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario U2f (2026-10-12): QuickEdit is only turned back on if it was on
+#  before the run. A console that had it off (0), or no real console (-1),
+#  is never touched - it used to get QuickEdit switched ON after every run.
+# ==============================================================================
+Write-Host "=== Scenario U2f: QuickEdit is left alone when it was not on before the run ===" -ForegroundColor Cyan
+foreach ($stateU2f in @(0, -1)) {
+    $script:quickEditCallsU2f = [System.Collections.Generic.List[bool]]::new()
+    $fakeSetQuickEditU2f = { param($Enabled) $script:quickEditCallsU2f.Add($Enabled) }.GetNewClosure()
+    $fakeGetQuickEditU2f = { return $stateU2f }.GetNewClosure()
+    $ranU2f = @{ Count = 0 }
+    $fakeInvokeModeU2f = { param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe) $ranU2f.Count++; return $null }.GetNewClosure()
+    Invoke-MainLoop -TargetPath "C:\fake\lib" -Settings $fakeSettingsU2e -SettingsPath "C:\fake\settings.json" -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ScriptDir "C:\fake\scriptdir" `
+        -GetModeHandler $fakeGetModeU2e -InvokeModeHandler $fakeInvokeModeU2f -PostRunPromptHandler { return 'Exit' } -SetQuickEditHandler $fakeSetQuickEditU2f -GetQuickEditHandler $fakeGetQuickEditU2f
+    Test-Assert ($ranU2f.Count -eq 1 -and $script:quickEditCallsU2f.Count -eq 0) ("with QuickEdit reported as " + $stateU2f + ", the run happened and SetQuickEditHandler was never called (got " + $script:quickEditCallsU2f.Count + " call(s))")
+}
 Write-Host ""
 
 # ==============================================================================

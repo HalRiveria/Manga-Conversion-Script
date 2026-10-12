@@ -121,14 +121,14 @@ function Invoke-ChapterDispatch {
             $chapterStates[$chapterKey] = $state
             $activeChapterCount++
             if ($state.Outstanding -le 0) {
-                & $ChapterCompleteCallback $chapterInfo
+                $null = & $ChapterCompleteCallback $chapterInfo
                 $state.Completed = $true
                 if ($null -ne $ChapterReleaseCheck) { $heldChapters.Add($chapterInfo) } else { $activeChapterCount-- }
                 $chapterResults.Add(@{ ChapterInfo = $chapterInfo; Completed = $true; Aborted = $false })
             }
         }
 
-        if ($AbortPollCallback) { & $AbortPollCallback @($running) }
+        if ($AbortPollCallback) { $null = & $AbortPollCallback @($running) }
 
         while ($pending.Count -gt 0 -and (-not $CancelToken.IsCancellationRequested) -and `
                $(if ($isSharedBudget) { $MaxConcurrent.Wait(0) } else { $running.Count -lt $MaxConcurrent })) {
@@ -153,7 +153,7 @@ function Invoke-ChapterDispatch {
                     $state = $chapterStates[$key]
                     $state.Outstanding--
                     if ($state.Outstanding -le 0 -and -not $state.Completed) {
-                        & $ChapterCompleteCallback $state.ChapterInfo
+                        $null = & $ChapterCompleteCallback $state.ChapterInfo
                         $state.Completed = $true
                         $activeChapterCount--
                         $chapterResults.Add(@{ ChapterInfo = $state.ChapterInfo; Completed = $true; Aborted = $false })
@@ -188,7 +188,7 @@ function Invoke-ChapterDispatch {
                         $state = $chapterStates[$key]
                         $state.Outstanding--
                         if ($state.Outstanding -le 0 -and -not $state.Completed) {
-                            & $ChapterCompleteCallback $state.ChapterInfo
+                            $null = & $ChapterCompleteCallback $state.ChapterInfo
                             $state.Completed = $true
                             $activeChapterCount--
                             $chapterResults.Add(@{ ChapterInfo = $state.ChapterInfo; Completed = $true; Aborted = $false })
@@ -214,7 +214,7 @@ function Invoke-ChapterDispatch {
             try { if ($job.Proc -and -not $job.Proc.HasExited) { $job.Proc.Kill() } } catch { }
             try { if ($job.Proc) { $null = $job.Proc.WaitForExit(5000) } } catch { }
             if (-not $job.SlotReleased) {
-                try { & $JobAbortCleanup $job } catch { }
+                try { $null = & $JobAbortCleanup $job } catch { }
                 if ($isSharedBudget) { try { $null = $MaxConcurrent.Release() } catch { } }
             }
             try { if ($job.Proc) { $job.Proc.Dispose() } } catch { }
@@ -244,7 +244,7 @@ function Invoke-ChapterDispatch {
                                 $state = $chapterStates[$key]
                                 $state.Outstanding--
                                 if ($state.Outstanding -le 0 -and -not $state.Completed) {
-                                    & $ChapterCompleteCallback $state.ChapterInfo
+                                    $null = & $ChapterCompleteCallback $state.ChapterInfo
                                     $state.Completed = $true
                                     $activeChapterCount--
                                     $chapterResults.Add(@{ ChapterInfo = $state.ChapterInfo; Completed = $true; Aborted = $false })
@@ -287,7 +287,7 @@ function Invoke-ChapterDispatch {
                                 $state = $chapterStates[$key]
                                 $state.Outstanding--
                                 if ($state.Outstanding -le 0 -and -not $state.Completed) {
-                                    & $ChapterCompleteCallback $state.ChapterInfo
+                                    $null = & $ChapterCompleteCallback $state.ChapterInfo
                                     $state.Completed = $true
                                     $activeChapterCount--
                                     $chapterResults.Add(@{ ChapterInfo = $state.ChapterInfo; Completed = $true; Aborted = $false })
@@ -314,7 +314,7 @@ function Invoke-ChapterDispatch {
                 foreach ($job in $running) {
                     try { if ($job.Proc -and -not $job.Proc.HasExited) { $job.Proc.Kill() } } catch { }
                     try { if ($job.Proc) { $null = $job.Proc.WaitForExit(5000) } } catch { }
-                    try { & $JobAbortCleanup $job } catch { }
+                    try { $null = & $JobAbortCleanup $job } catch { }
                     try { if ($job.Proc) { $job.Proc.Dispose() } } catch { }
                     if ($isSharedBudget) { try { $null = $MaxConcurrent.Release() } catch { } }
                     $job.SlotReleased = $true
@@ -325,7 +325,7 @@ function Invoke-ChapterDispatch {
                 try { if ($job.Proc -and -not $job.Proc.HasExited) { $job.Proc.Kill() } } catch { }
                 try { if ($job.Proc) { $null = $job.Proc.WaitForExit(5000) } } catch { }
                 if (-not $job.SlotReleased) {
-                    try { & $JobAbortCleanup $job } catch { }
+                    try { $null = & $JobAbortCleanup $job } catch { }
                     if ($isSharedBudget) { try { $null = $MaxConcurrent.Release() } catch { } }
                 }
                 try { if ($job.Proc) { $job.Proc.Dispose() } } catch { }
@@ -348,7 +348,7 @@ function Invoke-ChapterDispatch {
     # chapter's OTHER jobs already finished.
     if ($pending.Count -gt 0) {
         foreach ($job in $pending) {
-            try { & $JobAbortCleanup $job } catch { }
+            try { $null = & $JobAbortCleanup $job } catch { }
             $key = $job.ChapterKey
             if ($chapterStates.ContainsKey($key)) { $chapterStates[$key].Outstanding-- }
         }
@@ -370,7 +370,7 @@ function Invoke-ChapterDispatch {
             # cleanup/finalization phase, and a callback failure here
             # shouldn't prevent returning a result for every other
             # chapter.
-            try { & $ChapterCompleteCallback $state.ChapterInfo } catch { }
+            try { $null = & $ChapterCompleteCallback $state.ChapterInfo } catch { }
             $state.Completed = $true
             $chapterResults.Add(@{ ChapterInfo = $state.ChapterInfo; Completed = $false; Aborted = $true })
         }

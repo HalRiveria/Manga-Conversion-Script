@@ -106,12 +106,13 @@ function Show-ModeMenu {
             # Q3's own 2026-09-04 fix exists to prevent exactly the log-
             # ordering corruption that would otherwise cause.
             Set-AbortHandlerRunActive -Active $true
-            $null = Set-ConsoleQuickEditEnabled -Enabled $false
+            $quickEditWasOn = ((Get-ConsoleQuickEditEnabled) -eq 1)
+            if ($quickEditWasOn) { $null = Set-ConsoleQuickEditEnabled -Enabled $false }
             $coverScreen = @{ HasOutput = $false }
             try {
                 $null = Show-CoverDeletionMenu -PromptFunc $PromptFunc -Settings $Settings -SettingsPath $SettingsPath -ClearScreenFunc $ClearScreenFunc -ClearOnFirstRender $true -ScreenState $coverScreen -TargetPath $TargetPath
             } finally {
-                $null = Set-ConsoleQuickEditEnabled -Enabled $true
+                if ($quickEditWasOn) { $null = Set-ConsoleQuickEditEnabled -Enabled $true }
                 Set-AbortHandlerRunActive -Active $false
                 Complete-AbortDrain
                 Complete-LogRun

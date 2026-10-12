@@ -940,6 +940,59 @@ Test-Assert ($errorContentW.Contains("this one should actually land")) "a later 
 Write-Host ""
 
 # ==============================================================================
+#  Scenario W2 (2026-10-12): a failed log write says so on the console, once
+#  per file per run - not silently, and not once per line while the file
+#  stays locked. Start-LogRun (a new run) re-arms the warning.
+# ==============================================================================
+Write-Host "=== Scenario W2: a locked log file warns once per run, not per line ===" -ForegroundColor Cyan
+Initialize-LogPaths -TargetPath "C:\W2\Path" -FullLogging $false -ScriptDir $scratchDir
+Initialize-LogMutex
+Start-LogRun
+$lockedW2 = [System.IO.File]::Open($script:logErrorFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+try {
+    $firstW2  = @(& { Write-Log "first lost line" -Level Error } 6>&1)
+    $secondW2 = @(& { Write-Log "second lost line" -Level Error; Write-Log "third lost line" -Level Error } 6>&1)
+} finally {
+    $lockedW2.Close()
+}
+Test-Assert (@($firstW2 | Where-Object { "$_" -like "*Could not write to the log file*" }).Count -eq 1) "the first failed write prints one console warning naming the problem"
+Test-Assert (@($firstW2 | Where-Object { "$_" -like "*first lost line*" }).Count -eq 1) "the line itself still reaches the console"
+Test-Assert (@($secondW2 | Where-Object { "$_" -like "*Could not write to the log file*" }).Count -eq 0) "later failed writes to the same file in the same run do not warn again"
+Test-Assert (@($secondW2 | Where-Object { "$_" -like "*lost line*" }).Count -eq 2) "and their lines still reach the console"
+
+Start-LogRun
+$lockedW2 = [System.IO.File]::Open($script:logErrorFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+try {
+    $nextRunW2 = @(& { Write-Log "lost line in the next run" -Level Error } 6>&1)
+} finally {
+    $lockedW2.Close()
+}
+Test-Assert (@($nextRunW2 | Where-Object { "$_" -like "*Could not write to the log file*" }).Count -eq 1) "a new run (Start-LogRun) warns again"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario W3 (2026-10-12): Write-SummaryLog with its file locked warns and
+#  carries on. It was the one log write with nothing catching it - the end-
+#  of-run summary would have thrown out of Write-SummaryReport.
+# ==============================================================================
+Write-Host "=== Scenario W3: Write-SummaryLog does not throw when the summary file is locked ===" -ForegroundColor Cyan
+$lockedW3 = [System.IO.File]::Open($script:logSummaryFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+$threwW3 = $false
+$outputW3 = @()
+try {
+    $outputW3 = @(& { Write-SummaryLog -Lines @("summary line") } 6>&1)
+} catch {
+    $threwW3 = $true
+} finally {
+    $lockedW3.Close()
+}
+Test-Assert (-not $threwW3) "Write-SummaryLog did not throw"
+Test-Assert (@($outputW3 | Where-Object { "$_" -like "*Could not write this run's summary*" }).Count -eq 1) "it printed one console warning instead"
+Write-SummaryLog -Lines @("summary line after unlock")
+Test-Assert ([System.IO.File]::ReadAllText($script:logSummaryFile).Contains("summary line after unlock")) "a later summary write, once unlocked, still lands"
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

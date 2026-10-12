@@ -83,7 +83,7 @@ function Invoke-ZipParallelProcessing {
 
             $null = Test-AbortSignal
             Flush-ConsoleQueue -Queue $localConsoleQueue
-            if ($null -ne $PollCallback) { & $PollCallback }
+            if ($null -ne $PollCallback) { $null = & $PollCallback }
 
             $localStillPending = [System.Collections.Generic.List[hashtable]]::new()
             foreach ($h in $localHandles) {
@@ -108,12 +108,12 @@ function Invoke-ZipParallelProcessing {
                         # -JobCrashedHandler previously had no way to learn a
                         # worker died mid-run at all, not even via logging it
                         # noticed anything was wrong).
-                        if ($null -ne $JobCrashedHandler) { try { & $JobCrashedHandler $_ } catch { } }
+                        if ($null -ne $JobCrashedHandler) { try { $null = & $JobCrashedHandler $_ } catch { } }
                     } finally {
                         $h.PS.Dispose()
                     }
                     if ($null -ne $localResults) {
-                        foreach ($r in $localResults) { & $ResultHandler $r }
+                        foreach ($r in $localResults) { $null = & $ResultHandler $r }
                     }
                 } else {
                     $localStillPending.Add($h)
@@ -131,13 +131,23 @@ function Invoke-ZipParallelProcessing {
         }
 
         Flush-ConsoleQueue -Queue $localConsoleQueue
-        if ($null -ne $PollCallback) { & $PollCallback }
+        if ($null -ne $PollCallback) { $null = & $PollCallback }
     } finally {
+        # A worker stuck inside a .NET call can't be stopped, and Stop()/
+        # Dispose()/Close() would all sit and wait for it. See
+        # Docs/function-notes.md for what an abandoned worker can still do.
+        $stillRunning = $false
         foreach ($h in $localHandles) {
-            try { $h.PS.Stop() } catch { }
-            try { $h.PS.Dispose() } catch { }
+            try {
+                if ($h.Handle.IsCompleted) { $h.PS.Dispose() }
+                else { $stillRunning = $true; $null = $h.PS.BeginStop($null, $null) }
+            } catch { }
         }
-        if ($null -ne $localPool) { try { $localPool.Close() } catch { }; try { $localPool.Dispose() } catch { } }
+        if ($stillRunning) { try { $Cts.Cancel() } catch { } }
+        if ($null -ne $localPool) {
+            if ($stillRunning) { try { $null = $localPool.BeginClose($null, $null) } catch { } }
+            else               { try { $localPool.Close() } catch { }; try { $localPool.Dispose() } catch { } }
+        }
         # Best-effort drain on a failing path (see Docs/function-notes.md); the original exception is the one to surface.
         if ($null -ne $localConsoleQueue) { try { Flush-ConsoleQueue -Queue $localConsoleQueue } catch { } }
         $script:logMutex = $previousLogMutex

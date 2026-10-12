@@ -498,6 +498,57 @@ Test-Assert (Test-ParamIsMandatory 'MaxParallel') "-MaxParallel is Mandatory"
 Write-Host ""
 
 # ==============================================================================
+#  Scenario F (2026-10-12): teardown does not wait for a worker stuck in a
+#  blocking .NET call. A throwing -ResultHandler sends the call straight to
+#  its finally while a second worker is still inside Thread.Sleep; the old
+#  Stop()/Close()/Dispose() there blocked until that call returned. The
+#  caller's token is cancelled too, so the abandoned worker can see it.
+# ==============================================================================
+Write-Host "=== Scenario F: teardown does not wait for a worker stuck in a .NET call ===" -ForegroundColor Cyan
+Reset-HarnessAbortState
+$ctsF = [System.Threading.CancellationTokenSource]::new()
+$stuckWorkerF = {
+    param([int]$JobId, [int]$DelayMs, $LogMutex, $ConsoleQueue, $CancelToken)
+    [System.Threading.Thread]::Sleep($DelayMs)
+    return @{ JobId = $JobId }
+}
+$jobParamsF = [System.Collections.Generic.List[hashtable]]::new()
+$jobParamsF.Add(@{ JobId = 1; DelayMs = 0 })
+$jobParamsF.Add(@{ JobId = 2; DelayMs = 8000 })
+$caughtF = $null
+$swF = [System.Diagnostics.Stopwatch]::StartNew()
+try {
+    $null = Invoke-ZipParallelProcessing -WorkerScript $stuckWorkerF -JobParams $jobParamsF -SharedFunctionNames @() `
+        -MaxParallel 2 -Cts $ctsF -ResultHandler { param($r) throw "simulated ResultHandler failure" }
+} catch {
+    $caughtF = $_
+}
+$swF.Stop()
+Test-Assert ($null -ne $caughtF -and $caughtF.ToString() -like "*simulated ResultHandler failure*") "sanity check: the handler's exception propagated"
+Test-Assert ($swF.Elapsed.TotalSeconds -lt 5) ("the call returned without waiting out the other worker's 8s blocking call (took " + [math]::Round($swF.Elapsed.TotalSeconds, 2) + "s)")
+Test-Assert ($ctsF.Token.IsCancellationRequested) "the caller's token was cancelled so the abandoned worker can see it"
+$ctsF.Dispose()
+Reset-HarnessAbortState
+Write-Host ""
+
+# ==============================================================================
+#  Scenario G (2026-10-12): output emitted by -ResultHandler/-PollCallback
+#  does not leak into Invoke-ZipParallelProcessing's own return value.
+# ==============================================================================
+Write-Host "=== Scenario G: chatty callbacks do not leak into the return value ===" -ForegroundColor Cyan
+Reset-HarnessAbortState
+$ctsG = [System.Threading.CancellationTokenSource]::new()
+$jobParamsG = [System.Collections.Generic.List[hashtable]]::new()
+$jobParamsG.Add(@{ JobId = 1; DelayMs = 0 })
+$jobParamsG.Add(@{ JobId = 2; DelayMs = 0 })
+$outcomeG = Invoke-ZipParallelProcessing -WorkerScript $stuckWorkerF -JobParams $jobParamsG -SharedFunctionNames @() `
+    -MaxParallel 2 -Cts $ctsG -ResultHandler { param($r) "leaked from ResultHandler"; $true } -PollCallback { "leaked from PollCallback" }
+$ctsG.Dispose()
+Test-Assert ($outcomeG -is [hashtable]) ("the return is exactly one hashtable (got " + $(if ($null -eq $outcomeG) { "null" } else { $outcomeG.GetType().Name + " x" + @($outcomeG).Count }) + ")")
+Test-Assert ($outcomeG -is [hashtable] -and $outcomeG.ForceStoppedCount -eq 0) "ForceStoppedCount is still readable on it"
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

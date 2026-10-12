@@ -193,11 +193,39 @@ function Complete-AnimatedDispatchJob {
         [Parameter(Mandatory)]
         [hashtable]$ChapterResult,
         [bool]$DoFullLogging,
-        [bool]$DoAnimatedDeleteSource
+        [bool]$DoAnimatedDeleteSource,
+        [int]$StreamReadTimeoutMs = 15000
     )
 
-    $stdout = if ($Job.StdoutTask) { $Job.StdoutTask.GetAwaiter().GetResult() } else { $Job.Proc.StandardOutput.ReadToEnd() }
-    $stderr = if ($Job.StderrTask) { $Job.StderrTask.GetAwaiter().GetResult() } else { $Job.Proc.StandardError.ReadToEnd() }
+    # DOCUMENTED DUPLICATE of ImageConversionPipeline.ps1's Complete-ImageDispatchJob
+    # (same bounded, failure-tolerant read of the finished process's output) -
+    # keep both in sync. The 15s default is the same bound Test-AvifAnimated,
+    # Invoke-IccStripRetryOrFail and both pre-conversion detours use - all
+    # bumped together.
+    $streamText = @{ Stdout = ""; Stderr = "" }
+    if ($Job.StdoutTask -and $Job.StderrTask) {
+        # A faulted read makes WaitAll throw; each task is judged on its own below.
+        try { $null = [System.Threading.Tasks.Task]::WaitAll(@($Job.StdoutTask, $Job.StderrTask), $StreamReadTimeoutMs) } catch { }
+        foreach ($streamName in @('Stdout', 'Stderr')) {
+            $streamTask = $Job[$streamName + 'Task']
+            if ($streamTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) {
+                $streamText[$streamName] = $streamTask.Result
+            } elseif ($streamTask.IsFaulted) {
+                Write-Log ("Reading magick " + $streamName.ToLowerInvariant() + " failed for '" + $Job.SrcPath + "' - judging the conversion by exit code and output file only: " + $streamTask.Exception.GetBaseException().Message) -Level Warn
+            } else {
+                Write-Log ("magick exited but its " + $streamName.ToLowerInvariant() + " did not finish reading within " + [int]($StreamReadTimeoutMs / 1000) + "s for '" + $Job.SrcPath + "' - judging the conversion by exit code and output file only.") -Level Warn
+            }
+        }
+    } else {
+        try {
+            $streamText.Stdout = $Job.Proc.StandardOutput.ReadToEnd()
+            $streamText.Stderr = $Job.Proc.StandardError.ReadToEnd()
+        } catch {
+            Write-Log ("Reading magick output failed for '" + $Job.SrcPath + "' - judging the conversion by exit code and output file only: " + $_) -Level Warn
+        }
+    }
+    $stdout = $streamText.Stdout
+    $stderr = $streamText.Stderr
     $code   = $Job.Proc.ExitCode
 
     if ($DoFullLogging -and -not [string]::IsNullOrWhiteSpace($stdout)) {

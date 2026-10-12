@@ -895,9 +895,9 @@ Write-Host ""
 #  Scenario V2 (2026-09-08 addition): Set-ConsoleQuickEditEnabled never
 #  throws regardless of whether this process has a real interactive
 #  console attached (a harness run typically doesn't - stdin is
-#  redirected/piped), and Reset-AbortState re-enables QuickEdit as its own
-#  defensive belt-and-suspenders reset, same as it already does for
-#  RunActive.
+#  redirected/piped). Get-ConsoleQuickEditEnabled reports 1/0/-1 the same
+#  way, and Reset-AbortState leaves QuickEdit alone (2026-10-12: it used to
+#  force it on, which switched it on for a console that had it off).
 # ==============================================================================
 Write-Host "=== Scenario V2: Set-ConsoleQuickEditEnabled degrades gracefully with no real console attached ===" -ForegroundColor Cyan
 $threwV2a = $false
@@ -911,8 +911,23 @@ try { $null = Set-ConsoleQuickEditEnabled -Enabled $true } catch { $threwV2b = $
 Test-Assert (-not $threwV2b) "re-enabling QuickEdit does not throw either"
 
 $threwV2c = $false
-try { Reset-AbortState } catch { $threwV2c = $true }
-Test-Assert (-not $threwV2c) "Reset-AbortState's own defensive QuickEdit re-enable does not throw"
+$quickEditV2 = $null
+try { $quickEditV2 = Get-ConsoleQuickEditEnabled } catch { $threwV2c = $true }
+Test-Assert ((-not $threwV2c) -and ($quickEditV2 -in @(-1, 0, 1))) ("Get-ConsoleQuickEditEnabled reports 1 (on), 0 (off) or -1 (no console) without throwing (got " + $quickEditV2 + ")")
+
+if ($quickEditV2 -eq -1) {
+    Reset-AbortState
+    Test-Assert ((Get-ConsoleQuickEditEnabled) -eq -1) "Reset-AbortState does not throw or change anything with no console attached"
+} else {
+    # A real console: turn QuickEdit off, reset, and prove it stayed off.
+    try {
+        $null = Set-ConsoleQuickEditEnabled -Enabled $false
+        Reset-AbortState
+        Test-Assert ((Get-ConsoleQuickEditEnabled) -eq 0) "Reset-AbortState leaves QuickEdit off when it was off"
+    } finally {
+        $null = Set-ConsoleQuickEditEnabled -Enabled ($quickEditV2 -eq 1)
+    }
+}
 Reset-HarnessScenarioState
 Write-Host ""
 
@@ -949,6 +964,40 @@ $fakeW.Pool.Close(); $fakeW.Pool.Dispose()
 Test-Assert ($swW.Elapsed.TotalSeconds -lt 5) ("returned in under 5s despite a 30s -TimeoutSeconds and 30s-delayed jobs (took " + [math]::Round($swW.Elapsed.TotalSeconds, 2) + "s)")
 Test-Assert ($outcomeW.ForceStoppedCount -eq 2) ("both still-running jobs were force-stopped immediately, not waited for (got ForceStoppedCount=" + $outcomeW.ForceStoppedCount + ")")
 Test-Assert ([ConsoleCtrl]::DrainComplete.IsSet) "DrainComplete was still signalled after the fast-path force-stop"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario X (2026-10-12): force-stop does not wait for a worker stuck in a
+#  blocking .NET call. Stop() and Dispose() both block until that call
+#  returns, so the drain used to hold the abort for as long as the worker's
+#  current call took (a zip of a huge folder, say). BeginStop returns at once.
+# ==============================================================================
+Write-Host "=== Scenario X: force-stop returns without waiting for a worker stuck in a .NET call ===" -ForegroundColor Cyan
+Reset-HarnessScenarioState
+$stuckWorkerX = { param($JobId) [System.Threading.Thread]::Sleep(8000); return @{ JobId = $JobId } }
+$fakeX = New-FakeHandles -DelaysMs @(0) -Worker $stuckWorkerX
+$swX = [System.Diagnostics.Stopwatch]::StartNew()
+$outcomeX = Invoke-GracefulDrain -Handles $fakeX.Handles -TimeoutSeconds 1 -AbortWaitMessage ""
+$swX.Stop()
+Test-Assert ($outcomeX.ForceStoppedCount -eq 1) "the stuck worker was counted as force-stopped"
+Test-Assert ($swX.Elapsed.TotalSeconds -lt 5) ("the drain returned after its 1s timeout instead of waiting out the worker's 8s blocking call (took " + [math]::Round($swX.Elapsed.TotalSeconds, 2) + "s)")
+Test-Assert ([ConsoleCtrl]::DrainComplete.IsSet) "DrainComplete was still signalled"
+$null = $fakeX.Pool.BeginClose($null, $null)
+Reset-HarnessScenarioState
+Write-Host ""
+
+# ==============================================================================
+#  Scenario X2 (2026-10-12): Receive-CompletedHandles' own return value is
+#  not polluted by anything a -ResultHandler or -ErrorHandler emits.
+# ==============================================================================
+Write-Host "=== Scenario X2: a chatty -ResultHandler does not leak into Receive-CompletedHandles' result ===" -ForegroundColor Cyan
+$fakeX2 = New-FakeHandles -DelaysMs @(0, 0)
+foreach ($hX2 in $fakeX2.Handles) { $null = $hX2.Handle.AsyncWaitHandle.WaitOne(10000) }
+$seenX2 = [System.Collections.Generic.List[object]]::new()
+$remainingX2 = Receive-CompletedHandles -Handles $fakeX2.Handles -ResultHandler { param($r) $seenX2.Add($r); "leaked from ResultHandler"; $true }
+$fakeX2.Pool.Close(); $fakeX2.Pool.Dispose()
+Test-Assert ($seenX2.Count -eq 2) "sanity check: the handler really ran for both results"
+Test-Assert ($remainingX2 -is [System.Collections.Generic.List[hashtable]] -and $remainingX2.Count -eq 0) ("the return is still just the (empty) still-active list (got " + $(if ($null -eq $remainingX2) { "null" } else { $remainingX2.GetType().Name + " x" + @($remainingX2).Count }) + ")")
 Write-Host ""
 
 # ==============================================================================

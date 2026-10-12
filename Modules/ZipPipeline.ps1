@@ -138,7 +138,10 @@ $script:zipOnlyWorker = {
     # over an unrelated post-success logging hiccup. This step already has
     # its own inner try/catch for the one call that can legitimately fail
     # (Remove-Source) - it doesn't need the outer one too.
-    if ($DeleteFolders) {
+    if ($DeleteFolders -and $CancelToken.IsCancellationRequested) {
+        # No source delete once an abort is in - see Docs/function-notes.md (zipOnlyWorker).
+        Write-Log ("Abort requested - left the source folder in place (its zip is complete and verified): '" + $FolderPath + "'") -Level Warn
+    } elseif ($DeleteFolders) {
         try {
             $removed = Remove-Source -ItemPath $FolderPath
             if ($removed) {

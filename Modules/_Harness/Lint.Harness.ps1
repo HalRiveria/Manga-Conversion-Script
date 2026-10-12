@@ -55,6 +55,9 @@ $script:LintScriptVarAllowed = @(
     @{ Function  = 'Invoke-MutexGuardedWrite'
        Variables = @('logMutex')
        Why       = 'Only reached via Write-LogLineToRunFiles (main thread, see above) inside a worker''s propagated set. Same Rule 5 static-listing reason.' }
+    @{ Function  = 'Write-LogWriteFailureWarning'
+       Variables = @('logWriteFailureWarned')
+       Why       = 'Only called from Write-LogLineToFile''s catch, which is only reached via Write-LogLineToRunFiles (main thread, see above). Same Rule 5 static-listing reason.' }
     @{ Function  = 'Test-AbortSignal'
        Variables = @('abortRequested', 'ctrlCloseAbort', 'abortCancellationSources', 'CleanConsoleOutputEnabled')
        Why       = 'Only read after Test-AbortSignal''s own worker early-return (returns [ConsoleCtrl]::AbortRequested, never announces), i.e. main thread only.' }
@@ -573,6 +576,16 @@ Write-Host ""
 # process - and the other engine then blocks on the lock the first one
 # holds. Live-caught in dumps 2026-09-23 (Docs\full-pipeline-hang-investigation.md,
 # round 7). Runspace code uses plain loops/locks instead.
+#
+# Two shapes, both flagged:
+#   - the written cast: [Func[...]]{ ... }
+#   - the implicit one: a scriptblock literal passed straight to a .NET
+#     method or constructor - $dict.GetOrAdd($k, { ... }),
+#     [System.Lazy[object]]::new({ ... }). No cast is written, but .NET
+#     receives a delegate all the same; this is the shape the round 7 hang
+#     actually had. .ForEach()/.Where() are PowerShell's own and take real
+#     scriptblocks, so they're exempt. Add "# lint:ignore" on the line for
+#     any other method that really does take a scriptblock.
 Write-Host "=== Lint: scriptblock-to-delegate cast on a runspace-reachable path ===" -ForegroundColor Cyan
 
 $rule8 = @()
@@ -580,28 +593,63 @@ $delegateCastFinder = {
     param($AstNode)
     $found = [System.Collections.Generic.List[object]]::new()
     foreach ($cv in $AstNode.FindAll({ param($n) $n -is [System.Management.Automation.Language.ConvertExpressionAst] }, $true)) {
-        if ($cv.Type.TypeName.Name -match '^(System\.)?(Func|Action|Predicate|Comparison|Converter)(\[|$)') { $found.Add($cv) }
+        if ($cv.Extent.StartScriptPosition.Line -match '#\s*lint:ignore') { continue }
+        if ($cv.Type.TypeName.Name -match '^(System\.)?(Func|Action|Predicate|Comparison|Converter)(\[|$)') {
+            $found.Add(@{ Line = $cv.Extent.StartLineNumber; What = ("casts to delegate " + $cv.Type.TypeName.Name) })
+        }
+    }
+    foreach ($call in $AstNode.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)) {
+        if ($null -eq $call.Arguments) { continue }
+        $memberName = [string]$call.Member.Extent.Text
+        if ($memberName -in @('ForEach', 'Where')) { continue }
+        $passesScriptBlock = $false
+        foreach ($argument in $call.Arguments) {
+            if ($argument -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) { $passesScriptBlock = $true }
+        }
+        if (-not $passesScriptBlock) { continue }
+        if ($call.Extent.StartScriptPosition.Line -match '#\s*lint:ignore') { continue }
+        $found.Add(@{ Line = $call.Extent.StartLineNumber; What = ("passes a scriptblock to ." + $memberName + "(), which .NET turns into a delegate") })
     }
     return ,$found
 }
+
+# Proves the finder itself fires, since nothing in the real code trips it.
+$rule8SampleText = @'
+function Sample-Worker {
+    $a = [Func[object, object]]{ param($x) $x }
+    $b = $dict.GetOrAdd($key, { param($k) 1 })
+    $c = [System.Lazy[object]]::new({ 2 })
+    $d = @(1, 2).ForEach({ $_ })
+    $e = @(1, 2).Where({ $_ -gt 1 })
+    $f = $dict.GetOrAdd($key, { 3 })   # lint:ignore - sample
+    $g = $dict.TryAdd($key, 4)
+}
+'@
+$rule8SampleAst = [System.Management.Automation.Language.Parser]::ParseInput($rule8SampleText, [ref]$null, [ref]$null)
+$rule8SampleFound = & $delegateCastFinder $rule8SampleAst
+$rule8SampleLines = @($rule8SampleFound | ForEach-Object { $_.Line })
+Test-Assert ($rule8SampleLines -contains 2) "Rule 8 flags a written delegate cast ([Func[...]]{ })"
+Test-Assert ($rule8SampleLines -contains 3) "Rule 8 flags a scriptblock passed straight to a .NET method (GetOrAdd)"
+Test-Assert ($rule8SampleLines -contains 4) "Rule 8 flags a scriptblock passed straight to a constructor ([System.Lazy]::new)"
+Test-Assert ($rule8SampleFound.Count -eq 3) ("Rule 8 leaves .ForEach()/.Where(), a lint:ignore'd line and a plain call alone (flagged " + $rule8SampleFound.Count + ", expected 3)")
 foreach ($fname in $runspaceReachable) {
     if (-not $fnAstByName.ContainsKey($fname)) { continue }
     $fnAst = $fnAstByName[$fname]
     $fnFile = $null
     foreach ($name in $fileAsts.Keys) { if ($fileText[$name].Contains($fnAst.Extent.Text)) { $fnFile = $name; break } }
-    foreach ($cv in (& $delegateCastFinder $fnAst)) {
-        $rule8 += @{ File = $fnFile; Line = $cv.Extent.StartLineNumber; Text = ($fname + " (runspace-reachable) casts to delegate " + $cv.Type.TypeName.Name) }
+    foreach ($hit in (& $delegateCastFinder $fnAst)) {
+        $rule8 += @{ File = $fnFile; Line = $hit.Line; Text = ($fname + " (runspace-reachable) " + $hit.What) }
     }
 }
 foreach ($workerVar in $runspaceWorkerBodies) {
     $body = $scriptBlockVars[$workerVar]
     $workerFile = $null
     foreach ($name in $fileAsts.Keys) { if ($fileText[$name].Contains($body.Extent.Text)) { $workerFile = $name; break } }
-    foreach ($cv in (& $delegateCastFinder $body)) {
-        $rule8 += @{ File = $workerFile; Line = $cv.Extent.StartLineNumber; Text = ("worker `$" + $workerVar + " casts to delegate " + $cv.Type.TypeName.Name) }
+    foreach ($hit in (& $delegateCastFinder $body)) {
+        $rule8 += @{ File = $workerFile; Line = $hit.Line; Text = ("worker `$" + $workerVar + " " + $hit.What) }
     }
 }
-Test-Assert (@($rule8).Count -eq 0) "no runspace-reachable function or worker body casts a scriptblock to a delegate"
+Test-Assert (@($rule8).Count -eq 0) "no runspace-reachable function or worker body turns a scriptblock into a delegate (written cast or implicit)"
 Show-Findings -Findings @($rule8)
 Write-Host ""
 

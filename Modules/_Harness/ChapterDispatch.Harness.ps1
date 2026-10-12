@@ -914,6 +914,45 @@ $cts17.Dispose()
 Write-Host ""
 
 # ==============================================================================
+#  Scenario 18 (2026-10-12): output emitted by the callbacks whose result
+#  isn't used (-ChapterCompleteCallback, -AbortPollCallback, -JobAbortCleanup)
+#  does not leak into Invoke-ChapterDispatch's return value. Same class as
+#  Scenario 17's WaitForExit leak. 18 is a clean run; 18b is the abort path
+#  (a real process again, so -JobAbortCleanup actually runs).
+# ==============================================================================
+Write-Host "=== Scenario 18: chatty callbacks do not leak into the result ===" -ForegroundColor Cyan
+$feed18 = New-ManualChapterFeed -Chapters @(@{ ChapterInfo = "Chapter18"; Jobs = @((New-FakeJob -Id "J18")) })
+$result18 = Invoke-ChapterDispatch -ChapterProvider $feed18.ChapterProvider -JobBuilder $feed18.JobBuilder `
+    -JobStarter { param($job) $job.Started = $true; return $job } -JobPollCompleted { param($job) return $true } `
+    -JobFinalize { param($job, $pendingQueue) return @{ Success = $true } } -JobAbortCleanup { param($job) "leaked from JobAbortCleanup" } `
+    -ChapterCompleteCallback { param($chapterInfo) "leaked from ChapterCompleteCallback"; $true } `
+    -AbortPollCallback { param($runningJobs) "leaked from AbortPollCallback" } -MaxConcurrent 2 -CancelToken ([System.Threading.CancellationToken]::None)
+Test-Assert ($result18 -is [hashtable]) ("a clean run returns exactly one hashtable (got " + $(if ($null -eq $result18) { "null" } else { $result18.GetType().Name + " x" + @($result18).Count }) + ")")
+
+$feed18b = New-ManualChapterFeed -Chapters @(@{ ChapterInfo = "Chapter18b"; Jobs = @((New-FakeJob -Id "J18b")) })
+$cts18b = [System.Threading.CancellationTokenSource]::new()
+$pingExe18b = Join-Path $env:SystemRoot "System32\ping.exe"
+$jobStarter18b = {
+    param($job)
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $pingExe18b; $psi.Arguments = "-n 30 127.0.0.1"
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $job.Proc = [System.Diagnostics.Process]::Start($psi)
+    return $job
+}.GetNewClosure()
+$cleanupRan18b = @{ Count = 0 }
+$result18b = Invoke-ChapterDispatch -ChapterProvider $feed18b.ChapterProvider -JobBuilder $feed18b.JobBuilder `
+    -JobStarter $jobStarter18b -JobPollCompleted { param($job) return $job.Proc.HasExited } -JobFinalize { param($job, $pendingQueue) return @{ Success = $true } } `
+    -JobAbortCleanup { param($job) $cleanupRan18b.Count++; "leaked from JobAbortCleanup" }.GetNewClosure() `
+    -ChapterCompleteCallback { param($chapterInfo) "leaked from ChapterCompleteCallback" } `
+    -AbortPollCallback { param($runningJobs) if ($runningJobs.Count -gt 0) { $cts18b.Cancel() }; "leaked from AbortPollCallback" }.GetNewClosure() `
+    -MaxConcurrent 4 -AbortTimeoutSeconds 1 -CancelToken $cts18b.Token
+$cts18b.Dispose()
+Test-Assert ($cleanupRan18b.Count -ge 1) "sanity check: -JobAbortCleanup really ran on the abort path"
+Test-Assert ($result18b -is [hashtable]) ("the abort path returns exactly one hashtable too (got " + $(if ($null -eq $result18b) { "null" } else { $result18b.GetType().Name + " x" + @($result18b).Count }) + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

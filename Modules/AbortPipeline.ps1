@@ -116,6 +116,16 @@ public static class ConsoleQuickEdit
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
 
+    // 1 = on, 0 = off, -1 = can't tell (no real console attached).
+    public static int GetEnabled()
+    {
+        IntPtr handle = GetStdHandle(STD_INPUT_HANDLE);
+        if (handle == IntPtr.Zero || handle == new IntPtr(-1)) { return -1; }
+        uint mode;
+        if (!GetConsoleMode(handle, out mode)) { return -1; }
+        return (mode & ENABLE_QUICK_EDIT_MODE) != 0 ? 1 : 0;
+    }
+
     public static bool SetEnabled(bool enabled)
     {
         IntPtr handle = GetStdHandle(STD_INPUT_HANDLE);
@@ -277,6 +287,10 @@ function Set-ConsoleQuickEditEnabled {
     return [ConsoleQuickEdit]::SetEnabled($Enabled)
 }
 
+function Get-ConsoleQuickEditEnabled {
+    return [ConsoleQuickEdit]::GetEnabled()
+}
+
 function Register-AbortCancellationSource {
     param(
         [Parameter(Mandatory)]
@@ -300,7 +314,6 @@ function Reset-AbortState {
     [ConsoleCtrl]::IsCloseEvent   = $false
     [ConsoleCtrl]::RunActive      = $false
     [ConsoleCtrl]::DrainComplete.Reset()
-    $null = [ConsoleQuickEdit]::SetEnabled($true)
 }
 
 function Test-AbortSignal {
@@ -376,13 +389,13 @@ function Receive-CompletedHandles {
                 $results = $h.PS.EndInvoke($h.Handle)
             } catch {
                 if ($null -ne $ErrorHandler) {
-                    & $ErrorHandler ("Error collecting runspace result during abort drain: " + $_)
+                    $null = & $ErrorHandler ("Error collecting runspace result during abort drain: " + $_)
                 }
             } finally {
                 $h.PS.Dispose()
             }
             if ($null -ne $ResultHandler -and $null -ne $results) {
-                foreach ($r in $results) { & $ResultHandler $r }
+                foreach ($r in $results) { $null = & $ResultHandler $r }
             }
         } else {
             $stillActive.Add($h)
@@ -446,8 +459,9 @@ function Invoke-GracefulDrain {
             $forceStopMessage = "[ABORT] Force-stopping " + $forceStoppedCount + " job(s) that did not finish within " + $TimeoutSeconds + "s."
             Write-GatedConsoleMessage -Text $forceStopMessage -Color Red -CleanConsoleOutputEnabled ([bool]$script:CleanConsoleOutputEnabled)
             foreach ($h in $localHandles) {
-                try { $h.PS.Stop() } catch { }
-                try { $h.PS.Dispose() } catch { }
+                # BeginStop, not Stop, and no Dispose: both block until the
+                # worker's current .NET call returns. See Docs/function-notes.md.
+                try { $null = $h.PS.BeginStop($null, $null) } catch { }
             }
         }
 

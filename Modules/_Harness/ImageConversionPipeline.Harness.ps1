@@ -1834,6 +1834,52 @@ Test-Assert ($script:ccrActiveSeries.Count -eq 0) "the series still resolves and
 Test-Assert ($totalsQD.ConvertedSuccess -eq 2) ("both chapters still converted (got ConvertedSuccess=" + $totalsQD.ConvertedSuccess + ")")
 Write-Host ""
 
+# ==============================================================================
+#  Scenario AN (2026-10-12): Complete-ImageDispatchJob's read of the finished
+#  process's stdout/stderr is bounded and tolerates a failed read. It used to
+#  be a bare GetAwaiter().GetResult(): a pipe held open (a delegate process
+#  magick spawned) stalled the engine forever, and a faulted read threw out
+#  of JobFinalize. Success is still judged by exit code and output file.
+#  DOCUMENTED DUPLICATE of AnimatedConversionPipeline.Harness.ps1's own Scenario AN -
+#  keep both in sync.
+# ==============================================================================
+Write-Host "=== Scenario AN: a stuck or failed output-stream read does not stall or crash job finalize ===" -ForegroundColor Cyan
+$dirAN = New-Dir "scenario-an"
+function New-StreamJobAN {
+    param([string]$Name, $StdoutTask, $StderrTask)
+    $srcAN = Join-Path $dirAN ($Name + ".src")
+    $outAN = Join-Path $dirAN ($Name + ".out")
+    [System.IO.File]::WriteAllText($srcAN, "source")
+    [System.IO.File]::WriteAllText($outAN, "converted")
+    return @{ SrcPath = $srcAN; JxlPath = $outAN; Proc = [pscustomobject]@{ ExitCode = 0 }; StdoutTask = $StdoutTask; StderrTask = $StderrTask; ChapterKey = "an" }
+}
+$doneAN = [System.Threading.Tasks.TaskCompletionSource[string]]::new(); $doneAN.SetResult("")
+$neverAN = [System.Threading.Tasks.TaskCompletionSource[string]]::new()
+$faultAN = [System.Threading.Tasks.TaskCompletionSource[string]]::new(); $faultAN.SetException([System.IO.IOException]::new("simulated broken pipe"))
+
+$crAN = @{ ConvertedCount = 0; FailedCount = 0; DeletedCount = 0; DeleteFailedCount = 0 }
+$swAN = [System.Diagnostics.Stopwatch]::StartNew()
+$outputAN = @(& { Complete-ImageDispatchJob -Job (New-StreamJobAN -Name "stuck" -StdoutTask $neverAN.Task -StderrTask $doneAN.Task) -ChapterResult $crAN -PendingQueue ([System.Collections.Generic.Queue[hashtable]]::new()) -MagickExe "" -DoFullLogging $false -StreamReadTimeoutMs 300 } 6>&1)
+$swAN.Stop()
+$resultAN = @($outputAN | Where-Object { $_ -is [hashtable] })
+Test-Assert ($swAN.Elapsed.TotalSeconds -lt 5) ("a stream that never finishes reading is given up on after the timeout (took " + [math]::Round($swAN.Elapsed.TotalSeconds, 2) + "s)")
+Test-Assert ($resultAN.Count -eq 1 -and $resultAN[0].Success -eq $true -and $crAN.ConvertedCount -eq 1) "the conversion still counts as a success - exit code 0 and a real output file"
+Test-Assert (@($outputAN | Where-Object { "$_" -like "*did not finish reading within*" }).Count -eq 1) "the timed-out read is logged as a warning"
+
+$crAN2 = @{ ConvertedCount = 0; FailedCount = 0; DeletedCount = 0; DeleteFailedCount = 0 }
+$threwAN2 = $false
+$outputAN2 = @()
+try {
+    $outputAN2 = @(& { Complete-ImageDispatchJob -Job (New-StreamJobAN -Name "faulted" -StdoutTask $doneAN.Task -StderrTask $faultAN.Task) -ChapterResult $crAN2 -PendingQueue ([System.Collections.Generic.Queue[hashtable]]::new()) -MagickExe "" -DoFullLogging $false -StreamReadTimeoutMs 300 } 6>&1)
+} catch {
+    $threwAN2 = $true
+}
+$resultAN2 = @($outputAN2 | Where-Object { $_ -is [hashtable] })
+Test-Assert (-not $threwAN2) "a faulted stream read does not throw out of job finalize"
+Test-Assert ($resultAN2.Count -eq 1 -and $resultAN2[0].Success -eq $true -and $crAN2.ConvertedCount -eq 1) "and the conversion is still judged by exit code and output file"
+Test-Assert (@($outputAN2 | Where-Object { "$_" -like "*simulated broken pipe*" }).Count -eq 1) "the failed read is logged as a warning with its cause"
+Write-Host ""
+
 if ($script:failCount -eq 0) {
     Write-Host ("ALL PASSED  (" + $script:passCount + " assertions)") -ForegroundColor Green
     exit 0

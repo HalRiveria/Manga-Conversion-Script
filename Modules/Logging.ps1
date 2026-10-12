@@ -14,6 +14,7 @@ $script:SummaryFileEnabled = $true
 $script:CleanConsoleOutputEnabled = $false
 $script:logErrorPriorContent = ""
 $script:logWarnPriorContent  = ""
+$script:logWriteFailureWarned = $null   # log files already warned about this run - see Write-LogWriteFailureWarning
 
 function Initialize-LogPaths {
     param(
@@ -57,6 +58,7 @@ function Initialize-LogPaths {
 }
 
 function Start-LogRun {
+    $script:logWriteFailureWarned = $null
     if ($script:FullLogging) { return }
 
     $runHeader = "=== Run: " + (Get-Date -Format "yyyy-MM-dd HHmmss") + " ==="
@@ -187,18 +189,24 @@ function Write-LogLineToFile {
         try {
             [System.IO.File]::AppendAllText($FilePath, $Line + [System.Environment]::NewLine, [System.Text.Encoding]::UTF8)
         } catch {
-            # Swallowed deliberately - a locked/inaccessible log file (an
-            # external editor with it open, antivirus scanning it, a cloud-
-            # sync client mid-upload) must never be allowed to crash
-            # the real conversion work over losing one log line. Worse
-            # without this (2026-09-15 finding, real): if it's specifically
-            # the Errors log that's locked, the catch handler that's
-            # logging the ORIGINAL error via Write-Log -Level Error would
-            # throw AGAIN from inside that catch and escape the whole run -
-            # a locked log file taking down the pipeline over an unrelated
-            # conversion error.
+            # Never fatal - losing a log line must not take the run down
+            # (see Docs/function-notes.md). Warned once per file per run.
+            Write-LogWriteFailureWarning -FilePath $FilePath -ErrorText ([string]$_)
         }
     }
+}
+
+function Write-LogWriteFailureWarning {
+    param([string]$FilePath, [string]$ErrorText)
+    try {
+        if ($null -eq $script:logWriteFailureWarned) {
+            $script:logWriteFailureWarned = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        }
+        if (-not $script:logWriteFailureWarned.Add([string]$FilePath)) { return }
+        # Straight to the console, not through Write-Log - this IS Write-Log's own write path.
+        $warnLine = Format-LogLine -Message ("Could not write to the log file '" + $FilePath + "' - it may be locked (an open editor, cloud sync, antivirus). Lines that can't be written are skipped and the run carries on; this warning shows once per run. " + $ErrorText) -Level "Warn"
+        Write-LogLineToHost -Line $warnLine -Level "Warn"
+    } catch { }   # a failed warning must not fail the run either
 }
 
 function Write-Log {
@@ -256,13 +264,19 @@ function Write-SummaryLog {
     $block += "=== End of run ==="
     $block += ""
 
-    Invoke-MutexGuardedWrite {
-        $existing = ""
-        if (Test-Path -LiteralPath $script:logSummaryFile) {
-            $existing = [System.IO.File]::ReadAllText($script:logSummaryFile)
+    try {
+        Invoke-MutexGuardedWrite {
+            $existing = ""
+            if (Test-Path -LiteralPath $script:logSummaryFile) {
+                $existing = [System.IO.File]::ReadAllText($script:logSummaryFile)
+            }
+            $newContent = ($block -join "`r`n") + "`r`n" + $existing
+            [System.IO.File]::WriteAllText($script:logSummaryFile, $newContent, [System.Text.Encoding]::UTF8)
         }
-        $newContent = ($block -join "`r`n") + "`r`n" + $existing
-        [System.IO.File]::WriteAllText($script:logSummaryFile, $newContent, [System.Text.Encoding]::UTF8)
+    } catch {
+        # Same reasoning as Start-LogRun's catch - see Docs/function-notes.md.
+        $warnLine = Format-LogLine -Message ("Could not write this run's summary to '" + $script:logSummaryFile + "' - it may be locked or otherwise inaccessible. The summary above was still shown; only the file copy was skipped: " + $_) -Level "Warn"
+        try { Write-LogLineToHost -Line $warnLine -Level "Warn" } catch { }
     }
 }
 
@@ -313,5 +327,5 @@ function Write-LogFileSummary {
 }
 
 function Get-LoggingSharedFunctionNames {
-    return @('Write-Log', 'Get-WorkerRunspaceValue', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile', 'Write-LogLineToRunFiles')
+    return @('Write-Log', 'Get-WorkerRunspaceValue', 'Invoke-MutexGuardedWrite', 'Format-LogLine', 'Write-LogLineToHost', 'Write-LogLineToFile', 'Write-LogLineToRunFiles', 'Write-LogWriteFailureWarning')
 }

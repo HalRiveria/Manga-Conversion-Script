@@ -1395,6 +1395,7 @@ function Invoke-MainLoop {
         [scriptblock]$ResetAbortHandler = ${function:Reset-AbortState},
         [scriptblock]$SetRunActiveHandler = ${function:Set-AbortHandlerRunActive},
         [scriptblock]$SetQuickEditHandler = ${function:Set-ConsoleQuickEditEnabled},
+        [scriptblock]$GetQuickEditHandler = ${function:Get-ConsoleQuickEditEnabled},
         [scriptblock]$LogHandler = { param($m) Write-Log $m -Level Error },
         [scriptblock]$CompleteLogRunHandler = ${function:Complete-LogRun},
         [scriptblock]$StartLogRunHandler = ${function:Start-LogRun},
@@ -1469,12 +1470,13 @@ function Invoke-MainLoop {
         # enabled state) - uncaptured, & prints it straight to the console
         # (confirmed live: "True" at the start of a run, "False" right after
         # it finishes - 2026-09-14).
-        $null = & $SetQuickEditHandler -Enabled $false
+        $quickEditWasOn = ((& $GetQuickEditHandler) -eq 1)
+        if ($quickEditWasOn) { $null = & $SetQuickEditHandler -Enabled $false }
         $runStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         try {
             $stats = & $InvokeModeHandler -Resolved $resolved -TargetPath $TargetPath -Settings $Settings -CjxlExe $CjxlExe -MagickExe $MagickExe
         } finally {
-            $null = & $SetQuickEditHandler -Enabled $true
+            if ($quickEditWasOn) { $null = & $SetQuickEditHandler -Enabled $true }
             & $SetRunActiveHandler -Active $false
             # 2026-09-15 fix, real bug: Complete-AbortDrain (the only thing
             # that sets [ConsoleCtrl]::DrainComplete, unblocking the native

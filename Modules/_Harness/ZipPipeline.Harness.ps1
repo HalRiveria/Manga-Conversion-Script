@@ -473,6 +473,40 @@ Test-Assert ($statusCleanM -eq "Success" -and $null -eq $detailCleanM) "a genuin
 Write-Host ""
 
 # ==============================================================================
+#  Scenario Q (2026-10-12): the zip worker does not delete the source folder
+#  once an abort is in. A force-stopped worker that was stuck inside the zip
+#  call is no longer waited for, so it can finish that zip after the run has
+#  already returned - this check is what stops it going on to delete the
+#  folder unreported. Test-ZipArchive is swapped to cancel the token at the
+#  exact point between "zip verified" and the delete step.
+# ==============================================================================
+Write-Host "=== Scenario Q: an abort that lands mid-zip leaves the source folder in place ===" -ForegroundColor Cyan
+$rootQ = New-Dir "scenario-q"
+$leafQ = New-Dir "scenario-q\Chapter 1"
+New-FileIn -DirPath $leafQ -Name "page1.jpg" | Out-Null
+$ctsQ = [System.Threading.CancellationTokenSource]::new()
+$queueQ = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+$origTestZipArchiveQ = ${function:Test-ZipArchive}
+try {
+    function Test-ZipArchive {
+        param($ZipPath, $RequireJxlEntry)
+        $ctsQ.Cancel()
+        return (& $origTestZipArchiveQ -ZipPath $ZipPath -RequireJxlEntry $RequireJxlEntry)
+    }
+    $resultQ = & $script:zipOnlyWorker -FolderPath $leafQ -ZipOutPath ($leafQ + ".zip") -SeriesName "scenario-q" -DeleteFolders $true `
+        -DoPermanentDelete $true -LogMutex $null -ConsoleQueue $queueQ -CancelToken $ctsQ.Token
+} finally {
+    ${function:Test-ZipArchive} = $origTestZipArchiveQ
+    $script:workerConsoleQueue = $null
+    $ctsQ.Dispose()
+}
+Test-Assert ($resultQ.Success -eq 1) "the zip itself finished and verified"
+Test-Assert (Test-Path -LiteralPath ($leafQ + ".zip")) "the zip is on disk"
+Test-Assert ($resultQ.FolderDeleted -eq 0 -and $resultQ.FolderDeleteFailed -eq 0 -and (Test-Path -LiteralPath $leafQ)) "the source folder was not deleted"
+Test-Assert (@($queueQ.ToArray() | Where-Object { $_.Level -eq "Warn" -and $_.Message -like "*left the source folder in place*" }).Count -eq 1) "the log says why the folder was left"
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="
