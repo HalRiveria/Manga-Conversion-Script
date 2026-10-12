@@ -212,7 +212,7 @@ function Invoke-ChapterDispatch {
     } catch {
         foreach ($job in $running) {
             try { if ($job.Proc -and -not $job.Proc.HasExited) { $job.Proc.Kill() } } catch { }
-            try { if ($job.Proc) { $job.Proc.WaitForExit(5000) } } catch { }
+            try { if ($job.Proc) { $null = $job.Proc.WaitForExit(5000) } } catch { }
             if (-not $job.SlotReleased) {
                 try { & $JobAbortCleanup $job } catch { }
                 if ($isSharedBudget) { try { $null = $MaxConcurrent.Release() } catch { } }
@@ -313,7 +313,7 @@ function Invoke-ChapterDispatch {
                 Write-Log ("ChapterDispatch: force-stopping " + $running.Count + " job(s) that did not finish within " + $AbortTimeoutSeconds + "s.") -Level Warn
                 foreach ($job in $running) {
                     try { if ($job.Proc -and -not $job.Proc.HasExited) { $job.Proc.Kill() } } catch { }
-                    try { if ($job.Proc) { $job.Proc.WaitForExit(5000) } } catch { }
+                    try { if ($job.Proc) { $null = $job.Proc.WaitForExit(5000) } } catch { }
                     try { & $JobAbortCleanup $job } catch { }
                     try { if ($job.Proc) { $job.Proc.Dispose() } } catch { }
                     if ($isSharedBudget) { try { $null = $MaxConcurrent.Release() } catch { } }
@@ -323,7 +323,7 @@ function Invoke-ChapterDispatch {
         } catch {
             foreach ($job in $running) {
                 try { if ($job.Proc -and -not $job.Proc.HasExited) { $job.Proc.Kill() } } catch { }
-                try { if ($job.Proc) { $job.Proc.WaitForExit(5000) } } catch { }
+                try { if ($job.Proc) { $null = $job.Proc.WaitForExit(5000) } } catch { }
                 if (-not $job.SlotReleased) {
                     try { & $JobAbortCleanup $job } catch { }
                     if ($isSharedBudget) { try { $null = $MaxConcurrent.Release() } catch { } }

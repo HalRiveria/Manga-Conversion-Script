@@ -882,6 +882,38 @@ Test-Assert ($sw16c.Elapsed.TotalSeconds -lt 15) ("16c: cancellation still ends 
 Write-Host ""
 
 # ==============================================================================
+#  Scenario 17 (2026-10-12): the force-kill path with a REAL process returns
+#  exactly one result object. Every other scenario's fake jobs carry
+#  Proc = $null, so the kill/WaitForExit lines never actually ran here -
+#  which is how an uncaptured $job.Proc.WaitForExit(5000) (returns bool)
+#  leaked a stray True into this function's output unnoticed. Callers only
+#  kept working because member enumeration over the resulting array still
+#  found .ForceKilledCount/.Aborted on its one hashtable element.
+# ==============================================================================
+Write-Host "=== Scenario 17: force-killing a real process returns one result object, no leaked output ===" -ForegroundColor Cyan
+$job17 = New-FakeJob -Id "J17"
+$feed17 = New-ManualChapterFeed -Chapters @(@{ ChapterInfo = "Chapter17"; Jobs = @($job17) })
+$cts17 = [System.Threading.CancellationTokenSource]::new()
+$pingExe17 = Join-Path $env:SystemRoot "System32\ping.exe"
+$jobStarter17 = {
+    param($job)
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $pingExe17; $psi.Arguments = "-n 30 127.0.0.1"
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $job.Proc = [System.Diagnostics.Process]::Start($psi)
+    return $job
+}.GetNewClosure()
+$abortPollCallback17 = { param($runningJobs) if ($runningJobs.Count -gt 0) { $cts17.Cancel() } }.GetNewClosure()
+$result17 = Invoke-ChapterDispatch -ChapterProvider $feed17.ChapterProvider -JobBuilder $feed17.JobBuilder `
+    -JobStarter $jobStarter17 -JobPollCompleted { param($job) return $job.Proc.HasExited } -JobFinalize { param($job, $pendingQueue) return @{ Success = $true } } `
+    -JobAbortCleanup { param($job) } -ChapterCompleteCallback { param($chapterInfo) } `
+    -MaxConcurrent 4 -AbortPollCallback $abortPollCallback17 -AbortTimeoutSeconds 1 -CancelToken $cts17.Token
+Test-Assert ($result17 -is [hashtable]) ("the force-kill path returns exactly one hashtable (got " + $(if ($null -eq $result17) { "null" } else { $result17.GetType().Name }) + ")")
+Test-Assert ($result17.ForceKilledCount -eq 1) "the real process was force-killed"
+$cts17.Dispose()
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="
