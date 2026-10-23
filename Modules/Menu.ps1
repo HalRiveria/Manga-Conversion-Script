@@ -108,10 +108,14 @@ function Show-ModeMenu {
             Set-AbortHandlerRunActive -Active $true
             $quickEditWasOn = ((Get-ConsoleQuickEditEnabled) -eq 1)
             if ($quickEditWasOn) { $null = Set-ConsoleQuickEditEnabled -Enabled $false }
+            # DOCUMENTED DUPLICATE of Invoke-MainLoop's (Controller.ps1) sleep
+            # block around a run - keep both in sync.
+            $null = Set-SystemSleepBlocked -Blocked $true
             $coverScreen = @{ HasOutput = $false }
             try {
                 $null = Show-CoverDeletionMenu -PromptFunc $PromptFunc -Settings $Settings -SettingsPath $SettingsPath -ClearScreenFunc $ClearScreenFunc -ClearOnFirstRender $true -ScreenState $coverScreen -TargetPath $TargetPath
             } finally {
+                $null = Set-SystemSleepBlocked -Blocked $false
                 if ($quickEditWasOn) { $null = Set-ConsoleQuickEditEnabled -Enabled $true }
                 Set-AbortHandlerRunActive -Active $false
                 Complete-AbortDrain

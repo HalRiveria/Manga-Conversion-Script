@@ -1396,6 +1396,7 @@ function Invoke-MainLoop {
         [scriptblock]$SetRunActiveHandler = ${function:Set-AbortHandlerRunActive},
         [scriptblock]$SetQuickEditHandler = ${function:Set-ConsoleQuickEditEnabled},
         [scriptblock]$GetQuickEditHandler = ${function:Get-ConsoleQuickEditEnabled},
+        [scriptblock]$SetSleepBlockHandler = ${function:Set-SystemSleepBlocked},
         [scriptblock]$LogHandler = { param($m) Write-Log $m -Level Error },
         [scriptblock]$CompleteLogRunHandler = ${function:Complete-LogRun},
         [scriptblock]$StartLogRunHandler = ${function:Start-LogRun},
@@ -1472,10 +1473,16 @@ function Invoke-MainLoop {
         # it finishes - 2026-09-14).
         $quickEditWasOn = ((& $GetQuickEditHandler) -eq 1)
         if ($quickEditWasOn) { $null = & $SetQuickEditHandler -Enabled $false }
+        # Keep the PC from idle-sleeping for the run itself only - released
+        # in the finally below, before the summary/post-run prompt, so the
+        # menu sleeps normally. DOCUMENTED DUPLICATE of Menu.ps1's Cover
+        # Deletion bracket - keep both in sync.
+        $null = & $SetSleepBlockHandler -Blocked $true
         $runStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         try {
             $stats = & $InvokeModeHandler -Resolved $resolved -TargetPath $TargetPath -Settings $Settings -CjxlExe $CjxlExe -MagickExe $MagickExe
         } finally {
+            $null = & $SetSleepBlockHandler -Blocked $false
             if ($quickEditWasOn) { $null = & $SetQuickEditHandler -Enabled $true }
             & $SetRunActiveHandler -Active $false
             # 2026-09-15 fix, real bug: Complete-AbortDrain (the only thing

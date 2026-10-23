@@ -892,6 +892,36 @@ Reset-HarnessScenarioState
 Write-Host ""
 
 # ==============================================================================
+#  Scenario Y (2026-10-22): Set-SystemSleepBlocked really sets and clears
+#  the system-required flag. Read back through CallNtPowerInformation's
+#  SystemExecutionState (no admin rights needed). Another program can be
+#  holding the flag too, so "cleared" means back to what it was before.
+# ==============================================================================
+Write-Host "=== Scenario Y: Set-SystemSleepBlocked sets and clears the keep-awake flag ===" -ForegroundColor Cyan
+if (-not ([System.Management.Automation.PSTypeName]'PowerStateProbeY').Type) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class PowerStateProbeY
+{
+    [DllImport("powrprof.dll")]
+    private static extern uint CallNtPowerInformation(int level, IntPtr inBuf, uint inLen, out uint outBuf, uint outLen);
+    public static uint Get() { uint state; CallNtPowerInformation(16, IntPtr.Zero, 0, out state, 4); return state; }
+}
+'@ -Language CSharp
+}
+$esSystemRequiredY = [uint32]1
+$beforeY = ([PowerStateProbeY]::Get() -band $esSystemRequiredY)
+$blockedOkY = Set-SystemSleepBlocked -Blocked $true
+$duringY = ([PowerStateProbeY]::Get() -band $esSystemRequiredY)
+$unblockedOkY = Set-SystemSleepBlocked -Blocked $false
+$afterY = ([PowerStateProbeY]::Get() -band $esSystemRequiredY)
+Test-Assert ($blockedOkY -eq $true -and $unblockedOkY -eq $true) "both calls report success"
+Test-Assert ($duringY -eq $esSystemRequiredY) "while blocked, Windows reports the system-required flag set"
+Test-Assert ($afterY -eq $beforeY) ("after unblocking, the flag is back to what it was before (before " + $beforeY + ", after " + $afterY + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Scenario V2 (2026-09-08 addition): Set-ConsoleQuickEditEnabled never
 #  throws regardless of whether this process has a real interactive
 #  console attached (a harness run typically doesn't - stdin is

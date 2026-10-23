@@ -1707,6 +1707,36 @@ foreach ($stateU2f in @(0, -1)) {
 Write-Host ""
 
 # ==============================================================================
+#  Scenario U2g (2026-10-22): the PC is kept from idle-sleeping during the
+#  run itself and released BEFORE the summary/post-run prompt, so the menu
+#  sleeps normally - including when the run throws.
+# ==============================================================================
+Write-Host "=== Scenario U2g: sleep is blocked for the run only, released before the post-run prompt ===" -ForegroundColor Cyan
+foreach ($throwU2g in @($false, $true)) {
+    $sleepU2g = @{ Blocked = $false; Calls = [System.Collections.Generic.List[bool]]::new(); DuringRun = $null; AtPostRun = $null }
+    $fakeSetSleepU2g = { param($Blocked) $sleepU2g.Blocked = $Blocked; $sleepU2g.Calls.Add($Blocked); return $true }.GetNewClosure()
+    $fakeInvokeModeU2g = {
+        param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe)
+        $sleepU2g.DuringRun = $sleepU2g.Blocked
+        if ($throwU2g) { throw "simulated crash mid-run" }
+        return $null
+    }.GetNewClosure()
+    $fakePostRunU2g = { $sleepU2g.AtPostRun = $sleepU2g.Blocked; return 'Exit' }.GetNewClosure()
+    try {
+        Invoke-MainLoop -TargetPath "C:ake\lib" -Settings $fakeSettingsU2e -SettingsPath "C:ake\settings.json" -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ScriptDir "C:ake\scriptdir" `
+            -GetModeHandler $fakeGetModeU2e -InvokeModeHandler $fakeInvokeModeU2g -PostRunPromptHandler $fakePostRunU2g `
+            -SetQuickEditHandler { param($Enabled) } -GetQuickEditHandler { return -1 } -SetSleepBlockHandler $fakeSetSleepU2g
+    } catch { }
+    $labelU2g = if ($throwU2g) { "a run that throws" } else { "a normal run" }
+    Test-Assert ($sleepU2g.DuringRun -eq $true) ("sleep is blocked while " + $labelU2g + " is going")
+    Test-Assert ($sleepU2g.Blocked -eq $false -and ($sleepU2g.Calls -join ',') -eq 'True,False') ("and released exactly once afterwards (calls: " + ($sleepU2g.Calls -join ',') + ")")
+    if (-not $throwU2g) {
+        Test-Assert ($sleepU2g.AtPostRun -eq $false) "the post-run prompt (and the menu after it) is reached with sleep allowed again"
+    }
+}
+Write-Host ""
+
+# ==============================================================================
 #  Scenario U3 (2026-09-02 review fix): mode 5 (Cover Deletion)'s real work
 #  runs INSIDE $GetModeHandler (Get-SelectedMode -> Show-ModeMenu ->
 #  Show-CoverDeletionMenu), not inside $InvokeModeHandler like every other

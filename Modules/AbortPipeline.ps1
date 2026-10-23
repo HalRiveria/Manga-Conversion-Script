@@ -140,6 +140,28 @@ public static class ConsoleQuickEdit
 '@ -Language CSharp
 }
 
+# See Docs/function-notes.md's AbortPipeline.ps1 section (Set-SystemSleepBlocked).
+if (-not ([System.Management.Automation.PSTypeName]'SystemSleepBlock').Type) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class SystemSleepBlock
+{
+    private const uint ES_CONTINUOUS       = 0x80000000;
+    private const uint ES_SYSTEM_REQUIRED  = 0x00000001;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint SetThreadExecutionState(uint esFlags);
+
+    // Per-thread: must be cleared from the same thread that set it. Windows
+    // also drops it when that thread/process ends.
+    public static bool Block()   { return SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) != 0; }
+    public static bool Unblock() { return SetThreadExecutionState(ES_CONTINUOUS) != 0; }
+}
+'@ -Language CSharp
+}
+
 if (-not ([System.Management.Automation.PSTypeName]'ChildProcessJob').Type) {
     Add-Type -TypeDefinition @'
 using System;
@@ -289,6 +311,12 @@ function Set-ConsoleQuickEditEnabled {
 
 function Get-ConsoleQuickEditEnabled {
     return [ConsoleQuickEdit]::GetEnabled()
+}
+
+function Set-SystemSleepBlocked {
+    param([Parameter(Mandatory)][bool]$Blocked)
+    if ($Blocked) { return [SystemSleepBlock]::Block() }
+    return [SystemSleepBlock]::Unblock()
 }
 
 function Register-AbortCancellationSource {
