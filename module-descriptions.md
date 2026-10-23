@@ -829,25 +829,17 @@ CLAUDE.md.
 ## ZipPipeline.ps1
 
 **Synopsis:** ZipPipeline - all zip-domain orchestration that isn't the parallel-
-dispatch engine itself: mode 3 (zip-only) end to end, and mode 8's
-per-folder zip step.
+dispatch engine itself: Zip Folders (menu option 4) end to end.
 
 **Description:** Pure definitions only - no top-level side effects (assigning the
 $script:zipOnlyWorker scriptblock literal is inert, same category as
 AbortPipeline.ps1's $script:abortCancellationSources list init) - safe
 to dot-source more than once or alongside other modules.
 
-Per the reference extraction's ARCHITECTURE decision: any zip logic
-lives here, not scattered across whichever mode happens to need it.
-Covers PART 1 (mode 3, zip-only pipeline) and PART 2 (mode 8's
-per-folder zip step, which runs right after ImageConversionPipeline
-converts each batch - see that module's own PART 2 for the
-orchestration this was pulled out of). PART 2 was built against an
-earlier menu design where this was called "mode 2" - the menu was
-renumbered (Menu.ps1) before PART 2 got wired up for real, so every
-"mode 2" reference in this module's own code actually means what's now
-mode 8 ("Image Conversion + Zip"). PART 2 (Invoke-LooseFolderZip) was
-removed with Mode 8, 2026-09-23.
+Any zip logic lives here, not scattered across whichever mode happens to
+need it. (Full Pipeline's own per-chapter zip runs on the main thread in
+Controller.ps1's Complete-MergedFullPipelineChapter, using the shared
+ZipCreation/ZipValidation modules.)
 
 FORWARD REFERENCES (not defined in this module - callers must
 dot-source the owning module(s) first):
@@ -1370,15 +1362,12 @@ more than once or alongside other modules.
 ARCHITECTURE (per the reference extraction's explicit decision, and an
 earlier correction in this project's history - there is no separate
 "LooseConversionPipeline" module; don't recreate one):
-- Mode 1 (loose-only) IS this module, nothing else.
-- Mode 2 (loose+zip) is this module PLUS ZipPipeline.ps1's per-folder
-  zip step, wired in via -PostChapterCallback (see
-  Invoke-LooseImageConversionPipeline) rather than this module calling
-  into ZipPipeline.ps1 directly - keeps this module decoupled from
-  zip-domain logic, using a callback hook for the zip step.
-- Mode 8 is mode 2 with a different -PostChapterCallback gate logic
-  (see Controller.ps1's Invoke-Mode for how it wires this).
-- Mode 3 doesn't convert images, not involved here.
+- Image Conversion (menu option 2) IS this module, end to end, with no
+  zip step.
+- Full Pipeline (option 1) runs its own image engine in Controller.ps1
+  but reuses this module's helpers (candidate discovery, the per-job
+  finalize, the ICC-strip retry, WebP animation detection).
+- Animated Conversion (3) and Zip Folders (4) don't convert images.
 
 CLEAN CONSOLE OUTPUT REWORK: PART 2 walks the library two-tier -
 New-SeriesProvider (lazy, one series at a time) then Get-SeriesChapters
@@ -1490,9 +1479,6 @@ SkippedCount - see the InspectFailedCount field in the output, matching
 the same field AnimatedConversionPipeline.ps1 uses for the identical
 failure mode (this project's own "give it its own field, don't fold
 it into Fail" call, see Todo.md's Summary.ps1 decision).
-
--ZIPSTEPCALLBACK: Mode 8's CCR-fold mechanism - removed with Mode 8,
-2026-09-23.
 
 **Notes:** Extracted from Conversion Script Main.ps1 - see
 Modules\_Reference\ImageConversionPipeline.reference.ps1 for the
