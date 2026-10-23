@@ -1,102 +1,37 @@
 <#
 .SYNOPSIS
-    Config - the settings file this project's other modules read their
-    tunables from: default schema, load (with corrupt/stale-file
-    recovery), and save.
+    Config - the settings file the other modules read their tunables from:
+    the default schema, loading (with recovery from a corrupt or stale
+    file), and saving.
 
 .DESCRIPTION
     Pure definitions only - no top-level side effects, safe to dot-source
     more than once or alongside other modules.
 
-    Forward-references (same pattern as ZipCreation.ps1/FileDeletion.ps1):
-      - Write-Log (Modules\Logging.ps1) - used only for non-fatal warnings
-        when a settings file is missing/corrupt/stale. Never required:
-        every code path here still works correctly if Write-Log isn't
-        defined-safe order just means those warnings currently error out
-        instead of logging, exactly like every other module's forward
-        reference in this project.
+    Settings file: %LOCALAPPDATA%\ConversionScript\settings.json
+    (Get-ScriptSettingsPath). -BaseDir points it elsewhere, which the
+    harness uses.
 
-    Settings file location: %LOCALAPPDATA%\ConversionScript\settings.json
-    by default (Get-ScriptSettingsPath), matching the design already
-    decided in Docs\module-loading-design.md. -BaseDir lets a caller (or
-    this module's harness) point elsewhere instead of the real per-user
-    AppData folder.
+    Schema and defaults: Get-DefaultScriptSettings is the single source of
+    truth. Key names match the parameter names of the functions that use
+    them (Initialize-FileDeletion -PermanentDelete, Initialize-LogPaths
+    -FullLogging/-DisableSummaryFile, Initialize-CleanConsoleOutput
+    -Enabled, Invoke-LooseImageConversionPipeline -MaxCjxlProcs/
+    -JpegLossless/-JpegQuality, the Animated* parameters of
+    Invoke-LooseAnimatedConversionPipeline).
 
-    Schema: see Get-DefaultScriptSettings. Field names were chosen to
-    match the -Param names of the real Initialize-* functions that
-    consume them (Initialize-FileDeletion -PermanentDelete,
-    Initialize-LogPaths -FullLogging/-DisableSummaryFile,
-    Initialize-CleanConsoleOutput -Enabled, Invoke-LooseImageConversionPipeline
-    -MaxCjxlProcs/-JpegLossless/-JpegQuality) so a future caller can
-    splat the loaded hashtable straight in without a translation layer.
-    The five Animated* keys (AnimatedThreads/AnimatedQuality/
-    AnimatedLossless/AnimatedOverwrite/AnimatedDeleteSource) are added
-    ahead of AnimatedConversionPipeline.ps1 itself being built (added
-    2026-08-27 for the Menu module's options-menu draft) - defaults taken
-    from Backups\Old Scripts\Convert-AnimatedAvifToWebp.ps1's own CLI
-    defaults (Quality 90, Lossless/Overwrite off) and
-    Convert-AnimatedToJxl.ps1's KeepOriginals default (delete-on-success
-    by default, matching this project's other deletion toggles) -
-    AnimatedThreads has no real prior default to inherit (the old script
-    used [Environment]::ProcessorCount, not something a persisted static
-    setting can express) so it's set to a fixed value: 8, matching
-    MaxCjxlProcs and this machine's physical core count (Ryzen 7 7800X3D).
+    Loading validates every value's type and range: settings.json is user
+    input (it can be hand-edited or damaged). A bad value falls back to
+    that key's default with a warning, without discarding the rest of the
+    file. Keys that no longer exist are dropped quietly.
 
-    ZipWithUnconvertedAnimated (2026-08-27) gated the "Image Conversion +
-    Zip" mode (Mode 8). Mode 8 was retired 2026-09-23 in favor of Full
-    Pipeline's FullPipelineAnimatedConversion toggle, and this key went
-    with it - Import-ScriptSettings drops it silently from older files.
+    CjxlPath/MagickPath cache the tools' locations once found
+    (Find-ExeCached in DependencyDetection.ps1 does the finding; this
+    module only stores the strings). ModulesPath remembers a Modules
+    folder found somewhere other than next to the script (the main
+    script does the finding and prompting).
 
-    TODO once AnimatedConversionPipeline.ps1 is actually built: re-check
-    the five Animated* keys
-    against its real functions' actual -Param names (the same "match the
-    consuming function's param names" rule every other key in this
-    schema follows) and check whether it needs any settings beyond these
-    - they were guessed/designed ahead of a built module, not from one.
-
-    Real decisions made building this (not just extraction) - see
-    CLAUDE.md/CHANGELOG.md for the full writeup:
-      - $MaxThreads/$MaxParallel (reference: one value, CLI-overridable,
-        shared by mode 3 and mode 4) became ZipParallelThreads here - one
-        settings-file value, still shared by both modes, matching real
-        current behavior. The options-menu sketch in Todo.md lists "Zip-
-        Only Pipeline Threads" and "Rezip Pipeline Threads" as two
-        separate options; splitting them is a real behavior change, not
-        just data-modeling, so it was left as one setting rather than
-        guessed at.
-      - $deleteFolders (reference: hardcoded $true, mode 4's "delete
-        extracted staging folders after a successful re-zip" flag) became
-        a real setting, DeleteExtractedFoldersAfterRezip - removed
-        2026-09-09 along with RezipPipeline.ps1 itself (mode 9, the only
-        thing that ever read it).
-      - CjxlPath/MagickPath are persisted here even though they're
-        currently CLI params resolved fresh (via Find-Exe) every run -
-        letting a caller cache a successful auto-detection avoids
-        re-running that search every single run. Stored as plain strings,
-        empty by default (meaning "not yet resolved / detect fresh"). The
-        actual cache-check-then-detect-then-remember logic lives in
-        DependencyDetection.ps1's Find-ExeCached, not here - this module
-        only owns the field existing and its load/save; Find-ExeCached
-        takes/mutates a settings hashtable rather than depending on this
-        module directly, so DependencyDetection.ps1 stays standalone.
-      - ModulesPath is included per Docs\module-loading-design.md, but
-        this module does not implement the prompt-and-remember flow
-        itself - that's the main-script rewrite's job. This module just
-        gives it somewhere durable to persist that string.
-      - Values are type/range-validated on load, not just merged - a
-        hand-edited or corrupted settings.json is real user input, not a
-        can't-happen case (CLAUDE.md's "only validate at system
-        boundaries" applies here). A bad value for one key falls back to
-        that key's default individually, with a warning, rather than
-        discarding the whole file.
-
-.NOTES
-    Extracted from Conversion Script Main.ps1 - see
-    Modules\_Reference\Config.reference.ps1 for the verbatim source this
-    was built from, with original line numbers. Unlike a straight
-    extraction, this module's actual job (a real settings FILE, not just
-    the in-memory toggle surface) required real design decisions - see
-    above.
+    Write-Log (Logging.ps1) is used for the non-fatal warnings above.
 #>
 
 function Get-DefaultScriptSettings {
@@ -114,18 +49,11 @@ function Get-DefaultScriptSettings {
         MagickPath                       = ""
         ZipParallelThreads               = 1
         MaxCjxlProcs                     = 8
-        # Default matches MaxCjxlProcs (2026-09-03 addition, real bug fix -
-        # see CHANGELOG.md) so upgrading doesn't silently change Full
-        # Pipeline's real concurrency - this replaces the shared-budget
-        # call site that used to reuse $Settings.MaxCjxlProcs directly,
-        # which meant Full Pipeline's combined image+animated process
-        # ceiling was ALWAYS MaxCjxlProcs alone, silently ignoring
-        # AnimatedThreads entirely. Dedicated setting, not a sum of the
-        # other two (MaxCjxlProcs + AnimatedThreads would silently double-
-        # count for anyone who doesn't realize the two get added) - a
-        # single number is the real total Full Pipeline will ever run at
-        # once; MaxCjxlProcs/AnimatedThreads keep meaning exactly what
-        # they say for solo modes 2/3, unaffected by this setting.
+        # Full Pipeline's total process budget (image + animated engines
+        # together). A separate setting, not MaxCjxlProcs + AnimatedThreads:
+        # this is the real total Full Pipeline runs at once. MaxCjxlProcs
+        # and AnimatedThreads only apply to Image Conversion and Animated
+        # Conversion on their own.
         FullPipelineMaxConcurrentProcs   = 8
         FullLogging                      = $false
         DisableSummaryFile               = $false
@@ -141,13 +69,8 @@ function Get-DefaultScriptSettings {
         LastCoverDeletionPath            = ""
         CoverDeletionAskForFolder        = $false
         CoverDeletionDryRun              = $false
-        # Placeholder (2026-09-09, options-menu redesign) - exposed as a
-        # real, persisted toggle under the new "Full Pipeline Settings"
-        # submenu (Menu.ps1's Get-OptionsMenuSchema), but not yet read by
-        # Invoke-FullPipeline or anything else - flipping it currently has
-        # no effect. See Todo.md's "Run Cover Deletion automatically
-        # before Full Pipeline conversion" entry for the real feature this
-        # is scaffolding toward.
+        # Full Pipeline -> "Run Cover Deletion Before Conversion": runs a
+        # Cover Deletion scan before converting (Invoke-FullPipeline).
         RunCoverDeletionBeforeConversion = $false
         FullPipelineAnimatedConversion   = $true
     }
@@ -265,13 +188,12 @@ function Import-ScriptSettings {
         rather than failing the whole load. A genuinely corrupt/unparseable
         file (not just an unknown key or bad value within an otherwise
         valid one) is backed up (timestamped .bak) AND repaired in place
-        with the defaults (2026-09-03 fix, Todo.md finding) - without the
+        with the defaults - without the
         repair, the same corrupt file sat there forever, re-warning and
         dropping a new .bak on every single future launch. A file that
         merely can't be READ (locked, momentarily inaccessible - a second
         instance of the script, an AV/sync-client hold) is handled
-        SEPARATELY and does NOT get the backup+repair treatment (2026-09-03
-        fix, real bug caught by a same-session /code-review pass) - it
+        SEPARATELY and does NOT get the backup+repair treatment - it
         just uses defaults for this run, leaving the file untouched, since
         it may read fine on the very next launch. Only a genuine
         ConvertFrom-Json failure on content that WAS successfully read
@@ -325,7 +247,7 @@ function Import-ScriptSettings {
         # Backup swallowed here deliberately - a transient failure (file
         # lock, full disk, ACL) shouldn't stop the fallback-to-defaults
         # below. But the repair (overwriting $Path with defaults) is now
-        # GATED on this actually succeeding (2026-09-04 fix, real bug) -
+        # GATED on this actually succeeding -
         # it used to run unconditionally, so a failed backup plus the
         # unconditional repair meant the user's real settings content
         # could be lost with no backup and nothing logged about the
@@ -364,11 +286,11 @@ function Import-ScriptSettings {
         Write-Log ("Settings file at '" + $Path + "' did not contain a valid settings object - using defaults.") -Level Warn
         $backupPath = $Path + ".corrupt-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".bak"
         # Same backup-success gate as the parse-failure branch above
-        # (2026-09-04 fix, real bug) - see that branch's comment for why.
+        # - see that branch's comment for why.
         $backupOk = $false
         try { Copy-Item -LiteralPath $Path -Destination $backupPath -Force -ErrorAction Stop; $backupOk = $true } catch { }
         if ($backupOk) {
-            # Repair the file (2026-09-03 fix, Todo.md finding) - see the
+            # Repair the file - see the
             # matching parse-failure branch above for why.
             try { Export-ScriptSettings -Settings $settings -Path $Path } catch { }
         } else {

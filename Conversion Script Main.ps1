@@ -188,7 +188,7 @@ try {
     ))
     Export-ScriptSettings -Settings $settings -Path $settingsPath
 
-    Write-Log ("Conversion Script starting. Path: '" + $Path + "'. cjxl: '" + $resolvedCjxlPath + "'. magick: '" + $(if ($resolvedMagickPath) { $resolvedMagickPath } else { "(not found - WebP/AVIF/BMP/HEIC/HEIF input will fail)" }) + "'.")
+    Write-Log ("Conversion Script starting. Path: '" + $Path + "'. cjxl: '" + $resolvedCjxlPath + "'. magick: '" + $(if ($resolvedMagickPath) { $resolvedMagickPath } else { "(not found - WebP/AVIF/BMP/TIFF/HEIC/HEIF input will fail)" }) + "'.")
 
     # ==========================================================================
     #  MAIN LOOP - lives in Controller.ps1's Invoke-MainLoop

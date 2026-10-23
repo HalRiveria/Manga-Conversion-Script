@@ -248,7 +248,7 @@ function Test-WebPAnimated {
 }
 
 # ==============================================================================
-#  PART 2 - mode 1/2 orchestration
+#  PART 2 - Image Conversion (menu 2) orchestration
 # ==============================================================================
 
 function Get-LooseImageCandidates {
@@ -671,7 +671,7 @@ function Invoke-LooseImageConversionPipeline {
                     # both in sync. A bare WaitForExit() here (fixed
                     # 2026-09-15) has no timeout, and this jobStarter runs on
                     # the main thread inside the dispatch loop - a wedged
-                    # magick.exe would freeze the entire mode 2/8 run with no
+                    # magick.exe would freeze the entire Image Conversion run with no
                     # Ctrl+C escape (the cancel token is only checked between
                     # dispatch loop passes). Raw-handle ManualResetEvent
                     # instead of Process.WaitForExit(int) - this codebase's

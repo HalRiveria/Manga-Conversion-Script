@@ -102,7 +102,7 @@ function Test-AvifAnimated {
 }
 
 # ==============================================================================
-#  PART 2 - mode 3 orchestration
+#  PART 2 - Animated Conversion (menu 3) orchestration
 # ==============================================================================
 
 function Get-LooseAnimatedCandidates {

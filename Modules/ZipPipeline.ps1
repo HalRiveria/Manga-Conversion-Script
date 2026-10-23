@@ -1,7 +1,7 @@
 # See module-descriptions.md for this module's full description.
 
 # ==============================================================================
-#  PART 1 - mode 3 (zip-only pipeline)
+#  PART 1 - Zip Folders (menu 4)
 # ==============================================================================
 
 function Start-CcrSeriesProgressIfEnabled {
@@ -234,7 +234,7 @@ function Invoke-ZipOnlyPipeline {
             # side-scan's own Get-ZippableLeafDirs hitting a real TOCTOU
             # if $seriesRoot vanishes between the Test-Path check and the
             # scan, or CCR rendering itself throwing) used to kill the
-            # ENTIRE mode 3/8 run over a display-only concern.
+            # ENTIRE Zip Folders run over a display-only concern.
             try {
                 if ((Test-CcrEnabledForZipOnly) -and -not $zoSeenSeriesNames.Contains($seriesName)) {
                     $null = $zoSeenSeriesNames.Add($seriesName)
