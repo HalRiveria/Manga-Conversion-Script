@@ -893,32 +893,25 @@ Write-Host ""
 
 # ==============================================================================
 #  Scenario Y (2026-10-22): Set-SystemSleepBlocked really sets and clears
-#  the system-required flag. Read back through CallNtPowerInformation's
-#  SystemExecutionState (no admin rights needed). Another program can be
-#  holding the flag too, so "cleared" means back to what it was before.
+#  this thread's keep-awake request. Checked on the thread itself:
+#  SetThreadExecutionState returns the calling thread's PREVIOUS state, so
+#  re-setting the same value reads it back without changing it. (The
+#  system-wide flag is useless for this - any other program keeping the PC
+#  awake already holds it.)
 # ==============================================================================
-Write-Host "=== Scenario Y: Set-SystemSleepBlocked sets and clears the keep-awake flag ===" -ForegroundColor Cyan
-if (-not ([System.Management.Automation.PSTypeName]'PowerStateProbeY').Type) {
-    Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class PowerStateProbeY
-{
-    [DllImport("powrprof.dll")]
-    private static extern uint CallNtPowerInformation(int level, IntPtr inBuf, uint inLen, out uint outBuf, uint outLen);
-    public static uint Get() { uint state; CallNtPowerInformation(16, IntPtr.Zero, 0, out state, 4); return state; }
+Write-Host "=== Scenario Y: Set-SystemSleepBlocked sets and clears the keep-awake request ===" -ForegroundColor Cyan
+if (-not ([System.Management.Automation.PSTypeName]'ThreadExecStateProbeY').Type) {
+    Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class ThreadExecStateProbeY { [DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f); }'
 }
-'@ -Language CSharp
-}
-$esSystemRequiredY = [uint32]1
-$beforeY = ([PowerStateProbeY]::Get() -band $esSystemRequiredY)
+$esContinuousY = [uint32]2147483648
+$esKeepAwakeY  = [uint32]2147483649
 $blockedOkY = Set-SystemSleepBlocked -Blocked $true
-$duringY = ([PowerStateProbeY]::Get() -band $esSystemRequiredY)
+$duringY = [ThreadExecStateProbeY]::SetThreadExecutionState($esKeepAwakeY)
 $unblockedOkY = Set-SystemSleepBlocked -Blocked $false
-$afterY = ([PowerStateProbeY]::Get() -band $esSystemRequiredY)
+$afterY = [ThreadExecStateProbeY]::SetThreadExecutionState($esContinuousY)
 Test-Assert ($blockedOkY -eq $true -and $unblockedOkY -eq $true) "both calls report success"
-Test-Assert ($duringY -eq $esSystemRequiredY) "while blocked, Windows reports the system-required flag set"
-Test-Assert ($afterY -eq $beforeY) ("after unblocking, the flag is back to what it was before (before " + $beforeY + ", after " + $afterY + ")")
+Test-Assert ($duringY -eq $esKeepAwakeY) ("while blocked, this thread holds the keep-awake request (state 0x" + ([uint32]$duringY).ToString("X8") + ")")
+Test-Assert ($afterY -eq $esContinuousY) ("after unblocking, the request is gone (state 0x" + ([uint32]$afterY).ToString("X8") + ")")
 Write-Host ""
 
 # ==============================================================================
