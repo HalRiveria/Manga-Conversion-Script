@@ -23,18 +23,18 @@
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "..\Config.ps1")
-# Logging.ps1/FileDeletion.ps1 dot-sourced too (2026-08-31 addition, for
-# Scenario covering the PermanentDelete/CleanConsoleOutput re-sync fix on
+# Logging.ps1/FileDeletion.ps1 dot-sourced too (for the scenario covering
+# the PermanentDelete/CleanConsoleOutput re-sync on
 # Show-ModeMenu's '5' branch) - just for their real, trivial
 # Initialize-CleanConsoleOutput/Initialize-FileDeletion setters, which
-# Menu.ps1 now forward-references. Write-Log below is stubbed AFTER this,
-# overriding Logging.ps1's real one, same as before this addition - this
-# harness still never touches a real log file.
+# Menu.ps1 forward-references. Write-Log below is stubbed AFTER this,
+# overriding Logging.ps1's real one - this
+# harness never touches a real log file.
 . (Join-Path $PSScriptRoot "..\Logging.ps1")
 . (Join-Path $PSScriptRoot "..\FileDeletion.ps1")
-# AbortPipeline.ps1 dot-sourced too (2026-09-15 addition, for the real
+# AbortPipeline.ps1 dot-sourced too (for the real
 # Set-AbortHandlerRunActive/Complete-AbortDrain calls Show-ModeMenu's '5'
-# branch now makes for real - see that fix's own comment in Menu.ps1).
+# branch makes - see its own comment in Menu.ps1).
 # Same "real module, not stubbed" reasoning as Logging.ps1/FileDeletion.ps1
 # above - this harness needs the real [ConsoleCtrl]::RunActive/DrainComplete
 # state to assert against, not a fake.
@@ -111,18 +111,14 @@ function New-ScratchSettingsPath {
 }
 
 # ==============================================================================
-#  Scenario A: Get-ModeMenuLines - expected entries present, reserved
-#  numbers (5/6/7) are NOT listed as menu items. Convert Zipped (9) is
-#  ALSO not listed (2026-09-02, project owner's own decision - hidden
-#  from the live menu while its underlying code stays intact for a
-#  possible future reimplementation - see Get-ModeMenuLines/
-#  Resolve-ModeSelection's own matching comments in Menu.ps1).
+#  Scenario A: Get-ModeMenuLines - expected entries present, and numbers
+#  6-9 (including the retired Convert Zipped entry) are NOT listed as menu items.
 # ==============================================================================
 Write-Host "=== Scenario A: Get-ModeMenuLines ===" -ForegroundColor Cyan
 $linesA = Get-ModeMenuLines
 Test-Assert (($linesA -join "`n") -match "1 - Full Pipeline") "lists Full Pipeline (1)"
 Test-Assert (($linesA -join "`n") -match "5 - Cover Deletion") "lists Cover Deletion (5)"
-Test-Assert (($linesA -join "`n") -notmatch "Image Conversion \+ Zip") "does NOT list Image Conversion + Zip (Mode 8, retired 2026-09-23 - Full Pipeline's Animated Conversion toggle replaces it)"
+Test-Assert (($linesA -join "`n") -notmatch "Image Conversion \+ Zip") "does NOT list Image Conversion + Zip (Full Pipeline with its Animated Conversion toggle off does that job)"
 Test-Assert (($linesA -join "`n") -notmatch "9 - Convert Zipped") "does NOT list Convert Zipped (9) - hidden from the live menu"
 Test-Assert (($linesA -join "`n") -match "0 - Options") "lists Options (0)"
 Test-Assert (($linesA -join "`n") -match "Ctrl\+C") "mentions Ctrl+C abort behavior"
@@ -131,8 +127,7 @@ Test-Assert ($reservedShownA.Count -eq 0) "numbers 6-9 are not shown as menu ite
 Write-Host ""
 
 # ==============================================================================
-#  Scenario B: Resolve-ModeSelection - all five live valid codes ('9' is
-#  no longer one - see Scenario A/C's own matching comments)
+#  Scenario B: Resolve-ModeSelection - all four mode codes ('1'-'4')
 # ==============================================================================
 Write-Host "=== Scenario B: Resolve-ModeSelection valid codes ===" -ForegroundColor Cyan
 $b1 = Resolve-ModeSelection -Choice '1'
@@ -154,10 +149,8 @@ Write-Host ""
 
 # ==============================================================================
 #  Scenario C: Resolve-ModeSelection - invalid/reserved codes return $null.
-#  '9' is included here now (2026-09-02) - Convert Zipped/rezip is hidden
-#  from the live menu, so it resolves the same as any other unrecognized
-#  code; Menu.ps1's own commented-out '9' case is where to look to
-#  re-enable it, not here.
+#  '9' is included - Convert Zipped no longer exists, so it resolves the
+#  same as any other unrecognized code.
 # ==============================================================================
 Write-Host "=== Scenario C: Resolve-ModeSelection invalid codes ===" -ForegroundColor Cyan
 foreach ($badChoice in @('0', '5', '6', '7', '9', '', 'abc', '10')) {
@@ -229,8 +222,7 @@ Write-Host ""
 Write-Host "=== Scenario I: Get-OptionsMenuSchema shape and Config cross-check ===" -ForegroundColor Cyan
 $schemaI = Get-OptionsMenuSchema
 Test-Assert ($schemaI.Count -eq 7) "seven top-level items (Full Pipeline, Image Conversion, Animated Conversion, Zip, Logging, Permanent Delete, Open Settings Location)"
-# 2026-09-09 reorganization (see CHANGELOG.md) - a new top-level Full
-# Pipeline Settings submenu, everything else shifted down by one.
+# A top-level Full Pipeline Settings submenu comes first, everything else follows it.
 Test-Assert ($schemaI[0].Type -eq 'Submenu' -and $schemaI[0].Items.Count -eq 3) "Full Pipeline Settings is a 3-item submenu"
 $animToggleI = @($schemaI[0].Items | Where-Object { $_.SettingsKey -eq 'FullPipelineAnimatedConversion' })
 Test-Assert ($animToggleI.Count -eq 1 -and $animToggleI[0].Type -eq 'Bool' -and $animToggleI[0].Key -eq '3') "Full Pipeline Settings item 3 is the Animated Conversion toggle (FullPipelineAnimatedConversion)"
@@ -243,7 +235,7 @@ Test-Assert ($schemaI[1].Type -eq 'Submenu' -and $schemaI[1].Items.Count -eq 3) 
 Test-Assert ($schemaI[2].Type -eq 'Submenu' -and $schemaI[2].Items.Count -eq 5) "Animated Conversion Settings is a 5-item submenu"
 Test-Assert ($schemaI[3].Type -eq 'Submenu' -and $schemaI[3].Items.Count -eq 1) "Zip Settings is a 1-item submenu (Zip with Unconverted Animated Files retired with Mode 8)"
 Test-Assert ($schemaI[4].Type -eq 'Submenu' -and $schemaI[4].Items.Count -eq 3) "Logging is a 3-item submenu"
-Test-Assert ($schemaI[4].Items[1].Label -eq 'Disable Summary File' -and $schemaI[4].Items[1].SettingsKey -eq 'DisableSummaryFile') "Logging item 2's label matches its own settings key's sense (2026-09-09 rename, was 'Toggle Summary File')"
+Test-Assert ($schemaI[4].Items[1].Label -eq 'Disable Summary File' -and $schemaI[4].Items[1].SettingsKey -eq 'DisableSummaryFile') "Logging item 2's label matches its own settings key's sense"
 Test-Assert ($schemaI[5].Type -eq 'Bool' -and $schemaI[5].SettingsKey -eq 'PermanentDelete') "item 6 is the direct Permanent Delete Bool toggle"
 Test-Assert ($schemaI[6].Type -eq 'Action' -and $schemaI[6].Action -eq 'OpenSettingsLocation') "item 7 is the Open Settings File Location action"
 
@@ -361,7 +353,7 @@ $threwO = $false
 try {
     Show-OptionsMenuLevel -Items (Get-OptionsMenuSchema) -Settings $settingsO -SettingsPath $pathO -PromptFunc $promptO
 } catch { $threwO = $true }
-Test-Assert (-not $threwO) "an invalid top-level choice ('8', not in the schema - now 7 items, see 2026-09-03 addition) did not throw - just re-prompted"
+Test-Assert (-not $threwO) "an invalid top-level choice ('8', not in the schema - the schema has 7 items) did not throw - just re-prompted"
 Write-Host ""
 
 # ==============================================================================
@@ -372,7 +364,7 @@ $linesP = Get-CoverDeletionMenuLines
 Test-Assert (($linesP -join "`n") -match "1 - Run") "lists Run (1)"
 Test-Assert (($linesP -join "`n") -match "2 - Add Image") "lists Add Image (2)"
 Test-Assert (($linesP -join "`n") -match "4 - Open Profile Location") "lists Open Profile Location (4)"
-Test-Assert (($linesP -join "`n") -match "5 - Trailing-Zero Report") "lists Trailing-Zero Report (5) - 2026-08-31 addition, project owner's own decision"
+Test-Assert (($linesP -join "`n") -match "5 - Trailing-Zero Report") "lists Trailing-Zero Report (5)"
 Test-Assert ($linesP[-1] -eq "  0 - Back") "last line is always 0 - Back"
 Write-Host ""
 
@@ -390,14 +382,13 @@ Test-Assert ($resultQ.Mode -eq 'ImageConversion') "after Back ('0') out of Cover
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Q2 (2026-08-31 fix, caught by a same-day /code-review
-#  full-codebase pass): turning PermanentDelete off via Options, THEN
+#  Scenario Q2: turning PermanentDelete off via Options, THEN
 #  picking Cover Deletion in the SAME menu visit, must have Show-ModeMenu's
 #  '5' branch re-sync $script:PermanentDelete BEFORE Show-CoverDeletionMenu
 #  runs - Controller.ps1's Invoke-MainLoop only re-syncs AFTER Get-SelectedMode
 #  returns, which is too late for option 5's own real, permanent-deletion-
-#  capable work done INSIDE that same call. Live-reproduced before the fix:
-#  a just-turned-off Permanent Delete toggle had no effect on the very Cover
+#  capable work done INSIDE that same call. Without the re-sync,
+#  a just-turned-off Permanent Delete toggle would have no effect on the very Cover
 #  Deletion run that immediately followed it, deleting permanently instead
 #  of to the Recycle Bin. $script:PermanentDelete/CleanConsoleOutputEnabled
 #  are set by the REAL Initialize-FileDeletion/Initialize-CleanConsoleOutput
@@ -435,13 +426,13 @@ Test-Assert ($resultQ2.Mode -eq 'ImageConversion') "the loop still resolved a mo
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Q3 (2026-09-04 fix, real bug): Cover Deletion's own real work
-#  (Show-CoverDeletionMenu) never went through Invoke-MainLoop's own
-#  Invoke-Mode dispatch, so it was never bracketed by that loop's
+#  Scenario Q3: Cover Deletion's own real work
+#  (Show-CoverDeletionMenu) never goes through Invoke-MainLoop's own
+#  Invoke-Mode dispatch, so it isn't bracketed by that loop's
 #  Start-LogRun/Complete-LogRun pair - in split-log mode its Warn/Error
-#  lines landed with no run-separator header, and the next real run's
-#  Start-LogRun then mis-captured them as belonging to whatever ran
-#  before. Show-ModeMenu's own '5' branch must now bracket the call
+#  lines would land with no run-separator header, and the next real run's
+#  Start-LogRun would mis-capture them as belonging to whatever ran
+#  before. Show-ModeMenu's own '5' branch must bracket the call
 #  itself. Start-LogRun/Complete-LogRun are shadowed (real Logging.ps1
 #  functions, not injectable handlers here) to record call order.
 # ==============================================================================
@@ -469,13 +460,13 @@ Test-Assert (($script:eventOrderQ3 -join ',') -eq "START,COVER,COMPLETE") ("Star
 Test-Assert ($resultQ3.Mode -eq 'ImageConversion') "the loop still resolved a mode normally afterward"
 
 # ==============================================================================
-#  Scenario Q3b (2026-09-15 fix, real bug, two parts landing together):
+#  Scenario Q3b:
 #  (a) Cover Deletion never bracketed [ConsoleCtrl]::RunActive around its
 #  own real, permanent-deletion-capable work, unlike every dispatched mode
 #  via Invoke-MainLoop - a Ctrl+C during a real scan hit the OS default
-#  action instead of draining gracefully. (b) Complete-LogRun (fixed
-#  above in Q3, still real here) must ALSO fire when Show-CoverDeletionMenu
-#  itself throws, not just on the happy path - moved into a finally.
+#  action instead of draining gracefully. (b) Complete-LogRun (see
+#  Q3) must ALSO fire when Show-CoverDeletionMenu
+#  itself throws, not just on the happy path - it runs in a finally.
 # ==============================================================================
 Write-Host "=== Scenario Q3b: Cover Deletion brackets RunActive, and Complete-LogRun still fires if the submenu throws ===" -ForegroundColor Cyan
 $settingsQ3b = Get-DefaultScriptSettings
@@ -487,10 +478,8 @@ $script:runActiveDuringCoverQ3b = $null
 # Deliberately NOT .GetNewClosure()'d - this stub references no outer local
 # variable (only a $script:-prefixed one, already directly visible without
 # closure capture, and a .NET static member read) - .GetNewClosure() would
-# actually BREAK the $script: write here (Docs/lessons-learned.md's 9th
-# entry: a $script:-prefixed write inside a .GetNewClosure()'d scriptblock
-# doesn't reach the real script-scope variable) - confirmed live while
-# writing this test, the exact documented pitfall.
+# actually BREAK the $script: write here (a $script:-prefixed write inside
+# a .GetNewClosure()'d scriptblock doesn't reach the real script-scope variable).
 ${function:Show-CoverDeletionMenu} = { param($PromptFunc) $script:runActiveDuringCoverQ3b = [ConsoleCtrl]::RunActive }
 [ConsoleCtrl]::RunActive = $false
 [ConsoleCtrl]::DrainComplete.Reset()
@@ -536,14 +525,14 @@ Write-Host ""
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Q4 (2026-09-14 fix, real bug, same species as Q2/Q3 above):
+#  Scenario Q4 (same species as Q2/Q3 above):
 #  toggling Full Logging via Options, THEN picking Cover Deletion in the
 #  SAME menu visit, must have Show-ModeMenu's '5' branch re-init log paths
 #  BEFORE Show-CoverDeletionMenu runs, via the injected
 #  -ReinitLogPathsHandler - Invoke-MainLoop's own equivalent re-init check
 #  only runs AFTER Get-SelectedMode returns, too late for option 5's own
-#  real work done INSIDE that same call. Before the fix, Cover Deletion's
-#  Write-Log calls landed in the pre-toggle log files. Full Logging is
+#  real work done INSIDE that same call. Without the re-init, Cover Deletion's
+#  Write-Log calls would land in the pre-toggle log files. Full Logging is
 #  nested under the Options schema's 'Logging' submenu (key '5', item
 #  '1'), so the navigation needs an extra level of '0' to back all the
 #  way out before reaching '5' at the main prompt.
@@ -562,9 +551,8 @@ $script:reinitCallCountQ4 = 0
 # which resolves correctly on its own; .GetNewClosure() is the fix for a
 # DIFFERENT trap (a local variable read across a function boundary) and
 # actively breaks $script:-prefixed reads/writes inside the closure it
-# wraps (Docs/lessons-learned.md's 7th/8th entries) - confirmed live
-# while writing this scenario, the increment silently went to the wrong
-# scope and $script:reinitCallCountQ4 never moved.
+# wraps (the increment would silently go to the wrong
+# scope and $script:reinitCallCountQ4 would never move).
 $reinitHandlerQ4 = { $script:reinitCallCountQ4++ }
 $stubCoverMenuQ4 = { param($PromptFunc) $script:reinitCallCountAtCoverQ4 = $script:reinitCallCountQ4 }
 $realShowCoverDeletionMenuQ4 = ${function:Show-CoverDeletionMenu}
@@ -594,8 +582,8 @@ Test-Assert ($script:reinitCallCountAtCoverQ4b -eq 0) "visiting Cover Deletion t
 Write-Host ""
 
 # ==============================================================================
-#  Scenario R: Show-CoverDeletionMenu - Run, Add, and Trailing-Zero (5,
-#  2026-08-31 addition) all dispatch through their injected handlers and
+#  Scenario R: Show-CoverDeletionMenu - Run, Add, and Trailing-Zero (5)
+#  all dispatch through their injected handlers and
 #  return to the SAME submenu (not the caller) until Back is chosen
 # ==============================================================================
 Write-Host "=== Scenario R: Show-CoverDeletionMenu Run/Add/TrailingZero dispatch, stay in submenu until Back ===" -ForegroundColor Cyan
@@ -626,14 +614,13 @@ Test-Assert ($actionCallsS.Count -eq 1 -and $actionCallsS[0] -eq 'OpenProfileLoc
 Write-Host ""
 
 # ==============================================================================
-#  Scenario S2 (2026-08-31 fix, caught by a same-day /code-review
-#  full-codebase pass): Invoke-CoverDeletionRun and Invoke-TrailingZeroAuditRun
-#  had zero direct test coverage of their own (every scenario above
+#  Scenario S2: Invoke-CoverDeletionRun and Invoke-TrailingZeroAuditRun
+#  get direct coverage here (every scenario above
 #  injects the handler instead) - both real-deletion/real-scan functions,
 #  called here directly with their real UnwantedImage.ps1 dependencies
 #  stubbed locally (that module isn't dot-sourced in this harness - see
-#  this file's own header). Covers the -PathType Container fix (a
-#  dropped FILE, not a folder, is now rejected instead of silently
+#  this file's own header). Covers the -PathType Container check (a
+#  dropped FILE, not a folder, is rejected instead of silently
 #  becoming a one-file scan target) for both functions, and
 #  Invoke-TrailingZeroAuditRun's own "only open the report if something
 #  was actually found" branch.
@@ -655,14 +642,14 @@ Test-Assert (-not $resultRunFileS2.Ran) "Invoke-CoverDeletionRun rejects a FILE 
 Test-Assert ($script:unwantedScanCallsS2.Count -eq 0) "the real scan function was never called for a rejected file path"
 
 $promptFolderS2 = { param($m) $realFolderS2 }
-# 2026-09-23: no confirmation prompt any more - the dry-run choice is the
+# No confirmation prompt - the dry-run choice is the
 # saved CoverDeletionDryRun setting, passed in as -DryRun. A one-response
 # scripted prompt proves only the folder prompt is asked.
 $resultRunFolderS2 = Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc (New-ScriptedPrompt -Responses @($realFolderS2)) -DryRun $false
 Test-Assert ($resultRunFolderS2.Ran -and $script:unwantedScanCallsS2.Count -eq 1 -and $script:unwantedScanCallsS2[0] -eq $realFolderS2) "a prompted real folder is scanned straight away - no confirmation prompt"
 Test-Assert ($resultRunFolderS2.DryRun -eq $false -and $script:unwantedScanDryRunCallsS2[0] -eq $false) "-DryRun `$false runs for real"
 
-# 2026-09-23: a real (non-dry) run on a drive with no Recycle Bin, with
+# A real (non-dry) run on a drive with no Recycle Bin, with
 # Permanent Delete off, is refused up front - same rule as Invoke-Mode.
 # A dry run deletes nothing, so it still runs. Drive type forced via
 # RecycleBinProbe's test override.
@@ -683,9 +670,9 @@ try {
     }
 }
 
-# 2026-09-23: -FolderPath (the target folder, when "Ask for folder" is
+# -FolderPath (the target folder, when "Ask for folder" is
 # off) skips the prompt entirely, and an omitted -DryRun defaults to a
-# real run (2026-09-23: the owner set the dry-run default to off).
+# real run.
 $noPromptS2 = { param($m) throw ("unexpected prompt: " + $m) }
 $resultTargetS2 = Invoke-CoverDeletionRun -ProfilesPath "unused" -PromptFunc $noPromptS2 -FolderPath $realFolderS2
 Test-Assert ($resultTargetS2.Ran -and $resultTargetS2.ResolvedPath -eq $realFolderS2) "-FolderPath scans that folder without prompting"
@@ -718,8 +705,8 @@ Test-Assert ($script:trailingZeroOpenCallsS2.Count -eq 1 -and $script:trailingZe
 Write-Host ""
 
 # ==============================================================================
-#  Scenario S2b (2026-09-15 fix, real bug, latent): -OpenHandler's own
-#  return value used to leak into Invoke-TrailingZeroAuditRun's output
+#  Scenario S2b: -OpenHandler's own
+#  return value must not leak into Invoke-TrailingZeroAuditRun's output
 #  stream - a handler returning something (the shipped default,
 #  Start-Process with no -PassThru, never does) would turn this
 #  function's single-hashtable return into a 2-element array.
@@ -731,10 +718,10 @@ Test-Assert ($resultTZChattyS2b -is [hashtable]) ("the function still returns a 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario S3 (2026-09-09, "Approved new functionality" from Todo.md):
-#  Invoke-CoverDeletionRun/Invoke-TrailingZeroAuditRun's new -DefaultPath
+#  Scenario S3:
+#  Invoke-CoverDeletionRun/Invoke-TrailingZeroAuditRun's -DefaultPath
 #  (remembered-folder reuse on blank input) and Invoke-TrailingZeroAuditRun's
-#  new -Path bypass (skip the prompt entirely) - both real functions, same
+#  -Path bypass (skip the prompt entirely) - both real functions, same
 #  stubbed UnwantedImage.ps1 dependencies as Scenario S2.
 # ==============================================================================
 Write-Host "=== Scenario S3: -DefaultPath reuse and -Path bypass ===" -ForegroundColor Cyan
@@ -785,11 +772,11 @@ Test-Assert ((Show-PostRunPrompt -KeyReader $otherKeyReader) -eq 'ReturnToMenu')
 Write-Host ""
 
 # ==============================================================================
-#  Scenario U (2026-09-03 fix - the real FATAL crash): Show-CoverDeletionMenu's
+#  Scenario U: Show-CoverDeletionMenu's
 #  own switch cases must not leak a handler's non-$null return value (Run/
 #  Add/TrailingZero all return real hashtables in production) into ITS OWN
 #  output stream. Calls Show-CoverDeletionMenu directly and captures every
-#  bit of output from the whole call - before the $null = fix, this came
+#  bit of output from the whole call - without the $null = assignments, this would come
 #  back with the handlers' own return values mixed in.
 # ==============================================================================
 Write-Host "=== Scenario U: Show-CoverDeletionMenu doesn't leak Run/Add/TrailingZero handler return values ===" -ForegroundColor Cyan
@@ -802,25 +789,20 @@ Test-Assert ($null -eq $outputU) ("Show-CoverDeletionMenu's own call produced no
 Write-Host ""
 
 # ==============================================================================
-#  Scenario U3 (2026-09-09, "Approved new functionality" from Todo.md;
-#  rewritten same day after a /code-review finding - see below):
-#  Show-CoverDeletionMenu's two new behaviors - (a) persisting
+#  Scenario U3:
+#  Show-CoverDeletionMenu's two behaviors - (a) persisting
 #  $Settings.LastCoverDeletionPath immediately after item 1 OR item 5
 #  resolves a real path, and (b) item 1 firing -AutoTrailingZeroHandler
 #  automatically with that same resolved path, no second prompt.
 #  -RunHandler/-AutoTrailingZeroHandler stay fakes (same technique as
 #  Scenario U above) so this proves DISPATCH, not real scan/report
-#  behavior - that's Scenario S3's job. Persistence itself is now tested
+#  behavior - that's Scenario S3's job. Persistence itself is tested
 #  against a REAL scratch settings.json (Scenario K/L/M's own pattern),
-#  not an injectable -SaveSettingsHandler - that param was removed after
-#  a /code-review finding caught its default implementation calling
-#  Export-ScriptSettings bare/unassigned/unsuppressed, reintroducing the
-#  exact 2026-09-03 output-stream-leak class this switch statement was
-#  fixed for. This scenario's own call is captured and asserted $null
-#  (matching Scenario U's own leak-regression check), which the OLD
-#  version of this scenario did NOT do (it piped to `| Out-Null`
-#  instead) - a real, confirmed test-coverage gap, not just the
-#  underlying bug.
+#  not an injectable save handler, since a default handler calling
+#  Export-ScriptSettings bare/unassigned would reintroduce the
+#  output-stream leak Scenario U guards against. This scenario's own call
+#  is captured and asserted $null (matching Scenario U's own
+#  leak-regression check).
 # ==============================================================================
 Write-Host "=== Scenario U3: persisted LastCoverDeletionPath + automatic post-scan trailing-zero report ===" -ForegroundColor Cyan
 $fakePathU3 = "C:\fake\resolved\path"
@@ -854,8 +836,8 @@ Test-Assert ($script:autoTZCallsU3.Count -eq 1) "the auto trailing-zero report s
 Write-Host ""
 
 # ==============================================================================
-#  Scenario U4 (2026-09-10, Cover Deletion redundant-walk fix - Todo.md
-#  finding): Show-CoverDeletionMenu's '1' branch reuses -RunHandler's own
+#  Scenario U4 (Cover Deletion avoids a redundant directory walk):
+#  Show-CoverDeletionMenu's '1' branch reuses -RunHandler's own
 #  AllScannedFiles for the auto-chained trailing-zero audit instead of
 #  making it walk $path again - existence-filtered first, since item 1
 #  may have just deleted some of what it found. Two real files created on
@@ -892,17 +874,16 @@ Test-Assert (($script:preScannedSeenU4 | Where-Object { $_.FullName -eq $deleted
 Write-Host ""
 
 # ==============================================================================
-#  Scenario U2 (2026-09-03 fix, the actual live-reproduced crash): the full
+#  Scenario U2: the full
 #  real chain - Show-ModeMenu's '5' branch into the REAL Show-CoverDeletionMenu,
 #  whose default -TrailingZeroHandler resolves to the real
 #  Invoke-TrailingZeroAuditRun (function-swapped here to a fake returning a
 #  real hashtable with no real file scan, same technique as Scenario Q2's
-#  Show-CoverDeletionMenu swap). Before the $null = fixes in both functions,
-#  Get-SelectedMode's `$resolved` came back as a 2-element array (the leaked
+#  Show-CoverDeletionMenu swap). Without the $null = assignments in both functions,
+#  Get-SelectedMode's `$resolved` would come back as a 2-element array (the leaked
 #  hashtable, then the real resolved mode) the first time a real mode was
-#  picked right after visiting the trailing-zero audit - this is the actual
-#  repro for the live FATAL crash (CCO off -> mode 5 -> trailing-zero audit
-#  -> CCO back on -> attempt mode 1 -> crash).
+#  picked right after visiting the trailing-zero audit (CCO off -> mode 5 ->
+#  trailing-zero audit -> CCO back on -> attempt mode 1 -> crash).
 # ==============================================================================
 Write-Host "=== Scenario U2: Show-ModeMenu's real chain into Cover Deletion's real TrailingZeroHandler default doesn't corrupt `$resolved ===" -ForegroundColor Cyan
 $settingsU2 = Get-DefaultScriptSettings
@@ -922,7 +903,7 @@ Test-Assert ($resultU2.Mode -eq 'ImageConversion') "the real mode selection ('2'
 Write-Host ""
 
 # ==============================================================================
-#  Scenario V: menu-to-menu navigation clears and redraws (2026-09-23).
+#  Scenario V: menu-to-menu navigation clears and redraws.
 #  A spy -ClearScreenFunc and -PromptFunc log into one sequence, plus a
 #  temporary Write-Host override so a carried notice's position is visible.
 #  V1: Show-ModeMenu's first render never clears (it follows startup/run
@@ -973,7 +954,7 @@ Test-Assert ($screenV3.HasOutput -eq $true) "-ScreenState tells Show-ModeMenu th
 Write-Host ""
 
 # ==============================================================================
-#  Scenario W (2026-09-23): Cover Deletion's saved settings. Run and the
+#  Scenario W: Cover Deletion's saved settings. Run and the
 #  trailing-zero report get the target folder (no prompt) while "Ask for
 #  folder" is off, and "" (= prompt) once it's on; Run gets the saved
 #  dry-run value. 6/7 toggle and persist both settings, and the menu shows
@@ -1008,7 +989,7 @@ Write-Host ""
 #  Summary
 # ==============================================================================
 # ==============================================================================
-#  Scenario W2 (2026-09-23 review fix): a default Run on the target folder
+#  Scenario W2: a default Run on the target folder
 #  must not overwrite LastCoverDeletionPath - that's the folder the user
 #  last typed in, offered again when "Ask for folder" is turned back on.
 # ==============================================================================

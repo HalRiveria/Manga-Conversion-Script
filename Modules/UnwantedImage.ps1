@@ -47,12 +47,12 @@ function Import-UnwantedImageProfiles {
         return @()
     }
 
-    # Per-entry casts run in their OWN try/catch (2026-09-14 fix) - they
-    # used to share the parse try/catch above, so one hand-edited bad
-    # field (e.g. a fat-fingered dimension) in ANY entry was indistinguishable
+    # Per-entry casts run in their OWN try/catch, separate from the parse
+    # try/catch above - otherwise one hand-edited bad
+    # field (e.g. a fat-fingered dimension) in ANY entry would be indistinguishable
     # from the whole file being corrupt JSON: backed up and rewritten as
     # `[]`, silently discarding every OTHER, perfectly good profile too.
-    # Now a bad entry is skipped and warned about individually, matching
+    # So a bad entry is skipped and warned about individually, matching
     # Config.ps1's Import-ScriptSettings per-key fallback - the file itself
     # is untouched, since it's not actually corrupt.
     $profiles = [System.Collections.Generic.List[hashtable]]::new()
@@ -304,11 +304,9 @@ function Get-ScannableFiles {
     )
 
     # Built via foreach + Add, not the HashSet(IEnumerable, comparer)
-    # constructor directly on $ExcludePaths (2026-09-16 fix, real bug,
-    # latent/unreachable by any current caller but cheap to close) - an
+    # constructor directly on $ExcludePaths - an
     # explicit -ExcludePaths $null binds to this [string[]] parameter as a
-    # real $null (confirmed live via parameter binding, not just direct
-    # assignment), and HashSet<string>'s own (IEnumerable, comparer)
+    # real $null, and HashSet<string>'s own (IEnumerable, comparer)
     # constructor throws ArgumentNullException on a null collection.
     # foreach over a $null collection just doesn't iterate - no guard
     # needed beyond the inner null-element check. This is a DOCUMENTED
@@ -348,12 +346,12 @@ function Invoke-UnwantedImageScan {
     $files = $allScannedFiles | Where-Object { $ImageExtensions -icontains $_.Extension }
 
     foreach ($file in $files) {
-        # 2026-09-15 fix, real bug: this loop never polled the abort signal
-        # at all, unlike every other long-running per-file loop in this
+        # This loop must poll the abort signal like every other
+        # long-running per-file loop in this
         # codebase. During Full Pipeline's cover-deletion pre-scan,
         # Test-AbortSignal is what actually PRINTS the "[ABORT] Ctrl+C
         # detected" message - since nothing here called it, a user hitting
-        # Ctrl+C during this scan saw no feedback at all and deletions kept
+        # Ctrl+C during this scan would see no feedback at all and deletions would keep
         # happening for the rest of the scan regardless, only stopping once
         # the main dispatch loop later polled the abort signal itself.
         if (Test-AbortSignal) { $totals.Aborted = $true; break }
@@ -375,10 +373,9 @@ function Invoke-UnwantedImageScan {
 
         if ($DryRun) {
             Write-Log ("WOULD DELETE: [" + $matchResult.Profile.Label + "] '" + $file.FullName + "' | " + $file.Length + " bytes | " + $matchResult.Width + "x" + $matchResult.Height) -ForceConsole
-            # Own counter, not DeletedCount (2026-09-14 fix, Todo.md
-            # finding) - a dry run deletes nothing, but used to increment
-            # DeletedCount anyway, so the summary line below (which DOES
-            # write to the log file, not just console) logged a
+            # Own counter, not DeletedCount - a dry run deletes nothing, and
+            # incrementing DeletedCount anyway would make the summary line below (which DOES
+            # write to the log file, not just console) log a
             # real-looking "N deleted" count for a run that deleted
             # nothing.
             $totals.WouldDeleteCount++
@@ -443,7 +440,7 @@ function Get-TrailingZeroGroups {
     if ($null -ne $PreScannedFiles) {
         # DOCUMENTED DUPLICATE of Get-ScannableFiles's own identical guard
         # above - keep both in sync. See that function's own comment for
-        # why (2026-09-16 fix, real bug, latent/unreachable today).
+        # why.
         $excludeSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         foreach ($p in $ExcludePaths) { if ($null -ne $p) { $null = $excludeSet.Add($p) } }
         $files = $PreScannedFiles | Where-Object { -not $excludeSet.Contains($_.FullName) }

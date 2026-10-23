@@ -67,7 +67,7 @@ function Show-ModeMenu {
         if ($choice -eq '5') {
             # Re-init log paths BEFORE running Cover Deletion if Full
             # Logging/Disable Summary File was just toggled via option 0
-            # in this same menu visit (2026-09-14 fix, Todo.md finding) -
+            # in this same menu visit -
             # option 5 never returns to Invoke-MainLoop's own equivalent
             # check, it loops right back here, so without this Cover
             # Deletion's Write-Log calls landed in the pre-toggle
@@ -86,8 +86,7 @@ function Show-ModeMenu {
             Initialize-CleanConsoleOutput -Enabled ([bool]$Settings.CleanConsoleOutputEnabled)
             Initialize-FileDeletion -PermanentDelete ([bool]$Settings.PermanentDelete)
             Start-LogRun
-            # RunActive bracket + Complete-LogRun-in-finally (2026-09-15
-            # fix, real bugs, land together): Cover Deletion's real,
+            # RunActive bracket + Complete-LogRun-in-finally: Cover Deletion's real,
             # permanent-deletion-capable scan never returns out to
             # Invoke-MainLoop's own dispatch (this branch loops right back
             # to the top of THIS while loop instead) - it never reached
@@ -97,14 +96,12 @@ function Show-ModeMenu {
             # Remove-Source), instead of draining gracefully like every
             # other real deletion-capable path in this project. Only safe
             # to add now that Invoke-UnwantedImageScan's own scan loop
-            # actually polls the abort signal (2026-09-15 fix,
-            # UnwantedImage.ps1) - RunActive=true with nothing polling it
+            # actually polls the abort signal (UnwantedImage.ps1) - RunActive=true with nothing polling it
             # would instead freeze here for 65s with Ctrl+C swallowed.
             # Complete-LogRun moved into the same finally so an exception
             # inside the submenu (a locked report file, a path that
-            # vanishes mid-scan) can't skip closing the log run - Scenario
-            # Q3's own 2026-09-04 fix exists to prevent exactly the log-
-            # ordering corruption that would otherwise cause.
+            # vanishes mid-scan) can't skip closing the log run - skipping
+            # it would corrupt log ordering (Scenario Q3 covers this).
             Set-AbortHandlerRunActive -Active $true
             $quickEditWasOn = ((Get-ConsoleQuickEditEnabled) -eq 1)
             if ($quickEditWasOn) { $null = Set-ConsoleQuickEditEnabled -Enabled $false }
@@ -228,11 +225,10 @@ function Open-FolderInExplorer {
     if (-not (Test-Path -LiteralPath $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
-    # Quoted (2026-09-15 fix, real bug) - PS 5.1's Start-Process
+    # Quoted - PS 5.1's Start-Process
     # -ArgumentList doesn't quote a bare path itself, so an unquoted path
     # containing a space (e.g. a username with a space in it) arrives at
-    # explorer.exe as two separate arguments instead of one. Verified
-    # live with an argv-dumping helper.
+    # explorer.exe as two separate arguments instead of one.
     Start-Process -FilePath "explorer.exe" -ArgumentList ("`"" + $dir + "`"")
 }
 
@@ -445,8 +441,8 @@ function Invoke-TrailingZeroAuditRun {
     }
 
     Write-Host ("Report written: '" + $result.ReportPath + "' (" + $result.UniqueFileCount + " unique file(s))") -ForegroundColor Green
-    # $null = (2026-09-15 fix, real bug, latent) - the shipped default
-    # (Start-Process with no -PassThru) emits nothing, so this was safe
+    # $null = - the shipped default
+    # (Start-Process with no -PassThru) emits nothing, so this is safe
     # in practice, but -OpenHandler is advertised as an injection point -
     # a handler returning anything would make this function return a
     # 2-element array instead of the single hashtable below, and

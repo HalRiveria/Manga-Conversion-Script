@@ -59,12 +59,11 @@ function Move-ToRecycleBin {
     param([string]$ItemPath)
     $script:recycleBinCalls.Add($ItemPath)
     if (Test-Path -LiteralPath $ItemPath) { Remove-Item -LiteralPath $ItemPath -Force }
-    # Returns $true, matching the real FileDeletion.ps1 function (2026-08-31
-    # addition) - a same-day /code-review verification pass found that an
-    # unguarded call inside Initialize-LogPaths leaked this return value
+    # Returns $true, matching the real FileDeletion.ps1 function - an
+    # unguarded call inside Initialize-LogPaths would leak this return value
     # onto its own output stream (a stray "True"/"False" line printed at
-    # its real bare-statement call site). The old stub returned nothing at
-    # all, so it couldn't have caught that - it now can.
+    # its real bare-statement call site). A stub returning nothing at
+    # all couldn't catch that.
     return $true
 }
 
@@ -84,15 +83,13 @@ Test-Assert ($null -eq $script:logSummaryFile -and $null -eq $script:logErrorFil
 Write-Host ""
 
 # ==============================================================================
-#  Scenario B (rewritten 2026-09-03 - project owner's own explicit call:
-#  split-log mode's Errors/Warnings files should ACCUMULATE across runs,
-#  matching Write-SummaryLog's own already-existing append behavior,
-#  instead of being cleared at the start of every run): a previous run's
+#  Scenario B: split-log mode's Errors/Warnings files ACCUMULATE across runs,
+#  matching Write-SummaryLog's own append behavior,
+#  instead of being cleared at the start of every run: a previous run's
 #  own Error/Warn content survives a fresh Initialize-LogPaths call
 #  against the same target, and a "=== Run: ... ===" header is appended
 #  to mark where the new run's own content starts (via Start-LogRun,
-#  called separately from Initialize-LogPaths as of the 2026-09-03
-#  session-scope fix - see Start-LogRun's own header comment).
+#  called separately from Initialize-LogPaths).
 # ==============================================================================
 Write-Host "=== Scenario B: Initialize-LogPaths, split-log mode, previous run's content survives ===" -ForegroundColor Cyan
 Reset-LoggingState
@@ -143,8 +140,8 @@ Write-Host ""
 
 # ==============================================================================
 #  Scenario D: Write-Log, full-logging mode - writes, appends, UTF-8 (not
-#  ASCII-sanitized - see CLAUDE.md on why the historical ASCII-only rule
-#  was about the script's own source, not log content).
+#  ASCII-sanitized; the ASCII-only rule applies to the script's own
+#  source, not log content).
 # ==============================================================================
 Write-Host "=== Scenario D: Write-Log, full-logging mode ===" -ForegroundColor Cyan
 Reset-LoggingState
@@ -179,8 +176,8 @@ Test-Assert (-not (Test-Path -LiteralPath $script:logErrorFile) -or (Get-Content
 # Get-Content on a single-line file returns a bare String, not a 1-element
 # array - wrap in @() so indexing/Count below operate on the line, not on
 # individual characters of it (the exact class of PowerShell collection-
-# collapsing gotcha documented in CLAUDE.md's "Lessons learned"). Each file
-# now has 2 lines - Start-LogRun's own run-separator header (index 0),
+# collapsing gotcha). Each file
+# has 2 lines - Start-LogRun's own run-separator header (index 0),
 # then this run's one real line (index 1) - see Complete-LogRun for why
 # Write-Log itself still just appends here, not the header + line count.
 $errContent = @(Get-Content -LiteralPath $script:logErrorFile)
@@ -231,12 +228,12 @@ Test-Assert (-not $emptyFlushThrew) "Flush-ConsoleQueue on an already-empty queu
 Write-Host ""
 
 # ==============================================================================
-#  Scenario G2 (2026-09-22): under CCR, Flush-ConsoleQueue shows worker
+#  Scenario G2: under CCR, Flush-ConsoleQueue shows worker
 #  Warn/Error/Summary lines (e.g. a per-file conversion failure) through
 #  CCR's frozen-row path so they scroll cleanly above the live region, and
 #  drops worker Info lines (the per-series milestone chatter CCR's display
 #  replaces) unless the worker passed -ForceConsole. Every entry still gets
-#  its file write. Owner decision, same day: keep failure lines visible
+#  its file write. Failure lines stay visible
 #  during a CCR run. Stub Write-GatedConsoleMessage here since
 #  CleanConsoleRendering.ps1 isn't dot-sourced in this isolated harness.
 # ==============================================================================
@@ -340,15 +337,14 @@ $script:logMutex = $null
 Write-Host ""
 
 # ==============================================================================
-#  Scenario J (reworked 2026-09-22, the worker-state fix): Write-Log inside
-#  a REAL runspace worker, including the shape that silently broke before -
+#  Scenario J: Write-Log inside
+#  a REAL runspace worker, including the shape that is easy to break -
 #  a Write-Log call from inside a .GetNewClosure()'d block created inside
 #  another -SharedFunctionNames function (every [System.Lazy] factory in
 #  Controller.ps1 is exactly this). There, a propagated function's $script:
-#  resolves to the closure's own EMPTY module scope, so the old Write-Log
-#  saw no queue/paths/flags: printed raw and wrote no file (confirmed by
-#  running this scenario against the pre-fix Logging.ps1 - the closure
-#  line never reached the queue or any file). Now: both calls enqueue, the
+#  resolves to the closure's own EMPTY module scope, so a naive Write-Log
+#  would see no queue/paths/flags: print raw and write no file (the closure
+#  line would never reach the queue or any file). Instead both calls enqueue, the
 #  worker never writes a file itself, and the main thread's flush lands
 #  both lines in the main run's log file.
 # ==============================================================================
@@ -427,17 +423,15 @@ Write-Host ""
 #  forever). Abandonment is produced for real via a background runspace
 #  (matching Scenario J's already-proven-safe machinery) that opens the
 #  SAME named mutex, acquires it, and returns without releasing - NOT via
-#  a raw System.Threading.Thread: a first attempt at this scenario used a
-#  scriptblock cast to [System.Threading.ThreadStart] run on a bare CLR
-#  thread, and it crashed the entire harness process outright (no PASS/
-#  FAIL output, no summary - just exit 5). Root cause: a PowerShell
+#  a raw System.Threading.Thread: a scriptblock cast to
+#  [System.Threading.ThreadStart] run on a bare CLR thread would crash
+#  the entire harness process outright (no PASS/FAIL output, no summary -
+#  just exit 5), because a PowerShell
 #  scriptblock needs an associated runspace to execute - invoking one on a
 #  thread with no runspace throws immediately, and an unhandled exception
 #  on a background thread terminates the whole process by default .NET
-#  behavior. A live-reproduced case of "looked reasonable by analogy,
-#  wasn't tested" (see CLAUDE.md's Lessons Learned) - fixed by using the
-#  same runspace-based technique already proven safe elsewhere in this
-#  harness instead of a new untested pattern.
+#  behavior. This uses the same runspace-based technique as the
+#  rest of this harness.
 # ==============================================================================
 Write-Host "=== Scenario L: Write-Log recovers from an abandoned mutex ===" -ForegroundColor Cyan
 Reset-LoggingState
@@ -482,16 +476,15 @@ $script:logMutex = $null
 Write-Host ""
 
 # ==============================================================================
-#  Scenario M (rewritten 2026-09-03 - real bug, live-reported): full-logging
-#  mode used to Recycle-Bin a previous run's own timestamped log the moment
-#  the NEXT run against the same target started - the log the user was
-#  actively looking at right after that run finished vanished out from
-#  under them. Project owner's own call: a uniquely-timestamped file has no
-#  reason to ever be auto-deleted (unlike split-log mode's fixed-name
-#  Errors/Warnings files, which genuinely need clearing so a clean run
-#  isn't confused with stale content - that behavior is UNCHANGED, see
-#  Scenario M3/M4 below). This scenario now locks in the opposite of what
-#  it used to prove: old timestamped logs for the same target survive.
+#  Scenario M: full-logging
+#  mode must not Recycle-Bin a previous run's own timestamped log when
+#  the NEXT run against the same target starts - the log the user was
+#  actively looking at right after that run finished would vanish out from
+#  under them. A uniquely-timestamped file has no
+#  reason to ever be auto-deleted (split-log mode's fixed-name
+#  Errors/Warnings files accumulate across runs instead - see
+#  Scenario M3/M4 below). This scenario locks in that old timestamped
+#  logs for the same target survive.
 # ==============================================================================
 Write-Host "=== Scenario M: full-logging mode no longer deletes a previous run's own log ===" -ForegroundColor Cyan
 $script:recycleBinCalls.Clear()
@@ -515,18 +508,15 @@ Test-Assert (Test-Path -LiteralPath $aSecondLogFile) "target A's second run's ow
 Write-Host ""
 
 # ==============================================================================
-#  (Scenario M2 removed 2026-09-03: it tested full-logging mode's
-#  now-deleted old-log-cleanup try/catch, which no longer exists - see
-#  Scenario M above. Split-log mode's own equivalent "a failing
-#  Move-ToRecycleBin does not propagate" coverage already exists in
-#  Scenario M3 below, which throws on the Errors file specifically and
-#  confirms the run continues normally - no separate scenario needed.)
+#  (There is no Scenario M2: full-logging mode has no old-log-cleanup
+#  try/catch to test - see Scenario M above. Split-log mode's "a failing
+#  Move-ToRecycleBin does not propagate" coverage lives in
+#  Scenario M3 below.)
 # ==============================================================================
 
 # ==============================================================================
-#  Scenario M3 (rewritten 2026-09-03 - split-log mode no longer clears
-#  Errors/Warnings at all, so Move-ToRecycleBin is never called for
-#  either of them anymore): confirms real Error/Warn content written in
+#  Scenario M3 (split-log mode never clears Errors/Warnings, so
+#  Move-ToRecycleBin is never called for either of them): confirms real Error/Warn content written in
 #  one run is still present, verbatim, after a second Initialize-LogPaths
 #  call against the same target - multiple runs' content coexists in the
 #  same file, separated by their own run headers.
@@ -552,7 +542,7 @@ Test-Assert ($m3WarnContentM3 -like "*run 1 warn content*" -and $m3WarnContentM3
 Write-Host ""
 
 # ==============================================================================
-#  Scenario M4 (rewritten 2026-09-03 - no clearing to fail at anymore, but
+#  Scenario M4 (no clearing to fail at, but
 #  Initialize-LogPaths' own run-header write must still produce no stray
 #  output on its own output stream on a repeat call against an existing,
 #  already-populated pair of Errors/Warnings files).
@@ -567,22 +557,20 @@ Test-Assert ($null -eq $outputM4) ("Initialize-LogPaths produced no output on a 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario M5 (2026-09-03 addition): Complete-LogRun moves this run's own
+#  Scenario M5: Complete-LogRun moves this run's own
 #  newly-appended Errors/Warnings content above whatever existed before the
 #  run started, preserving each side's own internal chronological order -
 #  the newest run ends up on top, matching Write-SummaryLog's own
 #  prepend-block behavior for Summary.
 # ==============================================================================
 Write-Host "=== Scenario M5: Complete-LogRun moves this run's content to the top ===" -ForegroundColor Cyan
-# Deliberately ONE Initialize-LogPaths call for both "runs" (2026-09-03
-# fix, real bug caught by a same-session /code-review pass) - matches
+# Deliberately ONE Initialize-LogPaths call for both "runs" - matches
 # the real Invoke-MainLoop, which calls Initialize-LogPaths once at
 # bootstrap and Start-LogRun once per iteration, NOT Initialize-LogPaths
-# per iteration. A prior version of this scenario called
-# Initialize-LogPaths again for "run 2", which re-captured a fresh
-# prior-content snapshot and masked the real bug (every run after the
-# first got no header and a stale snapshot, so Complete-LogRun's own
-# StartsWith check silently no-op'd) instead of catching it.
+# per iteration. Calling Initialize-LogPaths again for "run 2" would
+# re-capture a fresh prior-content snapshot and mask a real bug (every run
+# after the first getting no header and a stale snapshot, so
+# Complete-LogRun's own StartsWith check silently no-ops).
 Reset-LoggingState
 Initialize-LogPaths -TargetPath "C:\M5\Path" -FullLogging $false -ScriptDir $scratchDir
 $m5ErrorFile = $script:logErrorFile
@@ -627,11 +615,11 @@ Test-Assert ($null -eq $outputM6b) "Complete-LogRun produces no output when the 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario M7 (2026-09-04 fix, real bug, live-reproduced): a locked
-#  Warnings file used to make Start-LogRun/Complete-LogRun's own "degrade
+#  Scenario M7: a locked
+#  Warnings file must not make Start-LogRun/Complete-LogRun's own "degrade
 #  to a Warn instead of throwing" catch throw a SECOND time, uncaught -
-#  the catch's Write-Log call routed straight back into the same locked
-#  file it was reporting on. Both functions must now survive a locked
+#  a Write-Log call in that catch would route straight back into the same locked
+#  file it was reporting on. Both functions must survive a locked
 #  Warnings file without throwing at all.
 # ==============================================================================
 Write-Host "=== Scenario M7: Start-LogRun/Complete-LogRun survive a locked Warnings file ===" -ForegroundColor Cyan
@@ -711,7 +699,7 @@ $script:logMutex.Dispose()
 Write-Host ""
 
 # ==============================================================================
-#  Scenario N2b (2026-08-31, from a same-day /code-review): calling
+#  Scenario N2b: calling
 #  Initialize-LogMutex a SECOND time does NOT dispose whatever mutex was
 #  already at $script:logMutex - locks in a deliberate contract, not an
 #  oversight. ZipParallelProcessing.ps1's own caller saves the old
@@ -737,9 +725,8 @@ $script:logMutex.Dispose()
 Write-Host ""
 
 # ==============================================================================
-#  Scenario N2c (2026-09-16 fix, real bug, live-experienced this session -
-#  see CHANGELOG.md): Invoke-MutexGuardedWrite's own WaitOne() used to have
-#  no timeout, so a mutex still held by a genuinely live process (not an
+#  Scenario N2c: Invoke-MutexGuardedWrite's own WaitOne() has a
+#  timeout - without one, a mutex still held by a genuinely live process (not an
 #  abandoned one - Scenario L already covers that case) blocked every
 #  later write against the same target path forever. Same real
 #  cross-thread contention setup as Scenario N2 (main thread holds the
@@ -754,9 +741,8 @@ Initialize-LogMutex -PathHash $n2cHash
 
 # .NET Mutex is thread-affine and recursive for its OWNING thread - holding
 # it on this same (harness) thread and then calling Invoke-MutexGuardedWrite
-# from here too would just re-enter for free, proving nothing (confirmed
-# live: the first draft of this scenario did exactly that and returned in
-# 0.01s). Needs genuine CROSS-THREAD contention, same as Scenario N2 - a
+# from here too would just re-enter for free, proving nothing (it would
+# return immediately). Needs genuine CROSS-THREAD contention, same as Scenario N2 - a
 # worker runspace opens the mutex by name and holds it deliberately longer
 # than Invoke-MutexGuardedWrite's own 10s timeout, standing in for an
 # orphaned process that never released it.
@@ -847,13 +833,12 @@ Write-Host ""
 
 # ==============================================================================
 #  Scenario P: Write-Log called before Initialize-LogPaths has ever run
-#  (2026-08-28, real bug fix - see CHANGELOG.md/Todo.md). Verified live
-#  before the fix: threw ParameterBindingValidationException ("Cannot
-#  bind argument to parameter 'FilePath' because it is null") in both
-#  full-logging and split-log mode - Write-SummaryLog already guarded the
-#  equivalent case, Write-Log didn't. Not reachable in the real script
-#  today (Initialize-LogPaths always runs first), but this proves the
-#  latent gap is actually closed, in both modes, for every level that
+#  Without a guard this would throw ParameterBindingValidationException
+#  ("Cannot bind argument to parameter 'FilePath' because it is null") in
+#  both full-logging and split-log mode, as Write-SummaryLog's equivalent
+#  case would. Not reachable in the real script
+#  (Initialize-LogPaths always runs first), but this proves the
+#  guard works, in both modes, for every level that
 #  writes to a file.
 # ==============================================================================
 Write-Host "=== Scenario P: Write-Log before Initialize-LogPaths degrades instead of throwing ===" -ForegroundColor Cyan
@@ -883,10 +868,10 @@ Test-Assert ($logContentP -like "*a real line after init*") "Write-Log still wri
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Q (2026-09-03 fix, real bug, live-reported): -ForceConsole
+#  Scenario Q: -ForceConsole
 #  bypasses the Clean Console Output console-echo gate. Mode 5/Cover
 #  Deletion has no CCR live-progress display of its own to replace the
-#  suppressed console lines with, so before this fix it reported nothing
+#  suppressed console lines with, so without -ForceConsole it would report nothing
 #  to the console at all with CCO on, silently, while still working and
 #  file-logging normally. Main-thread path checked via a real 6>&1
 #  capture; the worker path via the flag the queued entry carries.
@@ -912,8 +897,8 @@ $script:CleanConsoleOutputEnabled = $false
 Write-Host ""
 
 # ==============================================================================
-#  Scenario W (2026-09-15 fix, real bug): a locked/inaccessible log file must
-#  not make Write-Log throw. Before the fix, a locked Errors file would throw
+#  Scenario W: a locked/inaccessible log file must
+#  not make Write-Log throw. A locked Errors file would otherwise throw
 #  from inside the catch that's LOGGING the original error - escaping the
 #  whole run over an unrelated conversion failure.
 # ==============================================================================
@@ -940,7 +925,7 @@ Test-Assert ($errorContentW.Contains("this one should actually land")) "a later 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario W2 (2026-10-12): a failed log write says so on the console, once
+#  Scenario W2: a failed log write says so on the console, once
 #  per file per run - not silently, and not once per line while the file
 #  stays locked. Start-LogRun (a new run) re-arms the warning.
 # ==============================================================================
@@ -971,9 +956,9 @@ Test-Assert (@($nextRunW2 | Where-Object { "$_" -like "*Could not write to the l
 Write-Host ""
 
 # ==============================================================================
-#  Scenario W3 (2026-10-12): Write-SummaryLog with its file locked warns and
-#  carries on. It was the one log write with nothing catching it - the end-
-#  of-run summary would have thrown out of Write-SummaryReport.
+#  Scenario W3: Write-SummaryLog with its file locked warns and
+#  carries on. Without a catch, the end-
+#  of-run summary would throw out of Write-SummaryReport.
 # ==============================================================================
 Write-Host "=== Scenario W3: Write-SummaryLog does not throw when the summary file is locked ===" -ForegroundColor Cyan
 $lockedW3 = [System.IO.File]::Open($script:logSummaryFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)

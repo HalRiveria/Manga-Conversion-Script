@@ -116,13 +116,12 @@ function Test-Assert {
 }
 
 function Reset-HarnessScenarioState {
-    # Renamed from this harness's own former "Reset-AbortState" (2026-08-28)
-    # once the real module gained a real function of that exact name - this
+    # Named differently from the real module's Reset-AbortState - this
     # harness dot-sources the real module BEFORE defining its own helpers
-    # (see top of file), so the harness's own same-named function was
-    # silently shadowing the real one for every scenario in this file,
-    # meaning NONE of them ever actually exercised it. Delegates the
-    # abort-flag reset to the real Reset-AbortState now instead of
+    # (see top of file), so a same-named harness function would
+    # silently shadow the real one for every scenario in this file,
+    # meaning NONE of them would ever actually exercise it. Delegates the
+    # abort-flag reset to the real Reset-AbortState instead of
     # duplicating that logic by hand, so this harness's own per-scenario
     # cleanup can never silently drift from what the real function does -
     # only the extra test-isolation state below (CTS registry, CCR call
@@ -163,12 +162,12 @@ $ctsKeep.Dispose(); $ctsDrop.Dispose(); $ctsRemove.Dispose()
 Write-Host ""
 
 # ==============================================================================
-#  Scenario A2 (reworked 2026-09-22, the worker-state fix): inside a runspace
+#  Scenario A2: inside a runspace
 #  worker ($script:workerConsoleQueue set), Test-AbortSignal only REACTS -
 #  returns true, never announces, never enqueues, never touches the main
 #  thread's latch/CTS registry. The main thread's own call (its dispatch
-#  loop polls it) is the single announcer. Before this, the worker queued
-#  its own copy of the message, which printed a second, oddly-timestamped
+#  loop polls it) is the single announcer. If the worker queued
+#  its own copy of the message, it would print a second, oddly-timestamped
 #  [ABORT] line on top of the main thread's.
 # ==============================================================================
 Write-Host "=== Scenario A2: Test-AbortSignal inside a worker reacts but never announces ===" -ForegroundColor Cyan
@@ -198,19 +197,18 @@ $ctsA2.Dispose()
 Write-Host ""
 
 # ==============================================================================
-#  Scenario A3 (2026-09-22): the real-runspace shape that printed the abort
+#  Scenario A3: the real-runspace shape that could print the abort
 #  message 2-3 times per Ctrl+C. Test-AbortSignal propagated into a worker
 #  runspace via SessionStateFunctionEntry (exactly what -SharedFunctionNames
 #  does), called from inside a .GetNewClosure()'d block created inside
 #  another propagated function - the shape of Controller.ps1's chapter
 #  provider and [System.Lazy] factories. There, a propagated function's
-#  $script: resolves to the closure's own empty module scope, so the old
-#  code saw no worker queue AND a latch private to that closure - so it
-#  announced from the worker, once per closure instance, on top of the
+#  $script: resolves to the closure's own empty module scope, so naive
+#  code would see no worker queue AND a latch private to that closure - and
+#  announce from the worker, once per closure instance, on top of the
 #  main thread's own. Write-GatedConsoleMessage here is a worker-side
 #  recorder (located via $global:, which does resolve correctly in that
-#  context). Confirmed against the pre-fix AbortPipeline.ps1: 1
-#  worker-side announcement here (0 expected).
+#  context). 0 worker-side announcements are expected here.
 # ==============================================================================
 Write-Host "=== Scenario A3: Test-AbortSignal in a real runspace closure never announces ===" -ForegroundColor Cyan
 Reset-HarnessScenarioState
@@ -250,7 +248,7 @@ Test-Assert ($a3Queue.Count -eq 0) "and queued nothing for the main thread to pr
 Write-Host ""
 
 # ==============================================================================
-#  Scenario A4 (2026-09-22, the orphaned-magick.exe Todo item): a child
+#  Scenario A4 (orphaned magick.exe processes): a child
 #  process assigned to the ChildProcessJob dies when its parent is
 #  FORCE-killed (TerminateProcess - what Task Manager's End task and a
 #  hard window close do), with no chance for any PowerShell cleanup code
@@ -258,8 +256,8 @@ Write-Host ""
 #  long-lived ping.exe child, assigns it, reports the child's PID, then
 #  gets force-killed from here. Control run: same thing without
 #  Initialize-ChildProcessJob - the child must SURVIVE, proving the
-#  assertion above can actually fail (the pre-fix behavior, confirmed live
-#  2026-09-16 when a force-killed run left magick.exe running).
+#  assertion above can actually fail (without the job, a force-killed run
+#  leaves magick.exe running).
 # ==============================================================================
 Write-Host "=== Scenario A4: a force-killed parent takes its job-assigned children with it ===" -ForegroundColor Cyan
 $a4Script = Join-Path ([System.IO.Path]::GetTempPath()) ("abortpipeline-harness-job-" + [guid]::NewGuid().ToString("N") + ".ps1")
@@ -366,7 +364,7 @@ Test-Assert ([ConsoleCtrl]::DrainComplete.IsSet) "DrainComplete was signalled ev
 Write-Host ""
 
 # ==============================================================================
-#  Scenario E: the CLAUDE.md "Known gaps" race - a job that finishes in the
+#  Scenario E: the drain race - a job that finishes in the
 #  ~250ms window between the drain loop's last poll and its timeout firing
 #  must still be collected, not silently discarded/miscounted as
 #  force-stopped. Timing-sensitive: the poll interval is a fixed 250ms, so a
@@ -443,7 +441,7 @@ Write-Host ""
 #  message through Write-CleanConsoleMessage instead of raw Write-Host.
 #  Confirms both that the stub WAS called with the right text/color, and
 #  that the raw-Write-Host path produced NO console output at all for
-#  this call (not just "also called the stub" alongside the old path).
+#  this call (not just "also called the stub" alongside the raw path).
 # ==============================================================================
 Write-Host "=== Scenario I: Clean Console Output on - Test-AbortSignal routes through CCR ===" -ForegroundColor Cyan
 Reset-HarnessScenarioState
@@ -489,12 +487,12 @@ Write-Host ""
 # ==============================================================================
 #  Scenario K: Complete-AbortDrain finalizes the CCR display (via
 #  Complete-AllActiveSeriesProgress) when Clean Console Output is on AND
-#  this is a window-close event - NOT for a plain Ctrl+C (2026-09-08 fix,
-#  real bug, live-reported: finalizing every active series here for an
-#  ordinary Ctrl+C meant the run's own NORMAL per-chapter completion call,
-#  made moments later once the abort-drain's in-flight files finished,
-#  found the series already resolved and threw "not an active series" -
-#  a real FATAL ERROR ending an otherwise-successful run). Also does NOT
+#  this is a window-close event - NOT for a plain Ctrl+C (finalizing every
+#  active series here for an
+#  ordinary Ctrl+C would mean the run's own NORMAL per-chapter completion call,
+#  made moments later once the abort-drain's in-flight files finish,
+#  finds the series already resolved and throws "not an active series" -
+#  a FATAL ERROR ending an otherwise-successful run). Also does NOT
 #  call it at all when the toggle is off, so a caller that never
 #  dot-sourced CleanConsoleRendering.ps1 is never forced to have it loaded
 #  just because Complete-AbortDrain ran.
@@ -579,9 +577,8 @@ Write-Host ""
 
 # ==============================================================================
 #  Scenario N: Test-OwnAbortException - both conditions required
-#  (abortRequested AND a matching exception type), built 2026-08-28 from
-#  a real extraction of the main script's own top-level catch block (see
-#  Modules\_Reference\AbortPipeline.reference.ps1).
+#  (abortRequested AND a matching exception type), mirroring the main
+#  script's own top-level catch block.
 # ==============================================================================
 Write-Host "=== Scenario N: Test-OwnAbortException ===" -ForegroundColor Cyan
 
@@ -620,14 +617,14 @@ Reset-HarnessScenarioState
 Write-Host ""
 
 # ==============================================================================
-#  Scenario N2 (2026-08-31 fix): Ctrl+C landing during a stretch where
+#  Scenario N2: Ctrl+C landing during a stretch where
 #  nothing happens to be polling Test-AbortSignal (chapter discovery,
 #  Compress-FolderToZip, Test-ZipArchive, summary writing) - the NATIVE
 #  handler's own [ConsoleCtrl]::AbortRequested flag is set immediately and
 #  independent of polling, but $script:abortRequested (only ever set BY a
-#  Test-AbortSignal call) has not caught up yet. Before this fix,
-#  Test-OwnAbortException read $script:abortRequested directly and missed
-#  this - a genuine own-abort PipelineStoppedException looked like an
+#  Test-AbortSignal call) has not caught up yet. If
+#  Test-OwnAbortException read only $script:abortRequested it would miss
+#  this - a genuine own-abort PipelineStoppedException would look like an
 #  unrelated crash. Simulates that exact gap: set the native flag directly
 #  (as [ConsoleCtrl]'s real P/Invoke callback would), leave
 #  $script:abortRequested false (as if nothing had polled yet).
@@ -651,8 +648,8 @@ Write-Host "=== Scenario O: Invoke-AbortOrFatalHandler - own-abort branch ===" -
 Reset-HarnessScenarioState
 $script:abortRequested = $true
 $script:CleanConsoleOutputEnabled = $true
-# IsCloseEvent true here (2026-09-08 update, matching Complete-AbortDrain's
-# own fix - see Scenario K) - this scenario is specifically proving
+# IsCloseEvent true here (matching Complete-AbortDrain's
+# close-event-only CCR finalizing - see Scenario K) - this scenario is specifically proving
 # Invoke-AbortOrFatalHandler really calls Complete-AbortDrain, not a
 # reimplementation; Complete-AbortDrain itself only finalizes CCR for a
 # close event, which Scenario K already covers on its own.
@@ -707,15 +704,13 @@ Reset-HarnessScenarioState
 Write-Host ""
 
 # ==============================================================================
-#  Scenario R: Reset-AbortState (2026-08-28, closes the "abort state never
-#  reset" bug - Todo.md/CHANGELOG.md) - proves the REAL function itself,
+#  Scenario R: Reset-AbortState - proves the REAL function itself,
 #  not just this harness's own Reset-HarnessScenarioState wrapper around
 #  it (that wrapper is exercised by every other scenario already; this one
 #  is the only scenario that would catch a regression in the real
-#  function's own body). Simulates the exact real-world sequence the bug
-#  report described: one abort, then a second "run" in the same process
-#  with no new Ctrl+C - without the fix, Test-AbortSignal's first poll of
-#  that second run would already be $true.
+#  function's own body). Simulates one abort, then a second "run" in the
+#  same process with no new Ctrl+C - without the reset, Test-AbortSignal's
+#  first poll of that second run would already be $true.
 # ==============================================================================
 Write-Host "=== Scenario R: Reset-AbortState clears every piece of abort state ===" -ForegroundColor Cyan
 Reset-HarnessScenarioState
@@ -755,10 +750,9 @@ Reset-HarnessScenarioState
 Write-Host ""
 
 # ==============================================================================
-#  Scenario S (2026-08-31 fix, caught by a same-day /code-review
-#  full-codebase pass): Invoke-GracefulDrain's docstring promises it
-#  ALWAYS signals DrainComplete before returning - but nothing enforced
-#  that until this fix wrapped the drain body in try/finally. A failing
+#  Scenario S: Invoke-GracefulDrain
+#  ALWAYS signals DrainComplete before returning - enforced by
+#  wrapping the drain body in try/finally. A failing
 #  job (EndInvoke throws) routes into -ErrorHandler; if -ErrorHandler
 #  ITSELF throws (a broken caller-supplied handler), that propagates out
 #  of Receive-CompletedHandles uncaught - DrainComplete must still get
@@ -783,7 +777,7 @@ Reset-HarnessScenarioState
 Write-Host ""
 
 # ==============================================================================
-#  Scenario S2 (2026-09-03 fix, Todo.md finding): a bug in the CALLER's own
+#  Scenario S2: a bug in the CALLER's own
 #  -ResultHandler (the worker itself SUCCEEDS here) must propagate as ITS
 #  OWN real exception, not get caught by the same try/catch as a genuine
 #  EndInvoke() failure and mislabeled as "Error collecting runspace result
@@ -812,18 +806,17 @@ Reset-HarnessScenarioState
 Write-Host ""
 
 # ==============================================================================
-#  Scenario T (2026-08-31 addition, project owner's own explicit
-#  decision): ANY ctrl event (Ctrl+C, Ctrl+Break, window-close, logoff,
+#  Scenario T: ANY ctrl event (Ctrl+C, Ctrl+Break, window-close, logoff,
 #  shutdown) while [ConsoleCtrl]::RunActive is $false (idle at the menu)
 #  must fall through to the OS's own default action (return $false, no
-#  AbortRequested set, no blocking) instead of being caught - previously
-#  the handler caught EVERY Ctrl+C unconditionally, which leaked into the
-#  very next run dispatched in the same loop iteration and blocked the
+#  AbortRequested set, no blocking) instead of being caught - catching
+#  EVERY Ctrl+C unconditionally would leak into the
+#  very next run dispatched in the same loop iteration and block the
 #  handler thread on a drain that would never happen. Window-close/
-#  logoff/shutdown were widened into this same !RunActive guard on
-#  2026-09-15 (a real bug - they were previously always caught regardless
-#  of RunActive, hanging ~5s waiting on a drain nothing would ever
-#  complete when closing the window at the menu). Invokes the private
+#  logoff/shutdown fall under this same !RunActive guard (always
+#  catching them regardless of RunActive would hang ~5s waiting on a
+#  drain nothing would ever complete when closing the window at the
+#  menu). Invokes the private
 #  static Handler method directly via reflection - the real logic under
 #  test, not a simulation of its output state (the pattern every other
 #  scenario in this file uses, since Handler can't otherwise be called
@@ -842,14 +835,14 @@ $resultCtrlBreakT = $handlerMethodT.Invoke($null, @([uint32]1))   # CTRL_BREAK_E
 Test-Assert ($resultCtrlBreakT -eq $false) "Ctrl+Break with no active run also returns `$false"
 Test-Assert ([ConsoleCtrl]::AbortRequested -eq $false) "AbortRequested still NOT set after Ctrl+Break"
 
-# Window-close/logoff/shutdown are now ALSO exempted by !RunActive
-# (2026-09-15 fix, real bug) - closing the window at the menu, with
-# nothing actually running, used to still set AbortRequested and park
+# Window-close/logoff/shutdown are ALSO exempted by !RunActive -
+# closing the window at the menu, with
+# nothing actually running, would otherwise set AbortRequested and park
 # the handler thread in its own 65s Wait() for a drain that would never
 # complete (nothing dispatched to complete it) - a ~5s hang before
 # Windows force-killed the process anyway. Pre-signal DrainComplete
-# defensively (so this test can't itself hang for 65s if the fix
-# regresses), but the real assertion is that Wait() is never reached at
+# defensively (so this test can't itself hang for 65s if the
+# behavior regresses), but the real assertion is that Wait() is never reached at
 # all - the handler returns immediately.
 [ConsoleCtrl]::DrainComplete.Set()
 $resultCloseT = $handlerMethodT.Invoke($null, @([uint32]2))   # CTRL_CLOSE_EVENT
@@ -892,7 +885,7 @@ Reset-HarnessScenarioState
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Y (2026-10-22): Set-SystemSleepBlocked really sets and clears
+#  Scenario Y: Set-SystemSleepBlocked really sets and clears
 #  this thread's keep-awake request. Checked on the thread itself:
 #  SetThreadExecutionState returns the calling thread's PREVIOUS state, so
 #  re-setting the same value reads it back without changing it. (The
@@ -915,12 +908,12 @@ Test-Assert ($afterY -eq $esContinuousY) ("after unblocking, the request is gone
 Write-Host ""
 
 # ==============================================================================
-#  Scenario V2 (2026-09-08 addition): Set-ConsoleQuickEditEnabled never
+#  Scenario V2: Set-ConsoleQuickEditEnabled never
 #  throws regardless of whether this process has a real interactive
 #  console attached (a harness run typically doesn't - stdin is
 #  redirected/piped). Get-ConsoleQuickEditEnabled reports 1/0/-1 the same
-#  way, and Reset-AbortState leaves QuickEdit alone (2026-10-12: it used to
-#  force it on, which switched it on for a console that had it off).
+#  way, and Reset-AbortState leaves QuickEdit alone (forcing it on would switch
+#  it on for a console that had it off).
 # ==============================================================================
 Write-Host "=== Scenario V2: Set-ConsoleQuickEditEnabled degrades gracefully with no real console attached ===" -ForegroundColor Cyan
 $threwV2a = $false
@@ -955,7 +948,7 @@ Reset-HarnessScenarioState
 Write-Host ""
 
 # ==============================================================================
-#  Scenario W (2026-09-03 fix, real bug, live-reported and live-tested):
+#  Scenario W:
 #  Invoke-GracefulDrain's own wait-for-natural-completion loop must be
 #  skipped entirely when [ConsoleCtrl]::IsCloseEvent is true, going
 #  straight to force-stopping every handle instead - Windows force-kills
@@ -971,7 +964,7 @@ $fakeW = New-FakeHandles -DelaysMs @(30000, 30000)
 [ConsoleCtrl]::IsCloseEvent = $true
 $swW = [System.Diagnostics.Stopwatch]::StartNew()
 try {
-    # try/finally around the call (2026-09-16 fix) - [ConsoleCtrl] is a
+    # try/finally around the call - [ConsoleCtrl] is a
     # real, process-wide static type, and this harness runs every later
     # scenario in this same process. If Invoke-GracefulDrain ever threw
     # here, IsCloseEvent would have stayed $true for the rest of the run,
@@ -990,9 +983,9 @@ Test-Assert ([ConsoleCtrl]::DrainComplete.IsSet) "DrainComplete was still signal
 Write-Host ""
 
 # ==============================================================================
-#  Scenario X (2026-10-12): force-stop does not wait for a worker stuck in a
+#  Scenario X: force-stop does not wait for a worker stuck in a
 #  blocking .NET call. Stop() and Dispose() both block until that call
-#  returns, so the drain used to hold the abort for as long as the worker's
+#  returns, so a drain that waited would hold the abort for as long as the worker's
 #  current call took (a zip of a huge folder, say). BeginStop returns at once.
 # ==============================================================================
 Write-Host "=== Scenario X: force-stop returns without waiting for a worker stuck in a .NET call ===" -ForegroundColor Cyan
@@ -1010,7 +1003,7 @@ Reset-HarnessScenarioState
 Write-Host ""
 
 # ==============================================================================
-#  Scenario X2 (2026-10-12): Receive-CompletedHandles' own return value is
+#  Scenario X2: Receive-CompletedHandles' own return value is
 #  not polluted by anything a -ResultHandler or -ErrorHandler emits.
 # ==============================================================================
 Write-Host "=== Scenario X2: a chatty -ResultHandler does not leak into Receive-CompletedHandles' result ===" -ForegroundColor Cyan

@@ -3,7 +3,7 @@
 $script:logMutex           = $null
 $script:workerConsoleQueue = $null   # NAMED DIFFERENTLY FROM the plain $consoleQueue local
                                       # var used elsewhere for dispatch-loop setup - see
-                                      # Docs/function-notes.md, do not rename this back.
+                                      # so the two can't collide - do not rename this back.
 $script:FullLogging        = $false
 $script:logFile            = $null
 $script:logSummaryFile     = $null
@@ -72,9 +72,9 @@ function Start-LogRun {
             Set-Variable -Scope Script -Name $target.PriorVar -Value $prior
             Invoke-MutexGuardedWrite { $runHeader | Out-File -FilePath $target.FilePath -Append -Encoding UTF8 }
         } catch {
-            # Report straight to the console rather than through Write-Log - see
-            # Docs/function-notes.md for why (Write-Log would route a Warn back
-            # into this same locked file and throw again, uncaught).
+            # Report straight to the console rather than through Write-Log:
+            # Write-Log would route a Warn back
+            # into this same locked file and throw again, uncaught.
             $warnLine = Format-LogLine -Message ("Could not start a new run header in '" + $target.FilePath + "' - it may be locked or otherwise inaccessible. This run's own entries will still be appended, just without a run separator: " + $_) -Level "Warn"
             try { Write-LogLineToHost -Line $warnLine -Level "Warn" } catch { }
         }
@@ -98,7 +98,7 @@ function Complete-LogRun {
                 # (shouldn't happen) - leave it untouched rather than guess.
             }
         } catch {
-            # Same reasoning as Start-LogRun's catch - see Docs/function-notes.md.
+            # Same reasoning as Start-LogRun's catch: report to the console, not through Write-Log.
             $warnLine = Format-LogLine -Message ("Could not move this run's content to the top of '" + $target.FilePath + "' - it may be locked or otherwise inaccessible. The content is still there, just not reordered: " + $_) -Level "Warn"
             try { Write-LogLineToHost -Line $warnLine -Level "Warn" } catch { }
         }
@@ -113,16 +113,15 @@ function Initialize-LogMutex {
         throw "Initialize-LogMutex: no -PathHash supplied and `$script:pathHash is not set - call Initialize-LogPaths first, or pass -PathHash explicitly (e.g. from a runspace worker's own parameters)."
     }
 
-    # Deliberately does NOT dispose any previous $script:logMutex - see
-    # Docs/function-notes.md, ZipParallelProcessing.ps1 depends on that.
+    # Deliberately does NOT dispose any previous $script:logMutex -
+    # ZipParallelProcessing.ps1 depends on that.
     $script:logMutex = [System.Threading.Mutex]::new($false, ("JxlLogMutex_" + $PathHash))
 }
 
 function Get-LogMutex {
     # Plain accessor, not a closure - a .GetNewClosure()'d caller can't read
-    # $script:logMutex directly (confirmed live: it resolves to $null inside
-    # such a closure, not the real value - Docs/lessons-learned.md's 9th
-    # entry). Invoke via a function reference (& ${function:Get-LogMutex})
+    # $script:logMutex directly (it resolves to $null inside
+    # such a closure, not the real value). Invoke via a function reference (& ${function:Get-LogMutex})
     # from inside a closure instead of reading $script:logMutex there.
     return $script:logMutex
 }
@@ -139,10 +138,9 @@ function Invoke-MutexGuardedWrite {
     $acquired = $true
     try {
         if ($null -ne $mtx) {
-            # WaitOne() used to have no timeout (2026-09-16 fix, real bug,
-            # live-experienced this session - see CHANGELOG.md): a stuck or
+            # WaitOne() has a timeout: a stuck or
             # orphaned process that never released this named, system-wide
-            # mutex left every later Write-Log call on the same target path
+            # mutex would otherwise leave every later Write-Log call on the same target path
             # blocked here forever, 0% CPU, no error. 10s is generous for a
             # real writer (a brief file append) but short enough that a
             # genuinely stuck holder doesn't stall the whole run.
@@ -189,8 +187,8 @@ function Write-LogLineToFile {
         try {
             [System.IO.File]::AppendAllText($FilePath, $Line + [System.Environment]::NewLine, [System.Text.Encoding]::UTF8)
         } catch {
-            # Never fatal - losing a log line must not take the run down
-            # (see Docs/function-notes.md). Warned once per file per run.
+            # Never fatal - losing a log line must not take the run down.
+            # Warned once per file per run.
             Write-LogWriteFailureWarning -FilePath $FilePath -ErrorText ([string]$_)
         }
     }
@@ -274,7 +272,7 @@ function Write-SummaryLog {
             [System.IO.File]::WriteAllText($script:logSummaryFile, $newContent, [System.Text.Encoding]::UTF8)
         }
     } catch {
-        # Same reasoning as Start-LogRun's catch - see Docs/function-notes.md.
+        # Same reasoning as Start-LogRun's catch: report to the console, not through Write-Log.
         $warnLine = Format-LogLine -Message ("Could not write this run's summary to '" + $script:logSummaryFile + "' - it may be locked or otherwise inaccessible. The summary above was still shown; only the file copy was skipped: " + $_) -Level "Warn"
         try { Write-LogLineToHost -Line $warnLine -Level "Warn" } catch { }
     }
@@ -283,7 +281,7 @@ function Write-SummaryLog {
 function Flush-ConsoleQueue {
     param([System.Collections.Concurrent.ConcurrentQueue[object]]$Queue)
 
-    # Main thread only (not in Get-LoggingSharedFunctionNames). See Docs/function-notes.md.
+    # Main thread only (not in Get-LoggingSharedFunctionNames).
     $item = $null
     while ($Queue.TryDequeue([ref]$item)) {
         $line = $item.Line
@@ -315,10 +313,9 @@ function Write-LogFileSummary {
         } else {
             Write-Host "  Summary  : (disabled)" -ForegroundColor DarkGray
         }
-        # IsNullOrEmpty guards before Test-Path (2026-09-15 fix, real but
-        # latent - not reachable today since Initialize-LogPaths always
-        # runs before this, but every other path read in this module
-        # already guards this way; this pair was the one omission) -
+        # IsNullOrEmpty guards before Test-Path (not reachable today since
+        # Initialize-LogPaths always runs before this, but every other path
+        # read in this module guards this way) -
         # Test-Path -LiteralPath $null throws a parameter-binding error,
         # not a clean $false.
         if ((-not [string]::IsNullOrEmpty($script:logErrorFile)) -and (Test-Path -LiteralPath $script:logErrorFile)) { Write-Host ("  Errors   : " + $script:logErrorFile) -ForegroundColor Green }

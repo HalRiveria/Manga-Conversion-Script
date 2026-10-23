@@ -19,8 +19,8 @@ $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "..\UnwantedImage.ps1")
 
-# Fake, not the real AbortPipeline.ps1 (2026-09-15 addition, for the abort-
-# poll fix in Invoke-UnwantedImageScan's own scan loop) - this harness's own
+# Fake, not the real AbortPipeline.ps1 (for the abort-
+# poll in Invoke-UnwantedImageScan's own scan loop) - this harness's own
 # convention is stubbed dependencies (see this file's header), and a simple
 # call-counted fake gives deterministic control over exactly which file the
 # abort fires before, which a real native console handler can't offer.
@@ -34,10 +34,10 @@ function Test-AbortSignal {
 
 $script:logCalls = New-Object System.Collections.Generic.List[string]
 # -ForceConsole tracked separately, not folded into $logCalls' own string
-# shape (2026-09-03 addition) - Scenario Z below checks specifically that
-# every user-facing scan/audit line passes it, since that's the actual
-# fix for the real "mode 5 reports nothing under Clean Console Output"
-# bug (see Logging.ps1's Write-Log .PARAMETER doc for the full reasoning).
+# shape - Scenario Y below checks specifically that
+# every user-facing scan/audit line passes it, since that's what keeps
+# Cover Deletion from reporting nothing under Clean Console Output
+# (see Logging.ps1's Write-Log -ForceConsole).
 $script:logCallsForceConsole = New-Object System.Collections.Generic.List[bool]
 function Write-Log {
     param([string]$Message, [string]$Level = "Info", [switch]$ForceConsole)
@@ -189,12 +189,11 @@ $badDimProfileC.Width = 9999
 $resultC4 = Test-UnwantedImageMatch -File $imgC -Profiles @($badDimProfileC)
 Test-Assert ($resultC4.Status -eq 'NoMatch') "correct size but wrong dimensions -> NoMatch"
 
-# 2026-09-08 fix, latent gap caught by a full-codebase audit: a Mandatory
-# array parameter rejects an EMPTY array by default in PowerShell
+# A Mandatory array parameter rejects an EMPTY array by default in PowerShell
 # ("Cannot bind argument... because it is an empty collection"), distinct
-# from rejecting $null - -Profiles @() used to throw instead of correctly
-# reporting NoMatch for every file. Same species as
-# Export-UnwantedImageProfiles's own real bug fixed 2026-09-04.
+# from rejecting $null - -Profiles @() must correctly
+# report NoMatch for every file rather than throw. Same species as
+# Export-UnwantedImageProfiles's empty-array handling.
 $threwC4b = $false
 $resultC4b = $null
 try { $resultC4b = Test-UnwantedImageMatch -File $imgC -Profiles @() } catch { $threwC4b = $true }
@@ -206,13 +205,13 @@ $profileNonImgC = @{ Label = "N/A"; Width = 1; Height = 1; SizeBytes = $nonImgC.
 $resultC5 = Test-UnwantedImageMatch -File $nonImgC -Profiles @($profileNonImgC)
 Test-Assert ($resultC5.Status -eq 'NoMatch') "a non-image file (dimension read fails) -> NoMatch, no throw"
 
-# 2026-09-02 review fix: a file that matches on size+dimensions but can't
+# A file that matches on size+dimensions but can't
 # be hashed (locked by another process, or vanishes between the dimension
 # read and this call - a real TOCTOU gap, since Get-ImageDimensions and
-# Get-FileHash are two separate file opens) used to throw straight out of
+# Get-FileHash are two separate file opens) must not throw straight out of
 # Test-UnwantedImageMatch - with the bootstrap's $ErrorActionPreference =
 # 'Stop' inherited into this function, Get-FileHash's own terminating
-# error was never caught, unlike Get-TrailingZeroGroups's identical call
+# error has to be caught, like Get-TrailingZeroGroups's identical call
 # further down this same file. A real FileShare.None lock can't isolate
 # this to just the hash step (Get-ImageDimensions's own
 # [System.Drawing.Image]::FromFile call needs Read access too, so it
@@ -220,7 +219,7 @@ Test-Assert ($resultC5.Status -eq 'NoMatch') "a non-image file (dimension read f
 # shadows the Get-FileHash cmdlet with a throwing function for the
 # duration of one call instead, the standard PowerShell mocking technique
 # (a function of the same name resolves before the cmdlet in the same
-# scope chain). Confirmed live (outside this harness) that a real
+# scope chain). A real
 # FileShare.None lock DOES throw from Get-FileHash when it's the only
 # thing holding the file open - this just isolates that one failure
 # deterministically rather than racing a real lock against GDI+.
@@ -236,12 +235,11 @@ try {
 Write-Host ""
 
 # ==============================================================================
-#  Scenario C2 (2026-09-03 fix, Todo.md finding): a real, previously
-#  unfixed shadowing risk - a profile whose size+dimensions match but
-#  hash doesn't used to make Test-UnwantedImageMatch return HashMismatch
-#  immediately, WITHOUT trying any later profile - so a second profile
+#  Scenario C2: shadowing risk - a profile whose size+dimensions match but
+#  hash doesn't must not make Test-UnwantedImageMatch return HashMismatch
+#  immediately, WITHOUT trying any later profile - otherwise a second profile
 #  sharing the exact same size+dimensions but a genuinely matching hash
-#  was permanently shadowed and never got to delete anything. Now every
+#  would be permanently shadowed and never get to delete anything. Every
 #  size+dimension-matching profile is tried until a real Match is found.
 # ==============================================================================
 Write-Host "=== Scenario C2: a later profile with the same size+dimensions is no longer shadowed by an earlier hash mismatch ===" -ForegroundColor Cyan
@@ -252,7 +250,7 @@ $shadowingProfileC2.Label = "Shadowing Profile"
 $shadowingProfileC2.Hash  = "0000000000000000000000000000000000000000000000000000000000000000"
 
 # The shadowing (wrong-hash) profile is FIRST in the list - the exact
-# shape that used to permanently hide the real match behind it.
+# shape that would permanently hide the real match behind it.
 $resultC2 = Test-UnwantedImageMatch -File $imgC2 -Profiles @($shadowingProfileC2, $realProfileC2)
 Test-Assert ($resultC2.Status -eq 'Match' -and $resultC2.Profile.Label -eq 'Real Match') ("the real match (second in the list) was found despite an earlier same-size+dimensions profile with a wrong hash (got Status=" + $resultC2.Status + ", Profile=" + $resultC2.Profile.Label + ")")
 
@@ -266,9 +264,8 @@ Test-Assert ($resultC2b.Status -eq 'HashMismatch' -and $resultC2b.Profile.Label 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario C3 (2026-09-03 fix, real bug caught by a same-session
-#  /code-review pass): dimensions/hash are properties of the FILE, not of
-#  any one profile - trying every matching profile (the C2 fix above)
+#  Scenario C3: dimensions/hash are properties of the FILE, not of
+#  any one profile - trying every matching profile (Scenario C2)
 #  must NOT mean re-reading dimensions and re-hashing the same file once
 #  per matching profile. Wraps the real Get-ImageDimensions/Get-FileHash
 #  with call-counting shadows (the same function-shadowing technique
@@ -279,9 +276,9 @@ $imgC3 = New-RealImage -Name "match-c3.png" -Width 50 -Height 30
 $realProfileC3 = New-ProfileFromRealFile -File $imgC3 -Width 50 -Height 30 -Label "Real Match"
 # 4 wrong-hash profiles sharing the exact same size+dimensions, THEN the
 # real match last - every one of the 4 reaches the hash compare and gets
-# a HashMismatch (the C2 fix's own "try every matching profile" behavior)
+# a HashMismatch (Scenario C2's "try every matching profile" behavior)
 # before the real Match is found, so this is exactly the worst case the
-# caching fix targets. (A test where the real match came FIRST would
+# caching targets. (A test where the real match came FIRST would
 # short-circuit and pass even without caching, proving nothing.)
 $profilesC3 = @(1..4 | ForEach-Object {
     $p = $realProfileC3.Clone()
@@ -356,16 +353,15 @@ Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*Hash mismatch*"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario D2 (2026-09-02 review fix, live-confirmed): a ".tif" file must
+#  Scenario D2: a ".tif" file must
 #  actually be scanned and matchable, not silently invisible to
-#  Invoke-UnwantedImageScan's own default -ImageExtensions. Before this
-#  fix, New-UnwantedImageProfileFromFile (the real "2 - Add Image" flow)
+#  Invoke-UnwantedImageScan's own default -ImageExtensions. If
+#  New-UnwantedImageProfileFromFile (the real "2 - Add Image" flow)
 #  applied no extension filter at all - System.Drawing.Image.FromFile
-#  reads both .tif and .tiff - so a user could add a profile from a real
+#  reads both .tif and .tiff - a user could add a profile from a real
 #  .tif cover, get the "will be caught on every future scan" green-light
 #  confirmation, and have it silently never match on any later scan. Not
-#  a data-loss risk (fails toward not deleting), but a real false promise
-#  this closes.
+#  a data-loss risk (fails toward not deleting), but a false promise.
 # ==============================================================================
 Write-Host "=== Scenario D2: a .tif file is actually scanned and matchable, not silently invisible ===" -ForegroundColor Cyan
 $rootD2 = Join-Path $scratchDir "scenario-d2"
@@ -391,10 +387,10 @@ $profileE = New-ProfileFromRealFile -File $imgE -Width 60 -Height 40
 
 $script:logCalls.Clear()
 $resultE = Invoke-UnwantedImageScan -Path $rootE -Profiles @($profileE) -DryRun $true
-# 2026-09-14 fix, real bug: a dry run used to increment the SAME
-# DeletedCount a real run uses, so the log-file summary line reported a
-# real-looking "N deleted" count for a run that deleted nothing. It now
-# has its own counter, and DeletedCount correctly stays 0.
+# A dry run must not increment the same
+# DeletedCount a real run uses, or the log-file summary line would report a
+# real-looking "N deleted" count for a run that deleted nothing. It has
+# its own counter, and DeletedCount stays 0.
 Test-Assert ($resultE.WouldDeleteCount -eq 1) "counted in its own WouldDeleteCount, not DeletedCount"
 Test-Assert ($resultE.DeletedCount -eq 0) "DeletedCount itself stays 0 - nothing was actually deleted"
 Test-Assert (Test-Path -LiteralPath $imgE.FullName) "but the file was NOT actually touched"
@@ -432,19 +428,18 @@ $script:removeSourceShouldThrow = $false
 
 Test-Assert (-not $threwG) "a delete failure does not crash the whole scan"
 Test-Assert ($resultG.DeleteFailedCount -eq 1 -and $resultG.DeletedCount -eq 0) "counted as a delete failure, not a success"
-# 2026-09-15/16 fix, real bug: the summary line only ever reported
-# DeletedCount/HashMismatchCount/ScannedCount - a real delete failure
-# was silently invisible in the one line most likely to be read.
+# The summary line must report delete failures too, not only
+# DeletedCount/HashMismatchCount/ScannedCount - otherwise a real delete failure
+# is invisible in the one line most likely to be read.
 Test-Assert (($script:logCalls | Where-Object { $_ -like "Summary:*delete failure*" }).Count -eq 1) "the scan-complete summary line now mentions the delete failure, not just the scanned/deleted counts"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario G2 (2026-09-03 fix, Todo.md finding): Remove-Source's return
-#  value used to be discarded (`$null = Remove-Source ...`) - it returns
+#  Scenario G2: Remove-Source's return value must be checked - it returns
 #  $false (not an exception) when the file already vanished before
 #  deletion (a real TOCTOU gap between the match check and the delete
-#  call), so a file that was never actually there got logged and counted
-#  as a successful delete anyway. Must now be counted/logged distinctly.
+#  call), so discarding it would log and count a file that was never
+#  actually there as a successful delete. It must be counted/logged distinctly.
 # ==============================================================================
 Write-Host "=== Scenario G2: a file that vanished before deletion is not miscounted as deleted ===" -ForegroundColor Cyan
 $rootG2 = Join-Path $scratchDir "scenario-g2"
@@ -532,10 +527,10 @@ $auditK2 = Invoke-TrailingZeroAudit -Path $rootK2 -ReportPath $reportPathK2
 Test-Assert ($auditK2.UniqueFileCount -eq 0 -and $null -eq $auditK2.ReportPath) "nothing found -> UniqueFileCount 0, ReportPath `$null"
 Test-Assert (-not (Test-Path -LiteralPath $reportPathK2)) "no report file was created when nothing was found"
 
-# 2026-09-04 fix, real bug, live-reproduced: -ReportPath's parent directory
-# didn't exist (a fresh install where nothing had created
-# %LOCALAPPDATA%\ConversionScript\ yet) - Set-Content threw
-# DirectoryNotFoundException instead of the directory being created first,
+# -ReportPath's parent directory may not exist
+# (a fresh install where nothing has created
+# %LOCALAPPDATA%\ConversionScript\ yet) - the directory must be created first
+# rather than Set-Content throwing DirectoryNotFoundException,
 # matching every other writer under that same app-data folder.
 $reportDirK3   = Join-Path $scratchDir "scenario-k3-no-parent-dir\nested"
 $reportPathK3  = Join-Path $reportDirK3 "trailing_zeros_report.txt"
@@ -578,11 +573,11 @@ Test-Assert (-not $threwM -and @($loadedM2).Count -eq 0) "a corrupt profiles fil
 Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*" }).Count -ge 1) "a Warn was logged for the corrupt file"
 Test-Assert (@(Get-ChildItem -LiteralPath (Split-Path $corruptPathM -Parent) -Filter "*.corrupt-*.bak").Count -eq 1) "the corrupt file was backed up, not silently discarded"
 
-# 2026-09-04 fix, real bug: this function's own docstring claimed the same
+# This function follows the same
 # resilience convention as Config.ps1's Import-ScriptSettings (backup AND
-# repair), but only backed up - the corrupt file sat at $ProfilesPath
-# forever, re-triggering the same Warn/backup on every future call. It must
-# now be repaired with a valid empty-array file, same as settings.json is
+# repair) - a corrupt file left at $ProfilesPath would re-trigger the same
+# Warn/backup on every future call. It must
+# be repaired with a valid empty-array file, same as settings.json is
 # repaired with defaults.
 Test-Assert ((Get-Content -LiteralPath $corruptPathM -Raw) -notlike "*not valid json*") "the corrupt file's content was actually replaced (repaired), not left in place"
 $script:logCalls.Clear()
@@ -591,16 +586,15 @@ $loadedM2b = Import-UnwantedImageProfiles -ProfilesPath $corruptPathM
 Test-Assert (@($loadedM2b).Count -eq 0) "the repaired file loads cleanly as an empty array on the next call"
 Test-Assert ((@(Get-ChildItem -LiteralPath (Split-Path $corruptPathM -Parent) -Filter "*.corrupt-*.bak").Count) -eq $bakCountBeforeM) "no NEW backup was dropped on the next call - the file is genuinely repaired, not still corrupt"
 
-# 2026-09-02 review fix, REVISED 2026-09-14: valid JSON (so the parse step
+# Valid JSON (so the parse step
 # above never catches it), but a non-numeric value in one of the
-# [int]/[int64]-cast fields - the per-field cast used to run outside the
-# try/catch entirely. Real trigger: a user hand-editing the plain-JSON
+# [int]/[int64]-cast fields. Real trigger: a user hand-editing the plain-JSON
 # profiles file and fat-fingering a dimension.
 #
-# 2026-09-14 fix: this used to share the parse failure's recovery contract
+# A bad entry must not share the parse failure's recovery contract
 # (Warn + .bak + empty array) - treating one bad entry exactly like the
-# whole file being corrupt JSON, which silently discarded every OTHER
-# profile too when there was more than one. Now a bad entry is skipped
+# whole file being corrupt JSON would silently discard every OTHER
+# profile too when there was more than one. Instead a bad entry is skipped
 # and warned about individually (matching Config.ps1's Import-ScriptSettings
 # per-key fallback) - the file itself is untouched, since it's not
 # actually corrupt.
@@ -616,9 +610,9 @@ Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*" }).Count -ge 
 Test-Assert (@(Get-ChildItem -LiteralPath (Split-Path $badFieldPathM -Parent) -Filter "*.corrupt-*.bak").Count -eq 0) "the file was NOT backed up/repaired - it's not corrupt, just one bad entry"
 Test-Assert ((Get-Content -LiteralPath $badFieldPathM -Raw) -like "*3OOO*") "the file itself was left untouched, not overwritten with an empty array"
 
-# 2026-09-14 fix, the actual bug this closes: a file with SEVERAL profiles
+# A file with SEVERAL profiles
 # where only ONE has a bad field must keep the good ones, not wipe the
-# whole file the way the old shared-try/catch behavior did.
+# whole file.
 $mixedPathM = Join-Path $scratchDir "profiles-m-mixed\unwanted-image-profiles.json"
 New-Item -ItemType Directory -Path (Split-Path $mixedPathM -Parent) -Force | Out-Null
 '[{"Label":"Good A","Width":10,"Height":20,"SizeBytes":100,"SizeTolerance":5,"Hash":"AAA"},{"Label":"Bad B","Width":"NOT_A_NUMBER","Height":20,"SizeBytes":100,"SizeTolerance":5,"Hash":"BBB"},{"Label":"Good C","Width":30,"Height":40,"SizeBytes":300,"SizeTolerance":5,"Hash":"CCC"}]' | Set-Content -LiteralPath $mixedPathM -Encoding UTF8
@@ -685,16 +679,16 @@ $threwP2 = $false
 try { New-UnwantedImageProfileFromFile -Path $nonImgP.FullName -Label "X" } catch { $threwP2 = $true }
 Test-Assert $threwP2 "throws for a file that can't be read as an image"
 
-# 2026-09-02 review fix: this function's own Get-FileHash call now passes
+# This function's own Get-FileHash call passes
 # -ErrorAction Stop, matching this file's other two Get-FileHash sites
-# (both fixed the same day) - makes the throw reliable regardless of the
+# - which makes the throw reliable regardless of the
 # ambient $ErrorActionPreference a caller might have, rather than
 # depending on inheriting the bootstrap's own 'Stop' setting. Proven here
 # by explicitly setting a non-Stop preference for this one call and
 # shadowing Get-FileHash with a non-terminating-error version (a real
 # file lock can't isolate the failure to just this call, since
 # Get-ImageDimensions needs read access too and would fail first - same
-# reasoning as the earlier Test-UnwantedImageMatch fix's own test).
+# reasoning as the earlier Test-UnwantedImageMatch test).
 $imgP3 = New-RealImage -Name "profile-source-p3.png" -Width 15 -Height 15
 function Get-FileHash {
     [CmdletBinding()]
@@ -749,7 +743,7 @@ Test-Assert ($addFromFileR.Added -eq $true) "the profile was built from the real
 Test-Assert ($addFromFileR.Profile.Width -eq 77 -and $addFromFileR.Profile.Height -eq 88) "the built profile reflects the real file's dimensions"
 
 # Simulate a LATER, separate run: a target image with the SAME real
-# content as the source used to build the profile shows up somewhere
+# content as the source the profile was built from shows up somewhere
 # else in the library. A fresh Get-AllUnwantedImageProfiles call (as
 # Invoke-UnwantedImageScan's own default -Profiles does) should now
 # match and delete it - with NO manual profile list update in between.
@@ -849,11 +843,11 @@ Test-Assert ((Import-UnwantedImageProfiles -ProfilesPath $profilesPathX).Count -
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Y (2026-09-03 fix, real bug, live-reported): every user-facing
+#  Scenario Y: every user-facing
 #  Invoke-UnwantedImageScan/Invoke-TrailingZeroAudit line passes
 #  -ForceConsole to Write-Log. Mode 5/Cover Deletion has no CCR live-
 #  progress display of its own to replace suppressed console lines with,
-#  so before this fix it silently reported nothing to the console at all
+#  so without -ForceConsole it would silently report nothing to the console at all
 #  with Clean Console Output on, while still working and file-logging
 #  normally - see Logging.ps1's Write-Log .PARAMETER doc for the full
 #  reasoning. This harness's own Write-Log stub can't verify the CCO gate
@@ -891,11 +885,10 @@ Test-Assert (-not ($script:logCallsForceConsole -contains $false)) ("every Invok
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Z (2026-09-10, Cover Deletion redundant-walk fix - Todo.md
-#  finding): Invoke-UnwantedImageScan's own AllScannedFiles output, and
+#  Scenario Z: Invoke-UnwantedImageScan's own AllScannedFiles output, and
 #  Get-TrailingZeroGroups/Invoke-TrailingZeroAudit's -PreScannedFiles
 #  input - the two halves of Show-CoverDeletionMenu's own "walk once,
-#  reuse for both steps" fix. See CHANGELOG.md's matching entry.
+#  reuse for both steps" behavior.
 # ==============================================================================
 Write-Host "=== Scenario Z: AllScannedFiles output and -PreScannedFiles input ===" -ForegroundColor Cyan
 $rootZ = Join-Path $scratchDir "scenario-z"
@@ -937,8 +930,8 @@ Test-Assert ($auditResultZ2.UniqueFileCount -eq 1 -and (Test-Path -LiteralPath $
 Write-Host ""
 
 # ==============================================================================
-#  Scenario AA (2026-09-15 fix, real bug): the scan loop now polls the abort
-#  signal per file, instead of never checking it at all. 4 real matching
+#  Scenario AA: the scan loop polls the abort
+#  signal per file. 4 real matching
 #  files, abort signalled to fire before the 3rd Test-AbortSignal call
 #  (i.e. right after file 2 finishes) - the scan must stop there, not walk
 #  all 4.
@@ -965,10 +958,10 @@ Test-Assert ($scanResultAA.ScannedCount -lt 4) ("the scan stopped before reachin
 Write-Host ""
 
 # ==============================================================================
-#  Scenario AB (2026-09-15/16 fix, real bug): Get-TrailingZeroGroups used
-#  to ignore -ExcludePaths entirely whenever -PreScannedFiles was also
-#  supplied - it took the pre-scanned list as-is with no filtering at
-#  all, unlike the Get-ScannableFiles path taken when no pre-scanned list
+#  Scenario AB: Get-TrailingZeroGroups must not
+#  ignore -ExcludePaths when -PreScannedFiles is also
+#  supplied - taking the pre-scanned list as-is with no filtering at
+#  all would differ from the Get-ScannableFiles path taken when no pre-scanned list
 #  is given.
 # ==============================================================================
 Write-Host "=== Scenario AB: -ExcludePaths still filters an explicit -PreScannedFiles list ===" -ForegroundColor Cyan
@@ -982,12 +975,12 @@ Test-Assert ($groupsResultAB.Groups.Count -eq 0) "the pre-scanned file was exclu
 Write-Host ""
 
 # ==============================================================================
-#  Scenario AC (2026-09-15/16 fix, real bug): Add-UnwantedImageProfile's
+#  Scenario AC: Add-UnwantedImageProfile's
 #  own Export-UnwantedImageProfiles write can throw (locked file, no
-#  permission, disk full) - Show-AddUnwantedImageProfileFlow didn't catch
+#  permission, disk full) - Show-AddUnwantedImageProfileFlow must catch
 #  it, so a write failure at the very last step of an otherwise-successful
-#  interactive flow crashed out instead of reporting cleanly like the
-#  earlier file-read-error path already does.
+#  interactive flow reports cleanly like the
+#  earlier file-read-error path does, instead of crashing out.
 # ==============================================================================
 Write-Host "=== Scenario AC: a profile-write failure is caught, not left to crash the flow ===" -ForegroundColor Cyan
 $imgAC = New-RealImage -Name "flow-source-ac.png" -Width 18 -Height 28
@@ -1005,15 +998,14 @@ Test-Assert ($null -ne $flowResultAC -and $flowResultAC.Added -eq $false -and $f
 Write-Host ""
 
 # ==============================================================================
-#  Scenario AD (2026-09-16 fix, real bug, latent/unreachable by any real
-#  caller today but cheap to close): PS 5.1 binds an explicit
+#  Scenario AD: PS 5.1 binds an explicit
 #  -ExcludePaths $null to the [string[]]$ExcludePaths parameter as a real
 #  $null, not an empty array - passing that straight into
 #  HashSet<string>'s own (IEnumerable, comparer) constructor throws
-#  ArgumentNullException ("Value cannot be null. (Parameter 'collection')"),
-#  confirmed live. Both Get-ScannableFiles and Get-TrailingZeroGroups
+#  ArgumentNullException ("Value cannot be null. (Parameter 'collection')").
+#  Both Get-ScannableFiles and Get-TrailingZeroGroups
 #  (the -PreScannedFiles branch) build their exclude set via foreach +
-#  Add now instead, which tolerates a $null collection (foreach over
+#  Add instead, which tolerates a $null collection (foreach over
 #  $null just doesn't iterate).
 # ==============================================================================
 Write-Host "=== Scenario AD: -ExcludePaths `$null does not throw ===" -ForegroundColor Cyan

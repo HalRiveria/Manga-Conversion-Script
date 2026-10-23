@@ -17,9 +17,8 @@ public static class ConsoleCtrl
     public static volatile bool AbortRequested = false;
     public static volatile bool IsCloseEvent   = false;   // true = X button, false = Ctrl+C
 
-    // Whether a real pipeline run is currently dispatched - see
-    // Docs/function-notes.md's AbortPipeline.ps1 section for the full
-    // RunActive reasoning.
+    // Whether a real pipeline run is currently dispatched. The handler only
+    // waits for a drain when this is true; otherwise nothing could complete one.
     public static volatile bool RunActive = false;
 
     // The handler signals this when abort is requested; the main thread calls
@@ -28,20 +27,19 @@ public static class ConsoleCtrl
 
     private static HandlerRoutine _handler;   // keep a strong ref so the GC can't collect it
 
-    // Whether the most recent Register() call actually succeeded
-    // (2026-09-15 fix) - SetConsoleCtrlHandler's own BOOL return was
-    // previously discarded entirely, so a failed registration left the
-    // whole abort system silently inert with no way for the caller to
-    // even find out.
+    // Whether the most recent Register() call actually succeeded -
+    // SetConsoleCtrlHandler's own BOOL return is recorded here, since a failed
+    // registration would otherwise leave the whole abort system silently
+    // inert with no way for the caller to find out.
     public static bool LastRegisterSucceeded = false;
 
     public static void Register()
     {
         // Unregister the previous handler first if Register() has already
-        // been called once in this process (2026-09-15 fix, real bug) -
+        // been called once in this process -
         // SetConsoleCtrlHandler is additive; calling Register() a second
         // time in the same console session (e.g. a manual smoke test run
-        // twice without restarting the shell) left the FIRST delegate
+        // twice without restarting the shell) would leave the FIRST delegate
         // still registered with the OS on top of the new one, unrooted
         // and eligible for GC once _handler is reassigned below. A
         // Ctrl+C reaching that orphaned delegate after it's been
@@ -59,10 +57,10 @@ public static class ConsoleCtrl
     private static bool Handler(uint ctrlType)
     {
         // ctrlType: 0=CTRL_C, 1=CTRL_BREAK, 2=CTRL_CLOSE, 5=CTRL_LOGOFF, 6=CTRL_SHUTDOWN
-        // !RunActive now exempts EVERY ctrl type, not just Ctrl+C/Break
-        // (2026-09-15 fix, real bug) - closing the window (or logging
+        // !RunActive exempts EVERY ctrl type, not just Ctrl+C/Break -
+        // closing the window (or logging
         // off/shutting down) while sitting at the menu, with nothing
-        // actually running, used to still set AbortRequested and park
+        // actually running, would otherwise set AbortRequested and park
         // here for the full 65s wait for a drain that will never
         // complete (nothing is dispatched to complete it) - a ~5s hang
         // before Windows force-kills the process, every time.
@@ -72,15 +70,14 @@ public static class ConsoleCtrl
         }
         if (ctrlType == 0 || ctrlType == 1 || ctrlType == 2 || ctrlType == 5 || ctrlType == 6)
         {
-            // IsCloseEvent set BEFORE AbortRequested (2026-09-15 fix, real
-            // bug) - Test-AbortSignal (PowerShell side) reads
+            // IsCloseEvent set BEFORE AbortRequested - Test-AbortSignal (PowerShell side) reads
             // AbortRequested first as its own "is this a NEW abort" latch,
             // then reads IsCloseEvent to decide which message to print. A
-            // poll landing in the gap between the two writes under the
-            // OLD order would see AbortRequested=true while IsCloseEvent
+            // poll landing in the gap between the two writes, if the order
+            // were reversed, would see AbortRequested=true while IsCloseEvent
             // was still stale, permanently mislabeling a window close as
             // Ctrl+C for the rest of the run (Test-AbortSignal's own latch
-            // means it only reads these two fields once). Reordering
+            // means it only reads these two fields once). This order
             // closes the race - by the time AbortRequested is visibly
             // true, IsCloseEvent already reflects this event correctly.
             IsCloseEvent   = (ctrlType == 2 || ctrlType == 5 || ctrlType == 6);
@@ -94,8 +91,6 @@ public static class ConsoleCtrl
 '@ -Language CSharp
 }
 
-# See Docs/function-notes.md's AbortPipeline.ps1 section for the full
-# QuickEdit-mode reasoning.
 if (-not ([System.Management.Automation.PSTypeName]'ConsoleQuickEdit').Type) {
     Add-Type -TypeDefinition @'
 using System;
@@ -140,7 +135,6 @@ public static class ConsoleQuickEdit
 '@ -Language CSharp
 }
 
-# See Docs/function-notes.md's AbortPipeline.ps1 section (Set-SystemSleepBlocked).
 if (-not ([System.Management.Automation.PSTypeName]'SystemSleepBlock').Type) {
     Add-Type -TypeDefinition @'
 using System;
@@ -167,7 +161,6 @@ if (-not ([System.Management.Automation.PSTypeName]'ChildProcessJob').Type) {
 using System;
 using System.Runtime.InteropServices;
 
-// See Docs/function-notes.md's AbortPipeline.ps1 section (Initialize-ChildProcessJob).
 public static class ChildProcessJob
 {
     private const int JobObjectExtendedLimitInformation = 9;
@@ -281,10 +274,9 @@ $script:abortCancellationSources = [System.Collections.Generic.List[System.Threa
 
 function Register-AbortHandler {
     [ConsoleCtrl]::Register()
-    # 2026-09-15 fix, real bug - SetConsoleCtrlHandler's own BOOL return
-    # was previously discarded entirely inside Register(), so a failed
-    # registration left the whole abort system silently inert with no
-    # way for anything to even find out. Warn loudly rather than stay
+    # SetConsoleCtrlHandler's own BOOL return is recorded by Register(),
+    # since a failed registration would leave the whole abort system
+    # silently inert with no way for anything to find out. Warn loudly rather than stay
     # quiet - a failure here is rare (a process out of handle slots, or
     # already at the OS's per-process handler limit) but means Ctrl+C
     # won't drain gracefully at all for the rest of this run.
@@ -458,14 +450,13 @@ function Invoke-GracefulDrain {
     $forceStoppedCount = 0
 
     try {
-        # Moved inside the try (2026-09-15 fix, real bug) - this call used
-        # to sit BEFORE the try/finally below that guarantees
-        # Complete-AbortDrain runs. If it threw (Docs/function-notes.md
-        # already documents Flush-ConsoleQueue-on-a-bad-queue and
-        # Write-GatedConsoleMessage-not-resolving as exactly the failure
-        # modes that try/finally exists to protect against), Complete-AbortDrain
-        # never ran, DrainComplete never got Set(), and the native Ctrl+C
-        # handler thread stayed parked in its own 65s wait for a drain
+        # Inside the try so the try/finally below guarantees
+        # Complete-AbortDrain runs. If this call threw (Flush-ConsoleQueue
+        # on a bad queue, or Write-GatedConsoleMessage not resolving, are
+        # exactly the failure modes that try/finally protects against)
+        # outside it, Complete-AbortDrain
+        # would never run, DrainComplete would never get Set(), and the native Ctrl+C
+        # handler thread would stay parked in its own 65s wait for a drain
         # that already effectively failed.
         if ($AbortWaitMessage -ne "") {
             Write-GatedConsoleMessage -Text $AbortWaitMessage -Color Yellow -CleanConsoleOutputEnabled ([bool]$script:CleanConsoleOutputEnabled)
@@ -488,7 +479,7 @@ function Invoke-GracefulDrain {
             Write-GatedConsoleMessage -Text $forceStopMessage -Color Red -CleanConsoleOutputEnabled ([bool]$script:CleanConsoleOutputEnabled)
             foreach ($h in $localHandles) {
                 # BeginStop, not Stop, and no Dispose: both block until the
-                # worker's current .NET call returns. See Docs/function-notes.md.
+                # worker's current .NET call returns.
                 try { $null = $h.PS.BeginStop($null, $null) } catch { }
             }
         }
