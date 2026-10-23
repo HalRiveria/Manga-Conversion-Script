@@ -1,155 +1,192 @@
 # Manga Conversion Toolkit
 
-Personal automation for maintaining a large manga/comic library: extracting
-ZIPs, converting images to JPEG XL (`.jxl`), re-zipping, handling loose
-files, and converting animated AVIF to WebP. Built and iterated on with
-Claude as a development/debugging partner.
+A Windows PowerShell tool for keeping a large manga/comic library small and
+tidy. It converts loose chapter images to [JPEG XL](https://jpegxl.info/)
+(`.jxl`), converts animated AVIF files to animated WebP, zips each finished
+chapter folder, and can sweep out known unwanted images (scanlator credit
+pages and the like) before it starts.
 
-**Status: the rewrite is done and live.** `Conversion Script Main.ps1` is
-the real, actively-edited script - no longer frozen. It bootstraps (finds
-`Modules\`, loads settings, resolves `cjxl`/`magick`) and hands off to
-`Controller.ps1`'s `Invoke-MainLoop`. All 18 modules are built, tested, and
-wired in (21/21 harnesses - see `.\Tools\Run-Harness.ps1 -All` for the
-current assertion count, it drifts as coverage grows). The old monolithic
-script moved to `Modules\_Reference\Conversion Script Main - Old.ps1`, kept
-frozen as a reference copy. See `CLAUDE.md` for full working context if
-you're picking this up in a new session (human or Claude Code), `Todo.md`
-for the live tracker, and `CHANGELOG.md` for full version history.
+It works on a library laid out as folders: `Library\Series\Chapter\images`.
+Everything runs from one interactive menu.
 
-## What's in this repo
+## Features
 
-| File | What it does |
+- **Full Pipeline:** one pass over the whole library. Each chapter's images
+  are converted to JPEG XL and its animated AVIFs to WebP, then the chapter
+  is zipped and the folder removed. A chapter is only zipped if every file in
+  it converted cleanly. Anything that failed, or needs a decision from you,
+  is left untouched for the next run.
+- **Individual steps:** Image Conversion, Animated Conversion and Zip
+  Folders can each run on their own.
+- **Cover Deletion:** finds and deletes images you've taught it to recognise
+  (by size, dimensions and file hash), with a dry-run mode and a report of
+  suspicious "trailing-zero" file names.
+- **Parallel:** converts many files at once, with configurable process
+  counts. Image and animated conversion run side by side in Full Pipeline,
+  sharing one process limit.
+- **Safe to stop:** Ctrl+C or closing the window lets the files already in
+  progress finish, cleans up anything half-written, and stops. Converter
+  processes never outlive the script, even if the window is force-closed.
+- **Careful with your files:** originals go to the Recycle Bin by default
+  (permanent delete is an option), the tool refuses to start on a drive
+  with no Recycle Bin unless you've turned permanent delete on, and every
+  zip is verified before its folder is deleted.
+- **Clean Console Output:** an optional live progress view per series,
+  instead of a line per file. The log files still get every detail.
+- **Settings remembered** between runs, editable from an options menu.
+- **Keeps the PC awake** while a run is going (idle sleep only), and lets it
+  sleep normally at the menu.
+
+### File formats
+
+| Input | Becomes |
 |---|---|
-| `Conversion Script Main.ps1` | The live script - bootstrap (module discovery, settings, dependency resolution) plus one call into `Controller.ps1`'s `Invoke-MainLoop`. Interactive mode menu: Full Pipeline, Image Conversion, Animated Conversion, Zip Folders, Cover Deletion, Image Conversion + Zip. |
-
-`Modules\` holds all 18 standalone modules - each a self-contained `.ps1`
-(pure function definitions, no top-level side effects) with its own test
-harness in `Modules\_Harness\`. Full detail on every module - real design
-decisions made, bugs found and fixed, forward references - lives in
-`CLAUDE.md`; this table is a quick map, not the full story:
-
-| File | What it does |
-|---|---|
-| `Modules\Logging.ps1` | `Write-Log`, `Write-SummaryLog`, `Flush-ConsoleQueue`, `Initialize-LogPaths`/`Initialize-LogMutex`/`Initialize-CleanConsoleOutput`/`Start-LogRun`/`Complete-LogRun`. Nearly every other module forward-references this one. |
-| `Modules\FileDeletion.ps1` | `Move-ToRecycleBin`, `Remove-ItemPermanently`, `Remove-Source` (the wrapper every mode calls, routing on `Initialize-FileDeletion -PermanentDelete`). |
-| `Modules\AbortPipeline.ps1` | The Ctrl+C/window-close abort pipeline - `ConsoleCtrl`, a CTS registry, `Invoke-GracefulDrain` (graceful-drain/force-stop), `Invoke-AbortOrFatalHandler`. |
-| `Modules\DependencyDetection.ps1` | `Find-Exe` (generalized cjxl/magick locator) and `Find-ExeCached` (checks a cached path in a settings hashtable before searching again). |
-| `Modules\ZipCreation.ps1` | `Compress-FolderToZip` - creates a ZIP from a folder, clearing any pre-existing same-name ZIP first. |
-| `Modules\ZipValidation.ps1` | `Test-ZipArchive` - post-creation sanity check (entry count, optional required `.jxl` presence). |
-| `Modules\LeafDirectoryDiscovery.ps1` | `Get-ZippableLeafDirs`/`New-ZippableLeafDirProvider` (incremental leaf-folder scan) plus `New-SeriesProvider`/`Get-SeriesChapters` (two-tier series/chapter discovery for Clean Console Output). |
-| `Modules\ZipParallelProcessing.ps1` | `Invoke-ZipParallelProcessing` - the shared runspace-pool dispatcher used by `ZipPipeline.ps1` and `Controller.ps1`. |
-| `Modules\CleanConsoleRendering.ps1` | The Clean Console Output renderer - live per-series/chapter progress display replacing per-file console spam (log files unaffected). |
-| `Modules\ZipPipeline.ps1` | `Invoke-ZipOnlyPipeline` (mode "Zip Folders") - zip-domain orchestration. |
-| `Modules\ImageConversionPipeline.ps1` | `Invoke-LooseImageConversionPipeline` (mode "Image Conversion" end to end, Clean Console Output-integrated). |
-| `Modules\Config.ps1` | Settings schema + `Import-/Export-ScriptSettings` at `%LOCALAPPDATA%\ConversionScript\settings.json`, with per-key validation and corrupt-file recovery. |
-| `Modules\Menu.ps1` | `Get-SelectedMode`/`Show-ModeMenu` (mode-selection prompt, including the Cover Deletion submenu) and `Show-OptionsMenuLevel` (data-driven options-menu renderer). |
-| `Modules\Summary.ps1` | The clean-run summary report - `New-StatsTracker`, `Format-ElapsedTime`, `Get-SummaryLines`/`Write-SummaryReport`. |
-| `Modules\ChapterDispatch.ps1` | `Invoke-ChapterDispatch` - the generalized process-dispatch/abort/drain primitive all three real conversion entry points (modes 1, 2, 3) now run on, letting idle concurrency pick up the next chapter's work instead of blocking. |
-| `Modules\AnimatedConversionPipeline.ps1` | `Invoke-LooseAnimatedConversionPipeline` (AVIF→WebP conversion, mode "Animated Conversion" end to end). |
-| `Modules\UnwantedImage.ps1` | Detects/deletes known unwanted images by size+dimensions+hash match, a trailing-zero-filename audit, and profile persistence (`Add-UnwantedImageProfileFromFile`). |
-| `Modules\Controller.ps1` | Full Pipeline's two-engine dispatch (image + animated conversion each running their own chapter walk concurrently, sharing one process budget, zips only when both succeed) plus the real top-level dispatcher (`Invoke-Mode`/`Invoke-MainLoop`). |
-| `Modules\_Harness\*.Harness.ps1` | Standalone test harness per module - dot-sources the real module from `..\`. |
-| `Modules\_Reference\*.reference.ps1` | The extraction each module was built FROM - historical build input, not pending work (14 of 18 modules have one; `ZipParallelProcessing`, `CleanConsoleRendering`, `Controller.ps1`, and `ChapterDispatch.ps1` legitimately don't). |
-
-Earlier working scripts, including the standalone `Zip_Files-claude-parallel.ps1`
-that the staleness-check and former-container-guard logic were ported from,
-live in `Backups\Old Scripts\` - kept for reference, not tracked in git (see
-folder layout below).
+| `.jpg`, `.jpeg` | `.jxl` (quality 90 by default, or lossless JPEG recompression) |
+| `.png`, `.webp`, `.bmp`, `.heic`, `.heif`, static `.avif` | `.jxl` (quality 90) |
+| animated `.avif` | animated `.webp` |
+| animated `.webp`, `.gif` | left as they are |
 
 ## Requirements
 
-- Windows PowerShell 5.1 (all scripts are written for 5.1 compatibility, not PowerShell 7+ only features)
-- [cjxl](https://github.com/libjxl/libjxl) (JPEG XL encoder)
-- [ImageMagick](https://imagemagick.org/) (for WebP/ICC-profile pre-processing and animated AVIF handling)
+- Windows with **Windows PowerShell 5.1** (built into Windows 10 and 11).
+  PowerShell 7 isn't supported.
+- **cjxl**, the JPEG XL encoder from [libjxl](https://github.com/libjxl/libjxl/releases).
+- **ImageMagick 7** ([download](https://imagemagick.org/script/download.php#windows)).
+  Needed for Full Pipeline and Animated Conversion, and for any non-JPEG/PNG
+  input.
 
-**Thread count vs. RAM (animated conversion):** the animated-AVIF-to-WebP
-step (`magick ... -coalesce`) decodes every frame of the source
-animation into memory to reassemble it - a real, large multi-frame AVIF
-can need a lot of RAM per file, and that scales with how many run
-concurrently. Live-measured on this project's own real animated test
-library: 12 concurrent animated conversions pushed system RAM usage from
-a ~20GB baseline up to ~60GB, transiently, for the duration of the run -
-not a leak, it releases back down the moment each conversion finishes.
-Worth keeping in mind when raising the animated-conversion thread count
-setting on a machine with less RAM to spare, or when the library being
-converted skews toward large/long animated files.
+## Install
 
-## Folder layout (local, not all tracked)
+1. Install the two tools. The quickest way is winget, from any terminal:
 
-```
-Conversion Script/
-├── .git/
-├── .gitignore
-├── README.md
-├── CLAUDE.md              <- persistent context for Claude Code sessions
-├── CHANGELOG.md           <- full version history (v1.0 → v16.1, plus the rewrite's own build history)
-├── Todo.md                <- live tracker: open items, not-yet-built ideas
-├── Docs/                  <- extracted reference material (lessons learned, repo guard, backups, module loading, Clean Console Output, menu/full-pipeline design)
-├── Conversion Script Main.ps1   <- the live script: bootstrap + Invoke-MainLoop
-├── Modules/               <- all 18 built modules live here
-│   ├── Logging.ps1
-│   ├── FileDeletion.ps1
-│   ├── AbortPipeline.ps1
-│   ├── DependencyDetection.ps1
-│   ├── ZipCreation.ps1
-│   ├── ZipValidation.ps1
-│   ├── LeafDirectoryDiscovery.ps1
-│   ├── ZipParallelProcessing.ps1
-│   ├── CleanConsoleRendering.ps1
-│   ├── ZipPipeline.ps1
-│   ├── ImageConversionPipeline.ps1
-│   ├── Config.ps1
-│   ├── Menu.ps1
-│   ├── Summary.ps1
-│   ├── ChapterDispatch.ps1
-│   ├── AnimatedConversionPipeline.ps1
-│   ├── UnwantedImage.ps1
-│   ├── Controller.ps1
-│   ├── _Harness/          <- test harness per module, plus GuardRules/Lint/MainLoopIntegration
-│   └── _Reference/        <- extraction each module was built from, plus the frozen old monolithic script
-├── Tools/
-│   └── Run-Harness.ps1    <- runs one or all harnesses, compresses output to
-│                              PASS/FAIL summaries instead of every assertion line
-├── Testing/               <- scratch copy scripts run against (gitignored)
-└── Backups/               <- original test media, never touched by scripts (gitignored)
-    └── Old Scripts/       <- earlier working versions, kept for reference
+   ```powershell
+   winget install libjxl.libjxl
+   winget install ImageMagick.ImageMagick
+   ```
+
+   Or use the installers linked above. For libjxl, unzip a Windows release
+   somewhere such as `C:\Program Files\libjxl\`.
+2. Open a new terminal so the tools are on your `PATH`.
+3. Download or clone this repository. Keep `Conversion Script Main.ps1` and
+   the `Modules` folder together.
+4. If Windows blocks the script because it was downloaded, right-click
+   `Conversion Script Main.ps1` → Properties → tick **Unblock**, or run
+   `Unblock-File` on the folder's `.ps1` files.
+
+The script looks for `cjxl` and `magick` on your `PATH` and in the usual
+install folders. If it can't find one, pass the path once with `-CjxlPath` or
+`-MagickPath`. It remembers the location after that.
+
+## Usage
+
+Run it from PowerShell, pointing it at your library folder:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ".\Conversion Script Main.ps1" -Path "D:\Manga"
 ```
 
-`Backups/` holds source images/AVIFs kept safe from any script - copied into
-`Testing/` before a run - plus `Old Scripts/`, earlier working script
-versions kept for reference. Nothing under `Backups/` or `Testing/` is
-tracked in git: the former is binary test media and superseded code, not
-current source; the latter is regenerated scratch content.
+Without `-Path`, it works on the current folder.
 
-## Development approach
+### Library layout
 
-New functionality is built as an independent module first (its own file,
-its own test harness, living in `Modules\`), verified working in isolation,
-and only merged into the main script once proven. That's how all 18
-current modules were built, and it's still the process for anything new.
+```
+D:\Manga\
+├── Series A\
+│   ├── Chapter 001\   <- images
+│   ├── Chapter 002\
+│   └── Chapter 003.zip   (already done - skipped)
+└── Some Category\     <- optional grouping folders are fine
+    └── Series B\
+        └── Chapter 01\
+```
 
-Testing is manual: `.\Tools\Run-Harness.ps1 -All` runs every harness and
-compresses output to PASS/FAIL summaries (full output still shown on
-failure); there's no CI runner configured against this local-only repo.
+Each folder of images is treated as one chapter and becomes one `.zip` next
+to it.
 
-## Known open items
+### The menu
 
-See `CLAUDE.md`'s "Known gaps / open work" section for the current,
-maintained list of real open items (a couple of cosmetic-only display
-limitations, a design point deliberately left as-is, and similar) - not
-duplicated here since it changes often enough that a second copy would go
-stale.
+```
+1 - Full Pipeline         convert images and animated files, then zip
+2 - Image Conversion      convert loose images only; no zipping
+3 - Animated Conversion   convert animated AVIFs only; no zipping
+4 - Zip Folders           zip folders that are already converted
+5 - Cover Deletion        scan for and remove known unwanted images
+0 - Options               change settings (saved for future runs)
+```
 
-## Language
+After each run you get a summary. Press any key to go back to the menu, or
+Esc to exit.
 
-PowerShell (5.1-compatible), settled - not switching to Python. Real
-version history now comes from git itself, which was the strongest
-argument for Python; staying in PowerShell keeps the zero-install-friction
-Windows-native tooling (Recycle Bin integration via
-`Microsoft.VisualBasic.FileIO`, `SetConsoleCtrlHandler` for robust
-Ctrl+C/window-close handling) that a Python rewrite would have had to
-reproduce.
+### Options worth knowing
 
-## License / scope
+- **Permanent Delete:** off by default, so originals go to the Recycle Bin.
+  Turn it on only if you're sure, or if the library is on a drive without a
+  Recycle Bin (network shares, most removable drives).
+- **Process counts:** how many converters run at once. Animated conversion
+  can use a lot of memory per file (a long animated AVIF is decoded frame
+  by frame), so raise that one carefully on a machine with limited RAM.
+- **JPEG quality / lossless:** JPEGs are converted at quality 90 by
+  default. The lossless toggle recompresses them with no quality loss
+  instead, at a larger size.
+- **Full Pipeline → Animated Conversion:** turn off to leave animated AVIFs
+  as they are, and still zip their chapters.
+- **Full Pipeline → Run Cover Deletion Before Conversion:** runs a Cover
+  Deletion scan first.
+- **Clean Console Output, Full Logging:** how much you see on screen and in
+  the logs.
 
-Personal-use tooling, not published or intended for general distribution.
+### Cover Deletion
+
+Cover Deletion only removes images it has been taught. Use **Add Image** in
+its menu and point it at an example of an image you never want (a credits
+page, say). It saves that image's size, dimensions and hash as a profile,
+and future scans delete exact matches. **Dry Run** reports what would be
+deleted without deleting anything.
+
+### When a chapter isn't zipped
+
+Full Pipeline leaves a chapter folder as it is, and says why in the summary
+and log, when:
+
+- a file failed to convert,
+- a file name clashes with an existing `.jxl` that wasn't made from it,
+- an AVIF couldn't be inspected, or
+- the folder holds both an `.avif` and the `.webp` made from it (when
+  "Delete Original" is off for animated files).
+
+Fix the cause and run it again. Finished chapters are skipped.
+
+### Where things are kept
+
+| What | Where |
+|---|---|
+| Settings | `%LOCALAPPDATA%\ConversionScript\settings.json` |
+| Cover Deletion profiles | `%LOCALAPPDATA%\ConversionScript\unwanted-image-profiles.json` |
+| Logs | next to `Conversion Script Main.ps1` (`Conversion Log - ….log`) |
+
+## Testing
+
+Each module has its own test suite in `Modules\_Harness\`, using real
+`cjxl`/`magick` stand-ins built on the fly. Run them all with:
+
+```powershell
+.\Tools\Run-Harness.ps1 -All
+```
+
+## For contributors
+
+- `Conversion Script Main.ps1` only bootstraps: it finds `Modules\`, loads
+  settings, locates `cjxl`/`magick`, and hands over to `Controller.ps1`.
+- `Modules\` holds the 18 modules, one per job (logging, deletion, zip
+  creation, the conversion pipelines, the menu, and so on), each with a test
+  harness.
+- `Docs\` has the design notes and per-function documentation, including
+  [`Docs/lessons-learned.md`](Docs/lessons-learned.md), a list of the
+  PowerShell traps this code has hit and how they're avoided.
+- `CHANGELOG.md` is the full history. `Todo.md` lists open items.
+- This project was developed with Claude Code as a pair programmer.
+  `CLAUDE.md` is the working context those sessions use.
+
+## License
+
+No license has been chosen yet.
