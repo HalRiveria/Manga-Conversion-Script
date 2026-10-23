@@ -104,10 +104,9 @@ function Invoke-ZipParallelProcessing {
                         # engines, one job = one whole engine) can react to
                         # losing that worker entirely - -ResultHandler is
                         # NEVER called for a job that lands here, since there
-                        # is no result (2026-09-15 finding: a caller with no
-                        # -JobCrashedHandler previously had no way to learn a
-                        # worker died mid-run at all, not even via logging it
-                        # noticed anything was wrong).
+                        # is no result (a caller with no
+                        # -JobCrashedHandler has no way to learn a
+                        # worker died mid-run).
                         if ($null -ne $JobCrashedHandler) { try { $null = & $JobCrashedHandler $_ } catch { } }
                     } finally {
                         $h.PS.Dispose()
@@ -134,8 +133,7 @@ function Invoke-ZipParallelProcessing {
         if ($null -ne $PollCallback) { $null = & $PollCallback }
     } finally {
         # A worker stuck inside a .NET call can't be stopped, and Stop()/
-        # Dispose()/Close() would all sit and wait for it. See
-        # Docs/function-notes.md for what an abandoned worker can still do.
+        # Dispose()/Close() would all sit and wait for it, so an abandoned worker may keep running.
         $stillRunning = $false
         foreach ($h in $localHandles) {
             try {
@@ -148,7 +146,7 @@ function Invoke-ZipParallelProcessing {
             if ($stillRunning) { try { $null = $localPool.BeginClose($null, $null) } catch { } }
             else               { try { $localPool.Close() } catch { }; try { $localPool.Dispose() } catch { } }
         }
-        # Best-effort drain on a failing path (see Docs/function-notes.md); the original exception is the one to surface.
+        # Best-effort drain on a failing path; the original exception is the one to surface.
         if ($null -ne $localConsoleQueue) { try { Flush-ConsoleQueue -Queue $localConsoleQueue } catch { } }
         $script:logMutex = $previousLogMutex
         if ($null -ne $localLogMutex) { try { $localLogMutex.Dispose() } catch { } }

@@ -233,7 +233,7 @@ Test-Assert ($schemaI[0].Items[0].SettingsKey -eq 'FullPipelineMaxConcurrentProc
 Test-Assert ($schemaI[0].Items[1].SettingsKey -eq 'RunCoverDeletionBeforeConversion') "Full Pipeline Settings item 2 is the Run Cover Deletion Before Conversion placeholder"
 Test-Assert ($schemaI[1].Type -eq 'Submenu' -and $schemaI[1].Items.Count -eq 3) "Image Conversion Settings is a 3-item submenu"
 Test-Assert ($schemaI[2].Type -eq 'Submenu' -and $schemaI[2].Items.Count -eq 5) "Animated Conversion Settings is a 5-item submenu"
-Test-Assert ($schemaI[3].Type -eq 'Submenu' -and $schemaI[3].Items.Count -eq 1) "Zip Settings is a 1-item submenu (Zip with Unconverted Animated Files retired with Mode 8)"
+Test-Assert ($schemaI[3].Type -eq 'Submenu' -and $schemaI[3].Items.Count -eq 1) "Zip Settings is a 1-item submenu"
 Test-Assert ($schemaI[4].Type -eq 'Submenu' -and $schemaI[4].Items.Count -eq 3) "Logging is a 3-item submenu"
 Test-Assert ($schemaI[4].Items[1].Label -eq 'Disable Summary File' -and $schemaI[4].Items[1].SettingsKey -eq 'DisableSummaryFile') "Logging item 2's label matches its own settings key's sense"
 Test-Assert ($schemaI[5].Type -eq 'Bool' -and $schemaI[5].SettingsKey -eq 'PermanentDelete') "item 6 is the direct Permanent Delete Bool toggle"

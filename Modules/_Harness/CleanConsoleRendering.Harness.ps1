@@ -7,8 +7,7 @@
     (CCR is fully standalone, like DependencyDetection.ps1).
 
     WHAT THIS HARNESS CAN AND CANNOT VERIFY: this execution environment
-    has no real attached console - confirmed live that
-    [Console]::CursorTop/SetCursorPosition throws
+    has no real attached console - [Console]::CursorTop/SetCursorPosition throws
     System.IO.IOException ("The handle is invalid") here. That means:
       - Test-CleanConsoleCursorAvailable is verified to correctly detect
         this and return $false, and every scenario below therefore
@@ -28,8 +27,7 @@
         visually - that is explicitly not something this harness claims
         to cover.
     Write-Host output is captured via the Information stream (6>&1,
-    available since PS5) for content assertions - verified live that this
-    works before relying on it. Also verified live that a captured
+    available since PS5) for content assertions. A captured
     InformationRecord's .MessageData carries the actual -ForegroundColor
     value used (a real System.Management.Automation.HostInformationMessage
     object, not just the text) - used in Scenario K to prove color is
@@ -85,8 +83,8 @@ Test-Assert ((Get-ProgressBarString -Completed 0 -Total 8 -Width 8) -eq "[------
 Test-Assert ((Get-ProgressBarString -Completed 8 -Total 8 -Width 8) -eq "[########]") "8/8 is fully filled"
 Test-Assert ((Get-ProgressBarString -Completed 4 -Total 8 -Width 8) -eq "[####----]") "4/8 is half filled"
 Test-Assert ((Get-ProgressBarString -Completed 0 -Total 0 -Width 8) -eq "[########]") "0/0 (degenerate) renders as fully filled, not divide-by-zero"
-# 2026-09-15 fix, real bug: Math.Round(19.8) rounds UP to 20, so a
-# 39/40 bar (ratio 0.975, at width 20 that's 19.5) used to show as
+# Math.Round(19.8) rounds UP to 20, so a
+# 39/40 bar (ratio 0.975, at width 20 that's 19.5) would show as
 # COMPLETELY FULL - defeating the documented "a bar short of full means
 # something's still not done" signal, including for a chapter that then
 # goes on to fail. Floor keeps it honestly short of full until the last
@@ -112,15 +110,15 @@ Test-Assert ($emptySplit.Count -eq 1 -and $emptySplit[0] -eq "") "empty text ret
 Write-Host ""
 
 # ==============================================================================
-#  Scenario C2 (2026-09-03 fix, Todo.md finding): Get-DisplayWidth/
+#  Scenario C2: Get-DisplayWidth/
 #  Set-PadToDisplayWidth/Split-TextToWidth all treat a CJK character as 2
 #  console columns, not 1 - $Text.Length (a .NET UTF-16 code-unit count)
-#  used to be treated as a column count, so a chunk that fit within
+#  must not be treated as a column count, or a chunk that fit within
 #  $Width CHARACTERS could still be wider than $Width COLUMNS on screen,
 #  triggering the terminal's own automatic wrap and desyncing this
 #  module's row-count math for every row after it. This can't be verified
-#  against a REAL console from a harness (no live terminal in tests, same
-#  caveat the original finding noted) - these scenarios cover the
+#  against a REAL console from a harness (no live terminal in tests) -
+#  these scenarios cover the
 #  underlying width/chunking/padding MATH directly instead, which is
 #  exactly what the desync traced back to.
 # ==============================================================================
@@ -128,7 +126,7 @@ Write-Host "=== Scenario C2: CJK-aware display width, chunking, and padding ==="
 # Built from explicit Unicode code points, not literal CJK characters in
 # the source - a PS 5.1 .ps1 file without a BOM can misread literal
 # non-ASCII source characters depending on the encoding it's saved/read
-# with (confirmed live: literal characters here garbled on first draft).
+# with.
 # 0x65E5 0x672C 0x8A9E = "日本語" ("Japanese language"), 0x30C1 0x30E3
 # 0x30D7 0x30BF 0x30FC = "チャプター" ("chapter", katakana).
 $nihongo  = [string]([char]0x65E5) + [string]([char]0x672C) + [string]([char]0x8A9E)
@@ -378,8 +376,8 @@ Test-Assert ($outputTextL2 -like "*Waiting for current jobs*") "the message prin
 Test-Assert ($script:ccrActiveSeries.Contains("Series L")) "the active series is untouched - still registered after the message was printed"
 Test-Assert ($script:ccrActiveSeries["Series L"].ActiveChapters -contains "Chapter 1") "the active series' in-progress chapter is untouched too"
 
-# 2026-09-15 fix, real bug (latent - no current caller passes CRLF, but a
-# public function's own contract shouldn't depend on that): splitting on
+# No current caller passes CRLF, but a
+# public function's own contract shouldn't depend on that: splitting on
 # a bare "`n" leaves a trailing "`r" on each CRLF-delimited segment. A
 # stray CR mid-row makes the terminal snap the cursor back to column 0,
 # so the row's own trailing padding then overwrites the real message
@@ -393,11 +391,11 @@ Test-Assert (($rowTextsL3 | Where-Object { $_ -like "*line two*" }).Count -eq 1)
 Write-Host ""
 
 # ==============================================================================
-#  Scenario M: live-region cap (2026-09-21 fix - CCR pacing gap). A Full
+#  Scenario M: live-region cap. A Full
 #  Pipeline run whose idle engine walks the whole library up front
-#  announces every series to CCR at once. Before this fix the live region
-#  grew unbounded, eventually overran the console buffer, and
-#  SetCursorPosition threw - latching CCR into the print-everything
+#  announces every series to CCR at once. Without a cap the live region
+#  would grow unbounded, eventually overrun the console buffer, and
+#  SetCursorPosition would throw - latching CCR into the print-everything
 #  fallback that floods the console and starves the main thread (zip stops,
 #  abort polls are never reached). Get-CappedLiveRows bounds the live
 #  region to the window height so that can never happen at any library
@@ -423,7 +421,7 @@ for ($s = 1; $s -le 100; $s++) {
     $floodSeries[("Series " + $s)] = $entry
 }
 
-# Uncapped (MaxRows 0) = the pre-fix behavior: the entire flood renders.
+# Uncapped (MaxRows 0): the entire flood renders.
 # (Get-CappedLiveRows returns its List via the `,` unary-array convention,
 # so capture it directly - @(...) would see the wrapper as one element.)
 $uncapped = Get-CappedLiveRows -ActiveSeries $floodSeries -Width 79 -MaxRows 0
@@ -445,11 +443,11 @@ $roomy = Get-CappedLiveRows -ActiveSeries $floodSeries -Width 79 -MaxRows 5000
 Test-Assert ($roomy.Count -eq 300) "a cap larger than the content renders every row, no truncation"
 Test-Assert ($null -eq ($roomy | Where-Object { $_.Text -like "*more series in progress*" })) "no summary row when nothing is hidden"
 
-# A single series taller than the cap (2026-09-22 /code-review finding): a
+# A single series taller than the cap: a
 # series block keeps every Warning/Error chapter for the life of the series,
-# so one warning-heavy series can outgrow the window on its own. The old
-# cap always admitted the first series whole - the region could exceed
-# MaxRows and the cursor rewind failed exactly like the original flood.
+# so one warning-heavy series can outgrow the window on its own. A cap that
+# always admitted the first series whole would let the region exceed
+# MaxRows, and the cursor rewind would fail exactly like the original flood.
 $tallSeries = [System.Collections.Specialized.OrderedDictionary]::new()
 $tallEntry = @{
     TotalChapters  = 60

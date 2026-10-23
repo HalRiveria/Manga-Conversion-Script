@@ -4,17 +4,12 @@
     (Modules\ZipParallelProcessing.ps1).
 
 .DESCRIPTION
-    Dot-sources the REAL dependency modules now - AbortPipeline.ps1 and
-    Logging.ps1 - instead of hand-rolling stand-ins for what used to be
-    ZipParallelProcessing.ps1's own inline
-    ConsoleCtrl/Write-Log/Flush-ConsoleQueue/Test-AbortSignal copies.
-    Migrated 2026-08-27 along with the module itself (see
-    ZipParallelProcessing.ps1's own header and CLAUDE.md "Known gaps") -
-    this harness previously stubbed those pieces by hand precisely
-    because the module defined its own; now that it forward-references
-    the real ones, testing against stand-ins would no longer prove
-    anything real, so this harness switched to the same real-dependency
-    pattern ZipPipeline.Harness.ps1 already uses.
+    Dot-sources the REAL dependency modules - AbortPipeline.ps1 and
+    Logging.ps1 - rather than hand-rolling stand-ins for
+    ConsoleCtrl/Write-Log/Flush-ConsoleQueue/Test-AbortSignal. The module
+    forward-references the real ones, so testing against stand-ins would
+    not prove anything real; this is the same real-dependency
+    pattern ZipPipeline.Harness.ps1 uses.
 
     Exercises the module with fake workers that do no real conversion or
     zipping - just simulated delay/failure/hang.
@@ -159,7 +154,7 @@ function Test-Assert {
 
 # ==============================================================================
 #  Scenario A: -JobParams (fixed up-front list), all succeed, no abort.
-#  Mirrors how the zip-only pipeline (mode 3) calls this today.
+#  Mirrors how the zip-only pipeline (mode 4) calls this.
 # ==============================================================================
 Write-Host "=== Scenario A: -JobParams, all succeed, no abort ===" -ForegroundColor Cyan
 
@@ -186,15 +181,15 @@ Test-Assert ((@($resultsA | ForEach-Object { $_.JobId } | Sort-Object -Unique)).
 Write-Host ""
 
 # ==============================================================================
-#  Scenario A2 (2026-08-31 fix): the caller's own $script:logMutex (e.g.
+#  Scenario A2: the caller's own $script:logMutex (e.g.
 #  the bootstrap's, from Initialize-LogMutex) must be RESTORED after the
 #  call, not left $null - Invoke-ZipParallelProcessing creates its own
-#  fresh, LOCAL mutex object to seed the worker runspaces' initial state,
-#  which used to unconditionally null out $script:logMutex afterward
-#  instead of putting the caller's own reference back, silently
-#  unsynchronizing every main-thread Write-Log/Write-SummaryLog call for
-#  the rest of the run (Invoke-MutexGuardedWrite no-ops the locking on a
-#  $null mutex rather than erroring, so this was never visibly broken).
+#  fresh, LOCAL mutex object to seed the worker runspaces' initial state;
+#  nulling out $script:logMutex afterward instead of putting the caller's
+#  own reference back would silently unsynchronize every main-thread
+#  Write-Log/Write-SummaryLog call for the rest of the run
+#  (Invoke-MutexGuardedWrite no-ops the locking on a $null mutex rather
+#  than erroring, so it would never be visibly broken).
 # ==============================================================================
 Write-Host "=== Scenario A2: the caller's own log mutex is restored after the call, not left null ===" -ForegroundColor Cyan
 Initialize-LogMutex
@@ -218,14 +213,14 @@ Test-Assert $stillUsableA2 "the restored mutex is still genuinely usable (not di
 Write-Host ""
 
 # ==============================================================================
-#  Scenario A3 (2026-08-31 fix): the mutex save/restore must hold even
+#  Scenario A3: the mutex save/restore must hold even
 #  when the call throws BEFORE the runspace pool is ever built - a bad
 #  -SharedFunctionNames entry (not a real defined function) makes the
-#  Get-Item ("Function:\" + $sharedFn) lookup throw. Before the fix, that
-#  line sat OUTSIDE the try/finally that restores $script:logMutex, so an
-#  exception there left it pointed at this call's own local mutex forever
-#  (a handle leak - still a valid reference to the same NAMED mutex, so
-#  not a correctness break, but the fix's own invariant didn't hold here).
+#  Get-Item ("Function:\" + $sharedFn) lookup throw. That line must sit
+#  INSIDE the try/finally that restores $script:logMutex, or an
+#  exception there would leave it pointed at this call's own local mutex
+#  forever (a handle leak - still a valid reference to the same NAMED
+#  mutex, so not a correctness break, but the invariant wouldn't hold).
 # ==============================================================================
 Write-Host "=== Scenario A3: the mutex is still restored even when the call throws before the runspace pool is built ===" -ForegroundColor Cyan
 $callerMutexA3 = $script:logMutex
@@ -247,16 +242,16 @@ $script:cts3.Dispose()
 
 Test-Assert $threwA3 "sanity check: the bad -SharedFunctionNames entry genuinely made the call throw"
 Test-Assert ([object]::ReferenceEquals($script:logMutex, $callerMutexA3)) "the caller's mutex is still restored even though the call threw before the runspace pool was ever built"
-# 2026-08-31 fix: the raw Get-Item failure used to propagate as a bare
+# The raw Get-Item failure would otherwise propagate as a bare
 # "cannot find path" error with no mention of -SharedFunctionNames, the
-# offending name, or a dot-sourcing-order hint - now re-thrown with that
-# context (CLAUDE.md: "messages say what's wrong and what to do about it").
+# offending name, or a dot-sourcing-order hint - so it is re-thrown with
+# that context (messages should say what's wrong and what to do about it).
 Test-Assert ($errMsgA3 -match "SharedFunctionNames" -and $errMsgA3 -match "This-Function-Does-Not-Exist") ("the error message names both -SharedFunctionNames and the offending function name, not a bare 'cannot find path' (got: " + $errMsgA3 + ")")
 Write-Host ""
 
 # ==============================================================================
 #  Scenario B: -NextJobProvider, some items skipped inside the provider, no
-#  abort. Mirrors the pattern mode 4 (ZIP-extraction) would use: peek an
+#  abort. Mirrors a provider that peeks an
 #  item, decide to skip or dispatch, loop internally past skips.
 # ==============================================================================
 Write-Host "=== Scenario B: -NextJobProvider, some skipped, no abort ===" -ForegroundColor Cyan
@@ -266,16 +261,15 @@ $resultsB = [System.Collections.Generic.List[hashtable]]::new()
 $bTotal = 10
 # A hashtable, not three separate scalars: property mutation on a shared
 # object reliably persists across separate & $providerB invocations, unlike
-# a plain "$x++" scalar reassignment inside the closure (see the [ref] fix
-# and its docstring note in Invoke-ZipParallelProcessing for why - this harness
-# hit the exact same bug in its own Scenario B provider before this fix).
+# a plain "$x++" scalar reassignment inside the closure (see the [ref]
+# note in Invoke-ZipParallelProcessing for why).
 $stateB = @{ Index = 0; SkippedCount = 0; DispatchedCount = 0 }
 $providerB = {
     while ($stateB.Index -lt $bTotal) {
         $i = $stateB.Index
         $stateB.Index++
         if ($i % 3 -eq 0) {
-            # Simulates mode 4's "already completed per resume-state, skip it"
+            # Simulates a provider skipping an already-completed item"
             $stateB.SkippedCount++
             continue
         }
@@ -297,8 +291,7 @@ Test-Assert ($outcomeB.ForceStoppedCount -eq 0) "ForceStoppedCount is 0 on a cle
 Write-Host ""
 
 # ==============================================================================
-#  Scenario B2 (2026-09-09, Full Pipeline dispatch-redesign step 4):
-#  -PollCallback fires at least once per dispatch-loop pass, and at least
+#  Scenario B2: -PollCallback fires at least once per dispatch-loop pass, and at least
 #  once more after the final drain - proves a caller can rely on it to
 #  drain a cross-worker event queue on a real cadence, not just once at
 #  the very end.
@@ -340,10 +333,10 @@ $resultsD = [System.Collections.Generic.List[hashtable]]::new()
 $jobParamsD = [System.Collections.Generic.List[hashtable]]::new()
 $jobParamsD.Add(@{ JobId = 1; DoFullLogging = $FullLogging; LogFile = $logFile; LogErrorFile = $logErrorFile; LogWarnFile = $logWarnFile })
 $handlerD = { param($r) $resultsD.Add($r) }
-# 2026-09-15 fix: -JobCrashedHandler is the only way a caller learns a
+# -JobCrashedHandler is the only way a caller learns a
 # worker's own runspace died mid-run at all (Controller.ps1's Full Pipeline
 # treats one whole engine as a single long-lived "job" - losing it silently
-# previously meant chapters that engine hadn't reported yet got zipped and
+# would mean chapters that engine hadn't reported yet got zipped and
 # deleted anyway by the leftover-merge pass, see Controller.Harness.ps1).
 $crashedCountD = 0
 $crashedHandlerD = { param($errorRecord) $script:crashedCountD++ }
@@ -364,7 +357,7 @@ Test-Assert ($script:crashedCountD -eq 1) ("-JobCrashedHandler fired exactly onc
 Write-Host ""
 
 # ==============================================================================
-#  Scenario D2 (2026-09-03 fix, Todo.md finding): a bug in the CALLER's own
+#  Scenario D2: a bug in the CALLER's own
 #  -ResultHandler (not the runspace/worker) must propagate as ITS OWN real
 #  exception, not get caught and mislabeled as "Error collecting runspace
 #  result" - a genuine runspace failure and a caller-side ResultHandler bug
@@ -409,9 +402,7 @@ if ($RunSlowTest) {
     # in its registry, not a hardcoded variable name - without this
     # registration, [ConsoleCtrl]::AbortRequested being set below would
     # never actually cancel $script:cts, and this scenario would just hang
-    # for the full 120s instead of draining/force-stopping at 60s (the
-    # exact bug class ImageConversionPipeline.ps1's own rework hit and
-    # fixed this same session - see CHANGELOG.md).
+    # for the full 120s instead of draining/force-stopping at 60s.
     Register-AbortCancellationSource -Cts $script:cts
 
     $resultsC = [System.Collections.Generic.List[hashtable]]::new()
@@ -449,7 +440,7 @@ if ($RunSlowTest) {
     Test-Assert ($outcomeC.ForceStoppedCount -eq 2) ("expected 2 force-stopped jobs (the two 120s hangs), got " + $outcomeC.ForceStoppedCount)
     Test-Assert ((@($resultsC | Where-Object { $_.JobId -in @(1,2) })).Count -eq 2) "both fast jobs (1,2) completed and reported a result despite the abort"
     Test-Assert ($swC.Elapsed.TotalSeconds -ge 60 -and $swC.Elapsed.TotalSeconds -lt 90) ("total run time (" + [math]::Round($swC.Elapsed.TotalSeconds,1) + "s) is in the expected ~60-70s window (2s to abort + up to 60s drain, not the full 120s hang)")
-    Test-Assert ([ConsoleCtrl]::DrainComplete.IsSet) "DrainComplete was signalled by Invoke-GracefulDrain (a real fix this migration picked up - the old inline drain never signalled it at all)"
+    Test-Assert ([ConsoleCtrl]::DrainComplete.IsSet) "DrainComplete was signalled by Invoke-GracefulDrain"
 
     # Reset shared abort state so nothing leaks into a later run of this harness.
     Reset-HarnessAbortState
@@ -461,28 +452,22 @@ if ($RunSlowTest) {
 }
 
 # ==============================================================================
-#  Scenario E (2026-08-31 addition, project owner approved as an easy
-#  fix; corrected the same day after a verification pass found the
-#  original version could HANG the whole suite): -Cts/-WorkerScript/
-#  -ResultHandler/-MaxParallel are now all [Parameter(Mandatory)] -
-#  omitting -Cts specifically used to fail SILENTLY (no error at all):
+#  Scenario E: -Cts/-WorkerScript/
+#  -ResultHandler/-MaxParallel are all [Parameter(Mandatory)] -
+#  a missing -Cts would otherwise fail SILENTLY (no error at all):
 #  $Cts.Token.IsCancellationRequested on a $null $Cts just evaluates
-#  falsy, so a run with no -Cts was completely abort-deaf (no
+#  falsy, so a run with no -Cts would be completely abort-deaf (no
 #  cancellation ever noticed, DrainComplete never signalled). Every real
-#  caller already passes all four, so this closes a latent gap rather
-#  than fixing something live.
+#  caller passes all four.
 #
-#  ORIGINAL VERSION of this scenario actually CALLED the function with
-#  one parameter omitted and asserted the call threw. That only throws
-#  when PowerShell's own missing-Mandatory-parameter prompt has nowhere
-#  to read from (a fully non-interactive host, like Run-Harness.ps1's
-#  own `powershell -NoProfile -File` invocation) - in a REAL interactive
-#  console (a plain manual test run, or one of a review agent's own ad-
-#  hoc verification commands), PowerShell instead shows "Supply values
-#  for the following parameters:" and blocks forever waiting for input
-#  that will never come, verified live. Checking the parameter METADATA
-#  instead of actually invoking the function is host-independent - it
-#  can never hang, in any invocation context.
+#  This scenario checks the parameter METADATA rather than calling the
+#  function with one parameter omitted: a call only throws when
+#  PowerShell's own missing-Mandatory-parameter prompt has nowhere to
+#  read from (a fully non-interactive host, like Run-Harness.ps1's own
+#  `powershell -NoProfile -File` invocation) - in a REAL interactive
+#  console, PowerShell instead shows "Supply values for the following
+#  parameters:" and blocks forever waiting for input that will never
+#  come. Checking metadata is host-independent - it can never hang.
 # ==============================================================================
 Write-Host "=== Scenario E: -Cts/-WorkerScript/-ResultHandler/-MaxParallel are Mandatory ===" -ForegroundColor Cyan
 $paramsE = (Get-Command Invoke-ZipParallelProcessing).Parameters
@@ -498,10 +483,10 @@ Test-Assert (Test-ParamIsMandatory 'MaxParallel') "-MaxParallel is Mandatory"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario F (2026-10-12): teardown does not wait for a worker stuck in a
+#  Scenario F: teardown does not wait for a worker stuck in a
 #  blocking .NET call. A throwing -ResultHandler sends the call straight to
-#  its finally while a second worker is still inside Thread.Sleep; the old
-#  Stop()/Close()/Dispose() there blocked until that call returned. The
+#  its finally while a second worker is still inside Thread.Sleep; a
+#  blocking Stop()/Close()/Dispose() there would wait until that call returned. The
 #  caller's token is cancelled too, so the abandoned worker can see it.
 # ==============================================================================
 Write-Host "=== Scenario F: teardown does not wait for a worker stuck in a .NET call ===" -ForegroundColor Cyan
@@ -532,7 +517,7 @@ Reset-HarnessAbortState
 Write-Host ""
 
 # ==============================================================================
-#  Scenario G (2026-10-12): output emitted by -ResultHandler/-PollCallback
+#  Scenario G: output emitted by -ResultHandler/-PollCallback
 #  does not leak into Invoke-ZipParallelProcessing's own return value.
 # ==============================================================================
 Write-Host "=== Scenario G: chatty callbacks do not leak into the return value ===" -ForegroundColor Cyan

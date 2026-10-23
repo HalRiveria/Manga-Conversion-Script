@@ -109,11 +109,10 @@ try {
 Write-Host ""
 
 # ==============================================================================
-#  Scenario B2 (2026-09-08 fix, real bug caught by a full-codebase audit,
-#  same species as this project's other Remove-Source call sites):
-#  Remove-Source's $false return (the pre-existing ZIP already vanished in
-#  the narrow gap between Test-Path and this call) was discarded, logging
-#  "Deleted existing ZIP" regardless. Remove-Source shadowed to still
+#  Scenario B2: Remove-Source's $false return (the pre-existing ZIP
+#  already vanished in the narrow gap between Test-Path and this call)
+#  must not be discarded and logged as "Deleted existing ZIP" regardless.
+#  Remove-Source shadowed to still
 #  clear the file (so Compress-FolderToZip's own CreateFromDirectory call
 #  right after still succeeds, matching what a real concurrent delete
 #  would leave behind) but always report $false.
@@ -164,22 +163,17 @@ Test-Assert ($script:removeItemPermanentlyCalls.Count -eq 1 -and $script:removeI
 Write-Host ""
 
 # ==============================================================================
-#  Scenario D (user-requested): the ZIP output path must not be allowed to
+#  Scenario D: the ZIP output path must not be allowed to
 #  land INSIDE the folder being zipped - $SourceDir would then effectively
 #  be the zip's own "parent," and ZipFile.CreateFromDirectory can end up
 #  trying to include the very ZIP it's writing as part of its own
-#  contents (a self-referential write). Tested live, not assumed, since
-#  the failure mode here (hang vs. throw vs. silently-corrupt output) was
-#  not known in advance when this scenario was first written - it's known
-#  NOW (confirmed live, repeatedly, on this real machine:
-#  ZipFile.CreateFromDirectory throws "The process cannot access the
-#  file" - it tries to read the in-progress output file, which is still
-#  open for writing, as one of its own source entries): pinned to the
-#  real, observed behavior (2026-08-31, caught by a same-day /code-review -
-#  the original version branched on whether it threw and asserted
-#  `Test-Assert $true` in the throw case, a tautology that would keep
-#  passing even if this behavior later regressed to something worse,
-#  like silent corruption).
+#  contents (a self-referential write). The observed behavior on a real
+#  machine: ZipFile.CreateFromDirectory throws "The process cannot access
+#  the file" - it tries to read the in-progress output file, which is
+#  still open for writing, as one of its own source entries. The
+#  scenario pins that exact behavior rather than branching on whether it
+#  threw, so a regression to something worse (like silent corruption)
+#  would be caught.
 # ==============================================================================
 Write-Host "=== Scenario D: ZipOut located INSIDE SourceDir (self-referential) ===" -ForegroundColor Cyan
 $sourceD = New-ScratchSourceDir -Name "scenario-d-source" -FileCount 2

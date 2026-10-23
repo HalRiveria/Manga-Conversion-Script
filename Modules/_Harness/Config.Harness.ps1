@@ -56,8 +56,8 @@ Test-Assert (
     $defA2.ContainsKey('AnimatedLossless') -and $defA2.ContainsKey('AnimatedOverwrite') -and
     $defA2.ContainsKey('AnimatedDeleteSource')
 ) "schema includes all five Animated* keys"
-Test-Assert (-not $defA2.ContainsKey('ZipWithUnconvertedAnimated')) "ZipWithUnconvertedAnimated is gone from the schema (retired with Mode 8)"
-# 2026-09-03 addition, real bug fix (see CHANGELOG.md) - dedicated Full
+Test-Assert (-not $defA2.ContainsKey('ZipWithUnconvertedAnimated')) "ZipWithUnconvertedAnimated is gone from the schema (retired setting)"
+# Dedicated Full
 # Pipeline shared-budget setting, defaults to match MaxCjxlProcs (8) so
 # upgrading doesn't silently change real concurrency.
 Test-Assert ($defA2.ContainsKey('FullPipelineMaxConcurrentProcs') -and $defA2.FullPipelineMaxConcurrentProcs -eq 8) "schema includes FullPipelineMaxConcurrentProcs, default 8 (matches MaxCjxlProcs)"
@@ -115,27 +115,24 @@ Test-Assert ($settingsE.ContainsKey('ModulesPath')) "the merged result still con
 Write-Host ""
 
 # ==============================================================================
-#  Scenario E2 (2026-08-31 fix, caught by a same-day /code-review
-#  full-codebase pass): a hand-edited whole-number-with-decimal-point
+#  Scenario E2: a hand-edited whole-number-with-decimal-point
 #  value ("JpegQuality": 75.0) must be ACCEPTED, not silently reverted to
 #  the default. ConvertFrom-Json on this real PS 5.1/.NET Framework
-#  install yields [decimal] for such a value, not [double] - confirmed
-#  live, not assumed - so Test-ScriptSettingValue's own [double]-only
-#  integral check was dead code against real output from this project's
-#  own real Import-ScriptSettings path.
+#  install yields [decimal] for such a value, not [double] - so a
+#  [double]-only integral check in Test-ScriptSettingValue would be dead
+#  code against real output from Import-ScriptSettings.
 # ==============================================================================
 Write-Host "=== Scenario E2: a whole-number JSON value written with a decimal point (75.0) is accepted, not reverted ===" -ForegroundColor Cyan
 $pathE2 = Join-Path $scratchDir "decimal-settings.json"
 '{ "JpegQuality": 75.0 }' | Set-Content -LiteralPath $pathE2 -Encoding UTF8
 $settingsE2 = Import-ScriptSettings -Path $pathE2
 Test-Assert ($settingsE2.JpegQuality -eq 75) ("the decimal-point whole number was accepted as-is, not reverted to the default (got " + $settingsE2.JpegQuality + ")")
-# [int] normalization (2026-08-31 fix, caught by verifying a same-day
-# /code-review pass): storing the accepted value as-is left it a
+# [int] normalization: storing the accepted value as-is would leave it a
 # [decimal] - functionally harmless (every real consumer binds it to an
 # [int] parameter) but cosmetically wrong (the options menu would show
 # "Quality [75.0]", and Export-ScriptSettings would write "75.0" back
-# out, both looking like a live bug even though nothing downstream
-# actually broke).
+# out, both looking like a bug even though nothing downstream
+# would actually break).
 Test-Assert ($settingsE2.JpegQuality -is [int]) ("the accepted value was normalized to [int], not left as the raw [decimal] ConvertFrom-Json produced (got type " + $settingsE2.JpegQuality.GetType().Name + ")")
 Write-Host ""
 
@@ -156,9 +153,9 @@ $backupsF = @(Get-ChildItem -LiteralPath (Split-Path $pathF -Parent) -Filter "co
 Test-Assert ($backupsF.Count -eq 1) "the corrupt file was preserved as a .bak rather than silently discarded"
 Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*" }).Count -ge 1) "a Warn-level Write-Log call fired for the corrupt file"
 
-# 2026-09-03 fix, Todo.md finding: the corrupt file used to be backed up
-# but never repaired, so it re-warned and dropped a new .bak on every
-# single future launch. It should now be REPAIRED with the defaults - a
+# The corrupt file is backed up and then REPAIRED with the defaults
+# (otherwise it would re-warn and drop a new .bak on every
+# future launch) - a
 # second Import-ScriptSettings call against the SAME path must load
 # cleanly, with no new backup and no new Warn.
 $threwF3 = $false
@@ -173,8 +170,7 @@ Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*" }).Count -eq 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario F4 (2026-09-03 fix, real bug caught by a same-session
-#  /code-review pass): a file that can't be READ (locked, momentarily
+#  Scenario F4: a file that can't be READ (locked, momentarily
 #  inaccessible) must NOT get the same backup+repair-with-defaults
 #  treatment as genuinely corrupt JSON - that would permanently overwrite
 #  a perfectly good file's real customizations just because it couldn't
@@ -208,12 +204,11 @@ Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*could not be re
 Write-Host ""
 
 # ==============================================================================
-#  Scenario F5 (2026-09-04 fix, real bug): the corrupt-JSON repair used to
-#  be unconditional on the backup actually succeeding - if Copy-Item
-#  failed (locked destination, full disk, ACL), the corrupt file still got
-#  overwritten with defaults right after, losing the user's real content
-#  with no backup at all. The repair must now be GATED on the backup
-#  succeeding - Copy-Item shadowed to fail unconditionally.
+#  Scenario F5: the corrupt-JSON repair must be GATED on the backup
+#  actually succeeding - if Copy-Item fails (locked destination, full
+#  disk, ACL), overwriting the corrupt file with defaults would lose the
+#  user's real content with no backup at all. Copy-Item is shadowed to
+#  fail unconditionally.
 # ==============================================================================
 Write-Host "=== Scenario F5: corrupt JSON is left UNTOUCHED when the backup itself fails, not repaired anyway ===" -ForegroundColor Cyan
 $pathF5 = Join-Path $scratchDir "corrupt-settings-f5.json"
@@ -241,12 +236,12 @@ Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*Could not back 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario F2 (2026-08-31 fix): a settings file whose content is valid JSON
+#  Scenario F2: a settings file whose content is valid JSON
 #  but not a real settings OBJECT - the literal `null` (a realistic outcome
 #  of a truncated write, since Export-ScriptSettings's Set-Content isn't
 #  atomic) or a JSON array. ConvertFrom-Json doesn't throw on either, so
-#  the try/catch above never catches them - a prior version let $null
-#  reach ConvertTo-SettingsHashtable's [Parameter(Mandatory)] InputObject,
+#  the try/catch above never catches them - without a guard, $null
+#  would reach ConvertTo-SettingsHashtable's [Parameter(Mandatory)] InputObject,
 #  throwing a ParameterBindingValidationException that escaped this
 #  function's own "never throws" contract entirely.
 # ==============================================================================
@@ -305,17 +300,16 @@ Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn:*" }).Count -eq 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario H2 (2026-08-31 fix, caught by verifying a same-day
-#  /code-review pass): a value outside Int32's range is integral (passes
+#  Scenario H2: a value outside Int32's range is integral (passes
 #  the earlier double/decimal-truncation check) but throws OverflowException
-#  on the `[int]$Value` cast - unguarded, that exception escaped
+#  on the `[int]$Value` cast - unguarded, that exception would escape
 #  Import-ScriptSettings entirely (no try/catch there either), violating
 #  its own documented "never throws" contract by killing the WHOLE
 #  settings load instead of just this one key falling back to its
 #  default. Two shapes tested: a real [long] (99999999999, an integral
 #  JSON number too large for [int] but exactly representable, so
 #  ConvertFrom-Json itself returns [long]) and a [decimal] with the same
-#  numeric value (matches the exact repro used to find this).
+#  numeric value.
 # ==============================================================================
 Write-Host "=== Scenario H2: an Int32-range-overflowing value falls back to default instead of throwing ===" -ForegroundColor Cyan
 $pathH2 = Join-Path $scratchDir "overflow-settings.json"
@@ -363,8 +357,7 @@ Test-Assert ($settingsH3b.FullPipelineMaxConcurrentProcs -eq 12) "a valid FullPi
 Write-Host ""
 
 # ==============================================================================
-#  Scenario H4: a retired key (ZipWithUnconvertedAnimated, Mode 8's, removed
-#  2026-09-23) in an older settings file is dropped silently - no "unknown
+#  Scenario H4: a retired key (ZipWithUnconvertedAnimated) in an older settings file is dropped silently - no "unknown
 #  setting" warning on every launch - and everything else still loads.
 # ==============================================================================
 Write-Host "=== Scenario H4: a retired settings key is dropped silently ===" -ForegroundColor Cyan

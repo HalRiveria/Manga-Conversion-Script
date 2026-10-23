@@ -80,12 +80,12 @@ function Get-FilesRecursiveSafe {
 
         try {
             foreach ($d in [System.IO.Directory]::EnumerateDirectories($currentDir)) {
-                # Reparse-point guard (2026-09-15 fix, real bug) - a
+                # Reparse-point guard - a
                 # junction/symlink pointing back into an already-visited
                 # part of the tree turns this into an unbounded (in
                 # practice, MAX_PATH-bounded) cycle, multiplying every file
-                # under it once per loop. Confirmed live: one chapter plus
-                # one self-pointing junction produced 64 duplicate
+                # under it once per loop. One chapter plus
+                # one self-pointing junction produces 64 duplicate
                 # candidates for the same physical folder before the walk
                 # ran out of path length. DOCUMENTED DUPLICATE of the same
                 # guard in Get-ZippableLeafDirs/New-ZippableLeafDirProvider/
@@ -143,9 +143,9 @@ function Get-ZippableLeafDirs {
 
                 $childPath = $enumerator.Current
                 $dirInfo = [System.IO.DirectoryInfo]::new($childPath)
-                # Reparse-point guard (2026-09-15 fix, real bug) - see
-                # Get-FilesRecursiveSafe above for the live-reproduced
-                # failure mode (a self-pointing junction produced 64
+                # Reparse-point guard - see
+                # Get-FilesRecursiveSafe above for the failure mode
+                # (a self-pointing junction produces 64
                 # duplicate candidates for the same physical folder).
                 # Skipped entirely, not just excluded from recursion - a
                 # junction/symlink isn't real content this location owns,
@@ -220,11 +220,11 @@ function New-ZippableLeafDirProvider {
             $childPath = $state.CurrentEnumerator.Current
 
             $dirInfo = [System.IO.DirectoryInfo]::new($childPath)
-            # Reparse-point guard (2026-09-15 fix, real bug) - DOCUMENTED
+            # Reparse-point guard - DOCUMENTED
             # DUPLICATE of the same guard in Get-FilesRecursiveSafe/
             # Get-ZippableLeafDirs above and Test-SeriesCategoryFolder/
             # New-SeriesProvider below, keep all five in sync. See
-            # Get-FilesRecursiveSafe's own comment for the live-reproduced
+            # Get-FilesRecursiveSafe's own comment for the
             # failure mode.
             if (($dirInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
             $candidate = Test-ZippableLeafDirCandidate -Dir $dirInfo -QualifyingExtensions $QualifyingExtensions `
@@ -326,7 +326,7 @@ function Get-SeriesChapters {
         [System.Collections.Generic.HashSet[string]]$ExcludeStagingDirs = $null,
         [bool]$ForceRezip = $false
     )
-    # try/catch around a real TOCTOU window (2026-09-15 fix, real bug) -
+    # try/catch around a real TOCTOU window -
     # New-SeriesProvider enumerates series lazily, so there's a genuine
     # gap between a series folder being listed and Get-SeriesChapters
     # actually scanning it - someone reorganizing their library mid-scan

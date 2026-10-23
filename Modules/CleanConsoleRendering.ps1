@@ -6,7 +6,7 @@ $script:ccrCursorAvailable     = $null
 # Tracks the console width the PREVIOUS draw actually wrapped its rows
 # against - see Update-CleanConsoleDisplay's own use of this for why.
 $script:ccrLastDrawWidth       = $null
-# Test seam for the live-region row cap - see Docs/function-notes.md (Update-CleanConsoleDisplay).
+# Test seam for the live-region row cap - see Update-CleanConsoleDisplay.
 $script:ccrMaxLiveRows         = $null
 
 function Test-CleanConsoleCursorAvailable {
@@ -33,7 +33,7 @@ function Get-ProgressBarString {
     if ($Total -le 0) { return ("[" + ("#" * $Width) + "]") }
 
     $ratio  = [Math]::Min(1.0, [Math]::Max(0.0, $Completed / [double]$Total))
-    # Floor, not Round (2026-09-15 fix, real bug) - Round(19.8) is 20, so
+    # Floor, not Round - Round(19.8) is 20, so
     # a 40-chapter series showed a COMPLETELY FULL bar at chapter 39/40,
     # even when that 40th chapter then failed. That directly defeats the
     # documented "a bar that stalls short of full means something went
@@ -260,7 +260,7 @@ function Update-CleanConsoleDisplay {
     $newContentRows.AddRange($liveRows)
 
     $oldCount = $script:ccrLiveRegionLineCount
-    # 2026-09-15 fix, real bug: $oldCount is a ROW COUNT from the PREVIOUS
+    # $oldCount is a ROW COUNT from the PREVIOUS
     # draw, measured against that draw's own $effectiveWidth. If the
     # console window was resized since (narrower especially - conhost
     # reflows already-padded rows into MORE physical rows at a narrower
@@ -287,7 +287,7 @@ function Update-CleanConsoleDisplay {
                 [Console]::SetCursorPosition(0, [Console]::CursorTop - $blankRowsNeeded)
             }
         } catch {
-            # Transient rewind failure - redraw fresh, do not latch append-only. See Docs/function-notes.md.
+            # Transient rewind failure - redraw fresh, do not latch append-only.
             try {
                 foreach ($row in $newContentRows) { Write-ColoredConsoleRow -Text (Set-PadToDisplayWidth -Text $row.Text -Width $effectiveWidth) -Color $row.Color }
             } catch {
@@ -429,12 +429,12 @@ function Write-CleanConsoleMessage {
         [string]$Color
     )
     $rows = [System.Collections.Generic.List[hashtable]]::new()
-    # -split "\r?\n" (2026-09-15 fix, real latent bug), not a bare "`n" -
+    # -split "\r?\n", not a bare "`n" -
     # splitting on LF only leaves a trailing CR on each segment for CRLF
     # input. A stray CR written mid-row makes the terminal move the
     # cursor back to column 0, so the row's own trailing padding then
     # overwrites the message text with blanks - the row renders empty.
-    # Latent today (no current caller passes CRLF), but a real defect in
+    # No current caller passes CRLF, but it's part of
     # a public function's own contract.
     foreach ($segment in ($Text -split "\r?\n")) {
         $rows.Add(@{ Text = $segment; Color = $Color })

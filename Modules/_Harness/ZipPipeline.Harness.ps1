@@ -12,12 +12,9 @@
     integration test than the earlier pure-unit harnesses, appropriate
     for this tier.
 
-    DOT-SOURCE ORDER FLIPPED (2026-08-27, ZPP's migration onto
-    Logging.ps1/AbortPipeline.ps1): it used to matter that Logging.ps1
-    came AFTER ZipParallelProcessing.ps1, since ZPP had its own stale
-    inline Write-Log/Test-AbortSignal that would otherwise silently win.
-    ZPP no longer defines any of those itself - it forward-references
-    them - so AbortPipeline.ps1 and Logging.ps1 must now be dot-sourced
+    DOT-SOURCE ORDER: ZPP doesn't define Write-Log/Test-AbortSignal/
+    Invoke-GracefulDrain itself - it forward-references
+    them - so AbortPipeline.ps1 and Logging.ps1 must be dot-sourced
     BEFORE ZipParallelProcessing.ps1, or ZPP's own Invoke-ZipParallelProcessing
     would fail immediately (Write-Log/Test-AbortSignal/Invoke-GracefulDrain
     undefined).
@@ -74,7 +71,7 @@ function New-FileIn {
 }
 
 # ==============================================================================
-#  Scenario A: end-to-end mode 3 - real folders, real parallel zip, real
+#  Scenario A: end-to-end mode 4 - real folders, real parallel zip, real
 #  readable ZIP output, source folders deleted on success.
 # ==============================================================================
 Write-Host "=== Scenario A: Invoke-ZipOnlyPipeline end-to-end ===" -ForegroundColor Cyan
@@ -103,25 +100,24 @@ try { Test-Assert ($archive1A.Entries.Count -eq 2) ("Chapter 1.zip has both real
 finally { $archive1A.Dispose() }
 
 Test-Assert ($null -eq $script:zipOnlyCts) "the CTS was disposed and cleared after a normal (non-aborted) run"
-# 2026-09-03 fix, real bug caught by a same-session /code-review pass:
-# Invoke-ZipOnlyPipeline previously had no Aborted field at all (only
-# ForceStoppedCount) - Controller.ps1's Invoke-Mode now maps this onto
-# Summary.ps1's Aborted/ForceKilledCount fields, so mode 3's own summary
+# Invoke-ZipOnlyPipeline returns an Aborted field (alongside
+# ForceStoppedCount) - Controller.ps1's Invoke-Mode maps this onto
+# Summary.ps1's Aborted/ForceKilledCount fields, so mode 4's own summary
 # can say "Processing ABORTED" too.
 Test-Assert ($totalsA.Aborted -eq $false) "a normal, non-aborted run reports Aborted = `$false"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario A2 (2026-09-04 fix, real bug): $script:zipOnlyWorker's own
-#  bootstrap never set $script:CleanConsoleOutputEnabled in its own
-#  runspace's independent script scope - Write-Log's CCO gate never fired
-#  there, so every worker line was enqueued and printed straight to the
-#  console through Flush-ConsoleQueue's own unconditional drain, even with
-#  Clean Console Output on. Write-LogLineToHost shadowed to record every
+#  Scenario A2: $script:zipOnlyWorker's own
+#  bootstrap must set $script:CleanConsoleOutputEnabled in its own
+#  runspace's independent script scope - otherwise Write-Log's CCO gate
+#  never fires there, and every worker line is enqueued and printed
+#  straight to the console through Flush-ConsoleQueue's own unconditional
+#  drain, even with Clean Console Output on. Write-LogLineToHost shadowed to record every
 #  line actually reaching the console (both the direct-write and the
 #  queue-flush paths go through it).
 # ==============================================================================
-Write-Host "=== Scenario A2: mode 3's worker respects Clean Console Output - its own lines are not printed ===" -ForegroundColor Cyan
+Write-Host "=== Scenario A2: Zip Folders' worker respects Clean Console Output - its own lines are not printed ===" -ForegroundColor Cyan
 $rootA2 = New-Dir "scenario-a2"
 $leafA2 = New-Dir "scenario-a2\Chapter 1"
 New-FileIn -DirPath $leafA2 -Name "page1.jpg" | Out-Null
@@ -145,7 +141,7 @@ Test-Assert (@($script:hostLinesA2 | Where-Object { $_ -like "*Zipping*" -or $_ 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario A4 (2026-09-23): Zip Folders' CCR series grouping skips category
+#  Scenario A4: Zip Folders' CCR series grouping skips category
 #  folders, same rule as New-SeriesProvider - 'Complete\Series Z' shows as
 #  series 'Series Z' with its own 2-chapter total, not one 'Complete' series.
 # ==============================================================================
@@ -173,14 +169,14 @@ Test-Assert (($script:seriesStartsA4 -join ",") -eq "Series Z:2") ("CCR got one 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario A3 (2026-09-04 fix, real bug): mode 3's own worker had NO
-#  orphaned-"_tmp_*"-scratch-file sweep at all, unlike Invoke-LooseFolderZip
-#  (Scenario G2) and Invoke-FullPipelineChapter - a leftover scratch file
-#  from an earlier force-killed conversion run got permanently archived
-#  into the .cbz as a junk page, with the source folder then deleted right
-#  after.
+#  Scenario A3: mode 4's own worker must sweep orphaned "_tmp_*"
+#  scratch files, like Invoke-LooseFolderZip
+#  (Scenario G2) and Invoke-FullPipelineChapter - otherwise a leftover
+#  scratch file from an earlier force-killed conversion run gets
+#  permanently archived into the .cbz as a junk page, with the source
+#  folder then deleted right after.
 # ==============================================================================
-Write-Host "=== Scenario A3: mode 3's worker sweeps orphaned scratch files instead of archiving them ===" -ForegroundColor Cyan
+Write-Host "=== Scenario A3: Zip Folders' worker sweeps orphaned scratch files instead of archiving them ===" -ForegroundColor Cyan
 $rootA3 = New-Dir "scenario-a3"
 $leafA3 = New-Dir "scenario-a3\Chapter 1"
 New-FileIn -DirPath $leafA3 -Name "page1.jxl" | Out-Null
@@ -215,7 +211,7 @@ Test-Assert ($totalsB.ZippedSuccess -eq 0 -and $totalsB.ZippedFail -eq 0) "no zi
 Write-Host ""
 
 # ==============================================================================
-#  Scenario B2 (2026-09-15 fix, real bug): an abort BEFORE any candidate
+#  Scenario B2: an abort BEFORE any candidate
 #  is found must be reported as an abort, not as "no qualifying leaf
 #  directories found" (the same message a genuinely empty library gets)
 #  - the two are different problems that need different next steps from
@@ -304,12 +300,11 @@ Test-Assert ($totalsD.CandidateCount -eq 0) "the up-to-date leaf was excluded be
 Write-Host ""
 
 # ==============================================================================
-#  Scenario D2 (2026-08-31 fix, caught by a same-day /code-review
-#  full-codebase pass): with Clean Console Output OFF (the default), the
+#  Scenario D2: with Clean Console Output OFF (the default), the
 #  -NextJobProvider closure's per-series chapter-count side-scan (a
 #  SECOND, bounded Get-ZippableLeafDirs walk, purely to feed
 #  Start-CcrSeriesProgressIfEnabled's -TotalChapters - which itself no-ops
-#  when CCR is off) used to run unconditionally anyway, duplicating every
+#  when CCR is off) must not run, since it would duplicate every
 #  Test-ZippableLeafDirCandidate skip-reason Warn the FIRST (real,
 #  incremental) scan already logged. A series with one up-to-date leaf
 #  (triggers a real skip Warn) and one real leaf must log that Warn
@@ -333,20 +328,19 @@ Test-Assert ($warnLinesD2.Count -eq 1) ("the up-to-date-zip skip Warn was logged
 Write-Host ""
 
 # ==============================================================================
-#  Scenario D3 (2026-09-03 fix, Todo.md finding): the CCR series-name
-#  derivation used to blindly Substring $next.Dir.FullName by
-#  $trimmedPath's length with no check the prefix actually matches. A
+#  Scenario D3: the CCR series-name
+#  derivation must not blindly Substring $next.Dir.FullName by
+#  $trimmedPath's length without checking the prefix actually matches. A
 #  -Path ending in a literal "\." segment makes $trimmedPath keep that
 #  "\." (TrimEnd only strips a trailing separator, and "." isn't one) -
 #  .NET path resolution treats "\." as "this same directory" internally
 #  (the scan still works normally), but the un-resolved $Path STRING no
 #  longer matches $next.Dir.FullName's own fully-resolved prefix
-#  character-for-character, guaranteeing the exact mismatch this fix
-#  guards - without depending on Push-Location (which changes PowerShell's
+#  character-for-character, guaranteeing the exact mismatch this guards
+#  against - without depending on Push-Location (which changes PowerShell's
 #  own $PWD, not the process's real current directory .NET path APIs
-#  actually resolve relative paths against - the exact class of gotcha
-#  CLAUDE.md's "Lessons learned" warns about, confirmed live: an earlier
-#  draft of this test used a relative -Path and found zero candidates).
+#  actually resolve relative paths against, so a relative -Path would
+#  find zero candidates).
 #  Must degrade to the leaf's own folder name (with a Warn explaining why)
 #  instead of mis-slicing into a bogus name or throwing - and the actual
 #  zip must still succeed either way, since this is CCR display only.
@@ -386,12 +380,12 @@ Test-Assert (Test-Path -LiteralPath (Join-Path $onlyImagesE "08 - Chapter 8.zip"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario I: mode 3 CCR wiring, real Series folder wrapping two chapters -
+#  Scenario I: mode 4 CCR wiring, real Series folder wrapping two chapters -
 #  Start-SeriesProgress gets the real bounded-scan TotalChapters (2), both
 #  chapters resolve Success, and the series ends up resolved (off the active
 #  registry) once both are done.
 # ==============================================================================
-Write-Host "=== Scenario I: mode 3 CCR wiring, nested Series/Chapter ===" -ForegroundColor Cyan
+Write-Host "=== Scenario I: Zip Folders CCR wiring, nested Series/Chapter ===" -ForegroundColor Cyan
 $rootI  = New-Dir "scenario-i"
 $ch1I   = New-Dir "scenario-i\My Series\Chapter 1"
 $ch2I   = New-Dir "scenario-i\My Series\Chapter 2"
@@ -410,12 +404,12 @@ Test-Assert ($totalsI.ZippedSuccess -eq 2) "both chapters zipped"
 Test-Assert ($script:ccrActiveSeries.Count -eq 0) "the series resolved and left the active registry once both chapters completed"
 
 # ==============================================================================
-#  Scenario J: mode 3 CCR wiring, a FLAT leaf with no Series folder wrapping
-#  it (mode 3's own long-standing supported shape - see CLAUDE.md's Known
-#  gaps on why this isn't validated away) - degenerates to a one-chapter
+#  Scenario J: mode 4 CCR wiring, a FLAT leaf with no Series folder wrapping
+#  it (a supported shape for mode 4, which has no Series-folder layout
+#  validation) - degenerates to a one-chapter
 #  "series" named after the leaf itself, still resolves cleanly.
 # ==============================================================================
-Write-Host "=== Scenario J: mode 3 CCR wiring, flat leaf (no Series folder) ===" -ForegroundColor Cyan
+Write-Host "=== Scenario J: Zip Folders CCR wiring, flat leaf (no Series folder) ===" -ForegroundColor Cyan
 $rootJ = New-Dir "scenario-j"
 $leafJ = New-Dir "scenario-j\Lone Chapter"
 New-FileIn -DirPath $leafJ -Name "page1.jpg" | Out-Null
@@ -431,7 +425,7 @@ Test-Assert ($totalsJ.ZippedSuccess -eq 1) "the flat leaf was still zipped succe
 Test-Assert ($script:ccrActiveSeries.Count -eq 0) "the degenerate one-chapter series resolved too"
 
 # ==============================================================================
-#  Scenario K: mode 3 CCR wiring, a real zip FAILURE - Complete-ChapterProgress
+#  Scenario K: mode 4 CCR wiring, a real zip FAILURE - Complete-ChapterProgress
 #  gets called with Status Error, not silently skipped just because the job
 #  failed. Forced by holding an exclusive-lock FileStream open on the
 #  chapter's own image file, so ZipFile.CreateFromDirectory throws for real
@@ -439,7 +433,7 @@ Test-Assert ($script:ccrActiveSeries.Count -eq 0) "the degenerate one-chapter se
 #  path doesn't work - Compress-FolderToZip's own Remove-Source call just
 #  deletes it first and zips successfully anyway).
 # ==============================================================================
-Write-Host "=== Scenario K: mode 3 CCR wiring, a real zip failure ===" -ForegroundColor Cyan
+Write-Host "=== Scenario K: Zip Folders CCR wiring, a real zip failure ===" -ForegroundColor Cyan
 $rootK  = New-Dir "scenario-k"
 $ch1K   = New-Dir "scenario-k\Series\Chapter 1"
 $imgK   = New-FileIn -DirPath $ch1K -Name "page1.jpg"
@@ -457,11 +451,11 @@ Test-Assert ($totalsK.ZippedFail -eq 1) ("the forced zip failure was counted (go
 Test-Assert ($script:ccrActiveSeries.Count -eq 0) "the series still resolved (as an issue, not left hanging) after a real zip failure"
 
 # ==============================================================================
-#  Scenario M (2026-08-31 fix): Get-ZipChapterProgressStatus mapping, tested
+#  Scenario M: Get-ZipChapterProgressStatus mapping, tested
 #  directly (unit-level). A cancelled-before-start job's result
 #  (Success=0/Failed=0/FolderDeleteFailed=0, all zero - nothing attempted)
-#  used to be indistinguishable from a genuine clean success and fell
-#  through to "Success". The worker now sets Cancelled=1 on that path, and
+#  would be indistinguishable from a genuine clean success and fall
+#  through to "Success". The worker sets Cancelled=1 on that path, and
 #  this function checks it first.
 # ==============================================================================
 Write-Host "=== Scenario M: Get-ZipChapterProgressStatus mapping - cancelled-before-start is not Success ===" -ForegroundColor Cyan
@@ -473,7 +467,7 @@ Test-Assert ($statusCleanM -eq "Success" -and $null -eq $detailCleanM) "a genuin
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Q (2026-10-12): the zip worker does not delete the source folder
+#  Scenario Q: the zip worker does not delete the source folder
 #  once an abort is in. A force-stopped worker that was stuck inside the zip
 #  call is no longer waited for, so it can finish that zip after the run has
 #  already returned - this check is what stops it going on to delete the

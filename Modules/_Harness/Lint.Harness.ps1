@@ -1,6 +1,6 @@
 <#
     Static checks for the PowerShell traps this project has actually been
-    bitten by - see "Lessons learned". Six bugs, all the same species:
+    bitten by. Six bugs, all the same species:
     code that reads correctly and behaves otherwise. Five of the six leave
     a detectable trace in the source, so they're worth catching by grep
     (or, for Rule 5, real AST parsing) instead of by a live-debugging
@@ -32,11 +32,11 @@ $projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $script:LintKnownExceptions = @(
     @{ File = 'CleanConsoleRendering.ps1'
        Rule = 'collection-return'
-       Why  = 'Split-TextToWidth / Format-SeriesLines deliberately omit the comma guard because their harness wraps every call in @() - documented in CLAUDE.md' }
+       Why  = 'Split-TextToWidth / Format-SeriesLines deliberately omit the comma guard because their harness wraps every call in @()' }
     @{ File  = 'Controller.ps1'
        Rule  = 'shared-function-names'
        Names = @('Write-GatedConsoleMessage')
-       Why   = 'Test-AbortSignal (AbortPipeline.ps1) is in this worker''s -SharedFunctionNames and its source still references Write-GatedConsoleMessage, which Rule 5''s call-graph walk correctly finds - but only past its worker early-return (a worker never announces the abort, it just returns [ConsoleCtrl]::AbortRequested), so Write-GatedConsoleMessage - unsafe in a worker, CCR state doesn''t exist there - is never reached at runtime. See CHANGELOG.md 2026-09-14 / 2026-09-22.' }
+       Why   = 'Test-AbortSignal (AbortPipeline.ps1) is in this worker''s -SharedFunctionNames and its source still references Write-GatedConsoleMessage, which Rule 5''s call-graph walk correctly finds - but only past its worker early-return (a worker never announces the abort, it just returns [ConsoleCtrl]::AbortRequested), so Write-GatedConsoleMessage - unsafe in a worker, CCR state doesn''t exist there - is never reached at runtime.' }
 )
 
 # Rule 6 only: specific (function, $script: variable) pairs reviewed as safe
@@ -161,7 +161,7 @@ function Get-LineFindings {
             if ($line -match '#\s*lint:ignore') { continue }
             # A comment describing a bug is not the bug. AbortPipeline's
             # docstring quotes the exact broken check it fixed, and the
-            # first run of this lint duly flagged the explanation.
+            # lint would otherwise flag the explanation.
             if ($line -match '^\s*#') { continue }
             if (& $Predicate $line $name) {
                 $found += @{ File = $name; Line = ($i + 1); Text = $line }
@@ -200,7 +200,7 @@ Show-Findings -Findings @($rule1)
 Write-Host ""
 
 # ------------------------------------------------------------------------
-#  Rule 2: $null -eq <string param> used to mean "caller omitted this"
+#  Rule 2: $null -eq <string param> as a "caller omitted this" check"
 # ------------------------------------------------------------------------
 # An omitted [string] parameter binds to '', never $null, so the check
 # never fires. This shipped undetected in AbortPipeline for its whole life.
@@ -289,11 +289,8 @@ Write-Host ""
 # script-scope state - so if a listed function (or the worker scriptblock
 # itself) calls another user-defined function that isn't ALSO listed, that
 # call throws "term not recognized" the first time the runspace actually
-# reaches it. This bit this project four separate times in one session
-# (Logging.ps1's helpers, FileDeletion.ps1's helper, then both animated/
-# image conversion job-completion helpers - see CHANGELOG.md 2026-08-29),
-# each caught only because a harness scenario happened to exercise the
-# real runspace path. AST-based, not regex - reliably finding "what
+# reaches it - and only a run that really exercises that runspace path
+# notices. AST-based, not regex - reliably finding "what
 # functions does this one call" needs a real parse, not a pattern match.
 Write-Host "=== Lint: -SharedFunctionNames missing a transitively-called function ===" -ForegroundColor Cyan
 
@@ -328,8 +325,8 @@ $fnCallees = @{}
 foreach ($fname in $fnAstByName.Keys) {
     # Captured into a variable FIRST, then filtered - piping
     # Get-CalledUserFunctions' comma-guarded return STRAIGHT into
-    # Where-Object is the exact pipe-collapse trap Docs\lessons-learned.md
-    # documents: only one object (the whole array) crosses the pipeline
+    # Where-Object is the classic pipe-collapse trap:
+    # only one object (the whole array) crosses the pipeline
     # boundary, so $_ binds to the entire array rather than each name.
     $rawCallees = Get-CalledUserFunctions -AstNode $fnAstByName[$fname]
     $fnCallees[$fname] = @($rawCallees | Where-Object { $_ -ne $fname })
@@ -480,9 +477,9 @@ Write-Host ""
 # .GetNewClosure()'d block (every [System.Lazy] factory, chapter provider,
 # job builder in this codebase) it resolves to that closure's own EMPTY
 # dynamic-module scope instead - every `$script:` read comes back $null,
-# silently. Live-reproduced 2026-09-22 (CHANGELOG.md): the cause of worker
-# [Error]/[Warn] lines never reaching a log file and the duplicated abort
-# message. So: no runspace-reachable function, and no nested scriptblock
+# silently - which caused worker
+# [Error]/[Warn] lines to never reach a log file and the abort
+# message to be duplicated. So: no runspace-reachable function, and no nested scriptblock
 # inside a worker body, may touch `$script:` at all. The worker body's own
 # top level is fine (it IS the runspace's script scope). Worker-side state
 # goes through the console queue (Logging.ps1's Get-WorkerRunspaceValue),
@@ -526,7 +523,7 @@ Write-Host ""
 # ------------------------------------------------------------------------
 # PS 5.1's cmdlet-first-invocation race: two fresh runspaces calling the
 # same cmdlet for the first time at the same moment can deadlock both
-# (Docs\lessons-learned.md, 2026-09-10). Runspace code paths use raw .NET
+# Runspace code paths use raw .NET
 # only. Same reachable set as Rule 6 (propagated functions + worker
 # bodies); any command name that isn't a user function defined in the scan
 # is a cmdlet. Deliberate, reviewed exceptions go in
@@ -574,16 +571,15 @@ Write-Host ""
 # calling ConcurrentDictionary.AddOrUpdate with a scriptblock update
 # function), it waits for an event only its own, already-busy thread can
 # process - and the other engine then blocks on the lock the first one
-# holds. Live-caught in dumps 2026-09-23 (Docs\full-pipeline-hang-investigation.md,
-# round 7). Runspace code uses plain loops/locks instead.
+# holds. Runspace code uses plain loops/locks instead.
 #
 # Two shapes, both flagged:
 #   - the written cast: [Func[...]]{ ... }
 #   - the implicit one: a scriptblock literal passed straight to a .NET
 #     method or constructor - $dict.GetOrAdd($k, { ... }),
 #     [System.Lazy[object]]::new({ ... }). No cast is written, but .NET
-#     receives a delegate all the same; this is the shape the round 7 hang
-#     actually had. .ForEach()/.Where() are PowerShell's own and take real
+#     receives a delegate all the same; this is the shape that actually
+#     caused a hang. .ForEach()/.Where() are PowerShell's own and take real
 #     scriptblocks, so they're exempt. Add "# lint:ignore" on the line for
 #     any other method that really does take a scriptblock.
 Write-Host "=== Lint: scriptblock-to-delegate cast on a runspace-reachable path ===" -ForegroundColor Cyan

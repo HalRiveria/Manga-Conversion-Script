@@ -70,9 +70,9 @@ Test-Assert ($resultC -like "*cmd.exe") "the PATH-resolved path points at cmd.ex
 Write-Host ""
 
 # ==============================================================================
-#  Scenario C2 (2026-09-02 review fix, live-confirmed): a DIRECTORY passed
+#  Scenario C2: a DIRECTORY passed
 #  as -UserPath (or sitting in the cache) must fall through, not be
-#  accepted as-is - Test-PathSafely's own bare Test-Path used to return
+#  accepted as-is - a bare Test-Path returns
 #  $true for a directory too. Real trigger: a mistyped -CjxlPath pointing
 #  at an install FOLDER instead of the .exe inside it (or a hand-edited
 #  settings.json with the same mistake) - accepted silently, with no
@@ -109,9 +109,9 @@ Test-Assert ($resultD -eq $realCandidateD) "the first EXISTING candidate in orde
 Write-Host ""
 
 # ==============================================================================
-#  Scenario D3 (2026-09-15 fix, real bug, latent): an empty-string entry
-#  anywhere in -Candidates used to abort the WHOLE search instead of
-#  being skipped - Test-PathSafely's -Path is a Mandatory [string], and
+#  Scenario D3: an empty-string entry
+#  anywhere in -Candidates must not abort the WHOLE search; it is
+#  skipped instead - Test-PathSafely's -Path is a Mandatory [string], and
 #  PS 5.1 rejects an empty string for that at parameter-BIND time, before
 #  the function's own try/catch can even run. A real candidate later in
 #  the list should still be found.
@@ -132,12 +132,11 @@ Test-Assert ($resultD3 -eq $realCandidateD3) ("the real candidate AFTER the empt
 Write-Host ""
 
 # ==============================================================================
-#  Scenario D2 (2026-08-31 fix, caught by a same-day /code-review
-#  full-codebase pass): a function or alias sharing $ExeName's name (a
-#  real, not hypothetical, case - a user's own PowerShell profile
-#  defining a "magick"/"cjxl" helper) used to be matched by a bare
+#  Scenario D2: a function or alias sharing $ExeName's name (a
+#  real case - a user's own PowerShell profile
+#  defining a "magick"/"cjxl" helper) would be matched by a bare
 #  Get-Command call, and its .Source is an EMPTY STRING, not $null -
-#  still truthy for the old if-check, so Find-Exe returned "" instead of
+#  still truthy for a plain if-check, so Find-Exe would return "" instead of
 #  falling through to -Candidates, breaking the documented "$null if not
 #  found" contract AND skipping a real exe sitting at a candidate path.
 # ==============================================================================
@@ -191,17 +190,14 @@ Write-Host ""
 # ==============================================================================
 #  Scenario G: -ExeName is Mandatory - omitting it must fail loudly, not
 #  hang. Checked via parameter METADATA (Get-Command), not by actually
-#  invoking Find-Exe with -ExeName omitted (2026-09-09 fix, a real bug
-#  caught live: PowerShell only THROWS on a missing Mandatory parameter
+#  invoking Find-Exe with -ExeName omitted: PowerShell only THROWS on a
+#  missing Mandatory parameter
 #  when it can't prompt for one - when a real interactive console IS
 #  attached, it instead blocks the whole process waiting on stdin for a
 #  human to type a value, forever, with zero CPU/disk activity - the
-#  exact same species of host-dependent hang
-#  ZipParallelProcessing.Harness.ps1's own Scenario E already documented
-#  and avoided elsewhere in this codebase, see that scenario's own
-#  comment for the fuller explanation. This one didn't follow that same
-#  pattern and hung a real `.\Tools\Run-Harness.ps1 -All` run under an
-#  interactive-console invocation context before this fix. Checking
+#  same host-dependent hang
+#  ZipParallelProcessing.Harness.ps1's own Scenario E avoids; see that
+#  scenario's own comment for the fuller explanation. Checking
 #  parameter metadata is host-independent - it can never hang, in any
 #  invocation context.
 # ==============================================================================

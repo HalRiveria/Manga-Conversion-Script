@@ -129,13 +129,11 @@ function Test-ScriptSettingValue {
     }
     if ($Default -is [int]) {
         # ConvertFrom-Json yields [decimal] for a whole-number JSON value
-        # on this PS 5.1/.NET Framework combination - confirmed live
+        # on this PS 5.1/.NET Framework combination
         # ('{"a":75.0}' | ConvertFrom-Json).a.GetType() -> System.Decimal,
-        # NOT [double] (2026-08-31 fix, caught by a same-day /code-review:
-        # the [double] branch below was dead code against real
-        # ConvertFrom-Json output, so a hand-edited "JpegQuality": 75.0 in
-        # settings.json was silently rejected and reverted to the
-        # default, contrary to what this comment claimed). [double] kept
+        # NOT [double]. Without the [decimal] branch, a hand-edited
+        # "JpegQuality": 75.0 in settings.json would be silently rejected
+        # and reverted to the default. [double] is kept
         # alongside [decimal] rather than replaced - some other JSON
         # parser or a value built directly in PowerShell (not from this
         # project's own ConvertFrom-Json path) could still hand this
@@ -144,17 +142,16 @@ function Test-ScriptSettingValue {
                       (($Value -is [double] -or $Value -is [decimal]) -and ($Value -eq [math]::Truncate($Value)))
         if (-not $isIntegral) { return $false }
 
-        # try/catch around the [int] cast (2026-08-31 fix, caught by
-        # verifying a same-day /code-review pass): a value outside
+        # try/catch around the [int] cast: a value outside
         # Int32's range (e.g. a hand-edited "MaxCjxlProcs": 99999999999)
         # is integral by the check above but throws OverflowException on
         # cast, contradicting this function's own "never throws" contract
         # (Import-ScriptSettings' docstring) - unguarded, that exception
-        # escaped Import-ScriptSettings entirely (no try/catch there
-        # either) and killed the WHOLE settings load, not just this one
+        # would escape Import-ScriptSettings entirely (no try/catch there
+        # either) and kill the WHOLE settings load, not just this one
         # key falling back to its default. An out-of-Int32-range value is
         # exactly as invalid as any other out-of-range value this
-        # function already rejects below - now treated the same way.
+        # function already rejects below.
         try {
             $intValue = [int]$Value
         } catch {
@@ -215,16 +212,15 @@ function Import-ScriptSettings {
         return $settings
     }
 
-    # Read and parse are two SEPARATE try/catch blocks (2026-09-03 fix,
-    # real bug caught by a same-session /code-review pass) - they used to
-    # share one catch, so a file that's merely locked/momentarily
+    # Read and parse are two SEPARATE try/catch blocks - with one shared
+    # catch, a file that's merely locked/momentarily
     # inaccessible (a second instance of the script mid-Export-ScriptSettings,
-    # an AV/sync-client hold) was treated exactly like genuinely corrupt
+    # an AV/sync-client hold) would be treated exactly like genuinely corrupt
     # JSON: backed up and REPAIRED WITH DEFAULTS, permanently overwriting
     # every real customization in a perfectly good file just because it
     # couldn't be read at that instant. Only a real ConvertFrom-Json
     # failure (content that was actually read, and IS genuinely bad) gets
-    # the backup+repair treatment now; a read failure degrades to "use
+    # the backup+repair treatment; a read failure degrades to "use
     # defaults for this run" without touching the file at all - it might
     # read fine next launch.
     $raw = $null
@@ -246,19 +242,18 @@ function Import-ScriptSettings {
         $backupPath = $Path + ".corrupt-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".bak"
         # Backup swallowed here deliberately - a transient failure (file
         # lock, full disk, ACL) shouldn't stop the fallback-to-defaults
-        # below. But the repair (overwriting $Path with defaults) is now
-        # GATED on this actually succeeding -
-        # it used to run unconditionally, so a failed backup plus the
-        # unconditional repair meant the user's real settings content
-        # could be lost with no backup and nothing logged about the
-        # missing backup. A failed backup now skips the repair entirely
-        # and says so - the corrupt file is left alone for manual
-        # recovery instead of being silently overwritten.
+        # below. But the repair (overwriting $Path with defaults) is
+        # GATED on this actually succeeding - otherwise a failed backup
+        # plus the repair would lose the user's real settings content
+        # with no backup and nothing logged about it. A failed backup
+        # skips the repair entirely and says so - the corrupt file is
+        # left alone for manual recovery instead of being silently
+        # overwritten.
         $backupOk = $false
         try { Copy-Item -LiteralPath $Path -Destination $backupPath -Force -ErrorAction Stop; $backupOk = $true } catch { }
         if ($backupOk) {
-            # Repair the file with the defaults just fell back to (2026-09-03
-            # fix, Todo.md finding) - without this, the SAME corrupt file sat
+            # Repair the file with the defaults just fell back to - without
+            # this, the SAME corrupt file would sit
             # at $Path forever, so every future launch re-hit this exact
             # branch: another timestamped .bak dropped and another Warn logged
             # on every single run until someone manually deleted/fixed it.
@@ -300,9 +295,9 @@ function Import-ScriptSettings {
     }
 
     $loaded = ConvertTo-SettingsHashtable -InputObject $parsed
-    # Keys this project used to write and has since removed - dropped
+    # Keys this project no longer writes - dropped
     # silently rather than warning on every launch until the file is
-    # next saved. ZipWithUnconvertedAnimated: Mode 8 only, retired 2026-09-23.
+    # next saved. ZipWithUnconvertedAnimated belonged to a retired mode.
     $retiredKeys = @('ZipWithUnconvertedAnimated')
     foreach ($key in $loaded.Keys) {
         if ($retiredKeys -contains $key) { continue }
@@ -312,8 +307,7 @@ function Import-ScriptSettings {
         }
         $value = $loaded[$key]
         if (Test-ScriptSettingValue -Key $key -Value $value -Default $settings[$key]) {
-            # [int] normalization (2026-08-31 fix, caught by verifying a
-            # same-day /code-review pass): Test-ScriptSettingValue accepts
+            # [int] normalization: Test-ScriptSettingValue accepts
             # an integral [double]/[decimal] for an int-typed key (a
             # hand-edited "JpegQuality": 75.0), but storing $value as-is
             # kept it a [decimal] - functionally harmless (every real

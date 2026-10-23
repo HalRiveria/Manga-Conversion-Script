@@ -8,26 +8,18 @@
     from Logging.ps1 - stubbed here since LeafDirectoryDiscovery must
     stay standalone-testable without it. Scenario O also dot-sources the
     real ZipParallelProcessing.ps1 (for its own real dispatch/runspace
-    behavior) - since that module migrated onto Logging.ps1/
-    AbortPipeline.ps1 (2026-08-27, see CLAUDE.md "Known gaps"), it now
-    forward-references Test-AbortSignal/Flush-ConsoleQueue/
+    behavior) - that module forward-references
+    Test-AbortSignal/Flush-ConsoleQueue/
     Initialize-LogMutex/Invoke-GracefulDrain too, all stubbed alongside
     Write-Log below for the same "stay standalone" reason - Scenario O
     never triggers an abort, so Invoke-GracefulDrain's stub is never
     actually exercised, just present so the dot-source doesn't fail
     Set-StrictMode or a future call.
 
-    Scenario K/L reproduce the "parent/container folder" bug documented
-    in CHANGELOG.md's former-container guard entry, using a folder shape
-    modeled directly on the real examples in Backups\Test Images\Only
-    Images (before: chapter subfolders full of images) and
-    Backups\Rezip Tests\Only Images (after: chapter subfolders zipped and
-    removed, leaving only .zip files at the series level) - not touching
-    Backups itself, which is off-limits to every script by design; this
-    harness builds its own equivalent shape in a scratch temp directory.
-    CHANGELOG.md's own note says the guard's fix was "best-reasoned...
-    not a confirmed root-cause diagnosis - the exact mechanism wasn't
-    reproduced" - this is the first live reproduction and confirmation.
+    Scenario K/L reproduce the "parent/container folder" case: a series
+    folder whose chapter subfolders have all been zipped and removed,
+    leaving only .zip files at the series level. The harness builds that
+    shape in a scratch temp directory.
 
 .EXAMPLE
     .\Modules\_Harness\LeafDirectoryDiscovery.Harness.ps1
@@ -225,8 +217,8 @@ Write-Host ""
 # ==============================================================================
 #  Scenario I: 0-result case - return type must stay a real, enumerable
 #  List[hashtable], NOT collapse to $null. This is the exact bug class
-#  documented in CLAUDE.md's "Lessons learned" (already caught twice
-#  elsewhere in this project) - checked by TYPE, not just truthiness,
+#  PowerShell is prone to (collections collapsing to $null or a bare
+#  item on return) - checked by TYPE, not just truthiness,
 #  since a naive `$result.Count -eq 0` could also be satisfied by $null
 #  going through `@()`-wrapping at the call site and masking the bug.
 # ==============================================================================
@@ -254,10 +246,9 @@ Test-Assert ($resultJ[0].Dir.FullName -eq $leafJ) "indexing [0] on the 1-result 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario K (user-requested, reproduces the CHANGELOG.md former-container
-#  bug for real): a series folder ("Only Images") whose every chapter has
+#  Scenario K (reproduces the former-container case for real): a series folder ("Only Images") whose every chapter has
 #  already been converted, zipped, and had its source folder removed -
-#  modeled directly on Backups\Rezip Tests\Only Images's real shape (only
+#  modeled on a real post-completion series folder (only
 #  .zip files, zero subdirectories). Get-ZippableLeafDirs must NOT treat
 #  "Only Images" itself as a zippable leaf - it would otherwise archive
 #  all the already-created per-chapter .zip files into an unwanted wrapper
@@ -275,7 +266,6 @@ $script:logMessages.Clear()
 $resultK = Get-ZippableLeafDirs -ScanPath $rootK -QualifyingExtensions $imgExts
 Test-Assert ($resultK.Count -eq 0) "'Only Images' (zero subdirs, only .zip files inside) is NOT returned as a zip candidate"
 Test-Assert (($script:logMessages | Where-Object { $_ -like "*Only Images*existing .zip*" }).Count -eq 1) "the skip was logged with a clear reason, not silently dropped"
-Write-Host ("  (this is the first live reproduction of the bug CHANGELOG.md's former-container guard entry describes as 'not a confirmed root-cause diagnosis - the exact mechanism wasn't reproduced' - now confirmed fixed)") -ForegroundColor DarkGray
 Write-Host ""
 
 # ==============================================================================
@@ -320,15 +310,15 @@ Test-Assert ($errorMessageM -like "*does not exist*") "the error message is clea
 Write-Host ""
 
 # ==============================================================================
-#  Scenario N (user-requested): New-ZippableLeafDirProvider - repeated
+#  Scenario N: New-ZippableLeafDirProvider - repeated
 #  calls to the returned scriptblock correctly advance and find every
 #  qualifying leaf exactly once, matching Get-ZippableLeafDirs's batch
 #  result on the SAME tree (including a former-container case, proving
 #  guard parity via the shared Test-ZippableLeafDirCandidate helper), then
 #  consistently returns $null once exhausted. This is the closure/state-
-#  persistence-across-calls risk this project has documented failures
-#  with before (CLAUDE.md "Lessons learned") - verified live, not assumed
-#  safe by analogy to the pattern that already worked elsewhere.
+#  persistence-across-calls risk that closures are prone to - verified
+#  for real, not assumed safe by analogy to a pattern that worked
+#  elsewhere.
 # ==============================================================================
 Write-Host "=== Scenario N: New-ZippableLeafDirProvider matches batch results, advances correctly ===" -ForegroundColor Cyan
 $rootN = New-Dir "scenario-n"
@@ -371,17 +361,16 @@ Test-Assert ($null -eq $postExhaustion1 -and $null -eq $postExhaustion2) "callin
 Write-Host ""
 
 # ==============================================================================
-#  Scenario N2 (2026-08-31 fix, caught by a same-day /code-review
-#  full-codebase pass): a directory the provider just returned as a
+#  Scenario N2: a directory the provider just returned as a
 #  candidate must NOT be on $dirStack - it's a true leaf (Test-
 #  ZippableLeafDirCandidate returns $null the moment it finds a
-#  subdirectory), so pushing it was pointless, and worse in mode 3: the
+#  subdirectory), so pushing it would be pointless, and worse in mode 4: the
 #  caller (Invoke-ZipOnlyPipeline) zips that SAME candidate and deletes
 #  the folder before this provider's next call. The stack being LIFO
-#  meant the provider then popped the now-deleted path and
-#  EnumerateDirectories threw, logging a bogus "Could not enumerate -
+#  means the provider would then pop the now-deleted path and
+#  EnumerateDirectories would throw, logging a bogus "Could not enumerate -
 #  skipping it" Warn for a perfectly normal deletion - on every chapter,
-#  every default (-DeleteFolders $true) mode-3 run. This scenario
+#  every default (-DeleteFolders $true) mode-4 run. This scenario
 #  reproduces the exact production condition: return a candidate, delete
 #  it (simulating the worker), call again - no Warn should be logged.
 # ==============================================================================
@@ -526,7 +515,7 @@ Test-Assert ($null -eq $postExhaustionQ1 -and $null -eq $postExhaustionQ2) "call
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Q2 (2026-09-23): category folders are containers, not series.
+#  Scenario Q2: category folders are containers, not series.
 #  A direct child with no qualifying images/zips of its own and no chapter
 #  subfolder (a subfolder with qualifying images directly inside) is a
 #  category - its subfolders become the series, recursively. Series with
@@ -558,7 +547,7 @@ Test-Assert (-not (Test-SeriesCategoryFolder -Path (Join-Path $libraryQ2 "Series
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Q3 (2026-09-23 review fix): New-SeriesProvider never descends
+#  Scenario Q3: New-SeriesProvider never descends
 #  into a junction. A junction back to the library root looks like a
 #  category (its children are series), so without the guard every series
 #  was yielded again under the junction path, recursively.
@@ -586,7 +575,7 @@ try {
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Q4 (2026-09-24 review fix): a series folder deleted after the
+#  Scenario Q4: a series folder deleted after the
 #  provider's enumerator listed it but before the provider reached it is
 #  skipped with a Warn, not thrown out of the provider. Many siblings so
 #  the vanished one is already in the OS's directory-listing buffer when
@@ -662,7 +651,7 @@ Write-Host ""
 #  SAME guards Get-ZippableLeafDirs applies (former-container guard) are
 #  genuinely in effect here too, not just in principle - reusing
 #  Get-ZippableLeafDirs internally means this should be automatic, but
-#  verified live rather than assumed.
+#  verified rather than assumed.
 # ==============================================================================
 Write-Host "=== Scenario T: Get-SeriesChapters - multi-chapter scan + guard reuse ===" -ForegroundColor Cyan
 $seriesT = New-Dir "scenario-t-series"
@@ -680,7 +669,7 @@ Test-Assert (($foundNamesT -join "|") -eq "Chapter 1|Chapter 2") "the correct 2 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario T2 (2026-09-15 fix, real bug): a series folder that no longer
+#  Scenario T2: a series folder that no longer
 #  exists (deleted/renamed in the real TOCTOU window between
 #  New-SeriesProvider listing it and Get-SeriesChapters actually
 #  scanning it) must degrade to an empty result with a logged Warn, not
@@ -706,7 +695,7 @@ Write-Host ""
 # ==============================================================================
 #  Scenario U: integration - New-SeriesProvider + Get-SeriesChapters paired
 #  together across a small library, mimicking how a real caller (mode 1's
-#  restructured orchestration) would actually use the two-tier model: walk
+#  orchestration) would actually use the two-tier model: walk
 #  the library lazily series by series, and for each one, get its real
 #  chapter count via an eager per-series scan - exactly what
 #  Start-SeriesProgress's -TotalChapters needs.
@@ -736,13 +725,12 @@ Write-Host ""
 
 # ==============================================================================
 #  Scenario V: New-ZippableLeafDirProvider survives a permission-denied
-#  directory - real bug fix (2026-08-28, see Todo.md/CHANGELOG.md). Before
-#  the stack-based rewrite, the old single flat AllDirectories enumerator
-#  threw on the FIRST inaccessible directory anywhere in the tree and
-#  could never resume, silently abandoning everything past that point -
-#  verified live during the review with the exact icacls setup below: the
-#  batch path (Get-ZippableLeafDirs) found candidates on both sides of a
-#  denied folder, the incremental provider found nothing past it. Real
+#  directory. A single flat AllDirectories enumerator
+#  would throw on the FIRST inaccessible directory anywhere in the tree and
+#  never resume, silently abandoning everything past that point; this
+#  provider uses a stack-based walk instead, so it must find candidates on
+#  both sides of a denied folder, like the batch path
+#  (Get-ZippableLeafDirs) does. Real
 #  NTFS permissions via icacls, not a mock - a fake/mocked
 #  UnauthorizedAccessException wouldn't prove the real .NET enumerator
 #  actually throws where this scenario expects it to.
@@ -785,20 +773,14 @@ if (-not $icaclsOkV) {
 Write-Host ""
 
 # ==============================================================================
-#  Scenario W: Get-FilesRecursiveSafe (2026-09-10, added with no dedicated
-#  coverage of its own during the Full Pipeline hang fix - caught by
-#  /code-review medium, real gap given this function's own resilience
-#  claims are exactly the kind of thing this project's history shows
-#  needs a real test, not just reasoning). Two parts: basic recursive
+#  Scenario W: Get-FilesRecursiveSafe. Two parts: basic recursive
 #  discovery (multiple levels, confirms it isn't accidentally
 #  single-level), and the same real icacls permission-denial pattern
 #  Scenario V above uses - proves content on both sides of an
-#  inaccessible directory is still found, the exact resilience property
-#  a code-review pass also caught a real regression in (an earlier
-#  version `continue`'d past a directory's own subdirectory walk after
-#  its file walk failed, silently dropping that whole subtree - fixed
-#  before this scenario was even written, but this scenario is what
-#  should catch a REGRESSION of that fix later).
+#  inaccessible directory is still found - the exact resilience property
+#  that would break if the walk `continue`'d past a directory's own
+#  subdirectory walk after its file walk failed, silently dropping that
+#  whole subtree.
 # ==============================================================================
 Write-Host "=== Scenario W: Get-FilesRecursiveSafe - basic recursive discovery ===" -ForegroundColor Cyan
 $libraryW = Join-Path $scratchDir "scenario-w"
@@ -847,12 +829,11 @@ if (-not $icaclsOkW2) {
 Write-Host ""
 
 # ==============================================================================
-#  Scenario W3 (2026-09-15 fix, real bug found by the full line-by-line
-#  review series): a junction pointing back at an ancestor directory used
-#  to make every one of these stack-walk traversals loop, multiplying
-#  every file under the cycle once per loop - live-reproduced by a
-#  reviewer as 64 duplicate candidates for one real chapter before the
-#  synthesized path length finally exceeded MAX_PATH. Junctions don't
+#  Scenario W3: a junction pointing back at an ancestor directory must
+#  not make any of these stack-walk traversals loop, multiplying
+#  every file under the cycle once per loop - unguarded, that produces
+#  64 duplicate candidates for one real chapter before the
+#  synthesized path length finally exceeds MAX_PATH. Junctions don't
 #  need admin rights on Windows (unlike symlinks), so this is a real,
 #  unprivileged repro, not a mock.
 # ==============================================================================
@@ -878,7 +859,7 @@ if (-not $junctionOkW3) {
 Write-Host ""
 
 # ==============================================================================
-#  Scenario X (2026-09-15 fix, same bug, the other two traversals):
+#  Scenario X (same junction-cycle case, the other two traversals):
 #  Get-ZippableLeafDirs and New-ZippableLeafDirProvider must not multiply
 #  candidates through the same kind of junction cycle either.
 # ==============================================================================

@@ -79,7 +79,7 @@ function Resolve-ModulesPath {
         # stdin) can't answer this prompt - Read-Host against redirected/
         # EOF stdin returns "" rather than throwing, so without this guard
         # a bad -or-missing Modules\ path spins here forever printing "No
-        # path entered." (2026-09-14 fix, Todo.md finding). Same
+        # path entered." Same
         # [Console]::IsInputRedirected check the exit-keypress prompt
         # further down this file already uses.
         if ([Console]::IsInputRedirected) {

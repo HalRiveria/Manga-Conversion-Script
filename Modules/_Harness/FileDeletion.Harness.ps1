@@ -212,14 +212,12 @@ Write-Host ""
 # ==============================================================================
 #  Scenario J: -ItemPath is Mandatory on all three functions. Checked via
 #  parameter METADATA (Get-Command), not by actually calling each function
-#  with -ItemPath omitted (2026-09-09 fix, a real bug caught live in a
-#  sibling harness - DependencyDetection.Harness.ps1's own former Scenario
-#  G): PowerShell only THROWS on a missing Mandatory parameter when it
+#  with -ItemPath omitted: PowerShell only THROWS on a missing Mandatory parameter when it
 #  can't prompt for one - when a real interactive console IS attached, it
 #  instead blocks the whole process waiting on stdin for a human to type a
 #  value, forever, with zero CPU/disk activity. Matches
-#  ZipParallelProcessing.Harness.ps1's own Scenario E, which already
-#  documented and avoided this exact host-dependent hang - checking
+#  ZipParallelProcessing.Harness.ps1's own Scenario E, which avoids this
+#  same host-dependent hang - checking
 #  parameter metadata is host-independent, it can never hang in any
 #  invocation context.
 # ==============================================================================
@@ -240,12 +238,10 @@ Write-Host ""
 #  point) must unlink the junction itself, NOT recurse into the real
 #  target's contents. Directory.Delete(path, $true) on a reparse point is
 #  a known .NET footgun - recursive=$true can delete through the link
-#  into the target instead of just removing the link. Verified live with
+#  into the target instead of just removing the link. Tested with
 #  a real NTFS junction (New-Item -ItemType Junction, no elevation
-#  needed), not reasoned about from documentation - per this project's
-#  "test, don't assume" philosophy, especially given this exact category
-#  of bug (a plausible-sounding assumption about filesystem/.NET behavior
-#  turning out wrong) has bitten this codebase before.
+#  needed), not reasoned about from documentation - a plausible-sounding
+#  assumption about filesystem/.NET behavior is easy to get wrong.
 # ==============================================================================
 Write-Host "=== Scenario K: Remove-ItemPermanently on a directory junction unlinks only ===" -ForegroundColor Cyan
 $targetK  = New-ScratchDir -Name "scenario-k-real-target"
@@ -263,13 +259,13 @@ Test-Assert (Test-Path -LiteralPath $canaryK) "the canary file inside the real t
 Write-Host ""
 
 # ==============================================================================
-#  Scenario K2 (2026-09-23, Todo.md item): a junction or read-only file
-#  NESTED inside a folder being permanently deleted. Before the fix,
-#  Directory.Delete($path, $true) threw part-way ("Access to the path
-#  'link' is denied") and left the folder behind with the read-only file
-#  still in it - confirmed live against the pre-fix module. The junction's
-#  target was never deleted-through even then; this scenario proves the
-#  replacement walk (Remove-DirectoryTreePermanently) keeps it that way:
+#  Scenario K2: a junction or read-only file
+#  NESTED inside a folder being permanently deleted. A plain
+#  Directory.Delete($path, $true) throws part-way ("Access to the path
+#  'link' is denied") and leaves the folder behind with the read-only file
+#  still in it. The junction's target is never deleted-through; this
+#  scenario proves the walk (Remove-DirectoryTreePermanently) keeps it
+#  that way:
 #  unlinks nested reparse points, never recurses into them, and clears
 #  ReadOnly only on real entries.
 # ==============================================================================
@@ -327,9 +323,9 @@ Write-Host ""
 
 # ==============================================================================
 #  Scenario M: a Hidden/System file or directory can actually be deleted
-#  (2026-08-31 fix) - Get-Item -LiteralPath without -Force can't see a
+#  - Get-Item -LiteralPath without -Force can't see a
 #  Hidden/System item even though Test-Path (the guard both functions
-#  already have) can, so it used to throw "Could not find item" for
+#  have) can, so it would throw "Could not find item" for
 #  something sitting right there, on all three real-world shapes: a
 #  hidden file, a system file, and a hidden directory.
 # ==============================================================================
@@ -359,10 +355,10 @@ $hiddenFileM2 = Join-Path $scratchDir "scenario-m-hidden-recycle.txt"
 $null = Move-ToRecycleBin -ItemPath $hiddenFileM2
 Test-Assert (-not (Test-Path -LiteralPath $hiddenFileM2)) "Move-ToRecycleBin deletes a Hidden file instead of throwing"
 
-# 2026-09-15 fix, real bug: [System.IO.File]::Delete throws
-# UnauthorizedAccessException on a read-only file, which meant a
-# read-only source survived right next to its already-converted .jxl
-# and was misreported as a delete FAILURE.
+# [System.IO.File]::Delete throws
+# UnauthorizedAccessException on a read-only file, which would leave a
+# read-only source right next to its already-converted .jxl
+# and misreport it as a delete FAILURE.
 $readOnlyFileM = Join-Path $scratchDir "scenario-m-readonly.txt"
 "read-only content" | Out-File -FilePath $readOnlyFileM -Encoding UTF8
 (Get-Item -LiteralPath $readOnlyFileM -Force).Attributes = [System.IO.FileAttributes]::ReadOnly
@@ -372,15 +368,13 @@ Test-Assert ($resultM3 -eq $true) "Remove-ItemPermanently reports the read-only 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario N (2026-09-03 fix, Todo.md finding - latent, not live: every
-#  real call site already passes an absolute path): a RELATIVE -ItemPath
-#  used to pass Test-Path (resolved against PowerShell's own $PWD/provider
+#  Scenario N (every real call site already passes an absolute path): a
+#  RELATIVE -ItemPath would pass Test-Path (resolved against PowerShell's own $PWD/provider
 #  location) but then get deleted via .NET/VB FileIO calls that resolve
 #  relative paths against the PROCESS's real current directory instead -
 #  which Push-Location/Set-Location does NOT change (only PowerShell's
-#  own $PWD moves; [System.Environment]::CurrentDirectory does not,
-#  confirmed live earlier this session by ZipPipeline.Harness.ps1's own
-#  Scenario D3 hitting the identical gotcha). Both functions now resolve
+#  own $PWD moves; [System.Environment]::CurrentDirectory does not -
+#  ZipPipeline.Harness.ps1's Scenario D3 hits the identical gotcha). Both functions resolve
 #  -ItemPath via GetUnresolvedProviderPathFromPSPath FIRST, so the actual
 #  delete always targets the exact same file Test-Path already confirmed
 #  exists - proven here by Push-Location'ing somewhere PS $PWD and the
@@ -413,12 +407,10 @@ Test-Assert (-not (Test-Path -LiteralPath $relFileN2)) "Move-ToRecycleBin with a
 Write-Host ""
 
 # ==============================================================================
-#  Scenario O (2026-09-03 fix, real bug caught by a same-session
-#  /code-review pass on the fix above): a path on a drive letter that
+#  Scenario O: a path on a drive letter that
 #  isn't currently mounted must still degrade to $false, not throw.
 #  GetUnresolvedProviderPathFromPSPath (unlike Test-Path) throws for a
-#  path whose drive doesn't exist as a PowerShell drive at all - verified
-#  live during that review against a genuinely unmounted letter. This
+#  path whose drive doesn't exist as a PowerShell drive at all. This
 #  scenario finds a real unmounted letter on whatever machine it runs on
 #  rather than hardcoding one, so it stays valid across environments.
 # ==============================================================================
@@ -446,15 +438,14 @@ if ($null -eq $unmountedLetterO) {
 Write-Host ""
 
 # ==============================================================================
-#  Scenario P (2026-09-22, the worker-state fix): Remove-Source honours
+#  Scenario P: Remove-Source honours
 #  Permanent Delete inside a REAL runspace worker, including when called from
 #  a .GetNewClosure()'d block created inside another propagated function
 #  (the shape of every Full Pipeline job builder / [System.Lazy] factory).
 #  There, a propagated function's $script: resolves to the closure's own
-#  empty module scope - the old Remove-Source read $script:PermanentDelete
-#  as $null and silently sent the file to the Recycle Bin instead
-#  (confirmed against the pre-fix FileDeletion.ps1: the closure call took
-#  the Recycle Bin branch). The two deletion primitives are recorders here,
+#  empty module scope - so Remove-Source must not read $script:PermanentDelete
+#  there, or it would see $null and silently send the file to the Recycle
+#  Bin instead. The two deletion primitives are recorders here,
 #  so nothing real is deleted or recycled.
 # ==============================================================================
 Write-Host "=== Scenario P: Remove-Source honours Permanent Delete in a runspace closure ===" -ForegroundColor Cyan
@@ -487,17 +478,15 @@ Test-Assert ($pResult.Closure -eq "permanent") ("a worker Remove-Source call fro
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Q (2026-09-23, Todo.md item): Move-ToRecycleBin must NOT
+#  Scenario Q: Move-ToRecycleBin must NOT
 #  silently delete permanently when an item can't actually be recycled.
 #  The VB FileIO call with OnlyErrorDialogs (= no confirmation) deletes
-#  such an item outright and returns normally - confirmed live 2026-09-23
-#  with a 100 GB sparse file (over C:'s 97,350 MB Recycle Bin limit): the
-#  call succeeded, the file was gone, and it was NOT in the Recycle Bin
-#  (a small control file sent the same way WAS). Owner decision: leave it
-#  in place instead. Uses a real sparse file just over this drive's
+#  such an item outright and returns normally (e.g. a 100 GB sparse file
+#  over the drive's Recycle Bin limit: the call succeeds, the file is
+#  gone, and it is NOT in the Recycle Bin). The item is left in place
+#  instead. Uses a real sparse file just over this drive's
 #  limit (logical size only - no real disk space) so the check runs
-#  against the real Shell behavior boundary. Confirmed failing against the
-#  pre-fix module (the file was deleted outright).
+#  against the real Shell behavior boundary.
 # ==============================================================================
 Write-Host "=== Scenario Q: Move-ToRecycleBin leaves an unrecyclable item in place ===" -ForegroundColor Cyan
 $capQ = [RecycleBinProbe]::GetCapacityBytes($scratchDir)
@@ -548,7 +537,7 @@ Test-Assert ($null -eq [RecycleBinProbe]::GetUnrecyclableReason($smallQ)) "a nor
 Write-Host ""
 
 # ==============================================================================
-#  Scenario R (2026-09-23, /code-review findings): RecycleBinProbe's
+#  Scenario R: RecycleBinProbe's
 #  network / removable / delete-immediately / policy branches, driven by
 #  its test-only overrides (this PC has only fixed NTFS drives and none of
 #  those settings), plus the up-front run refusal and the vanished-path

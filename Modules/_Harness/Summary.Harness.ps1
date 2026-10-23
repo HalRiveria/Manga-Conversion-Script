@@ -17,9 +17,9 @@ $ErrorActionPreference = "Stop"
 
 $script:writeLogCalls = New-Object System.Collections.Generic.List[object]
 function Write-Log {
-    # -ForceConsole tracked explicitly (2026-09-15 fix regression coverage) -
+    # -ForceConsole tracked explicitly -
     # a fake without this parameter declared doesn't throw when called with
-    # -ForceConsole (verified live: PowerShell silently accepts it as if it
+    # -ForceConsole (PowerShell silently accepts it as if it
     # were positional/ignored on a non-CmdletBinding function), so a fake
     # missing the parameter can't catch a caller failing to pass it either -
     # it has to actually capture the value to be a meaningful test.
@@ -64,9 +64,9 @@ Test-Assert ($statsA2.LooseImgConverted.Success -eq 0) "mutating one tracker's n
 Test-Assert (
     $statsA2.ContainsKey('LooseAnimatedConverted') -and $statsA2.ContainsKey('LooseAnimatedDeleted')
 ) "schema includes the new LooseAnimatedConverted/LooseAnimatedDeleted groups"
-Test-Assert ($statsA2.ContainsKey('InspectFailed') -and $statsA2.InspectFailed.Count -eq 0) "schema includes InspectFailed (2026-08-28), defaulting to 0"
-Test-Assert ($statsA2.ContainsKey('Aborted') -and $statsA2.Aborted -eq $false) "schema includes Aborted (2026-09-03), defaulting to `$false"
-Test-Assert ($statsA2.ContainsKey('ForceKilledCount') -and $statsA2.ForceKilledCount -eq 0) "schema includes ForceKilledCount (2026-09-03), defaulting to 0"
+Test-Assert ($statsA2.ContainsKey('InspectFailed') -and $statsA2.InspectFailed.Count -eq 0) "schema includes InspectFailed, defaulting to 0"
+Test-Assert ($statsA2.ContainsKey('Aborted') -and $statsA2.Aborted -eq $false) "schema includes Aborted, defaulting to `$false"
+Test-Assert ($statsA2.ContainsKey('ForceKilledCount') -and $statsA2.ForceKilledCount -eq 0) "schema includes ForceKilledCount, defaulting to 0"
 Write-Host ""
 
 # ==============================================================================
@@ -91,9 +91,9 @@ $blobD = (Get-SummaryLines -Stats $statsD -ElapsedString "00h 00m 05s" -ModeFlag
 Test-Assert ($blobD -match "Loose Img Conv\.") "shows loose image conversion rows"
 Test-Assert ($blobD -match "Loose Anim\. Conv\.") "shows loose animated conversion rows"
 Test-Assert ($blobD -match "Loose Folders Zipped") "shows the zip-after-conversion rows"
-Test-Assert ($blobD -notmatch "ZIPs Extracted") "does not show the (unrelated) rezip/ZIP-pipeline rows"
+Test-Assert ($blobD -notmatch "ZIPs Extracted") "does not show the (unrelated) ZIP-pipeline rows"
 Test-Assert ($blobD -notmatch "Zip-only") "does not show the (unrelated) zip-only rows"
-Test-Assert ($blobD -match "Inspect Failed\s*: 3 file\(s\)") "shows Inspect Failed with the real count (2026-08-28)"
+Test-Assert ($blobD -match "Inspect Failed\s*: 3 file\(s\)") "shows Inspect Failed with the real count"
 Write-Host ""
 
 # ==============================================================================
@@ -123,7 +123,7 @@ $statsE.ZipOnlyZipped.Skipped = 2
 $blobE2 = (Get-SummaryLines -Stats $statsE -ElapsedString "00h 00m 01s" -ModeFlags $flagsE) -join "`n"
 Test-Assert ($blobE2 -match "Skipped \(animated originals kept\) = 2") "the zip-only row shows folders skipped for an .avif/.webp pair"
 Test-Assert ($blobE -notmatch "Loose") "shows nothing from any loose-pipeline group"
-Test-Assert ($blobE -notmatch "ZIPs Extracted") "shows nothing from the rezip/ZIP-pipeline group"
+Test-Assert ($blobE -notmatch "ZIPs Extracted") "shows nothing from the ZIP-pipeline group"
 Test-Assert ($blobE -notmatch "Inspect Failed") "does not show Inspect Failed - RunZipOnly alone doesn't touch either conversion engine"
 Write-Host ""
 
@@ -142,11 +142,11 @@ Test-Assert (($linesF -join "`n") -notmatch "ABORTED") "a normal (non-aborted) r
 Write-Host ""
 
 # ==============================================================================
-#  Scenario F2 (2026-09-03 fix, Todo.md finding): an aborted run's summary
-#  used to end with the exact same "Processing complete" footer as a
-#  normal finish - Stats.Aborted/Stats.ForceKilledCount (already tracked
-#  by every pipeline with an abort loop, per Controller.ps1's own
-#  $totals) now actually reach Get-SummaryLines' output.
+#  Scenario F2: an aborted run's summary must not end with the same
+#  "Processing complete" footer as a normal finish -
+#  Stats.Aborted/Stats.ForceKilledCount (tracked by every pipeline with
+#  an abort loop, per Controller.ps1's own $totals) reach
+#  Get-SummaryLines' output.
 # ==============================================================================
 Write-Host "=== Scenario F2: Get-SummaryLines reflects an aborted run, not 'Processing complete' ===" -ForegroundColor Cyan
 $statsF2 = New-StatsTracker
@@ -178,7 +178,7 @@ Write-SummaryReport -Lines $reportLinesG -FullLogging $true
 Test-Assert ($script:writeLogCalls.Count -eq $reportLinesG.Count) "Write-Log was called once per line"
 Test-Assert (@($script:writeLogCalls | Where-Object { $_.Level -ne 'Summary' }).Count -eq 0) "every Write-Log call used -Level Summary"
 Test-Assert ($script:summaryLogCalls.Count -eq 0) "Write-SummaryLog was NOT called in full-logging mode"
-# 2026-09-15 fix (real bug): without -ForceConsole, Write-Log suppresses
+# Without -ForceConsole, Write-Log suppresses
 # console output whenever Clean Console Output is enabled, and nothing
 # turns CCO off before the summary is written - so the whole summary
 # (every line) silently vanished from the console with CCO on.

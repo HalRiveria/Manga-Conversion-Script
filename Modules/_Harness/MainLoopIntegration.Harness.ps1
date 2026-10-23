@@ -24,15 +24,13 @@
     UnwantedImage.ps1 by calling its functions directly, never through
     Menu.ps1's own wrapper functions.
 
-    Net effect (found by a 2026-09-02 full-codebase review, not by any
-    existing harness): mode 5 (Cover Deletion)'s real work runs INSIDE
+    Net effect: mode 5 (Cover Deletion)'s real work runs INSIDE
     Get-SelectedMode, not inside Invoke-Mode like every other mode - so
-    it was the one mode never covered by Invoke-Mode's own try/catch,
-    and nothing else caught that either, because no harness exercised
-    the real chain connecting all three modules. This harness exists
-    specifically to close that gap - see Scenario B below for the actual
-    regression test proving the fix (Controller.ps1's Invoke-MainLoop,
-    2026-09-02) protects this real chain end to end, not just an
+    it is the one mode not covered by Invoke-Mode's own try/catch, and
+    no other harness exercises the real chain connecting all three
+    modules. This harness exists specifically to cover that - see the
+    containment scenario below for the test proving Controller.ps1's
+    Invoke-MainLoop protects this real chain end to end, not just an
     abstract fake-throwing handler.
 
     Deliberately does NOT dot-source ImageConversionPipeline.ps1/
@@ -148,8 +146,7 @@ $fakeSettings = @{
 # shadow) is the correct tool here, not a source change - adding a
 # pass-through -ProfilesPath parameter through Get-SelectedMode purely
 # for testability, when production never needs to vary it, would be
-# exactly the kind of unneeded abstraction CLAUDE.md's own conventions
-# argue against.
+# an unneeded abstraction.
 $script:activeProfilesPath = $null
 function Get-UnwantedImageProfilesPath {
     param([string]$BaseDir)
@@ -178,7 +175,7 @@ $null = Add-UnwantedImageProfile -Profile $profileA -ProfilesPath $profilesPathA
 $script:activeProfilesPath = $profilesPathA
 
 $fakeGetModeSettingsA = $fakeSettings.Clone()
-# 2026-09-23: Run scans the loop's own -TargetPath (no folder prompt, no
+# Run scans the loop's own -TargetPath (no folder prompt, no
 # confirmation); CoverDeletionDryRun off so the match is really deleted.
 $fakeGetModeSettingsA.CoverDeletionDryRun = $false
 $promptA = New-ScriptedPrompt -Responses @('5', '1', '0', '2')
@@ -202,22 +199,20 @@ Test-Assert ($postRunCallsA -eq 1) "the loop completed normally, no crash"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario B (2026-09-02 review fix, proven end to end): a genuinely
-#  uncontained throw from inside the real chain no longer crashes
+#  Scenario B (proven end to end): a genuinely
+#  uncontained throw from inside the real chain must not crash
 #  Invoke-MainLoop. NOTE this deliberately does NOT reuse
-#  UnwantedImage.Harness.ps1's Get-FileHash-shadow trick from Scenario A's
-#  sibling test in that file - THIS SAME DAY's other fix
-#  (Test-UnwantedImageMatch's own try/catch around Get-FileHash) already
-#  contains that exact failure internally now, so it would never reach
-#  Invoke-MainLoop's own catch at all any more (proven instead by
+#  UnwantedImage.Harness.ps1's Get-FileHash-shadow trick -
+#  Test-UnwantedImageMatch's own try/catch around Get-FileHash already
+#  contains that exact failure internally, so it would never reach
+#  Invoke-MainLoop's own catch at all (that is covered by
 #  UnwantedImage.Harness.ps1's own Scenario C6). To prove Invoke-MainLoop's
 #  OWN containment through the real chain, this throws from the one place
 #  genuinely nothing in Menu.ps1/UnwantedImage.ps1 wraps: the injected
 #  -PromptFunc itself (real Read-Host essentially never throws, but
-#  nothing rules it out - a closed/redirected stdin, for one). Before
-#  this fix, ANY uncontained throw anywhere in this real chain - this
-#  one, or the Get-FileHash one before ITS OWN fix, or a future one not
-#  yet found - had nothing between it and the bootstrap's top-level
+#  nothing rules it out - a closed/redirected stdin, for one). Without
+#  this containment, ANY uncontained throw anywhere in this real chain
+#  would have nothing between it and the bootstrap's top-level
 #  catch. This is the defense-in-depth layer; Scenario A above and
 #  UnwantedImage.Harness.ps1's Scenario C6 together already prove the
 #  specific Get-FileHash gap is closed at its source too.
@@ -268,7 +263,7 @@ Test-Assert ($postRunCallsB -eq 2) "Show-PostRunPrompt was reached both after th
 Write-Host ""
 
 # ==============================================================================
-#  Scenario B (2026-09-23): menu clear/redraw through the real main loop.
+#  Scenario B: menu clear/redraw through the real main loop.
 #  Iteration 1 goes mode menu -> Options -> back -> invalid pick -> mode 2;
 #  iteration 2 picks mode 2 straight away. Prompts, clears and the (fake)
 #  run are logged into one sequence. Every menu-to-menu step clears; the
@@ -290,7 +285,7 @@ Test-Assert (($seqB -join ",") -eq $expectedB) ("clears on Options entry, on goi
 Write-Host ""
 
 # ==============================================================================
-#  Scenario C (2026-09-23): Cover Deletion's defaults through the real main
+#  Scenario C: Cover Deletion's defaults through the real main
 #  loop - Run scans the loop's own target folder with no folder prompt and
 #  no confirmation, and the default CoverDeletionDryRun (off) really
 #  deletes the match. $fakeSettings has no CoverDeletion* keys, so this also proves
@@ -316,11 +311,11 @@ Test-Assert ($invokeModeC.Calls -eq 1) "the loop went 5 -> Run -> back -> mode 2
 Write-Host ""
 
 # ==============================================================================
-#  Scenario D (2026-09-23): Mode 8 is retired - through the real main loop,
+#  Scenario D: mode 8 does not exist - through the real main loop,
 #  picking 8 is an invalid selection (the menu redraws) and the next pick
 #  (2) is what actually gets dispatched.
 # ==============================================================================
-Write-Host "=== Scenario D: retired Mode 8 is rejected by the real menu ===" -ForegroundColor Cyan
+Write-Host "=== Scenario D: an unused menu number (8) is rejected by the real menu ===" -ForegroundColor Cyan
 $promptD = New-ScriptedPrompt -Responses @('8', '2')
 $realGetModeD = { param($Settings, $SettingsPath, $ReinitLogPathsHandler, $TargetPath) Get-SelectedMode -Settings $Settings -SettingsPath $SettingsPath -PromptFunc $promptD -TargetPath $TargetPath -ClearScreenFunc { } }.GetNewClosure()
 $modesD = [System.Collections.Generic.List[string]]::new()

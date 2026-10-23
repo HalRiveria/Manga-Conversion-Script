@@ -12,11 +12,8 @@
     JOB CONTRACT) and a test-flippable "done" flag JobPollCompleted reads -
     cheaper and faster than every other harness in this project.
 
-    Scenarios follow Docs\dispatch-redesign-design.md's own "Harness
-    strategy" list (numbered to match that doc), plus one additional
-    scenario (P) covering New-LibraryChapterProvider against a real
-    folder structure - the design doc's numbered list is entirely about
-    Invoke-ChapterDispatch.
+    Numbered scenarios cover Invoke-ChapterDispatch; scenario P covers
+    New-LibraryChapterProvider against a real folder structure.
 
     Stubs Write-Log (this module's only cross-module forward reference
     besides the compiled [ConsoleCtrl] type, which is dot-sourced for

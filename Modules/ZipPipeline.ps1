@@ -49,7 +49,7 @@ $script:zipOnlyWorker = {
     $null = [System.Reflection.Assembly]::LoadWithPartialName("Microsoft.VisualBasic")
     $null = [System.Reflection.Assembly]::LoadWithPartialName("System.IO.Compression.FileSystem")
 
-    # Only these two - worker log lines go through the queue; see Docs/function-notes.md (Get-WorkerRunspaceValue).
+    # Only these two - worker log lines go through the queue; see Get-WorkerRunspaceValue.
     $script:workerConsoleQueue = $ConsoleQueue
     $script:PermanentDelete    = $DoPermanentDelete
 
@@ -127,7 +127,7 @@ $script:zipOnlyWorker = {
         return $result
     }
 
-    # Deliberately OUTSIDE the try/catch above (2026-09-15 fix, real bug):
+    # Deliberately OUTSIDE the try/catch above:
     # that block's own catch treats ANY exception as "the zip failed" and
     # deletes $ZipOutPath - correct for a failure during zip creation, but
     # this step runs only AFTER the zip is already built and verified. If
@@ -139,7 +139,7 @@ $script:zipOnlyWorker = {
     # its own inner try/catch for the one call that can legitimately fail
     # (Remove-Source) - it doesn't need the outer one too.
     if ($DeleteFolders -and $CancelToken.IsCancellationRequested) {
-        # No source delete once an abort is in - see Docs/function-notes.md (zipOnlyWorker).
+        # No source delete once an abort is in.
         Write-Log ("Abort requested - left the source folder in place (its zip is complete and verified): '" + $FolderPath + "'") -Level Warn
     } elseif ($DeleteFolders) {
         try {
@@ -225,7 +225,7 @@ function Invoke-ZipOnlyPipeline {
                 $seriesRoot = $dirFullName
             }
 
-            # Wrapped in try/catch (2026-09-15 fix, real bug) - this whole
+            # Wrapped in try/catch - this whole
             # block is pure Clean Console Output bookkeeping (a side-scan
             # to count a series' own chapters for the progress display),
             # not real zip work. It runs inside $zoJobProvider, which
@@ -233,7 +233,7 @@ function Invoke-ZipOnlyPipeline {
             # own around -NextJobProvider - an unguarded throw here (the
             # side-scan's own Get-ZippableLeafDirs hitting a real TOCTOU
             # if $seriesRoot vanishes between the Test-Path check and the
-            # scan, or CCR rendering itself throwing) used to kill the
+            # scan, or CCR rendering itself throwing) would kill the
             # ENTIRE Zip Folders run over a display-only concern.
             try {
                 if ((Test-CcrEnabledForZipOnly) -and -not $zoSeenSeriesNames.Contains($seriesName)) {
@@ -287,8 +287,8 @@ function Invoke-ZipOnlyPipeline {
         }
 
         if ($totals.CandidateCount -eq 0) {
-            # Check Aborted first (2026-09-15 fix, real bug) - an abort
-            # before the very first candidate was ever found used to log
+            # Check Aborted first - an abort
+            # before the very first candidate was ever found would otherwise log
             # the same "no qualifying leaf directories found" message as
             # a genuinely empty library, pointing the user at their
             # folder layout instead of telling them the run was

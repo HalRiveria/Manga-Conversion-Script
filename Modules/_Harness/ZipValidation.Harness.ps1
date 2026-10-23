@@ -89,7 +89,7 @@ Write-Host ""
 
 # ==============================================================================
 #  Scenario D: entries present but none are .jxl, RequireJxlEntry=$false -
-#  does NOT throw, matching mode 3's zip-only use case (arbitrary content).
+#  does NOT throw, matching mode 4's zip-only use case (arbitrary content).
 # ==============================================================================
 Write-Host "=== Scenario D: no .jxl entries + RequireJxlEntry=`$false does not throw ===" -ForegroundColor Cyan
 $zipD = New-TestZip -EntryNames @("readme.txt", "cover.png")
@@ -148,13 +148,12 @@ Write-Host ""
 # ==============================================================================
 #  Scenario I: -ZipPath is Mandatory. Checked via parameter METADATA
 #  (Get-Command), not by actually calling Test-ZipArchive with -ZipPath
-#  omitted (2026-09-09 fix, a real bug caught live in a sibling harness -
-#  DependencyDetection.Harness.ps1's own former Scenario G): PowerShell
+#  omitted: PowerShell
 #  only THROWS on a missing Mandatory parameter when it can't prompt for
 #  one - with a real interactive console attached, it instead blocks the
 #  whole process waiting on stdin forever, zero CPU/disk activity.
 #  Matches ZipParallelProcessing.Harness.ps1's own Scenario E, which
-#  already documented and avoided this exact host-dependent hang.
+#  avoids this same host-dependent hang.
 # ==============================================================================
 Write-Host "=== Scenario I: -ZipPath is Mandatory ===" -ForegroundColor Cyan
 $attrI = (Get-Command Test-ZipArchive).Parameters['ZipPath'].Attributes |
