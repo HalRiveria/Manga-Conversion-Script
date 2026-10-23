@@ -166,27 +166,34 @@ Fix the cause and run it again. Finished chapters are skipped.
 
 ## Testing
 
-Each module has its own test suite in `Modules\_Harness\`, using real
-`cjxl`/`magick` stand-ins built on the fly. Run them all with:
+Each module has its own test suite in `Modules\_Harness\`. They use small
+stand-in `cjxl`/`magick` programs built on the fly, so they don't need the
+real tools or any images. Run one directly:
 
 ```powershell
-.\Tools\Run-Harness.ps1 -All
+powershell -NoProfile -File .\Modules\_Harness\Controller.Harness.ps1
 ```
 
-## For contributors
+or all of them:
+
+```powershell
+Get-ChildItem .\Modules\_Harness\*.Harness.ps1 | ForEach-Object { powershell -NoProfile -File $_.FullName }
+```
+
+Each one ends with `ALL PASSED` or a count of failures, and exits with 0 or
+1.
+
+## How it's put together
 
 - `Conversion Script Main.ps1` only bootstraps: it finds `Modules\`, loads
   settings, locates `cjxl`/`magick`, and hands over to `Controller.ps1`.
 - `Modules\` holds the 18 modules, one per job (logging, deletion, zip
-  creation, the conversion pipelines, the menu, and so on), each with a test
-  harness.
-- `Docs\` has the design notes and per-function documentation, including
-  [`Docs/lessons-learned.md`](Docs/lessons-learned.md), a list of the
-  PowerShell traps this code has hit and how they're avoided.
-- `CHANGELOG.md` is the full history. `Todo.md` lists open items.
+  creation, the conversion pipelines, the menu, and so on). Each is a file
+  of plain function definitions with its own test suite in
+  `Modules\_Harness\`.
 - This project was developed with Claude Code as a pair programmer.
-  `CLAUDE.md` is the working context those sessions use.
 
 ## License
 
-No license has been chosen yet.
+[MIT](LICENSE). Free to use, change and share, including commercially; just
+keep the copyright notice.
