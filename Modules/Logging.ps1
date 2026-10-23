@@ -1,4 +1,4 @@
-# See Docs/module-descriptions.md for this module's full description.
+# See module-descriptions.md for this module's full description.
 
 $script:logMutex           = $null
 $script:workerConsoleQueue = $null   # NAMED DIFFERENTLY FROM the plain $consoleQueue local

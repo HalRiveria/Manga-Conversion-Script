@@ -1,4 +1,4 @@
-# See Docs/module-descriptions.md for this module's full description.
+# See module-descriptions.md for this module's full description.
 
 # ==============================================================================
 #  PART 1 - mode 3 (zip-only pipeline)
@@ -97,7 +97,7 @@ $script:zipOnlyWorker = {
         $orphanedScratchFiles = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
         foreach ($f in (Get-FilesRecursiveSafe -ScanPath $FolderPath)) {
             if ($f.Name -imatch '_tmp_iccstrip(-\d+)?\.png$' -or
-                $f.Name -imatch '_tmp_(webp|avif|bmp|heic|heif)2png\.png$' -or
+                $f.Name -imatch '_tmp_(webp|avif|bmp|heic|heif|tiff)2png\.png$' -or
                 $f.Name -imatch '_tmp_overwrite\.webp$') {
                 $orphanedScratchFiles.Add($f)
             }

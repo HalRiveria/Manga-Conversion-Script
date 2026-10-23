@@ -1,4 +1,4 @@
-# See Docs/module-descriptions.md for this module's full description.
+# See module-descriptions.md for this module's full description.
 
 if (-not ([System.Management.Automation.PSTypeName]'ConsoleCtrl').Type) {
     Add-Type -TypeDefinition @'

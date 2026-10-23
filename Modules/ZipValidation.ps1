@@ -1,4 +1,4 @@
-# See Docs/module-descriptions.md for this module's full description.
+# See module-descriptions.md for this module's full description.
 
 # ---- Required assembly ----
 Add-Type -AssemblyName "System.IO.Compression.FileSystem"

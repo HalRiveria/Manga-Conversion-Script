@@ -2,7 +2,7 @@
 
 #Conversion Script Version 17.0 (modular rewrite)
 
-# See Docs/module-descriptions.md for this file's full description.
+# See module-descriptions.md for this file's full description.
 
 param(
     [string]$Path,

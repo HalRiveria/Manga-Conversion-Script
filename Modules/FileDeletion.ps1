@@ -1,4 +1,4 @@
-# See Docs/module-descriptions.md for this module's full description.
+# See module-descriptions.md for this module's full description.
 
 # ---- Required assembly (Recycle Bin support) ----
 Add-Type -AssemblyName "Microsoft.VisualBasic"

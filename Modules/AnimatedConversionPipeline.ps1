@@ -1,4 +1,4 @@
-# See Docs/module-descriptions.md for this module's full description.
+# See module-descriptions.md for this module's full description.
 
 # ==============================================================================
 #  PART 1 - shared helpers used by PART 2's live conversion engine

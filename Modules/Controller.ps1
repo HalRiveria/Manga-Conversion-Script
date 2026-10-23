@@ -1,7 +1,7 @@
-# See Docs/module-descriptions.md for this module's full description.
+# See module-descriptions.md for this module's full description.
 
 # ==============================================================================
-#  DISPATCH-REDESIGN STEP 4 - see Docs/module-descriptions.md's Controller.ps1
+#  DISPATCH-REDESIGN STEP 4 - see module-descriptions.md's Controller.ps1
 #  section for the full design.
 # ==============================================================================
 
@@ -482,6 +482,7 @@ $script:fullPipelineEngineWorker = {
                     '\.bmp$'  { "BMP";  break }
                     '\.heic$' { "HEIC"; break }
                     '\.heif$' { "HEIF"; break }
+                    '\.tiff?$' { "TIFF"; break }   # cjxl can't read TIFF at all
                     default   { $null }
                 }
                 $allJobs.Add(@{

@@ -42,7 +42,7 @@ Everything runs from one interactive menu.
 | Input | Becomes |
 |---|---|
 | `.jpg`, `.jpeg` | `.jxl` (quality 90 by default, or lossless JPEG recompression) |
-| `.png`, `.webp`, `.bmp`, `.heic`, `.heif`, static `.avif` | `.jxl` (quality 90) |
+| `.png`, `.webp`, `.bmp`, `.tif`, `.tiff`, `.heic`, `.heif`, static `.avif` | `.jxl` (quality 90) |
 | animated `.avif` | animated `.webp` |
 | animated `.webp`, `.gif` | left as they are |
 
@@ -69,9 +69,12 @@ Everything runs from one interactive menu.
 2. Open a new terminal so the tools are on your `PATH`.
 3. Download or clone this repository. Keep `Conversion Script Main.ps1` and
    the `Modules` folder together.
-4. If Windows blocks the script because it was downloaded, right-click
-   `Conversion Script Main.ps1` → Properties → tick **Unblock**, or run
-   `Unblock-File` on the folder's `.ps1` files.
+4. If you downloaded a ZIP and Windows blocks the scripts, unblock them once
+   from inside the folder:
+
+   ```powershell
+   Get-ChildItem -Recurse -Filter *.ps1 | Unblock-File
+   ```
 
 The script looks for `cjxl` and `magick` on your `PATH` and in the usual
 install folders. If it can't find one, pass the path once with `-CjxlPath` or
@@ -191,6 +194,9 @@ Each one ends with `ALL PASSED` or a count of failures, and exits with 0 or
   creation, the conversion pipelines, the menu, and so on). Each is a file
   of plain function definitions with its own test suite in
   `Modules\_Harness\`.
+- [`module-descriptions.md`](module-descriptions.md) has a detailed write-up
+  of each module: what it does, why it's built the way it is, and the
+  problems it was built to avoid.
 - This project was developed with Claude Code as a pair programmer.
 
 ## License

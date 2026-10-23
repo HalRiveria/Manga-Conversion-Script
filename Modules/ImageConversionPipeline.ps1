@@ -1,4 +1,4 @@
-# See Docs/module-descriptions.md for this module's full description.
+# See module-descriptions.md for this module's full description.
 
 # ==============================================================================
 #  PART 1 - shared helpers used by PART 2's live conversion engine
@@ -14,7 +14,7 @@ function Test-OrphanedScratchFileName {
     param([Parameter(Mandatory)][string]$Name)
     return (
         $Name -imatch '_tmp_iccstrip(-\d+)?\.png$' -or
-        $Name -imatch '_tmp_(webp|avif|bmp|heic|heif)2png\.png$' -or
+        $Name -imatch '_tmp_(webp|avif|bmp|heic|heif|tiff)2png\.png$' -or
         $Name -imatch '_tmp_overwrite\.webp$'
     )
 }
@@ -578,6 +578,7 @@ function Invoke-LooseImageConversionPipeline {
                     '\.bmp$'  { "BMP";  break }
                     '\.heic$' { "HEIC"; break }
                     '\.heif$' { "HEIF"; break }
+                    '\.tiff?$' { "TIFF"; break }   # cjxl can't read TIFF at all
                     default   { $null }
                 }
                 $allJobs.Add(@{

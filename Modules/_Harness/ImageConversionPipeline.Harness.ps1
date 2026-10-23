@@ -419,12 +419,13 @@ Test-Assert (Test-OrphanedScratchFileName -Name "photo_tmp_avif2png.png") "'_tmp
 Test-Assert (Test-OrphanedScratchFileName -Name "photo_tmp_bmp2png.png") "'_tmp_bmp2png.png' matches"
 Test-Assert (Test-OrphanedScratchFileName -Name "photo_tmp_heic2png.png") "'_tmp_heic2png.png' matches"
 Test-Assert (Test-OrphanedScratchFileName -Name "photo_tmp_heif2png.png") "'_tmp_heif2png.png' matches"
+Test-Assert (Test-OrphanedScratchFileName -Name "photo_tmp_tiff2png.png") "'_tmp_tiff2png.png' matches"
 Test-Assert (Test-OrphanedScratchFileName -Name "anim_tmp_overwrite.webp") "'_tmp_overwrite.webp' matches"
 Test-Assert (-not (Test-OrphanedScratchFileName -Name "page1.jpg")) "a genuine loose image does NOT match"
 
 $zipPipelinePath   = Join-Path $PSScriptRoot "..\ZipPipeline.ps1"
 $zipPipelineSource = Get-Content -LiteralPath $zipPipelinePath -Raw
-foreach ($patternA0b in @('_tmp_iccstrip(-\d+)?\.png$', '_tmp_(webp|avif|bmp|heic|heif)2png\.png$', '_tmp_overwrite\.webp$')) {
+foreach ($patternA0b in @('_tmp_iccstrip(-\d+)?\.png$', '_tmp_(webp|avif|bmp|heic|heif|tiff)2png\.png$', '_tmp_overwrite\.webp$')) {
     Test-Assert ($zipPipelineSource.Contains($patternA0b)) ("ZipPipeline.ps1's own deliberately-kept-literal still contains pattern '" + $patternA0b + "' (not drifted)")
 }
 Write-Host ""
@@ -1157,7 +1158,7 @@ Test-Assert ($totalsQ2b.DeletedSuccess -eq 0) ("DeletedSuccess stays 0, not fals
 Write-Host ""
 
 Write-Host "=== Scenario Q3: .bmp/.heic/.heif each convert through the WebP-style temp-PNG detour ===" -ForegroundColor Cyan
-foreach ($extQ3 in @("bmp", "heic", "heif")) {
+foreach ($extQ3 in @("bmp", "heic", "heif", "tif", "tiff")) {
     $chQ3 = New-Dir ("scenario-q3-" + $extQ3 + "\Series\Chapter 1")
     $srcQ3 = New-FakeImage -DirPath $chQ3 -Name ("cover." + $extQ3)
 
@@ -1166,6 +1167,23 @@ foreach ($extQ3 in @("bmp", "heic", "heif")) {
     Test-Assert ($totalsQ3.ConvertedSuccess -eq 1 -and $totalsQ3.ConvertedFail -eq 0) ("." + $extQ3 + " converted successfully through the magick detour (got ConvertedSuccess=" + $totalsQ3.ConvertedSuccess + ", ConvertedFail=" + $totalsQ3.ConvertedFail + ")")
     Test-Assert (-not (Test-Path -LiteralPath $srcQ3)) ("the ." + $extQ3 + " source was deleted after a successful conversion")
     Test-Assert (Test-Path -LiteralPath (Join-Path $chQ3 "cover.jxl")) ("cover.jxl was created for ." + $extQ3)
+}
+Write-Host ""
+
+# Scenario Q3b (2026-10-23): .tif/.tiff go through the magick detour too.
+# Real cjxl can't read TIFF; before this they were handed to it directly
+# and only converted by accident, via the ICC-strip retry, with a
+# misleading "ICC profile mismatch" warning on every file. The fake cjxl
+# here accepts anything, so the proof is the other direction: with no
+# magick available, a TIFF must now be refused with the same "ImageMagick
+# not found" failure as BMP/HEIC, instead of going straight to cjxl.
+Write-Host "=== Scenario Q3b: .tif/.tiff need magick (no longer sent straight to cjxl) ===" -ForegroundColor Cyan
+foreach ($extQ3b in @("tif", "tiff")) {
+    $chQ3b = New-Dir ("scenario-q3b-" + $extQ3b + "\Series\Chapter 1")
+    $srcQ3b = New-FakeImage -DirPath $chQ3b -Name ("scan." + $extQ3b)
+    $totalsQ3b = Invoke-LooseImageConversionPipeline -Path (Join-Path $scratchDir ("scenario-q3b-" + $extQ3b)) -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
+    Test-Assert ($totalsQ3b.ConvertedFail -eq 1 -and $totalsQ3b.ConvertedSuccess -eq 0) ("." + $extQ3b + " without magick fails cleanly instead of going straight to cjxl (got ConvertedSuccess=" + $totalsQ3b.ConvertedSuccess + ", ConvertedFail=" + $totalsQ3b.ConvertedFail + ")")
+    Test-Assert (Test-Path -LiteralPath $srcQ3b) ("the ." + $extQ3b + " source is left untouched")
 }
 Write-Host ""
 

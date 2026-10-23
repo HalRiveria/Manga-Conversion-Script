@@ -324,6 +324,22 @@ Test-Assert (Test-Path -LiteralPath $chB) "the chapter folder still exists - nev
 Write-Host ""
 
 # ==============================================================================
+#  Scenario B2 (2026-10-23): Full Pipeline sends .tif/.tiff through the
+#  magick pre-conversion (real cjxl can't read TIFF). The fake cjxl accepts
+#  anything, so the proof is a magick that can't start: a TIFF must now
+#  fail instead of being converted straight by cjxl. A .jpg next to it
+#  doesn't need magick and still converts.
+# ==============================================================================
+Write-Host "=== Scenario B2: TIFF goes through magick, not straight to cjxl ===" -ForegroundColor Cyan
+$chB2 = New-Dir "scenario-b2\Series\Chapter 1"
+$tifB2 = New-FakeImageIn -DirPath $chB2 -Name "scan.tif"
+New-FakeImageIn -DirPath $chB2 -Name "page1.jpg" | Out-Null
+$totalsB2 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-b2") -CjxlExe $fakeCjxlExe -MagickExe (Join-Path $scratchDir "no-such-magick.exe") -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
+Test-Assert ($totalsB2.ConvertedImageFail -eq 1 -and $totalsB2.ConvertedImageSuccess -eq 1) ("the TIFF needed magick (failed without it) while the JPEG converted (got success=" + $totalsB2.ConvertedImageSuccess + ", fail=" + $totalsB2.ConvertedImageFail + ")")
+Test-Assert ((Test-Path -LiteralPath $tifB2) -and $totalsB2.ZipCreatedSuccess -eq 0) "the TIFF is left in place and the chapter isn't zipped"
+Write-Host ""
+
+# ==============================================================================
 #  Scenario C: image engine fails (symmetric case) - same zip-blocking
 #  result, proving the policy checks BOTH engines, not just one.
 # ==============================================================================
