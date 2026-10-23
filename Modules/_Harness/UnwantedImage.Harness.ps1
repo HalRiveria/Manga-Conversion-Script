@@ -147,18 +147,6 @@ function New-ScriptedPrompt {
 Write-Host ""
 
 # ==============================================================================
-#  Scenario A: Get-UnwantedImageProfiles - fresh, independent, expected shape
-# ==============================================================================
-Write-Host "=== Scenario A: Get-UnwantedImageProfiles ===" -ForegroundColor Cyan
-$profilesA1 = Get-UnwantedImageProfiles
-$profilesA2 = Get-UnwantedImageProfiles
-$profilesA1[0].Label = "mutated"
-Test-Assert ($profilesA2[0].Label -eq "Cover") "mutating one call's result does not affect a second call's result"
-Test-Assert ($profilesA2.Count -eq 5) "five known profiles (v1-v5)"
-Test-Assert (@($profilesA2 | Where-Object { $_.Width -eq 3000 -and $_.Height -eq 1500 }).Count -eq 5) "all five share the expected 3000x1500 dimensions"
-Write-Host ""
-
-# ==============================================================================
 #  Scenario B: Get-ImageDimensions - real success and real failure
 # ==============================================================================
 Write-Host "=== Scenario B: Get-ImageDimensions ===" -ForegroundColor Cyan
@@ -657,7 +645,7 @@ Test-Assert ($loadedN.Count -eq 1 -and $loadedN[0].Label -eq "Solo") "round-trip
 Write-Host ""
 
 # ==============================================================================
-#  Scenario O: Get-AllUnwantedImageProfiles combines built-in + persisted
+#  Scenario O: Get-AllUnwantedImageProfiles returns the saved profiles
 # ==============================================================================
 Write-Host "=== Scenario O: Get-AllUnwantedImageProfiles ===" -ForegroundColor Cyan
 $profilesPathO = Join-Path $scratchDir "profiles-o\unwanted-image-profiles.json"
@@ -666,7 +654,9 @@ Export-UnwantedImageProfiles -Profiles @(
     @{ Label = "Custom 2"; Width = 2; Height = 2; SizeBytes = 2; SizeTolerance = 0; Hash = "C2" }
 ) -ProfilesPath $profilesPathO
 $allO = Get-AllUnwantedImageProfiles -ProfilesPath $profilesPathO
-Test-Assert ($allO.Count -eq 7) ("5 built-in + 2 persisted = 7 (got " + $allO.Count + ")")
+Test-Assert ($allO.Count -eq 2 -and $allO[0].Label -eq "Custom 1") ("returns exactly the 2 saved profiles (got " + $allO.Count + ")")
+$noFileO = Get-AllUnwantedImageProfiles -ProfilesPath (Join-Path $scratchDir "profiles-o-none\unwanted-image-profiles.json")
+Test-Assert ($noFileO.Count -eq 0) "with no profiles file there are no profiles"
 Write-Host ""
 
 # ==============================================================================
@@ -680,7 +670,7 @@ Test-Assert ($profileP.Width -eq 33 -and $profileP.Height -eq 22) "real dimensio
 Test-Assert ($profileP.SizeBytes -eq $imgP.Length) "real file size read from the file"
 Test-Assert ($profileP.Hash -eq (Get-FileHash -LiteralPath $imgP.FullName -Algorithm SHA256).Hash) "real SHA-256 hash read from the file"
 Test-Assert ($profileP.Label -eq "My New Target") "the given label is used"
-Test-Assert ($profileP.SizeTolerance -eq 5000) "default SizeTolerance is 5000, matching the built-in profiles"
+Test-Assert ($profileP.SizeTolerance -eq 5000) "default SizeTolerance is 5000"
 
 $imgP2 = New-RealImage -Name "unlabeled-p.png" -Width 10 -Height 10
 $profileP2 = New-UnwantedImageProfileFromFile -Path $imgP2.FullName
@@ -727,7 +717,7 @@ Write-Host ""
 
 # ==============================================================================
 #  Scenario Q: Add-UnwantedImageProfile - adds successfully, persists,
-#  refuses a duplicate hash (against built-in AND already-persisted)
+#  refuses a duplicate hash (against the already-saved profiles)
 # ==============================================================================
 Write-Host "=== Scenario Q: Add-UnwantedImageProfile ===" -ForegroundColor Cyan
 $profilesPathQ = Join-Path $scratchDir "profiles-q\unwanted-image-profiles.json"
@@ -743,9 +733,6 @@ $dupResultQ = Add-UnwantedImageProfile -Profile $profileQ -ProfilesPath $profile
 Test-Assert ($dupResultQ.Added -eq $false -and $dupResultQ.Reason) "adding the exact same profile again is refused, with a reason"
 Test-Assert ((Import-UnwantedImageProfiles -ProfilesPath $profilesPathQ).Count -eq 1) "still only 1 persisted - no duplicate was written"
 
-$builtInDupProfileQ = (Get-UnwantedImageProfiles)[0].Clone()
-$dupResultQ2 = Add-UnwantedImageProfile -Profile $builtInDupProfileQ -ProfilesPath $profilesPathQ
-Test-Assert ($dupResultQ2.Added -eq $false) "a profile matching a BUILT-IN profile's hash is also refused, not just persisted-vs-persisted"
 Write-Host ""
 
 # ==============================================================================

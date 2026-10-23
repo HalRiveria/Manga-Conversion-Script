@@ -771,8 +771,7 @@ An image counts as unwanted only if it matches a stored profile on size, dimensi
 |---|---|
 | `Invoke-UnwantedImageScan` | Scans a folder tree, deletes (or in dry-run mode only reports) files that match a profile, and returns a totals hashtable. |
 | `Test-UnwantedImageMatch` | Checks one file against the profiles: size, then dimensions, then hash. Returns a status of `Match`, `HashMismatch`, `HashFailure` or `NoMatch`. |
-| `Get-AllUnwantedImageProfiles` | Built-in profiles followed by the user's saved ones. |
-| `Get-UnwantedImageProfiles` | The five built-in " Cover" profiles, defined in code. |
+| `Get-AllUnwantedImageProfiles` | The profiles to match against: everything saved in the profiles file. |
 | `Import-UnwantedImageProfiles` / `Export-UnwantedImageProfiles` | Load and save the user's profiles at `%LOCALAPPDATA%\ConversionScript\unwanted-image-profiles.json`. |
 | `Show-AddUnwantedImageProfileFlow` | The interactive "Add Image" flow: asks for a path and label, shows what was read, asks Y/N, then saves. |
 | `Add-UnwantedImageProfileFromFile`, `New-UnwantedImageProfileFromFile`, `Add-UnwantedImageProfile` | Build a profile from a real image file (dimensions, size, SHA-256) and save it. A profile whose hash already exists is refused. |
@@ -790,7 +789,7 @@ An image counts as unwanted only if it matches a stored profile on size, dimensi
 - Dry run (`-DryRun $true`) logs `WOULD DELETE` lines and counts them in `WouldDeleteCount`, not `DeletedCount`, and deletes nothing.
 - The totals hashtable has `ScannedCount`, `DeletedCount`, `WouldDeleteCount`, `DeleteFailedCount`, `HashMismatchCount`, `HashFailureCount`, `AlreadyGoneCount`, `Aborted` and `AllScannedFiles`. A `Summary`-level line with the counts is always logged. Per-file results use `-ForceConsole` so they show even with Clean Console Output on.
 - `Import-UnwantedImageProfiles` returns an empty list for a missing file. A file that isn't valid JSON is copied to `<file>.corrupt-<timestamp>.bak` and only then rewritten as an empty list (if the backup fails, the file is left alone with a warning). A bad entry in an otherwise valid file is skipped with a warning and doesn't affect the other entries or the file.
-- Built-in profiles come first and can't be edited from the saved file. `Add-UnwantedImageProfile` rejects a new profile if either list already has the same hash.
+- `Add-UnwantedImageProfile` rejects a new profile if a saved one already has the same hash.
 - `Get-TrailingZeroGroups` checks all file types (not only images), computes SHA-256 for each trailing-zero file, and groups identical files, keeping each distinct folder they appear in. `Invoke-TrailingZeroAudit` writes the report only if at least one group is found, and returns `ReportPath = $null` otherwise.
 
 **Things to watch out for**

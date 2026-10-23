@@ -2,11 +2,6 @@
 
 Add-Type -AssemblyName System.Drawing
 
-function Get-UnwantedImageProfiles {
-    return @(
-    )
-}
-
 function Get-UnwantedImageProfilesPath {
     param([string]$BaseDir)
 
@@ -96,9 +91,7 @@ function Export-UnwantedImageProfiles {
 function Get-AllUnwantedImageProfiles {
     param([string]$ProfilesPath = (Get-UnwantedImageProfilesPath))
 
-    $builtIn   = @(Get-UnwantedImageProfiles)
-    $persisted = Import-UnwantedImageProfiles -ProfilesPath $ProfilesPath
-    return ,($builtIn + $persisted)
+    return Import-UnwantedImageProfiles -ProfilesPath $ProfilesPath
 }
 
 function New-UnwantedImageProfileFromFile {
