@@ -41,13 +41,11 @@ function Invoke-IccStripRetryOrFail {
     Write-Log ("ICC profile mismatch on '" + $Job.SrcPath + "' - stripping profile and retrying.") -Level Warn
     $stripPsi = [System.Diagnostics.ProcessStartInfo]::new()
     $stripPsi.FileName               = $MagickExe
-    # %% on the OUTPUT path only (2026-09-16 fix, real bug, live-reported
-    # and confirmed) - see AnimatedConversionPipeline.ps1's jobStarter own
+    # %% on the OUTPUT path only - see AnimatedConversionPipeline.ps1's jobStarter own
     # comment for the full story. The SOURCE does NOT need this - reading
-    # an existing file with a literal % works fine unescaped; an earlier
-    # version of this fix mistakenly escaped it too, which broke it
-    # outright (magick looking for a literal %% that doesn't exist on
-    # disk, live-reported the same day).
+    # an existing file with a literal % works fine unescaped, and escaping
+    # it would break it (magick would look for a literal %% that doesn't
+    # exist on disk).
     $escapedStrippedPng  = $strippedPng.Replace('%', '%%')
     $stripPsi.Arguments              = "`"" + $Job.SrcPath + "`" -strip `"" + $escapedStrippedPng + "`""
     $stripPsi.UseShellExecute        = $false
@@ -90,10 +88,10 @@ function Invoke-IccStripRetryOrFail {
 
         # DOCUMENTED DUPLICATE: Test-AvifAnimated in
         # AnimatedConversionPipeline.ps1 uses the identical bounded-stream-
-        # read pattern below - keep both in sync. 15s, not 5s (2026-09-16
-        # band-aid, see that module's own matching comment).
+        # read pattern below - keep both in sync. 15s gives
+        # margin (see that module's own matching comment).
         if (-not [System.Threading.Tasks.Task]::WaitAll(@($stripStdoutTask, $stripStderrTask), 15000)) {
-            # 2026-09-16 fix: same reasoning as Test-AvifAnimated's own
+            # Same reasoning as Test-AvifAnimated's own
             # matching comment - the process handle above only proves the
             # PROCESS exited, not that its redirected stdout/stderr pipes
             # reached EOF.
@@ -189,8 +187,8 @@ function Complete-ImageDispatchJob {
             throw ("cjxl exited with code " + $code + ". Stderr: " + $stderr)
         }
         # Exit code and stderr included even on these two throws
-        # (2026-09-16 fix, same reasoning as AnimatedConversionPipeline.ps1's
-        # matching fix - cjxl exiting 0 while failing to produce real
+        # (same reasoning as AnimatedConversionPipeline.ps1's
+        # matching throws - cjxl exiting 0 while failing to produce real
         # output shouldn't leave the log with no diagnostic detail).
         if (-not [System.IO.File]::Exists($Job.JxlPath)) { throw ("Output .jxl was not created (cjxl exited " + $code + "): '" + $Job.JxlPath + "'. Stderr: " + $stderr) }
         $jxlSize = [System.IO.FileInfo]::new($Job.JxlPath).Length
@@ -429,11 +427,10 @@ function Invoke-LooseImageConversionPipeline {
 
         $seriesProvider  = New-SeriesProvider -LibraryPath $Path -QualifyingExtensions $FolderQualifyingExtensions
         $chapterQueue    = [System.Collections.Generic.Queue[hashtable]]::new()
-        # Hashtable, not a plain scalar (2026-09-14 code-review finding - a
-        # second, unfixed instance of the same closure-latch bug this
-        # session's audit already fixed in 5 other places; see
+        # Hashtable, not a plain scalar (a plain scalar assigned inside a
+        # closure doesn't latch; see
         # ChapterDispatch.ps1's New-LibraryChapterProvider for the full
-        # explanation of why a plain scalar doesn't latch here).
+        # explanation).
         $chapterProviderState = @{ SeriesExhausted = $false }
         $chapterProvider = {
             while ($chapterQueue.Count -eq 0 -and -not $chapterProviderState.SeriesExhausted) {
@@ -646,15 +643,12 @@ function Invoke-LooseImageConversionPipeline {
                     $tempPngLocal = $tempPng
                     $magickPsi = [System.Diagnostics.ProcessStartInfo]::new()
                     $magickPsi.FileName               = $MagickExe
-                    # %% on the OUTPUT path only (2026-09-16 fix, real bug,
-                    # live-reported and confirmed - DOCUMENTED DUPLICATE of
+                    # %% on the OUTPUT path only (DOCUMENTED DUPLICATE of
                     # Controller.ps1's own matching jobStarter, keep both
                     # in sync). The SOURCE does NOT need this - reading an
-                    # existing file with a literal % works fine unescaped;
-                    # an earlier version of this fix mistakenly escaped it
-                    # too, which broke it outright (magick looking for a
-                    # literal %% that doesn't exist on disk, live-reported
-                    # the same day).
+                    # existing file with a literal % works fine unescaped,
+                    # and escaping it would break it (magick would look for
+                    # a literal %% that doesn't exist on disk).
                     $escapedTempPng2    = $tempPng.Replace('%', '%%')
                     $magickPsi.Arguments              = "`"" + $job.SrcPath + "[0]`" `"" + $escapedTempPng2 + "`""
                     $magickPsi.UseShellExecute        = $false
@@ -668,16 +662,13 @@ function Invoke-LooseImageConversionPipeline {
                     $magickStderrTask = $magickProc.StandardError.ReadToEndAsync()
                     # DOCUMENTED DUPLICATE of Controller.ps1's own image-engine
                     # JobStarter's identical PNG pre-conversion wait - keep
-                    # both in sync. A bare WaitForExit() here (fixed
-                    # 2026-09-15) has no timeout, and this jobStarter runs on
+                    # both in sync. A bare WaitForExit() here has no timeout, and this jobStarter runs on
                     # the main thread inside the dispatch loop - a wedged
                     # magick.exe would freeze the entire Image Conversion run with no
                     # Ctrl+C escape (the cancel token is only checked between
                     # dispatch loop passes). Raw-handle ManualResetEvent
-                    # instead of Process.WaitForExit(int) - this codebase's
-                    # own precedent (2026-09-10 round-6 fix,
-                    # Docs/full-pipeline-hang-investigation.md) for why
-                    # WaitForExit(int) itself can't be trusted here.
+                    # instead of Process.WaitForExit(int), which can't be
+                    # trusted to return reliably here.
                     $preConvWaitHandle = [System.Threading.ManualResetEvent]::new($false)
                     $preConvOrigHandle = $preConvWaitHandle.SafeWaitHandle
                     $preConvWaitHandle.SafeWaitHandle = (
@@ -703,10 +694,9 @@ function Invoke-LooseImageConversionPipeline {
                         throw ($formatLabel + "->PNG pre-conversion did not exit within 120s - killed")
                     }
                     # Bounded the same way Test-AvifAnimated/
-                    # Invoke-IccStripRetryOrFail already are (2026-09-16 fix,
-                    # real bug found by a Gemini review - this pre-conversion
+                    # Invoke-IccStripRetryOrFail already are (this pre-conversion
                     # detour and Controller.ps1's own documented-duplicate
-                    # copy above were missed during that same pass). The
+                    # copy above follow the same rule). The
                     # WaitOne above only proves the PROCESS exited, not that
                     # its redirected stdout/stderr pipes reached EOF.
                     if (-not [System.Threading.Tasks.Task]::WaitAll(@($magickStdoutTask, $magickStderrTask), 15000)) {
@@ -783,8 +773,8 @@ function Invoke-LooseImageConversionPipeline {
             # force-killed/never-started chapter reports as "N
             # force-stopped" instead of a false clean Success once
             # ChapterDispatch.ps1 invokes $ChapterCompleteCallback for it
-            # (2026-09-15 fix - this key didn't exist before, so the
-            # force-stopped status branch below was dead code).
+            # (without this increment the force-stopped status branch below
+            # would be dead code).
             $cr = $chapterResults[$job.ChapterKey]
             if ($null -ne $cr) { $cr.ForceKilledCount++ }
         }.GetNewClosure()
@@ -819,15 +809,13 @@ function Invoke-LooseImageConversionPipeline {
             $null = $chapterResults.Remove($chapterInfo)
         }.GetNewClosure()
 
-        # Hashtable, not a plain scalar (2026-09-14 fix, Todo.md finding) -
-        # a plain $abortMessagePrinted assigned inside this
-        # .GetNewClosure()'d scriptblock resets to $false on every
-        # invocation instead of latching, confirmed live - the once-only
-        # guard below never actually held. Currently harmless (the
+        # Hashtable, not a plain scalar - a plain $abortMessagePrinted
+        # assigned inside this .GetNewClosure()'d scriptblock resets to
+        # $false on every invocation instead of latching, so the once-only
+        # guard wouldn't hold. Currently harmless either way (the
         # dispatch loop stops polling within an iteration or two of
-        # Test-AbortSignal first returning true), but a real bug if this
-        # poll callback is ever invoked more times after an abort than it
-        # is today. DOCUMENTED DUPLICATE: the identical pattern (same
+        # Test-AbortSignal first returning true), but it would matter if
+        # this poll callback were invoked more times after an abort. DOCUMENTED DUPLICATE: the identical pattern (same
         # fields, same reasoning) also appears in Controller.ps1's and
         # AnimatedConversionPipeline.ps1's own abort-poll callbacks - keep
         # all three in sync.

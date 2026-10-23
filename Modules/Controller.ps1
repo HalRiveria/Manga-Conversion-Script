@@ -246,19 +246,18 @@ function Complete-MergedFullPipelineChapter {
         $zipResult = @{ Status = $null; ZipSize = 0; EntryCount = 0; FolderDeleted = $false; FolderDeleteFailed = $false }
         try {
             # Get-FilesRecursiveSafe, not Get-ChildItem -Recurse | Where-Object
-            # (2026-09-16 fix) - this runs on the MAIN thread, concurrently
+            # - this runs on the MAIN thread, concurrently
             # with both engine worker runspaces still processing later
             # chapters (called from $pollCallback/$finalizeChapterEntry
-            # above). Never proven to hit this project's own confirmed PS
-            # 5.1 concurrent-runspace cmdlet-race (that class needs two
-            # FRESH runspaces racing on their own first invocation - the
-            # main thread's own Get-ChildItem/Where-Object use is not
-            # "fresh" by the time a real run gets here), but reuses
-            # already-tested, already-.NET-only infrastructure either way,
-            # and closes a real, independent gap this raw Get-ChildItem
-            # call had: no reparse-point guard, unlike every other
-            # recursive tree walk in this codebase since the 2026-09-15
-            # junction-cycle fix (see LeafDirectoryDiscovery.ps1).
+            # above). Not known to hit the PS 5.1 concurrent-runspace
+            # cmdlet-race (that class needs two FRESH runspaces racing on
+            # their own first invocation - the main thread's own
+            # Get-ChildItem/Where-Object use is not "fresh" by the time a
+            # real run gets here), but it reuses already-tested,
+            # .NET-only infrastructure either way, and a raw Get-ChildItem
+            # call has no reparse-point guard, unlike every other
+            # recursive tree walk in this codebase (see
+            # LeafDirectoryDiscovery.ps1's junction-cycle handling).
             $orphanedScratchFiles = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
             foreach ($f in (Get-FilesRecursiveSafe -ScanPath $ChapterDir)) {
                 if (Test-OrphanedScratchFileName -Name $f.Name) { $orphanedScratchFiles.Add($f) }
@@ -340,8 +339,7 @@ function Get-MergedChapterStatus {
 
 # Get-ZipBlockedStatusOverride is intentionally NOT redefined here - the
 # real definition lives in ImageConversionPipeline.ps1 (dot-sourced
-# before this module on every real path). See Docs/function-notes.md's
-# Controller.ps1 section for why.
+# before this module on every real path).
 
 $script:fullPipelineEngineWorker = {
     param(
@@ -379,13 +377,13 @@ $script:fullPipelineEngineWorker = {
     )
 
     $null = [System.Reflection.Assembly]::LoadWithPartialName("Microsoft.VisualBasic")
-    # Only these two - worker log lines go through the queue; see Docs/function-notes.md (Get-WorkerRunspaceValue).
+    # Only these two - worker log lines go through the queue.
     $script:workerConsoleQueue = $ConsoleQueue
     $script:PermanentDelete    = $DoPermanentDelete
 
     $seriesProvider  = New-SeriesProvider -LibraryPath $Path -QualifyingExtensions $FolderQualifyingExtensions
     $chapterQueue    = [System.Collections.Generic.Queue[hashtable]]::new()
-    # Hashtable, not a plain scalar (2026-09-14 fix, Todo.md finding) - see
+    # Hashtable, not a plain scalar - see
     # ChapterDispatch.ps1's New-LibraryChapterProvider for why a plain
     # scalar assigned inside this .GetNewClosure()'d scriptblock doesn't
     # latch across invocations.
@@ -433,7 +431,7 @@ $script:fullPipelineEngineWorker = {
 
             if ($cr.TotalFiles -eq 0) { return @() }
 
-            # Announce only once this engine has real work - see Docs/function-notes.md (Invoke-FullPipeline, "CCR announcement pacing").
+            # Announce only once this engine has real work.
             # DOCUMENTED DUPLICATE: same move in the animated jobBuilder below - keep both in sync.
             if ($AnnouncedChapters.TryAdd($chapterInfo, 0)) {
                 $EventQueue.Enqueue(@{ Kind = 'ChapterStarted'; ChapterKey = $chapterInfo; SeriesName = $chapterInfo.SeriesName; ChapterName = $chapterInfo.ChapterName })
@@ -549,15 +547,13 @@ $script:fullPipelineEngineWorker = {
                     $tempPngLocal = $tempPng
                     $magickPsi = [System.Diagnostics.ProcessStartInfo]::new()
                     $magickPsi.FileName               = $MagickExe
-                    # %% on the OUTPUT path only (2026-09-16 fix, real bug,
-                    # live-reported and confirmed - DOCUMENTED DUPLICATE of
+                    # %% on the OUTPUT path only - DOCUMENTED DUPLICATE of
                     # AnimatedConversionPipeline.ps1's matching jobStarter
-                    # comment, keep all copies in sync). The SOURCE does
+                    # comment, keep all copies in sync. The SOURCE does
                     # NOT need this - reading an existing file with a
-                    # literal % works fine unescaped; an earlier version of
-                    # this fix mistakenly escaped it too, which broke it
-                    # outright (magick looking for a literal %% that
-                    # doesn't exist on disk, live-reported the same day).
+                    # literal % works fine unescaped, and escaping it
+                    # would break it (magick would look for a literal %%
+                    # that doesn't exist on disk).
                     $escapedTempPng    = $tempPng.Replace('%', '%%')
                     $magickPsi.Arguments              = "`"" + $job.SrcPath + "[0]`" `"" + $escapedTempPng + "`""
                     $magickPsi.UseShellExecute        = $false
@@ -570,10 +566,8 @@ $script:fullPipelineEngineWorker = {
                     $magickStdoutTask = $magickProc.StandardOutput.ReadToEndAsync()
                     $magickStderrTask = $magickProc.StandardError.ReadToEndAsync()
                     # DOCUMENTED DUPLICATE of ImageConversionPipeline.ps1's own
-                    # jobStarter's identical PNG pre-conversion wait (ported
-                    # there 2026-09-15, after a full line-by-line review found
-                    # it was still using a bare, unbounded WaitForExit() - the
-                    # exact bug this codebase already fixed here) - keep both
+                    # jobStarter's identical PNG pre-conversion wait (a bare,
+                    # unbounded WaitForExit() would hang) - keep both
                     # in sync.
                     $preConvWaitHandle = [System.Threading.ManualResetEvent]::new($false)
                     $preConvOrigHandle = $preConvWaitHandle.SafeWaitHandle
@@ -596,10 +590,7 @@ $script:fullPipelineEngineWorker = {
                         throw ("magick pre-conversion did not exit within 120s - killed")
                     }
                     # Bounded the same way Test-AvifAnimated/
-                    # Invoke-IccStripRetryOrFail already are (2026-09-16 fix,
-                    # real bug found by a Gemini review - this pre-conversion
-                    # detour and ImageConversionPipeline.ps1's own copy were
-                    # missed during that same pass). The WaitOne above only
+                    # Invoke-IccStripRetryOrFail are. The WaitOne above only
                     # proves the PROCESS exited, not that its redirected
                     # stdout/stderr pipes reached EOF - a process tree where
                     # something else inherited the handle could still hang
@@ -679,7 +670,7 @@ $script:fullPipelineEngineWorker = {
             # force-killed/never-started chapter reports as "N
             # force-stopped" (and, critically, NOT a plain 'Success' that
             # Complete-MergedFullPipelineChapter would then zip and
-            # delete) instead of silently disappearing (2026-09-15 fix).
+            # delete) instead of silently disappearing.
             $cr = $chapterResults[$job.ChapterKey]
             if ($null -ne $cr) { $cr.ForceKilledCount++ }
         }.GetNewClosure()
@@ -752,15 +743,12 @@ $script:fullPipelineEngineWorker = {
                 $psi = [System.Diagnostics.ProcessStartInfo]::new()
                 $psi.FileName = $MagickExe
                 $qualityArg = if ($DoAnimatedLossless) { "-define webp:lossless=true" } else { "-quality " + $AnimatedQuality }
-                # %% on the OUTPUT path only (2026-09-16 fix, real bug,
-                # live-reported and confirmed - DOCUMENTED DUPLICATE of
+                # %% on the OUTPUT path only - DOCUMENTED DUPLICATE of
                 # AnimatedConversionPipeline.ps1's own matching jobStarter,
-                # keep both in sync). The SOURCE does NOT need this -
+                # keep both in sync. The SOURCE does NOT need this -
                 # reading an existing file with a literal % works fine
-                # unescaped; an earlier version of this fix mistakenly
-                # escaped it too, which broke it outright (magick looking
-                # for a literal %% that doesn't exist on disk, live-
-                # reported the same day).
+                # unescaped, and escaping it would break it (magick would
+                # look for a literal %% that doesn't exist on disk).
                 $escapedOutPathAnim = $job.MagickOutputPath.Replace('%', '%%')
                 $psi.Arguments = "`"" + $job.SrcPath + "`" -coalesce -loop 0 " + $qualityArg + " `"" + $escapedOutPathAnim + "`""
                 $psi.UseShellExecute        = $false
@@ -777,7 +765,7 @@ $script:fullPipelineEngineWorker = {
                 return $job
             } catch {
                 # Bare Process.Start() throws a NON-terminating error when
-                # uncaught (Docs/lessons-learned.md's 7th entry) - without
+                # uncaught - without
                 # this try/catch, $job.Proc stays $null and $job.Proc.HasExited
                 # (jobPollCompleted below) is falsy forever, hanging the whole
                 # engine. Rethrow so ChapterDispatch's own JobStarter catch
@@ -827,11 +815,11 @@ $script:fullPipelineEngineWorker = {
         $null = $chapterResults.Remove($chapterInfo)
     }.GetNewClosure()
 
-    # Hashtable, not a plain scalar (2026-09-14 fix, Todo.md finding) - a
+    # Hashtable, not a plain scalar - a
     # plain $abortMessagePrinted assigned inside this .GetNewClosure()'d
     # scriptblock resets to $false on every invocation instead of
-    # latching, confirmed live - the once-only guard below never actually
-    # held. Currently harmless (the dispatch loop stops polling within an
+    # latching, so the once-only guard below would never hold. Currently
+    # harmless (the dispatch loop stops polling within an
     # iteration or two of Test-AbortSignal first returning true), but a
     # real bug if this poll callback is ever invoked more times after an
     # abort than it is today. DOCUMENTED DUPLICATE: the identical pattern
@@ -895,7 +883,7 @@ function Invoke-FullPipeline {
         [bool]$CoverDeletionDryRun = $false,
         [bool]$AnimatedConversionEnabled = $true,
         [scriptblock]$PromptFunc = { param($Message) Read-Host $Message },
-        # Injectable (2026-09-16, Todo.md's own tracked gap) - lets a test
+        # Injectable - lets a test
         # substitute a scriptblock that deliberately throws, to genuinely
         # exercise -JobCrashedHandler's real code path end-to-end. Real
         # callers never pass this; it defaults to the real engine worker.
@@ -923,8 +911,7 @@ function Invoke-FullPipeline {
         } catch {
             $exMessage = $_.Exception.Message
             Write-Log ("Cover deletion pre-scan failed: " + $exMessage) -Level Error -ForceConsole
-            # Null-checked before .Trim() (2026-09-16 fix, real bug found by
-            # a Gemini review, confirmed live) - Read-Host (the real
+            # Null-checked before .Trim() - Read-Host (the real
             # default -PromptFunc) returns $null, not "", when stdin is
             # genuinely closed/at EOF rather than just an empty line -
             # every other prompt call in this codebase already guards this
@@ -956,7 +943,7 @@ function Invoke-FullPipeline {
         $fullCts = [System.Threading.CancellationTokenSource]::new()
         Register-AbortCancellationSource -Cts $fullCts
 
-        # Deferred series start - see Docs/function-notes.md (Invoke-FullPipeline, "CCR announcement pacing").
+        # Deferred series start (CCR announcement pacing).
         $seriesChapterTotals = @{}
         $startedSeries       = [System.Collections.Generic.HashSet[string]]::new()
         $ensureSeriesStarted = {
@@ -975,7 +962,7 @@ function Invoke-FullPipeline {
             param($key, $entry)
             $totals.ChapterCount++
 
-            # Zip-only chapter: announce it now - see Docs/function-notes.md (Invoke-FullPipeline, "CCR announcement pacing").
+            # Zip-only chapter: announce it now.
             if ($cleanConsoleOutputEnabled -and $announcedChapters.TryAdd($key, 0)) {
                 & $ensureSeriesStarted $entry.SeriesName
                 Start-ChapterProgress -SeriesName $entry.SeriesName -ChapterName $entry.ChapterName
@@ -1024,19 +1011,17 @@ function Invoke-FullPipeline {
                     $totals.ZipCreatedFail++
                 }
             } elseif ($isZippableNow -and $fullCts.Token.IsCancellationRequested) {
-                # Split from the genuine-error case below (2026-09-15 fix,
-                # real bug, latent) - the original combined condition
-                # conflated "this chapter's conversion genuinely errored"
-                # with "the whole run was aborted," and would have labeled
-                # a real conversion failure on a non-aborted run as "zip
-                # skipped: run aborted". Currently masked -
+                # Split from the genuine-error case below - a combined
+                # condition would conflate "this chapter's conversion
+                # genuinely errored" with "the whole run was aborted," and
+                # would label a real conversion failure on a non-aborted
+                # run as "zip skipped: run aborted". Currently masked -
                 # Get-ZipBlockedStatusOverride (ImageConversionPipeline.ps1)
                 # short-circuits `if ($Status -eq 'Error') { return $Status,
                 # $Detail }` before the "run aborted" text is ever appended,
                 # so today this branch is genuinely only reachable when the
-                # run really was aborted. Splitting it removes the latent
-                # trap rather than relying on that short-circuit staying in
-                # place forever.
+                # run really was aborted. Splitting it avoids relying on
+                # that short-circuit staying in place forever.
                 $totals.ZipSkippedDueToError++
                 $displayStatus, $displayDetail = Get-ZipBlockedStatusOverride -Status $chapterOutcome.Status -Detail $chapterOutcome.Detail -BlockedReason "run aborted"
             } elseif ($isZippableNow -and $chapterOutcome.Status -eq 'Error') {
@@ -1102,10 +1087,10 @@ function Invoke-FullPipeline {
                         else                              { $entry.AnimatedResult = $evt.Result; $entry.GotAnimated = $true }
 
                         if (-not ($entry.GotImage -and $entry.GotAnimated)) { continue }
-                        # $null = (2026-09-15 fix) - Dictionary.Remove
-                        # returns bool; the identical call at this
-                        # function's own :697 (chapterCompleteCallback)
-                        # already captures it correctly. Doesn't print
+                        # $null = - Dictionary.Remove
+                        # returns bool; the identical call in this
+                        # function's chapterCompleteCallback
+                        # captures it too. Doesn't print
                         # today only because this whole poll callback is
                         # invoked bare and its output stream discarded by
                         # ZipParallelProcessing's own caller - not a reason
@@ -1147,15 +1132,14 @@ function Invoke-FullPipeline {
             if ($r.Aborted) { $totals.Aborted = $true }
         }.GetNewClosure()
 
-        # 2026-09-15 fix (real bug, HIGH severity - full line-by-line review
-        # series): if one engine's runspace throws an unhandled exception,
+        # If one engine's runspace throws an unhandled exception,
         # -ResultHandler above is NEVER called for it (there is no result -
-        # EndInvoke rethrows) - previously that meant $totals.Aborted never
-        # got set from a crash alone, the surviving engine just kept going,
-        # and every chapter the crashed engine hadn't yet reported on sat in
-        # $mergeState forever with that engine's Got<Engine> flag still
-        # false. The leftover-merge loop below used to hand those straight
-        # to $finalizeChapterEntry anyway, and Get-ChapterProgressStatus($null)
+        # EndInvoke rethrows) - so $totals.Aborted would never
+        # get set from a crash alone, the surviving engine would just keep
+        # going, and every chapter the crashed engine hadn't yet reported on
+        # would sit in $mergeState forever with that engine's Got<Engine>
+        # flag still false. The leftover-merge loop below must not hand
+        # those straight to $finalizeChapterEntry, because Get-ChapterProgressStatus($null)
         # (ImageConversionPipeline.ps1) returns a bare "Success" for a $null
         # result - indistinguishable from "this engine legitimately had
         # nothing to do here" - so Complete-MergedFullPipelineChapter would
@@ -1165,13 +1149,12 @@ function Invoke-FullPipeline {
         # uncertain state; the leftover loop below is what actually stops
         # the zip+delete for chapters already caught in it.
         # $totals.Aborted set directly here, not via a local
-        # $anyEngineCrashed flag checked after the call (2026-09-16 fix,
-        # real bug) - the old version wrote `$script:anyEngineCrashed =
-        # $true` inside this .GetNewClosure()'d handler while the check
-        # below read the local, unprefixed `$anyEngineCrashed` - two
-        # different variables in two different scopes, so the local one
-        # never updated and `if ($anyEngineCrashed)` was always $false.
-        # Confirmed live in isolation. $totals is a hashtable already in
+        # $anyEngineCrashed flag checked after the call - a
+        # `$script:anyEngineCrashed = $true` write inside this
+        # .GetNewClosure()'d handler would be a different variable, in a
+        # different scope, from a local, unprefixed `$anyEngineCrashed`
+        # read after the call, so the local one would never update.
+        # $totals is a hashtable already in
         # this closure's lexical scope, and mutating a captured
         # reference's own properties works fine through .GetNewClosure()
         # (unlike a `$script:`-prefixed write, or rebinding a scalar) -
@@ -1210,30 +1193,25 @@ function Invoke-FullPipeline {
             # legitimate $null ImageResult/AnimatedResult (an engine that DID
             # report but had zero files for this chapter) - that case
             # already has its Got<Engine> flag correctly set true. Do NOT
-            # zip/delete a chapter we have incomplete information about -
-            # 2026-09-15 fix, the most severe finding in the full review
-            # series (a crashed engine's leftover chapters were previously
-            # zipped and deleted anyway, reported as a clean run).
+            # zip/delete a chapter we have incomplete information about (a crashed
+            # engine's leftover chapters would otherwise be zipped and
+            # deleted anyway, reported as a clean run).
             if (-not ($leftoverEntry.GotImage -and $leftoverEntry.GotAnimated)) {
                 $totals.Aborted = $true
-                # Warn only for a chapter that was actually started - see Docs/function-notes.md (Invoke-FullPipeline, "CCR announcement pacing").
+                # Warn only for a chapter that was actually started.
                 if ($announcedChapters.ContainsKey($leftoverKey)) {
                     Write-Log ("Full Pipeline: '" + $leftoverEntry.Dir.FullName + "' was left incomplete (an engine never finished reporting on it, likely due to the run stopping mid-way) - NOT zipped, NOT deleted, left exactly as-is for a future run to pick back up.") -Level Warn -ForceConsole
                 }
                 # Credit whichever engine's result DID arrive before
-                # skipping zip/delete (2026-09-16 fix, real bug found by a
-                # Gemini review). $finalizeChapterEntry above is the ONLY
+                # skipping zip/delete. $finalizeChapterEntry above is the ONLY
                 # place in this function that adds to these totals - since
                 # every entry that reaches this branch skips it entirely
                 # (by construction: $mergeState.Remove only ever runs once
                 # BOTH engines have reported, so a leftover entry can never
                 # have both flags true), real completed conversions and
                 # deletions from whichever engine DID finish this chapter
-                # before the crash/abort were silently dropped from the
-                # run's own summary - the exact undercount bug this same
-                # 2026-09-15 fix was supposed to have closed everywhere,
-                # reintroduced one level up in this same function the same
-                # day.
+                # before the crash/abort would otherwise be silently dropped
+                # from the run's own summary.
                 $totals.ChapterCount++
                 if ($null -ne $leftoverEntry.ImageResult) {
                     $ir = $leftoverEntry.ImageResult
@@ -1253,7 +1231,7 @@ function Invoke-FullPipeline {
                     $totals.DeletedAnimatedFail      += $ar.DeleteFailedCount
                     $totals.InspectFailedCount       += $ar.InspectFailedCount
                 }
-                # Complete only an announced chapter (else Complete-ChapterProgress throws) - see Docs/function-notes.md (Invoke-FullPipeline, "CCR announcement pacing").
+                # Complete only an announced chapter (else Complete-ChapterProgress throws).
                 if ($cleanConsoleOutputEnabled -and $announcedChapters.ContainsKey($leftoverKey)) {
                     $null = Complete-ChapterProgress -SeriesName $leftoverEntry.SeriesName -ChapterName $leftoverEntry.ChapterName -Status 'Warning' -Detail "left incomplete - run stopped before both engines finished"
                 }
@@ -1414,7 +1392,7 @@ function Invoke-MainLoop {
     # option 5, which runs BEFORE this loop's own re-init check below ever
     # sees a Full Logging/Disable Summary File toggle made in the SAME menu
     # visit) can re-init log paths itself instead of logging into stale
-    # Errors/Warnings files (2026-09-14 fix, Todo.md finding). Reading
+    # Errors/Warnings files. Reading
     # $Settings live (closure, not params) means this loop's own check
     # below will see the same already-current values and just no-op its
     # own re-init - redundant but harmless, not worth threading state back
@@ -1425,12 +1403,11 @@ function Invoke-MainLoop {
         # this scriptblock is .GetNewClosure()'d (needed so $TargetPath/
         # $Settings/etc. resolve correctly once passed into Show-ModeMenu),
         # and a $script:-prefixed read inside a .GetNewClosure()'d block
-        # doesn't see the real script-scope value (confirmed live - resolves
-        # to $null, not the current mutex - Docs/lessons-learned.md's 9th
-        # entry). Without this indirection, $previousLogMutexForDispose was
-        # always $null and the old mutex was never disposed, leaking a
-        # handle on every Full-Logging-toggle-then-Cover-Deletion cycle
-        # (2026-09-14 code-review finding).
+        # doesn't see the real script-scope value (it resolves to $null,
+        # not the current mutex). Without this indirection,
+        # $previousLogMutexForDispose would always be $null and the old
+        # mutex would never be disposed, leaking a handle on every
+        # Full-Logging-toggle-then-Cover-Deletion cycle.
         $previousLogMutexForDispose = & $GetLogMutexHandler
         & $InitializeLogMutexHandler
         # A failed Dispose() on the OLD mutex is harmless - a fresh one was
@@ -1470,8 +1447,8 @@ function Invoke-MainLoop {
         # $null = : -SetQuickEditHandler's default (Set-ConsoleQuickEditEnabled)
         # returns [ConsoleQuickEdit]::SetEnabled's own bool (the PREVIOUS
         # enabled state) - uncaptured, & prints it straight to the console
-        # (confirmed live: "True" at the start of a run, "False" right after
-        # it finishes - 2026-09-14).
+        # (it prints "True" at the start of a run, "False" right after it
+        # finishes).
         $quickEditWasOn = ((& $GetQuickEditHandler) -eq 1)
         if ($quickEditWasOn) { $null = & $SetQuickEditHandler -Enabled $false }
         # Keep the PC from idle-sleeping for the run itself only - released
@@ -1486,9 +1463,9 @@ function Invoke-MainLoop {
             $null = & $SetSleepBlockHandler -Blocked $false
             if ($quickEditWasOn) { $null = & $SetQuickEditHandler -Enabled $true }
             & $SetRunActiveHandler -Active $false
-            # 2026-09-15 fix, real bug: Complete-AbortDrain (the only thing
+            # Complete-AbortDrain (the only thing
             # that sets [ConsoleCtrl]::DrainComplete, unblocking the native
-            # Ctrl+C handler thread) previously had only two callers -
+            # Ctrl+C handler thread) has only two other callers -
             # Invoke-AbortOrFatalHandler (needs a real exception) and
             # Invoke-GracefulDrain (reached only via
             # Invoke-ZipParallelProcessing - Full Pipeline and Zip Folders only). Image and Animated Conversion

@@ -11,14 +11,13 @@ function New-LibraryChapterProvider {
     )
     $seriesProvider = New-SeriesProvider -LibraryPath $LibraryPath -QualifyingExtensions $QualifyingExtensions
     $chapterQueue   = [System.Collections.Generic.Queue[hashtable]]::new()
-    # Hashtable, not a plain scalar (2026-09-14 fix, Todo.md finding) - a
-    # plain $seriesExhausted assigned inside this .GetNewClosure()'d
-    # scriptblock resets to $false on every invocation instead of
-    # latching, confirmed live. Currently harmless here (the caller stops
-    # polling once this returns $null anyway), but it read as working
-    # protection that wasn't. Matches LeafDirectoryDiscovery.ps1's
-    # New-ZippableLeafDirProvider, which uses the same pattern for the
-    # same reason.
+    # Hashtable, not a plain scalar - a plain $seriesExhausted assigned
+    # inside this .GetNewClosure()'d scriptblock resets to $false on every
+    # invocation instead of latching. Currently harmless here (the caller
+    # stops polling once this returns $null anyway), but a plain scalar
+    # would read as working protection that isn't. Matches
+    # LeafDirectoryDiscovery.ps1's New-ZippableLeafDirProvider, which uses
+    # the same pattern for the same reason.
     $state = @{ SeriesExhausted = $false }
 
     return {
@@ -96,18 +95,16 @@ function Invoke-ChapterDispatch {
             if ($null -eq $chapterInfo) { $providerExhausted = $true; break }
             $chapterKey = $chapterInfo
             # @($null) is a 1-element array containing $null, not an empty
-            # array (2026-09-15 fix, real bug) - a $JobBuilder returning
-            # $null for "nothing to do" (the documented zero-job-chapter
-            # contract every builder is supposed to satisfy with @()
-            # instead) used to crash on $null.ChapterKey below rather than
-            # taking that path. All 3 production builders already return
-            # @(), so this only ever bit a harness's own manually-built
+            # array - a $JobBuilder returning $null for "nothing to do" (the
+            # documented zero-job-chapter contract every builder is supposed
+            # to satisfy with @() instead) would crash on $null.ChapterKey
+            # below rather than taking that path. All 3 production builders
+            # already return @(), so this only matters for a manually-built
             # feed - explicit $null-to-empty-array normalization either way.
             $rawJobs = & $JobBuilder $chapterInfo
             # Statement-form assignment inside each branch, NOT
-            # `$jobs = if (...) { @() } else { @($rawJobs) }` (confirmed
-            # live while building this fix - a real, separate PowerShell
-            # trap from the one this fix targets: when an if/else block's
+            # `$jobs = if (...) { @() } else { @($rawJobs) }` (a separate
+            # PowerShell trap from the $null one above: when an if/else block's
             # own tail expression is what's captured by an OUTER
             # assignment, a single Hashtable emitted from inside that
             # block gets enumerated into its individual DictionaryEntry
@@ -137,10 +134,10 @@ function Invoke-ChapterDispatch {
                 $job = & $JobStarter $job
                 $running.Add($job)
             } catch {
-                # Release BEFORE Write-Log (2026-09-15 fix, real bug): if
-                # Write-Log itself throws (a locked Errors log file), the
-                # old order left this job's semaphore slot permanently
-                # leaked - it was never added to $running, so the outer
+                # Release BEFORE Write-Log: if Write-Log itself throws (a
+                # locked Errors log file), releasing afterwards would leak
+                # this job's semaphore slot permanently - it was never added
+                # to $running, so the outer
                 # catch's own cleanup (which only walks $running) can't
                 # find it either. In Full Pipeline the semaphore is SHARED
                 # between both engines, so a leak here would have shrunk
@@ -159,7 +156,7 @@ function Invoke-ChapterDispatch {
                         $chapterResults.Add(@{ ChapterInfo = $state.ChapterInfo; Completed = $true; Aborted = $false })
                     }
                 } else {
-                    # Invariant violation (2026-09-15 fix) - should never
+                    # Invariant violation - should never
                     # happen (every job's ChapterKey is set from a key this
                     # function itself just registered), but if it ever did,
                     # this chapter's Outstanding count would never reach 0
@@ -194,7 +191,7 @@ function Invoke-ChapterDispatch {
                             $chapterResults.Add(@{ ChapterInfo = $state.ChapterInfo; Completed = $true; Aborted = $false })
                         }
                     } else {
-                        # Invariant violation (2026-09-15 fix) - see the
+                        # Invariant violation - see the
                         # JobStarter-failure catch above for the full
                         # explanation. DOCUMENTED DUPLICATE, keep in sync
                         # with the other two copies of this same block.
@@ -250,7 +247,7 @@ function Invoke-ChapterDispatch {
                                     $chapterResults.Add(@{ ChapterInfo = $state.ChapterInfo; Completed = $true; Aborted = $false })
                                 }
                             } else {
-                                # Invariant violation (2026-09-15 fix) - see
+                                # Invariant violation - see
                                 # the JobStarter-failure catch earlier in
                                 # this function for the full explanation.
                                 # DOCUMENTED DUPLICATE, keep in sync with
@@ -293,7 +290,7 @@ function Invoke-ChapterDispatch {
                                     $chapterResults.Add(@{ ChapterInfo = $state.ChapterInfo; Completed = $true; Aborted = $false })
                                 }
                             } else {
-                                # Invariant violation (2026-09-15 fix) - see
+                                # Invariant violation - see
                                 # the JobStarter-failure catch earlier in
                                 # this function for the full explanation.
                                 # DOCUMENTED DUPLICATE, keep in sync with
@@ -341,9 +338,8 @@ function Invoke-ChapterDispatch {
     # below never see them - nothing decrements their chapter's
     # Outstanding or calls $JobAbortCleanup on them. Left unhandled, a
     # chapter with any never-started job can never reach Outstanding=0,
-    # so it silently never completes at all (2026-09-15 finding - the
-    # force-killed-chapter-undercounts-totals bug's own untested sibling
-    # case). Treat them the same as a force-killed running job: cleanup,
+    # so it silently never completes at all (the never-started sibling of
+    # the force-killed-chapter case). Treat them the same as a force-killed running job: cleanup,
     # decrement, let the loop below credit whatever real work the
     # chapter's OTHER jobs already finished.
     if ($pending.Count -gt 0) {
@@ -362,8 +358,7 @@ function Invoke-ChapterDispatch {
             # needs $ChapterCompleteCallback invoked - it's the only thing
             # that merges this chapter's real, already-finished work (jobs
             # that completed via $JobFinalize before the kill) into the
-            # caller's totals. Skipping it here (the pre-2026-09-15
-            # behavior) meant a chapter that converted+deleted N files
+            # caller's totals. Skipping it here would mean a chapter that converted+deleted N files
             # before being force-killed contributed ZERO to the run
             # summary, even though those N files are correctly on disk.
             # Wrapped in try/catch: this function is already in its own

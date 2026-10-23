@@ -7,7 +7,7 @@
     dependency modules - FileDeletion.ps1, AbortPipeline.ps1,
     LeafDirectoryDiscovery.ps1, CleanConsoleRendering.ps1, and Logging.ps1
     - since this is an orchestration-tier module. $CjxlExe/$MagickExe are
-    real (if fake) compiled executables, not mocks - Convert-ImageBatch
+    real (if fake) compiled executables, not mocks - the conversion engine
     spawns actual OS processes via System.Diagnostics.Process, so a fake
     process is what's actually exercised, not a stand-in for the process
     layer itself.
@@ -17,26 +17,20 @@
     each scenario control per-image outcomes just by what it writes into
     the fake source files, without any harness-side process mocking.
 
-    Scenarios focus on what this session's rework actually changed: the
-    two-tier series/chapter walk (New-SeriesProvider + Get-SeriesChapters,
-    replacing the old -PerFolderBatching toggle), CCR event emission, the
-    -PostChapterCallback shape, the Register-AbortCancellationSource fix,
-    and the chapter/conversion-coverage decoupling fix (both real bugs
-    found in an Opus review pass over the first version of this rework -
-    see ImageConversionPipeline.ps1's header and CHANGELOG.md).
-    Convert-ImageBatch (PART 1) itself is exercised as a dependency
-    throughout, but its own edge cases (WebP transcode, ICC-strip retry,
-    animated-WebP detection) predate this session and aren't the focus
-    here.
+    Scenarios cover the two-tier series/chapter walk (New-SeriesProvider +
+    Get-SeriesChapters), CCR event emission, the -PostChapterCallback
+    shape, the Register-AbortCancellationSource handling, and the
+    chapter/conversion-coverage decoupling (see ImageConversionPipeline.ps1's
+    header). The batch-conversion edge cases (WebP transcode, ICC-strip
+    retry, animated-WebP detection) are exercised through the live pipeline.
 
     Register-/Unregister-AbortCancellationSource and Test-AbortSignal are
     wrapped with call-tracking spies (defined after dot-sourcing
     AbortPipeline.ps1, calling straight through to the real originals) so
     Scenario H can prove the actual registration/cancellation mechanics
     fired, and fire a real abort deterministically mid-batch via a call-
-    count trigger instead of a wall-clock race - the earlier version of
-    this scenario fired the abort before the call even started, so it
-    never actually exercised Convert-ImageBatch's own abort path at all.
+    count trigger instead of a wall-clock race (firing the abort before
+    the call even started would never exercise the pipeline's own abort path).
 
 .EXAMPLE
     .\Modules\_Harness\ImageConversionPipeline.Harness.ps1
@@ -50,9 +44,8 @@ $modulesDir = Join-Path $PSScriptRoot ".."
 . (Join-Path $modulesDir "LeafDirectoryDiscovery.ps1")
 . (Join-Path $modulesDir "CleanConsoleRendering.ps1")
 . (Join-Path $modulesDir "Logging.ps1")
-# ChapterDispatch.ps1 (2026-09-09) - Invoke-LooseImageConversionPipeline's
-# own real dependency now, mode 2's migration onto it (dispatch redesign
-# step 3 of 4). Dot-sourced before ImageConversionPipeline.ps1 itself,
+# ChapterDispatch.ps1 - Invoke-LooseImageConversionPipeline's
+# own real dependency. Dot-sourced before ImageConversionPipeline.ps1 itself,
 # matching Conversion Script Main.ps1's own intended load order.
 . (Join-Path $modulesDir "ChapterDispatch.ps1")
 . (Join-Path $modulesDir "AnimatedConversionPipeline.ps1")
@@ -230,11 +223,11 @@ class Program {
             return 0;
         }
         if (content.Contains("STDERR_FLOOD")) {
-            // 2026-09-04 addition, same technique as fake magick.exe's own
+            // Same technique as fake magick.exe's own
             // stderr flood below - simulates a cjxl that emits more than
             // the OS anonymous-pipe buffer (~4KB/~64KB depending on
             // platform) of stderr before exiting, proving
-            // Convert-ImageBatch's async cjxl dispatch (which polls
+            // the async cjxl dispatch (which polls
             // HasExited rather than reading synchronously inline) doesn't
             // deadlock on it.
             string flood = new string('E', 200);
@@ -250,8 +243,7 @@ class Program {
         }
         if (content.Contains("ARGS_MARKER")) {
             // Lets a test read back the exact arguments this fake was
-            // actually invoked with (2026-09-02, recurring-bug-pattern
-            // coverage - see Scenario AI below) - e.g. proving a real
+            // actually invoked with (see Scenario AI below) - e.g. proving a real
             // --quality=<N> value was received, not just that SOME .jxl
             // got written.
             File.WriteAllText(dst, "ARGS:" + string.Join(" ", args));
@@ -266,7 +258,7 @@ $fakeCjxlExe = Join-Path $scratchDir "fake_cjxl.exe"
 Add-Type -TypeDefinition $fakeCjxlSource -Language CSharp -OutputAssembly $fakeCjxlExe -OutputType ConsoleApplication
 
 # ------------------------------------------------------------------
-#  Fake magick.exe (added 2026-08-28, for the new static-AVIF path) -
+#  Fake magick.exe (for the static-AVIF path) -
 #  same technique as AnimatedConversionPipeline.Harness.ps1's own fake:
 #   - "identify -format "%n" <path>": reads FRAMES:<n> from the input's
 #     content (default 1 - static); FAIL_IDENTIFY -> exit 1 (an
@@ -283,8 +275,8 @@ using System.Text.RegularExpressions;
 class Program {
     static int Main(string[] args) {
         if (args.Length > 0 && args[0] == "identify") {
-            // 2026-09-09: Test-AvifAnimated now addresses frame [0] only
-            // (a real perf fix - see AnimatedConversionPipeline.ps1's own
+            // Test-AvifAnimated addresses frame [0] only
+            // (a perf choice - see AnimatedConversionPipeline.ps1's own
             // header) - strip that trailing selector to find the real
             // fixture file on disk.
             string rawPath = args[args.Length - 1];
@@ -292,13 +284,13 @@ class Program {
             // Logs each identify call's target path (gated on an env var so
             // unrelated scenarios pay nothing) - lets a test count how many
             // times an identify spawn actually happened, proving the
-            // 2026-08-31 cancellation-check fix (an already-cancelled
+            // cancellation check (an already-cancelled
             // -CancelToken must short-circuit the collision-guard pre-pass
             // BEFORE it ever spawns magick for AVIF classification).
             string identifyLog = Environment.GetEnvironmentVariable("HARNESS_IDENTIFY_LOG");
             if (identifyLog != null) {
                 // WaitOne(timeoutMs) + AbandonedMutexException handling
-                // (2026-09-10, same fix as Controller.Harness.ps1's own
+                // (same as Controller.Harness.ps1's own
                 // identical mutex patterns - see that file's own comment
                 // for the full reasoning: a bare, timeout-less WaitOne()
                 // with no AbandonedMutexException catch can cascade a
@@ -338,12 +330,12 @@ class Program {
         string srcContent = File.Exists(src) ? File.ReadAllText(src) : "";
         if (srcContent.Contains("HUGE_STDERR")) {
             // Writes a large stderr dump (well over a typical OS pipe
-            // buffer) BEFORE doing anything else - proves the 2026-08-31
-            // redirect-deadlock fix (both streams now drained
+            // buffer) BEFORE doing anything else - proves the
+            // redirect-deadlock handling (both streams drained
             // asynchronously before WaitForExit in both
             // Invoke-IccStripRetryOrFail and the WebP/AVIF-to-PNG
             // pre-conversion call) actually prevents a hang, rather than
-            // just reproducing the already-fixed Test-AvifAnimated case
+            // just reproducing the Test-AvifAnimated case
             // in the sibling module.
             string line = new string('X', 200) + Environment.NewLine;
             for (int i = 0; i < 2000; i++) { Console.Error.Write(line); }
@@ -353,8 +345,7 @@ class Program {
             return 1;
         }
         // Invoke-IccStripRetryOrFail's own call shape: "<src>" -strip
-        // "<dst>" - -colorspace Gray deliberately removed (2026-08-31,
-        // project owner's own decision: never force-convert color data) -
+        // "<dst>" (no -colorspace Gray: color data is never force-converted) -
         // actually remove the ICC_MISMATCH marker here, simulating a real
         // profile strip, so a retry against the resulting PNG behaves
         // differently from the original (fake cjxl.exe's own ICC_MISMATCH
@@ -379,7 +370,7 @@ function New-FakeAvif {
 Write-Host ""
 
 # ==============================================================================
-#  Scenario A0 (2026-08-31 reuse fix): Get-LooseImageExtensions is the
+#  Scenario A0: Get-LooseImageExtensions is the
 #  single source of truth this module and Controller.ps1 both use as a
 #  default parameter value, instead of 5 independently hardcoded copies of
 #  the same 7-element array. AnimatedConversionPipeline.ps1 keeps its own
@@ -388,9 +379,8 @@ Write-Host ""
 #  is caught immediately instead of silently drifting.
 # ==============================================================================
 Write-Host "=== Scenario A0: Get-LooseImageExtensions is the shared source of truth ===" -ForegroundColor Cyan
-# 2026-09-02: ".gif"/".bmp"/".heic"/".heif" added (project owner's own
-# decision - these formats should count as unconverted content, not be
-# silently invisible to chapter discovery).
+# ".gif"/".bmp"/".heic"/".heif" count as unconverted content, not
+# silently invisible to chapter discovery.
 $expectedExtA0 = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif", ".gif", ".bmp", ".heic", ".heif")
 $actualExtA0 = @(Get-LooseImageExtensions)
 Test-Assert (($actualExtA0 -join ",") -eq ($expectedExtA0 -join ",")) ("Get-LooseImageExtensions returns the expected 11-element list in order (got: " + ($actualExtA0 -join ",") + ")")
@@ -402,7 +392,7 @@ Test-Assert ($animatedPipelineSource.Contains($expectedLiteral)) "AnimatedConver
 Write-Host ""
 
 # ==============================================================================
-#  Scenario A0b (2026-09-03 cleanup, Todo.md item): Test-OrphanedScratchFileName
+#  Scenario A0b: Test-OrphanedScratchFileName
 #  is the single source of truth this module and Controller.ps1 both call
 #  now, instead of the same 3-line regex trio hand-duplicated across this
 #  module, Controller.ps1, and ZipPipeline.ps1. ZipPipeline.ps1 keeps its
@@ -458,8 +448,7 @@ Test-Assert (-not $totalsA.Aborted) "not marked aborted"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario A2 (2026-09-09, mode 2's ChapterDispatch.ps1 migration): THE
-#  actual point of the migration, tested directly - an idle concurrency
+#  Scenario A2: the point of dispatching through ChapterDispatch.ps1, tested directly - an idle concurrency
 #  slot picks up the NEXT chapter's job while the CURRENT chapter still
 #  has work outstanding, instead of blocking on one chapter's conversion
 #  finishing before the next chapter's images are even dispatched.
@@ -516,10 +505,10 @@ Test-Assert (Test-Path -LiteralPath (Join-Path $chB "bad.jpg")) "failed source l
 Test-Assert (-not (Test-Path -LiteralPath (Join-Path $chB "good.jpg"))) "successful source deleted"
 
 # ==============================================================================
-#  Scenario B2 (2026-08-31 fix): a cjxl process that writes a PARTIAL/corrupt
+#  Scenario B2: a cjxl process that writes a PARTIAL/corrupt
 #  .jxl before exiting non-zero (simulating a crash or disk-full mid-write) -
-#  Complete-ImageConversionJob's normal failure path used to leave that
-#  partial .jxl on disk (only the force-kill path cleaned one up). Left
+#  Complete-ImageConversionJob's normal failure path must clean that
+#  partial .jxl up (not only the force-kill path). Left
 #  behind, it's a non-zero-byte file newer than its source, so the NEXT run's
 #  Get-LooseImageCandidates would misclassify the source as a stale leftover
 #  and permanently delete it - losing the real source over a garbage output.
@@ -544,8 +533,7 @@ $rootC = New-Dir "scenario-c"
 $chC = New-Dir "scenario-c\Series\Chapter 1"
 $staleSrcC = New-FakeImage -DirPath $chC -Name "already_done.jpg"
 [System.IO.File]::WriteAllText((Join-Path $chC "already_done.jxl"), "real jxl bytes")
-# Force the source's timestamp strictly OLDER than the .jxl's (2026-08-31
-# fix, caught by verifying this same day's /code-review 4th pass) - both
+# Force the source's timestamp strictly OLDER than the .jxl's - both
 # writes above happen back-to-back and can land in the same filesystem
 # timestamp tick, making $img.LastWriteTimeUtc -ge $jxlItem.LastWriteTimeUtc
 # true on EQUALITY and misrouting this scenario into NamingCollisions
@@ -561,10 +549,9 @@ Test-Assert (-not (Test-Path -LiteralPath $staleSrcC)) "stale source deleted"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario C1b (2026-09-08 fix, real bug caught by a full-codebase audit,
-#  same species as this project's other Remove-Source call sites):
-#  Remove-Source's $false return was discarded in
-#  Remove-StaleLooseSources, reporting a successful cleanup regardless.
+#  Scenario C1b (same species as this project's other Remove-Source call sites):
+#  Remove-Source's $false return must not be discarded in
+#  Remove-StaleLooseSources, or a successful cleanup is reported regardless.
 #  Remove-Source shadowed to return $false unconditionally.
 # ==============================================================================
 Write-Host "=== Scenario C1b: an already-gone stale source is not miscounted as cleaned ===" -ForegroundColor Cyan
@@ -588,26 +575,22 @@ Test-Assert ($totalsC1b.StaleCleanedSuccess -eq 0) ("StaleCleanedSuccess stays 0
 Write-Host ""
 
 # ==============================================================================
-#  Scenario C2 (2026-08-31, corrected same day): a same-basename extension
+#  Scenario C2: a same-basename extension
 #  collision - the .jxl exists FIRST (from a real, earlier conversion of a
 #  NOW-GONE source), then a genuinely different, unconverted file with the
 #  same basename shows up LATER (e.g. photo.jpg converted+deleted, then an
 #  unrelated photo.png added).
 #
-#  Before the FIRST fix, this was silently deleted as "stale" without ever
-#  being converted, purely because the basenames matched (loses the new,
-#  unconverted source - Recycle-Bin-recoverable at least).
+#  Deleting it as "stale" without ever converting it, purely because the
+#  basenames matched, would lose the new, unconverted source. Routing it
+#  to NeedsConversion is no better: converting photo.png writes cjxl's
+#  output to the SAME photo.jxl path, silently OVERWRITING the
+#  pre-existing .jxl - the only remaining copy of the ORIGINAL photo.jpg's
+#  content, permanently destroyed by a plain file write (not even
+#  Recycle-Bin-recoverable).
 #
-#  The FIRST fix's own attempt (routing a newer source to NeedsConversion)
-#  was ITSELF wrong, caught by a same-day /code-review: converting
-#  photo.png writes cjxl's output to the SAME photo.jxl path, silently
-#  OVERWRITING the pre-existing .jxl - the only remaining copy of the
-#  ORIGINAL photo.jpg's content, permanently destroyed by a plain file
-#  write (not even Recycle-Bin-recoverable). Worse than the bug it
-#  replaced.
-#
-#  The actual fix: neither action is safe without knowing which file
-#  produced the existing .jxl, so a newer same-basename source is now
+#  So neither action is safe without knowing which file
+#  produced the existing .jxl: a newer same-basename source is
 #  excluded from BOTH lists entirely - not converted (would overwrite),
 #  not deleted (would lose an unconverted source) - logged as an Error and
 #  left for the user to resolve by hand.
@@ -625,11 +608,10 @@ Test-Assert ($totalsC2.ConvertedSuccess -eq 0 -and $totalsC2.ConvertedFail -eq 0
 Test-Assert ($totalsC2.StaleCleanedSuccess -eq 0) "not counted as a stale-source cleanup either - not deleted"
 Test-Assert (Test-Path -LiteralPath $collidingSrcC2) "the colliding source survives untouched on disk - not deleted"
 Test-Assert ((Get-Content -LiteralPath (Join-Path $chC2 "photo.jxl") -Raw) -eq $originalJxlBytesC2) "the pre-existing .jxl survives byte-for-byte untouched - NOT silently overwritten by a conversion of the unrelated colliding source"
-# 2026-08-31 fix (from a second same-day /code-review): the collision used
-# to be completely invisible outside its own log line - not counted
-# anywhere, and (since it's this chapter's ONLY loose image) the chapter's
-# ChapterResult stayed $null, mapping to a clean Success with no zip-block
-# at all. Get-LooseImageCandidates now returns it via NamingCollisions,
+# The collision must not be invisible outside its own log line - if it
+# weren't counted anywhere, then (since it's this chapter's ONLY loose image)
+# the chapter's ChapterResult would stay $null, mapping to a clean Success
+# with no zip-block at all. Get-LooseImageCandidates returns it via NamingCollisions,
 # counted into InspectFailedCount and used to force IsZippable=$false.
 Test-Assert ($totalsC2.InspectFailedCount -eq 1) ("the naming collision is now counted in InspectFailedCount, not invisible (got " + $totalsC2.InspectFailedCount + ")")
 
@@ -637,8 +619,7 @@ Test-Assert ($totalsC2.InspectFailedCount -eq 1) ("the naming collision is now c
 # ==============================================================================
 #  Scenario C2c: the live CCR display shows a naming-collision chapter
 #  (same fixture as Scenario C2) as a Warning that names the collision -
-#  and, since mode 2 never zips, says nothing about a zip (2026-09-24: it
-#  used to say "zip skipped", a Mode 8 leftover). An "extra" entry with
+#  and, since mode 2 never zips, says nothing about a zip. An "extra" entry with
 #  no collision (a stray image in the series root) gets no warning.
 # ==============================================================================
 Write-Host "=== Scenario C2c: live CCR status names the real zip-block reason, and skips extras ===" -ForegroundColor Cyan
@@ -674,13 +655,11 @@ Test-Assert ($null -ne $callC2cExtra -and $callC2cExtra.Status -eq 'Success' -an
 Write-Host ""
 
 # ==============================================================================
-#  Scenario C2b (2026-08-31 fix, found by a second same-day /code-review):
-#  same collision shape as C2, but with the colliding source's timestamp
-#  EXACTLY EQUAL to the pre-existing .jxl's, not newer. The comparison was
-#  strict -gt, so an equal timestamp fell through to the stale branch and
-#  got permanently deleted without ever being converted - a real risk here
-#  since ZIP extraction commonly produces coarse or identical timestamps.
-#  Fixed by changing -gt to -ge.
+#  Scenario C2b: same collision shape as C2, but with the colliding source's timestamp
+#  EXACTLY EQUAL to the pre-existing .jxl's, not newer. The comparison is
+#  -ge, not -gt: with a strict -gt an equal timestamp would fall through to
+#  the stale branch and be permanently deleted without ever being converted -
+#  a real risk since ZIP extraction commonly produces coarse or identical timestamps.
 # ==============================================================================
 Write-Host "=== Scenario C2b: a same-basename file with an EQUAL timestamp is also left untouched, not deleted as stale ===" -ForegroundColor Cyan
 $chC2b = New-Dir "scenario-c2b\Series\Chapter 1"
@@ -710,17 +689,15 @@ Test-Assert ($totalsD.SeriesCount -eq 1) "the empty series was still walked"
 Test-Assert ($totalsD.ChapterCount -eq 0) "zero chapters counted"
 
 # ==============================================================================
-#  Scenario D2 (2026-09-01 live-shakedown fix): a chapter that finished
+#  Scenario D2: a chapter that finished
 #  converting on an EARLIER run - source images already deleted, only a
-#  .jxl left, zero loose files of any kind. Confirmed live against this
-#  project's real cjxl.exe: with -FolderQualifyingExtensions still
-#  defaulting to the bare Get-LooseImageExtensions() list (no ".jxl", this
-#  engine's own output extension), Get-SeriesChapters never finds this
-#  chapter at all - it's silently invisible to every later mode-1 run,
-#  permanently, with no warning logged (same root cause as
-#  Controller.ps1's Full Pipeline - see that file's own matching fix).
-#  Fixed by adding ".jxl" to this function's own -FolderQualifyingExtensions
-#  default.
+#  .jxl left, zero loose files of any kind. If -FolderQualifyingExtensions
+#  defaulted to the bare Get-LooseImageExtensions() list (no ".jxl", this
+#  engine's own output extension), Get-SeriesChapters would never find this
+#  chapter at all - silently invisible to every later run, with no
+#  warning logged (same root cause as Controller.ps1's Full Pipeline - see
+#  that file's own matching handling). So this function's own
+#  -FolderQualifyingExtensions default includes ".jxl".
 # ==============================================================================
 Write-Host "=== Scenario D2: a chapter with ONLY already-converted .jxl (zero loose files) is still discovered ===" -ForegroundColor Cyan
 $rootD2 = New-Dir "scenario-d2"
@@ -775,9 +752,9 @@ Test-Assert ($statusWarn -eq "Warning" -and $detailWarn -match "2 image") "skipp
 $statusErr, $detailErr = Get-ChapterProgressStatus -ChapterResult @{ FailedCount = 1; ForceKilledCount = 1; DeleteFailedCount = 0; SkippedCount = 0 }
 Test-Assert ($statusErr -eq "Error" -and $detailErr -match "1 failed" -and $detailErr -match "1 force-stopped") "failed+force-killed result -> Error with both reasons in detail"
 
-# 2026-08-31 fix: InspectFailedCount is now Error-tier - previously not
-# checked here AT ALL, so it fell through to a silent Success, letting the
-# zip gate proceed with a raw, completely unconverted AVIF in the chapter.
+# InspectFailedCount is Error-tier - if it weren't checked here at all, it
+# would fall through to a silent Success, letting the zip gate proceed with
+# a raw, completely unconverted AVIF in the chapter.
 $statusInspErr, $detailInspErr = Get-ChapterProgressStatus -ChapterResult @{ FailedCount = 0; ForceKilledCount = 0; DeleteFailedCount = 0; SkippedCount = 0; InspectFailedCount = 1 }
 Test-Assert ($statusInspErr -eq "Error" -and $detailInspErr -match "1 inspect failure") "InspectFailedCount alone is Error tier, not silently Success - it means a file was left completely unconverted"
 
@@ -804,14 +781,14 @@ Test-Assert ($script:ccrActiveSeries.Count -eq 0) "series resolved and left the 
 Test-Assert ($totalsG.ConvertedSuccess -eq 1 -and $totalsG.ConvertedFail -eq 1) "conversion counts still correct with CCR on"
 
 # ==============================================================================
-#  Scenario G2 (2026-09-03 fix, real bug, live-reported, same fix as
+#  Scenario G2 (same rule as
 #  Controller.ps1's Invoke-FullPipeline): a series with zero qualifying
 #  chapters (e.g. already fully converted and zipped - nothing left but a
 #  .cbz and an info file, no chapter subfolders at all) must never call
-#  Start-SeriesProgress. Before this fix it did - Start-SeriesProgress's
+#  Start-SeriesProgress. Its
 #  own docstring says a 0-chapter call "is rendered as an immediately-
 #  frozen '0/0' line" via Update-CleanConsoleDisplay, exactly the unwanted
-#  line the project owner asked to have suppressed entirely.
+#  line that must be suppressed entirely.
 #  $script:ccrActiveSeries is NOT the right observable (a 0-chapter call
 #  never enters it either way, by that same existing design) - spies
 #  directly on Start-SeriesProgress instead.
@@ -850,12 +827,11 @@ Write-Host ""
 #  fix and that a real abort correctly reaches Invoke-ChapterDispatch's own
 #  CancelToken.
 #
-#  Call sequence changed with the 2026-09-09 ChapterDispatch.ps1 migration
-#  (no longer a simple series-loop/chapter-loop/AbortPollCallback chain -
-#  see this module's own header) - $testAbortSignalTriggerAt=4 still happens
-#  to land after the fake cjxl process is dispatched and sleeping, confirmed
-#  live (ConvertedSuccess=1 below - the in-flight job completes via the
-#  abort-drain wait, not a force-kill), so it wasn't changed.
+#  The call sequence goes through ChapterDispatch.ps1 (not a simple
+#  series-loop/chapter-loop/AbortPollCallback chain - see this module's own
+#  header) - $testAbortSignalTriggerAt=4 lands after the fake cjxl process
+#  is dispatched and sleeping (ConvertedSuccess=1 below - the in-flight job
+#  completes via the abort-drain wait, not a force-kill).
 # ==============================================================================
 Write-Host "=== Scenario H: abort registration actually wired up ===" -ForegroundColor Cyan
 Reset-AbortState
@@ -872,12 +848,11 @@ Test-Assert ($script:unregisterCtsCalls.Count -eq 1) ("Unregister-AbortCancellat
 Test-Assert ([object]::ReferenceEquals($script:registerCtsCalls[0], $script:unregisterCtsCalls[0])) "the registered and unregistered CTS are the SAME object"
 Test-Assert ($script:unregisterCtsWasCancelled[0]) "that CTS's token actually got cancelled by the real abort (captured just before the module disposed it)"
 Test-Assert ($totalsH.Aborted) "pipeline reports Aborted"
-# LastCompletedPaths is always empty now (2026-09-09, a deliberate
-# simplification, not a regression - see this module's own header): its
-# old semantics were an "at the exact instant abort was detected"
-# snapshot scoped to one chapter's own blocking Convert-ImageBatch call,
-# which has no clean equivalent once dispatch spans the whole run and
-# chapters interleave. Confirmed via a repo-wide grep that nothing
+# LastCompletedPaths is always empty (a deliberate
+# simplification - see this module's own header): an
+# "at the exact instant abort was detected" snapshot scoped to one
+# chapter's own blocking call has no clean equivalent once dispatch spans
+# the whole run and chapters interleave. Nothing
 # outside this module and its own harness ever read it.
 Test-Assert ($totalsH.LastCompletedPaths.Count -eq 0) ("LastCompletedPaths is always empty in the migrated pipeline, by design (got " + $totalsH.LastCompletedPaths.Count + ")")
 Test-Assert ($totalsH.ConvertedSuccess -eq 1) "the in-flight job still completed successfully via the abort-drain wait, rather than being force-killed"
@@ -934,8 +909,8 @@ Test-Assert ($totalsI.ConvertedSuccess -eq 1) "only the non-staging chapter's im
 #  Scenario J: a chapter dir excluded by Get-SeriesChapters's former-container
 #  guard (a stray .zip sitting directly inside it) must still get its
 #  unconverted images converted - conversion coverage is NOT gated behind
-#  zip-domain "is this worth re-zipping" guards. Real bug found in review;
-#  see ImageConversionPipeline.ps1's header/CHANGELOG.md.
+#  zip-domain "is this worth re-zipping" guards (see
+#  ImageConversionPipeline.ps1's header).
 # ==============================================================================
 Write-Host "=== Scenario J: former-container guard doesn't drop conversion coverage ===" -ForegroundColor Cyan
 $rootJ = New-Dir "scenario-j"
@@ -1014,8 +989,7 @@ Test-Assert ($extraCallbackM[0].ChapterResult.ConvertedCount -eq 1 -and $extraCa
 # ==============================================================================
 #  Scenario N: -FolderExcludeStagingDirs must still exclude a staging directory
 #  even when it holds an unconverted image the merge would otherwise re-add -
-#  the merge was bypassing this exclusion entirely (a real second-review
-#  finding), independent of -KnownZipPaths.
+#  the merge must not bypass this exclusion, independent of -KnownZipPaths.
 # ==============================================================================
 Write-Host "=== Scenario N: FolderExcludeStagingDirs still applies to extras ===" -ForegroundColor Cyan
 $rootN = New-Dir "scenario-n"
@@ -1036,11 +1010,10 @@ Test-Assert (Test-Path -LiteralPath (Join-Path $stagingN "excluded.jpg")) "the s
 # ==============================================================================
 #  Scenario O: -FolderExcludeStagingDirs must also protect a STALE source (one
 #  with an existing non-zero .jxl counterpart) from Remove-StaleLooseSources -
-#  a real second-review finding distinct from Scenario N (which only covers
-#  the NeedsConversion/extras path). Get-LooseImageCandidates previously had
-#  no concept of -FolderExcludeStagingDirs at all, so a stale source sitting in
-#  a directory the caller explicitly asked to leave alone (e.g. mode 4's
-#  in-progress extraction area) would get deleted anyway.
+#  distinct from Scenario N (which only covers the NeedsConversion/extras
+#  path). Without that, a stale source sitting in a directory the caller
+#  explicitly asked to leave alone (e.g. an in-progress extraction area)
+#  would get deleted anyway.
 # ==============================================================================
 Write-Host "=== Scenario O: FolderExcludeStagingDirs protects stale sources too ===" -ForegroundColor Cyan
 $rootO = New-Dir "scenario-o"
@@ -1060,8 +1033,8 @@ Test-Assert (Test-Path -LiteralPath $staleSrcO) "the staging dir's stale source 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Q: static AVIF converts through the WebP-style temp-PNG detour,
-#  2026-08-28 (Todo.md's decided static-AVIF-always-converts change).
+#  Scenario Q: static AVIF converts through the WebP-style temp-PNG detour
+#  (a static AVIF always converts).
 # ==============================================================================
 Write-Host "=== Scenario Q: static AVIF converts to .jxl, same detour as WebP ===" -ForegroundColor Cyan
 $chQ = New-Dir "scenario-q\Series\Chapter 1"
@@ -1089,28 +1062,20 @@ Test-Assert (Test-Path -LiteralPath $avifR) "the animated AVIF source was left u
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Q2 (2026-09-02, project owner's own decision): .gif/.bmp/.heic/
-#  .heif now count as unconverted content, same as any other extension on
+#  Scenario Q2: .gif/.bmp/.heic/
+#  .heif count as unconverted content, same as any other extension on
 #  Get-LooseImageExtensions()'s own list. .bmp/.heic/.heif actually
-#  convert, through the same magick temp-PNG detour WebP/AVIF already use
-#  (confirmed live - cjxl.exe cannot read any of the three directly, but
+#  convert, through the same magick temp-PNG detour WebP/AVIF use
+#  (cjxl.exe cannot read any of the three directly, but
 #  `magick -list format` confirms BMP is read/write and HEIC/HEIF are
 #  read-only, both sufficient for a one-way transcode). .gif is always
-#  SKIPPED, never actually converted (project owner's own real-world
-#  experience - GIF conversion caused real problems in older script
-#  versions; live-reproduced the same day, an animated GIF reaching the
-#  ICC-strip retry path left orphaned numbered temp PNGs behind that no
-#  cleanup regex in this project catches).
+#  SKIPPED, never actually converted (GIF conversion has caused real
+#  problems: an animated GIF reaching the ICC-strip retry path left
+#  orphaned numbered temp PNGs behind that no cleanup regex catches).
 #
-#  2026-09-14 (dead-code-removal, Todo.md's matching entry): this
-#  scenario used to also exercise Convert-ImageBatch's own skip-check
-#  DIRECTLY (a defensive backstop, since Get-LooseImageCandidates already
-#  excludes .gif entirely at discovery time - Scenario AC2, above - so it
-#  never reached Convert-ImageBatch through either real caller). That
-#  direct call was removed along with Convert-ImageBatch itself; the
-#  live end-to-end check below (which already proved the real governing
-#  behavior - discovery-level exclusion, not a skip inside the batch
-#  function) is the only assertion this scenario needs.
+#  Get-LooseImageCandidates already excludes .gif entirely at discovery
+#  time (Scenario AC2, above), so it never reaches conversion; the live
+#  end-to-end check below proves that governing behavior.
 # ==============================================================================
 Write-Host "=== Scenario Q2: .gif is always skipped, never actually converted ===" -ForegroundColor Cyan
 $chQ2 = New-Dir "scenario-q2\Series\Chapter 1"
@@ -1125,18 +1090,13 @@ Test-Assert (Test-Path -LiteralPath $gifQ2) "the GIF source is still untouched a
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Q2b (2026-09-08 fix, real bug caught by a full-codebase audit,
-#  same species as this project's other Remove-Source call sites):
+#  Scenario Q2b (same species as this project's other Remove-Source call sites):
 #  Remove-Source's $false return (the source already vanished before
-#  deletion - a real TOCTOU gap) was discarded in the conversion-job
-#  finalizer, reporting a successful delete regardless.
-#  Remove-Source shadowed to return $false unconditionally.
-#
-#  2026-09-14 (dead-code-removal, Todo.md's matching entry): ported from a
-#  direct Convert-ImageBatch call to the live Invoke-LooseImageConversionPipeline
-#  path - Complete-ImageDispatchJob (the live twin) has the identical
-#  $removed check, but nothing previously proved it through the real
-#  pipeline.
+#  deletion - a real TOCTOU gap) must not be discarded in the conversion-job
+#  finalizer, or a successful delete is reported regardless.
+#  Remove-Source shadowed to return $false unconditionally. Runs through
+#  the live Invoke-LooseImageConversionPipeline (Complete-ImageDispatchJob's
+#  $removed check).
 # ==============================================================================
 Write-Host "=== Scenario Q2b: an already-gone source is not miscounted as deleted ===" -ForegroundColor Cyan
 $chQ2b = New-Dir "scenario-q2b\Series\Chapter 1"
@@ -1170,9 +1130,9 @@ foreach ($extQ3 in @("bmp", "heic", "heif", "tif", "tiff")) {
 }
 Write-Host ""
 
-# Scenario Q3b (2026-10-23): .tif/.tiff go through the magick detour too.
-# Real cjxl can't read TIFF; before this they were handed to it directly
-# and only converted by accident, via the ICC-strip retry, with a
+# Scenario Q3b: .tif/.tiff go through the magick detour too.
+# Real cjxl can't read TIFF; handing it directly would only convert by
+# accident, via the ICC-strip retry, with a
 # misleading "ICC profile mismatch" warning on every file. The fake cjxl
 # here accepts anything, so the proof is the other direction: with no
 # magick available, a TIFF must now be refused with the same "ImageMagick
@@ -1200,7 +1160,7 @@ Write-Host ""
 # ==============================================================================
 #  Scenario S: a real Test-AvifAnimated failure (couldn't determine frame
 #  count) is its own InspectFailedCount outcome - NOT folded into
-#  FailedCount, matching Convert-AnimatedBatch's identical failure mode.
+#  FailedCount, matching the animated pipeline's identical failure mode.
 # ==============================================================================
 Write-Host "=== Scenario S: AVIF inspect-failure counts separately from FailedCount ===" -ForegroundColor Cyan
 $chS = New-Dir "scenario-s\Series\Chapter 1"
@@ -1233,7 +1193,7 @@ Reset-AbortState
 Write-Host ""
 
 # ==============================================================================
-#  Scenario W: the ICC-strip retry (2026-08-31 fix) - fake cjxl.exe fails
+#  Scenario W: the ICC-strip retry - fake cjxl.exe fails
 #  the FIRST attempt with the exact "Getting pixel data failed" signature
 #  (ICC_MISMATCH marker), fake magick.exe's ICC-strip command actually
 #  removes that marker into a real temp PNG, and the RETRY against that
@@ -1257,8 +1217,8 @@ Write-Host ""
 
 # ==============================================================================
 #  Scenario X: an ICC-strip retry that ALSO hits the same failure signature
-#  falls through to a normal failure instead of retrying forever (2026-08-31
-#  fix) - without the -not $Job.IccRetried guard, Complete-ImageConversionJob
+#  falls through to a normal failure instead of retrying forever -
+#  without the -not $Job.IccRetried guard, Complete-ImageConversionJob
 #  would strip-and-retry the same source indefinitely.
 # ==============================================================================
 Write-Host "=== Scenario X: a retry that fails the same way does NOT retry again ===" -ForegroundColor Cyan
@@ -1277,12 +1237,11 @@ Test-Assert ($totalsX.ConvertedFail -eq 1 -and $totalsX.ConvertedSuccess -eq 0) 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario X2 (2026-08-31 fix, caught by a same-day /code-review of the
-#  original ICC-retry fix): the ICC-strip retry must be reused directly
+#  Scenario X2: the ICC-strip retry must be reused directly
 #  for a .webp/.avif source, not re-run through the webp/avif-to-PNG
 #  pre-conversion branch a second time. $j.SrcPath still ends in .webp
-#  even for the retry job, so before this fix the isWebp/isAvif check
-#  fired again on redispatch, redoing an entirely separate, NON-stripped
+#  even for the retry job, so an unguarded isWebp/isAvif check
+#  would fire again on redispatch, redoing an entirely separate, NON-stripped
 #  pre-conversion from the (untouched) original .webp - overwriting
 #  TempPng, orphaning the real stripped PNG Invoke-IccStripRetryOrFail
 #  produced, and failing the retry the same way every time since the
@@ -1302,13 +1261,12 @@ Test-Assert (@($leftoverTempPngsX2).Count -eq 0) ("no orphaned temp PNG (neither
 Write-Host ""
 
 # ==============================================================================
-#  Scenario X3 (2026-08-31 fix, found by a THIRD same-day /code-review
-#  pass): both the ICC-strip magick call (Invoke-IccStripRetryOrFail) and
-#  the WebP/AVIF-to-PNG pre-conversion magick call had both stdout/stderr
-#  redirected but never read - the same Process redirect deadlock species
-#  already found and fixed in AnimatedConversionPipeline.ps1's
-#  Test-AvifAnimated, just never applied here. A huge stderr dump (well
-#  over a typical OS pipe buffer) proves neither call site hangs anymore.
+#  Scenario X3: both the ICC-strip magick call (Invoke-IccStripRetryOrFail) and
+#  the WebP/AVIF-to-PNG pre-conversion magick call redirect
+#  stdout/stderr and must read them - the same Process redirect deadlock
+#  species handled in AnimatedConversionPipeline.ps1's
+#  Test-AvifAnimated. A huge stderr dump (well
+#  over a typical OS pipe buffer) proves neither call site hangs.
 # ==============================================================================
 Write-Host "=== Scenario X3: a huge stderr dump does not hang the ICC-strip magick call ===" -ForegroundColor Cyan
 $imgX3 = Join-Path (New-Dir "scenario-x3\Series\Chapter 1") "cover.jpg"
@@ -1331,12 +1289,11 @@ Test-Assert ($swX4.Elapsed.TotalSeconds -lt 15) ("returned promptly instead of d
 Write-Host ""
 
 # ==============================================================================
-#  Scenario X5 (2026-09-04 fix, real bug): Invoke-IccStripRetryOrFail's own
-#  Process::Start call was the one Process::Start in this file NOT wrapped
-#  in try/catch (its two siblings - the WebP/AVIF pre-conversion above, and
-#  the cjxl dispatch itself - both are). A bad/stale -MagickExe path there
-#  used to throw a raw, less-clear exception instead of the same clean
-#  "counted as a real failure" outcome Scenario Y already proves for a bad
+#  Scenario X5: Invoke-IccStripRetryOrFail's own
+#  Process::Start call is wrapped in try/catch like its two siblings (the
+#  WebP/AVIF pre-conversion above, and the cjxl dispatch itself). A bad/stale
+#  -MagickExe path there must not throw a raw, less-clear exception instead
+#  of the same clean "counted as a real failure" outcome Scenario Y already proves for a bad
 #  -CjxlExe path. Must fail fast and cleanly, not hang or crash the batch.
 # ==============================================================================
 Write-Host "=== Scenario X5: a bad -MagickExe path during an ICC-strip retry fails fast and cleanly ===" -ForegroundColor Cyan
@@ -1353,12 +1310,11 @@ Test-Assert ($totalsX5.ConvertedFail -eq 1 -and $totalsX5.ConvertedSuccess -eq 0
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Y (2026-08-31 fix): Process.Start() throwing (a stale/bad
-#  -CjxlExe path) used to hang the dispatch loop indefinitely - a raw .NET
+#  Scenario Y: Process.Start() throwing (a stale/bad
+#  -CjxlExe path) must not hang the dispatch loop - a raw .NET
 #  exception there isn't terminating in this scriptblock, so execution
-#  continued with $j.Proc left $null, and $null.HasExited never becomes
-#  true, so that job sat in $running forever. Confirmed live before the fix
-#  (this exact repro hung past 40s with no progress). Now wrapped in
+#  would continue with $j.Proc left $null, and $null.HasExited never becomes
+#  true, so that job would sit in $running forever. Wrapped in
 #  try/catch, so it must fail fast and cleanly instead.
 # ==============================================================================
 Write-Host "=== Scenario Y: a bad -CjxlExe path fails fast instead of hanging the dispatch loop ===" -ForegroundColor Cyan
@@ -1375,10 +1331,10 @@ Test-Assert ($totalsY.ConvertedFail -eq 1 -and $totalsY.ConvertedSuccess -eq 0) 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Z (2026-08-31 fix): $looseCts's construction and
-#  Register-AbortCancellationSource call were moved INSIDE the function's
-#  try block (same species as ZipParallelProcessing.ps1's mutex-leak fix
-#  from earlier today). Register-AbortCancellationSource is temporarily
+#  Scenario Z: $looseCts's construction and
+#  Register-AbortCancellationSource call sit INSIDE the function's
+#  try block (same species as ZipParallelProcessing.ps1's mutex-leak
+#  handling). Register-AbortCancellationSource is temporarily
 #  replaced with a fake that captures the real $Cts (so the test can
 #  inspect it afterward) and throws, simulating a real registration
 #  failure. Verified via a disposed Cts's own .Cancel() throwing
@@ -1412,15 +1368,13 @@ Test-Assert $disposedZ "the Cts was disposed via the finally block despite the t
 Write-Host ""
 
 # ==============================================================================
-#  Scenario AA (2026-08-31 fix, caught by a same-day /code-review 4th pass):
-#  an animated AVIF/WebP sitting next to a same-basename convertible source
-#  (e.g. animated "foo.avif" + static "foo.jpg") used to be misclassified as
-#  a genuine output-path collision, since the collision pre-pass ran BEFORE
-#  the per-job animated-skip checks and only knew extensions, not animation
-#  status - both sources failed with "Resolve the name clash manually" and
-#  neither the real conversion nor the animated-skip ever happened. Animation
-#  classification now runs in the SAME pre-pass that builds the collision
-#  count, so "foo.jpg" converts cleanly and "foo.avif" is a Warning-tier
+#  Scenario AA: an animated AVIF/WebP sitting next to a same-basename
+#  convertible source (e.g. animated "foo.avif" + static "foo.jpg") must not
+#  be misclassified as a genuine output-path collision (a pre-pass that ran
+#  before the per-job animated-skip checks and only knew extensions, not
+#  animation status, would fail both sources with "Resolve the name clash
+#  manually"). Animation classification runs in the SAME pre-pass that
+#  builds the collision count, so "foo.jpg" converts cleanly and "foo.avif" is a Warning-tier
 #  skip, not an Error-tier false collision.
 # ==============================================================================
 Write-Host "=== Scenario AA: an animated file does not false-positive as a name clash with a same-basename convertible source ===" -ForegroundColor Cyan
@@ -1438,13 +1392,12 @@ Test-Assert (Test-Path -LiteralPath $avifAA) "the animated foo.avif source was l
 Write-Host ""
 
 # ==============================================================================
-#  Scenario AC (2026-08-31 fix, caught by a same-day /code-review 4th pass):
-#  a leaked "_tmp_*" scratch file (one whose owning cleanup path couldn't
-#  run - force-killed process, locked file swallowed by a bare catch) used
-#  to be indistinguishable from a real loose image at Get-LooseImageCandidates'
+#  Scenario AC: a leaked "_tmp_*" scratch file (one whose owning cleanup path couldn't
+#  run - force-killed process, locked file swallowed by a bare catch) would
+#  be indistinguishable from a real loose image at Get-LooseImageCandidates'
 #  own discovery boundary, since its extension (.png/.webp) is in
 #  $LooseImageExtensions - the NEXT run would convert it and leave the
-#  garbage output behind permanently. Now excluded by name pattern.
+#  garbage output behind permanently. So it is excluded by name pattern.
 # ==============================================================================
 Write-Host "=== Scenario AC: orphaned _tmp_* scratch files are excluded from loose-image discovery ===" -ForegroundColor Cyan
 $chAC = New-Dir "scenario-ac\Series\Chapter 1"
@@ -1460,24 +1413,22 @@ $realAC = New-FakeImage -DirPath $chAC -Name "real.jpg"
 
 $candidatesAC = Get-LooseImageCandidates -ScanPath (Join-Path $scratchDir "scenario-ac")
 
-# 2026-09-02 review fix: the BMP/HEIC/HEIF scratch patterns (and the
-# numbered iccstrip variant) were confirmed live to be missed by the
-# pre-widening regexes here - a real "cover_tmp_bmp2png.png" was
+# The BMP/HEIC/HEIF scratch patterns (and the numbered iccstrip variant)
+# are covered too - a "cover_tmp_bmp2png.png" must not be
 # misclassified as a genuine NeedsConversion candidate.
 Test-Assert ($candidatesAC.NeedsConversion.Count -eq 1 -and $candidatesAC.NeedsConversion[0].Name -eq "real.jpg") ("only the real loose image was returned, all 7 scratch-file patterns excluded (got " + $candidatesAC.NeedsConversion.Count + " candidate(s): " + (($candidatesAC.NeedsConversion | ForEach-Object { $_.Name }) -join ", ") + ")")
 Test-Assert ($candidatesAC.StaleSources.Count -eq 0) "no scratch file was misclassified as a stale source either"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario AC2 (2026-09-02 review fix, live-confirmed): a never-converted
+#  Scenario AC2: a never-converted
 #  extension (currently just .gif - Get-NeverConvertedExtensions) must
 #  NEVER be classified as a stale source, no matter its timestamp relative
-#  to a same-basename .jxl. Before this fix, a chapter with "01.jpg" and
+#  to a same-basename .jxl. Otherwise a chapter with "01.jpg" and
 #  "01.gif" would convert "01.jpg" to "01.jxl" (deleting "01.jpg"
-#  normally) and leave "01.gif" untouched with a "File left untouched"
-#  promise (Convert-ImageBatch's own skip message) - but on the VERY NEXT
-#  run, "01.gif" (older than the freshly-written "01.jxl") was classified
-#  as StaleSources and DELETED, breaking that promise one run later.
+#  normally) and leave "01.gif" untouched - but on the VERY NEXT
+#  run, "01.gif" (older than the freshly-written "01.jxl") would be classified
+#  as StaleSources and DELETED.
 #  Reproduced directly against Get-LooseImageCandidates with a real,
 #  already-older .gif sitting next to a real .jxl.
 # ==============================================================================
@@ -1496,19 +1447,13 @@ Test-Assert (Test-Path -LiteralPath $gifAC2) "the .gif itself is untouched on di
 Write-Host ""
 
 # ==============================================================================
-#  Scenario AD (2026-08-31 fix, caught by verifying this same day's
-#  /code-review 4th pass): the WebP VP8X-header read moved into the
-#  collision-guard pre-pass (fix 1, Scenario AA above) lost the try/catch it
-#  had inside the dispatch loop's own per-job error handling - an
-#  inaccessible .webp (locked by another process, here) used to throw
-#  straight out and end the whole run, instead of failing just that one
-#  file like every other per-file I/O error here.
-#
-#  2026-09-14 (dead-code-removal, Todo.md's matching entry): ported from a
-#  direct Convert-ImageBatch call to the live Invoke-LooseImageConversionPipeline
-#  path - jobBuilder (the live twin) has the identical try/catch around
-#  Test-WebPAnimated, but nothing previously proved it through the real
-#  pipeline.
+#  Scenario AD: the WebP VP8X-header read in the
+#  collision-guard pre-pass (Scenario AA above) is wrapped in try/catch - an
+#  inaccessible .webp (locked by another process, here) must not throw
+#  straight out and end the whole run; it fails just that one
+#  file like every other per-file I/O error here. Runs through the live
+#  Invoke-LooseImageConversionPipeline (jobBuilder's try/catch around
+#  Test-WebPAnimated).
 # ==============================================================================
 Write-Host "=== Scenario AD: a locked/unreadable .webp fails just that file, not the whole batch ===" -ForegroundColor Cyan
 $chAD = New-Dir "scenario-ad\Series\Chapter 1"
@@ -1530,16 +1475,11 @@ Test-Assert ($null -ne $totalsAD -and $totalsAD.ConvertedFail -eq 1) ("the locke
 Write-Host ""
 
 # ==============================================================================
-#  Scenario AD2 (2026-09-09, architecture-consistency extraction - see
-#  Todo.md's matching entry and Test-WebPAnimated's own header): direct
-#  coverage of Test-WebPAnimated itself (previously untestable in
-#  isolation) and of the pipeline actually skipping a real animated WebP -
-#  a real, pre-existing gap (only the locked-file/error path above had
-#  coverage, never the actual animation-flag-detected/skip path).
-#
-#  2026-09-14 (dead-code-removal, Todo.md's matching entry): the skip
-#  proof was ported from a direct Convert-ImageBatch call to the live
-#  Invoke-LooseImageConversionPipeline path.
+#  Scenario AD2: direct
+#  coverage of Test-WebPAnimated itself (see its own header) and of the
+#  pipeline actually skipping a real animated WebP (the
+#  animation-flag-detected/skip path, as opposed to the locked-file/error
+#  path above), through the live Invoke-LooseImageConversionPipeline.
 # ==============================================================================
 Write-Host "=== Scenario AD2: Test-WebPAnimated direct coverage + the pipeline skips a real animated WebP ===" -ForegroundColor Cyan
 function New-FakeWebp {
@@ -1562,9 +1502,9 @@ function New-FakeWebp {
 $chAD2 = New-Dir "scenario-ad2\Series\Chapter 1"
 $animatedWebpAD2 = Join-Path $chAD2 "animated.webp"
 $staticWebpAD2 = Join-Path $chAD2 "static.webp"
-# Deliberately OUTSIDE $chAD2 (2026-09-14) - this fixture is only for the
+# Deliberately OUTSIDE $chAD2 - this fixture is only for the
 # direct Test-WebPAnimated unit check below, not the live-pipeline check
-# further down, which now scans $chAD2's real directory contents and
+# further down, which scans $chAD2's real directory contents and
 # would otherwise pick this up as a third file to convert.
 $noVp8xWebpAD2 = Join-Path $scratchDir "scenario-ad2-no-vp8x.webp"
 New-FakeWebp -Path $animatedWebpAD2 -Animated $true
@@ -1582,39 +1522,32 @@ Test-Assert ($totalsAD2.ConvertedSuccess -eq 1) "the real static WebP in the sam
 Write-Host ""
 
 # ==============================================================================
-#  Scenario AF (2026-08-31 fix, caught by verifying this same day's
-#  /code-review 4th pass, then CORRECTED by a second verification pass that
-#  showed the fix WAS observably testable after all): the outer dispatch-
-#  loop catch's own bulk cleanup (fix 3) iterates a $running list that can
+#  Scenario AF: the outer dispatch-
+#  loop catch's own bulk cleanup iterates a $running list that can
 #  be STALE if Complete-ImageConversionJob throws partway through the poll
 #  loop's per-pass foreach - it may still list jobs that function's own
 #  finally already finished processing, including a job that already
 #  converted successfully. Without the SlotReleased guard, the outer
 #  catch's force-cleanup would delete that job's real, already-converted
 #  .jxl output as if it belonged to a genuinely still-running, force-killed
-#  job - a real data-loss bug.
+#  job - data loss.
 # ==============================================================================
-#  Scenario AG (2026-08-31 fix, caught by verifying this same day's
-#  /code-review 4th pass): the dispatch loop's own force-kill cleanup
-#  dropped ONE step - deleting a partial/corrupt .jxl a killed cjxl
+#  Scenario AG: the dispatch loop's own force-kill cleanup
+#  must delete a partial/corrupt .jxl a killed cjxl
 #  process may have already written. Left behind, that's a non-zero-byte
 #  .jxl NEWER than its source - the NEXT run's Get-LooseImageCandidates
 #  classifies the source as stale and deletes it, keeping only the
 #  garbage output (same species Scenario B2 already covers for the
 #  ORDINARY failure path).
 #
-#  2026-09-14 (dead-code-removal, Todo.md's matching entry): the original
-#  version of this scenario proved the fix against Convert-ImageBatch's
-#  own now-deleted outer catch, using a synthetic Write-Log throw to
-#  trigger it. That catch no longer exists in this module - the
-#  equivalent generic force-kill cleanup now lives in ChapterDispatch.ps1's
+#  The generic force-kill cleanup lives in ChapterDispatch.ps1's
 #  Invoke-ChapterDispatch (its own drain-loop force-kill block, proven
 #  generically by ChapterDispatch.Harness.ps1's Scenarios 12/13). What's
 #  still THIS pipeline's own responsibility, and wasn't otherwise proven
 #  through the real pipeline, is that its own -JobAbortCleanup closure
 #  (the thing that block calls per job) actually deletes a force-killed
-#  job's partial .jxl - rewritten here as a real end-to-end abort/
-#  force-kill instead of a synthetic throw, using the same
+#  job's partial .jxl - proven here with a real end-to-end abort/
+#  force-kill, using the same
 #  Test-AbortSignal call-count trigger as Scenario H above.
 # ==============================================================================
 Write-Host "=== Scenario AG: a force-killed job's partial .jxl is cleaned up by the pipeline's own JobAbortCleanup ===" -ForegroundColor Cyan
@@ -1644,23 +1577,16 @@ Test-Assert (-not (Test-Path -LiteralPath $expectedJxlAG)) "the partial .jxl lef
 Write-Host ""
 
 # ==============================================================================
-#  Scenario AI (2026-09-02, recurring-bug-pattern coverage): omitting
-#  -DoJpegQuality falls back to a safe default (90), not 0. Same species
-#  of bug as the 2026-09-01 .jxl-discovery gap (Todo.md/CHANGELOG.md) -
-#  a parameter default silently diverging from its sibling function's
-#  own default (Convert-AnimatedBatch's -AnimatedQuality already
-#  defaulted to 90) - fixed the same day this scenario was added, but
-#  was latent (both real call sites already pass it explicitly) and had
-#  NO test anywhere proving the omitted-key fallback itself was safe.
-#  Reads back the fake cjxl.exe's own real argument string (via the new
-#  ARGS_MARKER trigger) to prove --quality=90 was actually received, not
-#  just that some default value exists somewhere unverified.
-#
-#  2026-09-14 (dead-code-removal, Todo.md's matching entry): ported from a
-#  direct Convert-ImageBatch call to the live Invoke-LooseImageConversionPipeline
-#  path - jobStarter (the live twin) has the identical arg-construction
-#  branches, but nothing previously proved the omitted-key default through
-#  the real pipeline.
+#  Scenario AI: omitting
+#  -DoJpegQuality falls back to a safe default (90), not 0. The risk is a
+#  parameter default silently diverging from its sibling function's
+#  own default (-AnimatedQuality also defaults to 90); both real call sites
+#  pass it explicitly, so only this test proves the omitted-key fallback
+#  itself is safe. Reads back the fake cjxl.exe's own real argument string
+#  (via the ARGS_MARKER trigger) to prove --quality=90 was actually
+#  received, not just that some default value exists somewhere unverified.
+#  Runs through the live Invoke-LooseImageConversionPipeline (jobStarter's
+#  arg-construction branches).
 # ==============================================================================
 Write-Host "=== Scenario AI: -JpegQuality defaults to 90 when omitted ===" -ForegroundColor Cyan
 $chAI = New-Dir "scenario-ai\Series\Chapter 1"
@@ -1676,21 +1602,15 @@ Test-Assert ($argsTextAI -match "--quality=90(\s|$)") ("omitting -JpegQuality pr
 Write-Host ""
 
 # ==============================================================================
-#  Scenario AJ (2026-09-03 fix, real bug, live-reported): every cjxl
+#  Scenario AJ: every cjxl
 #  invocation passes --num_threads=1, on all three argument-building
-#  branches (lossless JPEG, lossy JPEG, non-JPEG). Before this fix, cjxl's
-#  own default ("-1" = use machine default) was never overridden, so each
-#  concurrently-dispatched process grabbed its own machine-default thread
-#  pool independently of -MaxCjxlProcs - confirmed live (4 configured
-#  processes saturated far more than 4 real threads). Same ARGS_MARKER
-#  technique as Scenario AI, one file per branch.
-#
-#  2026-09-14 (dead-code-removal, Todo.md's matching entry): ported from
-#  three direct Convert-ImageBatch calls to three live
-#  Invoke-LooseImageConversionPipeline runs (one per branch, since
-#  -JpegLossless/-JpegQuality are pipeline-level, not per-file) - jobStarter
-#  (the live twin) has the identical three arg-construction branches, but
-#  nothing previously proved --num_threads=1 through the real pipeline.
+#  branches (lossless JPEG, lossy JPEG, non-JPEG). Otherwise cjxl's
+#  own default ("-1" = use machine default) would apply, and each
+#  concurrently-dispatched process would grab its own machine-default thread
+#  pool independently of -MaxCjxlProcs. Same ARGS_MARKER
+#  technique as Scenario AI, one file per branch, as three live
+#  Invoke-LooseImageConversionPipeline runs (-JpegLossless/-JpegQuality are
+#  pipeline-level, not per-file).
 # ==============================================================================
 Write-Host "=== Scenario AJ: every cjxl invocation pins --num_threads=1 ===" -ForegroundColor Cyan
 $chAJLossless = New-Dir "scenario-aj-lossless\Series\Chapter 1"
@@ -1717,7 +1637,7 @@ Test-Assert ($argsPngAJ -match "--num_threads=1(\s|$)") ("non-JPEG branch pins -
 Write-Host ""
 
 # ==============================================================================
-#  Scenario AL (2026-09-04 fix, real bug): the cjxl job in the dispatch
+#  Scenario AL: the cjxl job in the dispatch
 #  loop is polled via HasExited, not read synchronously inline - both
 #  redirected streams must be drained as soon as the process starts (not
 #  only once it's found HasExited), or a cjxl that writes more than the
@@ -1725,13 +1645,9 @@ Write-Host ""
 #  forever, hanging the whole batch with no error and no timeout.
 #  Run on a background runspace with a bounded wait, NOT called directly -
 #  a real regression here would hang forever, and this proves it fails
-#  the assertion instead of hanging the whole harness process.
-#
-#  2026-09-14 (dead-code-removal, Todo.md's matching entry): ported from a
-#  direct Convert-ImageBatch call (inside the runspace) to the live
-#  Invoke-LooseImageConversionPipeline path - jobStarter (the live twin)
-#  has the identical async stdout/stderr-drain pattern, but nothing
-#  previously proved it survives a stderr flood through the real pipeline.
+#  the assertion instead of hanging the whole harness process. Runs the
+#  live Invoke-LooseImageConversionPipeline (jobStarter's async
+#  stdout/stderr-drain pattern).
 # ==============================================================================
 Write-Host "=== Scenario AL: a cjxl job with a stderr flood does not deadlock the dispatch loop ===" -ForegroundColor Cyan
 $chAL = New-Dir "scenario-al\Series\Chapter 1"
@@ -1853,10 +1769,10 @@ Test-Assert ($totalsQD.ConvertedSuccess -eq 2) ("both chapters still converted (
 Write-Host ""
 
 # ==============================================================================
-#  Scenario AN (2026-10-12): Complete-ImageDispatchJob's read of the finished
-#  process's stdout/stderr is bounded and tolerates a failed read. It used to
-#  be a bare GetAwaiter().GetResult(): a pipe held open (a delegate process
-#  magick spawned) stalled the engine forever, and a faulted read threw out
+#  Scenario AN: Complete-ImageDispatchJob's read of the finished
+#  process's stdout/stderr is bounded and tolerates a failed read. A bare
+#  GetAwaiter().GetResult() would let a pipe held open (a delegate process
+#  magick spawned) stall the engine forever, and a faulted read would throw out
 #  of JobFinalize. Success is still judged by exit code and output file.
 #  DOCUMENTED DUPLICATE of AnimatedConversionPipeline.Harness.ps1's own Scenario AN -
 #  keep both in sync.

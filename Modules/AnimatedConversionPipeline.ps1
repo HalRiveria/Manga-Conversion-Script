@@ -12,14 +12,12 @@ function Test-AvifAnimated {
         [string]$MagickExe
     )
 
-    # 2026-09-16: a literal % in an INPUT path does NOT need escaping -
-    # confirmed live (reading works fine either way; a real % is only
+    # A literal % in an INPUT path does NOT need escaping -
+    # reading works fine (a real % is only
     # misread by ImageMagick when WRITING multiple images/frames to one
     # output path - see Complete-AnimatedDispatchJob's own jobStarter for
-    # where the real fix belongs). An earlier version of this fix
-    # mistakenly escaped this read path too, which broke it outright
-    # (magick looking for a literal %% that doesn't exist on disk,
-    # live-reported the same day).
+    # where the escaping belongs). Escaping this read path would break it
+    # (magick would look for a literal %% that doesn't exist on disk).
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName               = $MagickExe
     $psi.Arguments              = "identify -ping -format `"%T\n`" `"" + $AvifPath + "[0]`""
@@ -59,16 +57,15 @@ function Test-AvifAnimated {
         # DOCUMENTED DUPLICATE: Invoke-IccStripRetryOrFail in
         # ImageConversionPipeline.ps1 uses the identical bounded-stream-read
         # pattern below - keep both in sync.
-        # 15s, not 5s (2026-09-16 band-aid). The real cause of the "pretty
-        # frequent" timeouts turned out to be thread-pool starvation, not a
-        # CPU-starved process (2026-09-22, see ChapterDispatch.ps1's
-        # Initialize-ChildProcessReadThreadPool) - 15s kept as margin.
+        # 15s gives margin; the usual cause of slow reads is thread-pool
+        # starvation, not a CPU-starved process (see ChapterDispatch.ps1's
+        # Initialize-ChildProcessReadThreadPool).
         # DOCUMENTED DUPLICATE: keep in sync
         # with ImageConversionPipeline.ps1's Invoke-IccStripRetryOrFail and
         # its own pre-conversion detour, and Controller.ps1's matching
         # pre-conversion detour - all four bumped together.
         if (-not [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 15000)) {
-            # 2026-09-16 fix: the process handle above only proves the
+            # The process handle above only proves the
             # PROCESS exited, not that its redirected stdout/stderr pipes
             # reached EOF - an inherited handle in the process tree (a
             # delegate ImageMagick can spawn) could keep a pipe open after
@@ -237,11 +234,11 @@ function Complete-AnimatedDispatchJob {
     try {
         if ($code -ne 0) { throw ("magick exited with code " + $code + ". Stderr: " + $stderr) }
         # Exit code and stderr included even on these two throws
-        # (2026-09-16 fix, real gap found live) - magick can exit 0
+        # - magick can exit 0
         # (clean success) while still failing to produce real output
-        # (observed live: a -quality 100 WebP encode that ran for minutes
-        # then left no output file, exit code 0, cause unconfirmed) -
-        # without this, the log gave no way to tell what magick actually
+        # (e.g. a -quality 100 WebP encode that ran for minutes
+        # then left no output file, exit code 0) -
+        # without this, the log would give no way to tell what magick actually
         # said on its way out.
         if (-not [System.IO.File]::Exists($Job.MagickOutputPath)) { throw ("Output .webp was not created (magick exited " + $code + "): '" + $Job.MagickOutputPath + "'. Stderr: " + $stderr) }
         $webpSize = [System.IO.FileInfo]::new($Job.MagickOutputPath).Length
@@ -332,11 +329,10 @@ function Invoke-LooseAnimatedConversionPipeline {
 
         $seriesProvider  = New-SeriesProvider -LibraryPath $Path -QualifyingExtensions $FolderQualifyingExtensions
         $chapterQueue    = [System.Collections.Generic.Queue[hashtable]]::new()
-        # Hashtable, not a plain scalar (2026-09-14 code-review finding - a
-        # second, unfixed instance of the same closure-latch bug this
-        # session's audit already fixed in 5 other places; see
+        # Hashtable, not a plain scalar (a plain scalar assigned inside a
+        # closure doesn't latch; see
         # ChapterDispatch.ps1's New-LibraryChapterProvider for the full
-        # explanation of why a plain scalar doesn't latch here).
+        # explanation).
         $chapterProviderState = @{ SeriesExhausted = $false }
         $chapterProvider = {
             while ($chapterQueue.Count -eq 0 -and -not $chapterProviderState.SeriesExhausted) {
@@ -488,24 +484,19 @@ function Invoke-LooseAnimatedConversionPipeline {
                 $psi = [System.Diagnostics.ProcessStartInfo]::new()
                 $psi.FileName = $MagickExe
                 $qualityArg = if ($AnimatedLossless) { "-define webp:lossless=true" } else { "-quality " + $AnimatedQuality }
-                # %% on the OUTPUT path only (2026-09-16 fix, real bug,
-                # live-reported and confirmed by the project owner testing
-                # with/without a "100%" folder name, then confirmed again
-                # live here: a literal % anywhere in the path of a
+                # %% on the OUTPUT path only: a literal % anywhere in the path of a
                 # MULTI-FRAME output write - exactly this call's own
                 # -coalesce/animated-webp write - gets read by ImageMagick
                 # as its own percent-escape syntax, and when it can't
                 # resolve the destination as one literal filename, it
                 # falls back to its own per-scene auto-numbered output
-                # instead (observed live: a real, correctly-sized file
+                # instead (e.g. a real, correctly-sized file
                 # with "-0" appended, not the expected clean path).
                 # Doubling it is ImageMagick's own documented escape for a
                 # literal %. The SOURCE path does NOT need this - reading
-                # an existing file with a literal % works fine unescaped;
-                # an earlier version of this fix mistakenly escaped the
-                # source too, which broke it outright (magick looking for
-                # a literal %% that doesn't exist on disk, live-reported
-                # the same day).
+                # an existing file with a literal % works fine unescaped,
+                # and escaping it would break it (magick would look for
+                # a literal %% that doesn't exist on disk).
                 $escapedOutPath = $job.MagickOutputPath.Replace('%', '%%')
                 $psi.Arguments = "`"" + $job.SrcPath + "`" -coalesce -loop 0 " + $qualityArg + " `"" + $escapedOutPath + "`""
                 $psi.UseShellExecute        = $false
@@ -524,7 +515,7 @@ function Invoke-LooseAnimatedConversionPipeline {
                 return $job
             } catch {
                 # Bare Process.Start() throws a NON-terminating error when
-                # uncaught (Docs/lessons-learned.md's 7th entry) - without
+                # uncaught (a known PowerShell trap) - without
                 # this try/catch, $job.Proc stays $null and jobPollCompleted's
                 # $job.Proc.HasExited is falsy forever, hanging the whole
                 # dispatch loop. Rethrow so ChapterDispatch's own JobStarter
@@ -565,7 +556,7 @@ function Invoke-LooseAnimatedConversionPipeline {
             # sync. Feeds Get-ChapterAnimatedStatus so a force-killed/
             # never-started chapter reports as "N force-stopped" instead
             # of a false clean Success once ChapterDispatch.ps1 invokes
-            # $ChapterCompleteCallback for it (2026-09-15 fix).
+            # $ChapterCompleteCallback for it.
             $cr = $chapterResults[$job.ChapterKey]
             if ($null -ne $cr) { $cr.ForceKilledCount++ }
         }.GetNewClosure()
@@ -595,15 +586,13 @@ function Invoke-LooseAnimatedConversionPipeline {
             $null = $chapterResults.Remove($chapterInfo)
         }.GetNewClosure()
 
-        # Hashtable, not a plain scalar (2026-09-14 fix, Todo.md finding) -
-        # a plain $abortMessagePrinted assigned inside this
-        # .GetNewClosure()'d scriptblock resets to $false on every
-        # invocation instead of latching, confirmed live - the once-only
-        # guard below never actually held. Currently harmless (the
+        # Hashtable, not a plain scalar - a plain $abortMessagePrinted
+        # assigned inside this .GetNewClosure()'d scriptblock resets to
+        # $false on every invocation instead of latching, so the once-only
+        # guard wouldn't hold. Currently harmless either way (the
         # dispatch loop stops polling within an iteration or two of
-        # Test-AbortSignal first returning true), but a real bug if this
-        # poll callback is ever invoked more times after an abort than it
-        # is today. DOCUMENTED DUPLICATE: the identical pattern (same
+        # Test-AbortSignal first returning true), but it would matter if
+        # this poll callback were invoked more times after an abort. DOCUMENTED DUPLICATE: the identical pattern (same
         # fields, same reasoning) also appears in Controller.ps1's and
         # ImageConversionPipeline.ps1's own abort-poll callbacks - keep all
         # three in sync.

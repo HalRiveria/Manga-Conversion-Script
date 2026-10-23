@@ -47,7 +47,7 @@ $modulesDir = Join-Path $PSScriptRoot ".."
 . (Join-Path $modulesDir "AbortPipeline.ps1")
 . (Join-Path $modulesDir "CleanConsoleRendering.ps1")
 . (Join-Path $modulesDir "ZipParallelProcessing.ps1")
-# ChapterDispatch.ps1 (2026-09-09, dispatch redesign step 4) - Full
+# ChapterDispatch.ps1 - Full
 # Pipeline's own two engines now each run Invoke-ChapterDispatch, not
 # Convert-ImageBatch/Convert-AnimatedBatch's own solo dispatch loops.
 . (Join-Path $modulesDir "ChapterDispatch.ps1")
@@ -111,9 +111,8 @@ $peakTrackerSource = @'
 static void PeakBump(int delta) {
     string dir = Environment.GetEnvironmentVariable("HARNESS_PEAK_DIR");
     if (dir == null) return;
-    // WaitOne(timeoutMs) + AbandonedMutexException handling (2026-09-10,
-    // real bug found chasing a Controller.Harness.ps1 hang) - this used to
-    // be a bare WaitOne() with no timeout and no catch, unlike every other
+    // WaitOne(timeoutMs) + AbandonedMutexException handling - a bare
+    // WaitOne() with no timeout and no catch would be a hazard, unlike every other
     // named-mutex use in this codebase (compare Logging.ps1's
     // Invoke-MutexGuardedWrite). A prior fake_cjxl.exe/fake_magick.exe
     // process that terminated abnormally while holding this mutex (a
@@ -177,8 +176,7 @@ class Program {
             if (m.Success) { Thread.Sleep(int.Parse(m.Groups[1].Value)); }
             if (content.Contains("ARGS_MARKER")) {
                 // Lets a test read back the real arguments this fake was
-                // invoked with (2026-09-02, recurring-bug-pattern coverage -
-                // see Scenario Z3) - e.g. proving a real --quality=<N> value
+                // invoked with (see Scenario Z3) - e.g. proving a real --quality=<N> value
                 // was actually received from the worker scriptblock's own
                 // default, not just that SOME .jxl got written.
                 File.WriteAllText(dst, "ARGS:" + string.Join(" ", args));
@@ -203,16 +201,15 @@ class Program {
 ##PEAKTRACKER##
     static int Main(string[] args) {
         if (args.Length > 0 && args[0] == "identify") {
-            // 2026-09-09: Test-AvifAnimated now addresses frame [0] only
-            // (a real perf fix - see AnimatedConversionPipeline.ps1's own
-            // header) - strip that trailing selector to find the real
+            // Test-AvifAnimated addresses frame [0] only
+            // (a perf choice - see AnimatedConversionPipeline.ps1) - strip that trailing selector to find the real
             // fixture file on disk.
             string rawPath = args[args.Length - 1];
             string path = Regex.Replace(rawPath, "\\[\\d+\\]$", "");
             // Logs each identify call's target path (gated on an env var
             // so unrelated scenarios pay nothing) - lets a test count how
             // many times Test-AvifAnimated actually spawned magick for a
-            // given file, proving the 2026-08-31 double-classification fix
+            // given file, proving the double-classification avoidance
             // (Controller.ps1's own classification result threaded through
             // to Convert-AnimatedBatch instead of it re-checking).
             string identifyLog = Environment.GetEnvironmentVariable("HARNESS_IDENTIFY_LOG");
@@ -237,8 +234,7 @@ class Program {
                 Console.Error.WriteLine("simulated identify failure");
                 return 1;
             }
-            // IDENTIFY_SLEEP_MS (2026-09-09, dispatch-redesign migration,
-            // Scenario Z4) - a separate marker from SLEEP_MS (which only
+            // IDENTIFY_SLEEP_MS (Scenario Z4) - a separate marker from SLEEP_MS (which only
             // ever delayed the CONVERSION path, never identify) - lets a
             // test force one chapter's own classification to take
             // measurably longer than another chapter's whole conversion,
@@ -324,7 +320,7 @@ Test-Assert (Test-Path -LiteralPath $chB) "the chapter folder still exists - nev
 Write-Host ""
 
 # ==============================================================================
-#  Scenario B2 (2026-10-23): Full Pipeline sends .tif/.tiff through the
+#  Scenario B2: Full Pipeline sends .tif/.tiff through the
 #  magick pre-conversion (real cjxl can't read TIFF). The fake cjxl accepts
 #  anything, so the proof is a magick that can't start: a TIFF must now
 #  fail instead of being converted straight by cjxl. A .jpg next to it
@@ -356,13 +352,13 @@ Test-Assert ($totalsC.ZipCreatedSuccess -eq 0 -and $totalsC.ZipSkippedDueToError
 Write-Host ""
 
 # ==============================================================================
-#  Scenario C2 (2026-08-31 fix): a DISPATCHED engine whose runspace crashes
+#  Scenario C2: a DISPATCHED engine whose runspace crashes
 #  with an UNCAUGHT exception - not a normal "cjxl exited 1" failure
 #  (that's Scenario C above, already handled) but a genuine runspace-level
 #  crash (e.g. Process.Start() throwing because the exe path is bad) that
 #  ZipParallelProcessing.ps1's own EndInvoke() try/catch swallows into a
-#  log line without ever calling -ResultHandler. Before the fix, a missing
-#  result read as "nothing to convert" -> clean Success -> the chapter got
+#  log line without ever calling -ResultHandler. A missing
+#  result must not read as "nothing to convert" -> clean Success -> the chapter
 #  zipped with the crashed engine's files completely untouched. Real
 #  -CjxlExe pointed at a nonexistent path - Convert-ImageBatch has no
 #  try/catch around its own Process.Start() call, so this reliably crashes
@@ -381,22 +377,21 @@ Test-Assert (Test-Path -LiteralPath $chC2) "the chapter folder still exists - ne
 Write-Host ""
 
 # ==============================================================================
-#  Scenario C2b (2026-09-16 fix, real bug found by a Gemini review):
-#  Invoke-FullPipeline's own -JobCrashedHandler used to write
-#  $script:anyEngineCrashed inside a .GetNewClosure()'d scriptblock while
-#  the check right after Invoke-ZipParallelProcessing read the LOCAL,
-#  unprefixed $anyEngineCrashed - two different variables in two
-#  different scopes, so the local one never updated and
-#  `if ($anyEngineCrashed)` was always $false, regardless of what the
+#  Scenario C2b: Invoke-FullPipeline's own -JobCrashedHandler must set
+#  totals.Aborted directly. Writing $script:anyEngineCrashed inside a
+#  .GetNewClosure()'d scriptblock while the check right after
+#  Invoke-ZipParallelProcessing read the LOCAL, unprefixed
+#  $anyEngineCrashed would be two different variables in two different
+#  scopes, so the local one would never update and
+#  `if ($anyEngineCrashed)` would always be $false, regardless of what the
 #  handler did. Scenario C2 above doesn't actually exercise this path
-#  any more (its nonexistent-cjxl-path setup is now caught as a normal
-#  per-file failure, not a genuine runspace crash - Todo.md's own tracked
-#  gap: no test could reach -JobCrashedHandler's real code path through
-#  Invoke-FullPipeline without a way to inject a deliberately-crashing
-#  engine worker). -EngineWorkerScript (added this same fix) closes that
-#  gap: a scriptblock with no param() block ignores whatever named
+#  (its nonexistent-cjxl-path setup is caught as a normal per-file
+#  failure, not a genuine runspace crash), so reaching -JobCrashedHandler's
+#  real code path through Invoke-FullPipeline needs a way to inject a
+#  deliberately-crashing engine worker. -EngineWorkerScript provides that:
+#  a scriptblock with no param() block ignores whatever named
 #  parameters Invoke-ZipParallelProcessing's own AddParameter calls pass
-#  it (confirmed live) and just throws immediately.
+#  it and just throws immediately.
 # ==============================================================================
 Write-Host "=== Scenario C2b: a genuinely crashed engine runspace sets totals.Aborted, not just totals.ZipSkippedDueToError ===" -ForegroundColor Cyan
 $chC2b = New-Dir "scenario-c2b\Series\Chapter 1"
@@ -410,15 +405,15 @@ Write-Host ""
 
 
 # ==============================================================================
-#  Scenario C3 (2026-08-31 fix): AVIF classification used to only look at
-#  $imageCandidates.NeedsConversion, never .StaleSources - Get-LooseImageCandidates
+#  Scenario C3: AVIF classification must look at .StaleSources as well as
+#  $imageCandidates.NeedsConversion - Get-LooseImageCandidates
 #  matches staleness purely by basename (ANY same-basename non-zero .jxl
 #  counts, regardless of which source produced it), so an animated AVIF
 #  can look "stale" the moment an UNRELATED file with the same basename
-#  already has a .jxl. Before the fix, that AVIF was deleted by
+#  already has a .jxl. Otherwise that AVIF would be deleted by
 #  Remove-StaleLooseSources while still sitting unfiltered in
 #  $animatedCandidates - deleted out from under the engine that still
-#  owned it.
+#  owns it.
 # ==============================================================================
 Write-Host "=== Scenario C3: an animated AVIF wrongly matched as a stale image source is preserved, not deleted ===" -ForegroundColor Cyan
 $chC3 = New-Dir "scenario-c3\Series\Chapter 1"
@@ -435,16 +430,10 @@ Test-Assert ($totalsC3.StaleImageCleanedSuccess -eq 0) "the AVIF was NOT deleted
 Write-Host ""
 
 # ==============================================================================
-#  Scenario C4 (2026-08-31 fix, rewritten 2026-09-09 for the dispatch-
-#  redesign migration - see Controller.ps1's own "DISPATCH-REDESIGN STEP 4"
-#  header): used to call Invoke-FullPipelineChapter directly, dispatching a
-#  real cjxl process and racing a background runspace to cancel its own Cts
-#  mid-flight. That whole dispatch-and-race mechanism no longer exists at
-#  this level - Complete-MergedFullPipelineChapter (the function that
-#  replaced Invoke-FullPipelineChapter) takes already-resolved
+#  Scenario C4: Complete-MergedFullPipelineChapter takes already-resolved
 #  ImageResult/AnimatedResult directly, it doesn't dispatch anything itself
-#  (dispatch now lives in Invoke-ChapterDispatch, already covered by its
-#  own 33/33-assertion harness). The real behavior this scenario protects
+#  (dispatch lives in Invoke-ChapterDispatch, covered by its
+#  own harness). The real behavior this scenario protects
 #  - "an engine's own result reads Success, but zipping must still be
 #  blocked because the run's Cts was cancelled" - is still exactly this
 #  function's own concern, and is now directly, deterministically testable
@@ -466,14 +455,14 @@ Test-Assert (-not (Test-Path -LiteralPath (Join-Path $scratchDir "scenario-c4.zi
 Write-Host ""
 
 # ==============================================================================
-#  Scenario C4c (2026-09-04 fix, real bug, same species as
+#  Scenario C4c (same species as
 #  UnwantedImage.ps1's Invoke-UnwantedImageScan Scenario G2): Remove-Source
 #  returns $false (not an exception) when the chapter folder already
 #  vanished before deletion - a real TOCTOU gap between the zip finishing
-#  and this call. This used to be discarded, reporting a successful
-#  delete anyway. Remove-Source shadowed to return $false unconditionally.
-#  Calls Complete-MergedFullPipelineChapter directly (2026-09-09 rewrite -
-#  see Scenario C4's own comment above for why).
+#  and this call. That result must not be discarded, or a successful
+#  delete would be reported anyway. Remove-Source shadowed to return $false unconditionally.
+#  Calls Complete-MergedFullPipelineChapter directly (see Scenario C4's own
+#  comment above for why).
 # ==============================================================================
 Write-Host "=== Scenario C4c: a chapter folder already gone before deletion is not miscounted as deleted ===" -ForegroundColor Cyan
 $chC4c = New-Dir "scenario-c4c\Series\Chapter 1"
@@ -487,8 +476,7 @@ function Remove-Source {
 }
 
 try {
-    # ConvertedCount = 0 (2026-09-09 fix, this rewrite's own first draft
-    # had it wrong): this test's own ImageResult is entirely hand-built,
+    # ConvertedCount = 0: this test's own ImageResult is entirely hand-built,
     # not produced by a real dispatch - claiming ConvertedCount=1 makes
     # Complete-MergedFullPipelineChapter require a real .jxl zip entry
     # (Test-ZipArchive's own -RequireJxlEntry), but the only file this
@@ -509,12 +497,12 @@ Test-Assert ($resultC4c.ZipResult.FolderDeleteFailed -eq $false) "FolderDeleteFa
 Write-Host ""
 
 # ==============================================================================
-#  Scenario C6 (2026-08-31 fix): an abort-blocked zip (Scenario C4's own
-#  shape, but through the REAL Invoke-FullPipeline this time, not a direct
-#  Invoke-FullPipelineChapter call) used to be invisible in the run's own
+#  Scenario C6: an abort-blocked zip (Scenario C4's own
+#  shape, but through the REAL Invoke-FullPipeline this time) must not be
+#  invisible in the run's own
 #  summary counters - Zipped is $false and Status is 'Success' (the
 #  engine finished cleanly before the abort was noticed), so neither the
-#  ZipCreated* nor the (pre-fix) ZipSkippedDueToError branch fired. Same
+#  ZipCreated* nor a plain ZipSkippedDueToError branch would fire on their own. Same
 #  real-runspace timing technique as Scenario C4 (marker-polling, not a
 #  flat sleep): a background runspace sets the REAL
 #  [ConsoleCtrl]::AbortRequested flag once the 200ms-sleeping fake-cjxl
@@ -542,7 +530,7 @@ $null = $cancelPsC6.AddScript({
 }).AddArgument($markerC6)
 $cancelHandleC6 = $cancelPsC6.BeginInvoke()
 
-# CCR spy (2026-09-09, zip-blocked-status fix) - proves the live display
+# CCR spy - proves the live display
 # actually reflects the block, not just the run summary's own
 # ZipSkippedDueToError counter (already covered above). Same function-
 # swap technique as Scenario H2's Start-SeriesProgress spy.
@@ -557,8 +545,8 @@ $script:realCompleteChapterProgressC6Ref = $realCompleteChapterProgressC6
 $script:CleanConsoleOutputEnabled = $true
 
 try {
-    # -AbortTimeoutSeconds explicit and small (2026-09-16 fix, same
-    # reasoning as Scenario Z6's own matching change) - the 60s default is
+    # -AbortTimeoutSeconds explicit and small (same
+    # reasoning as Scenario Z6's own) - the 60s default is
     # for a real run's graceful-drain window, not a test scenario; bounds
     # the worst case if the marker-polling background runspace below ever
     # slips its timing.
@@ -598,7 +586,7 @@ Test-Assert ($totalsD.ZipCreatedSuccess -eq 1) "still zipped cleanly (a clean, e
 Write-Host ""
 
 # ==============================================================================
-#  Scenario D2 (2026-08-31 fix): a chapter Get-SeriesChapters discovers
+#  Scenario D2: a chapter Get-SeriesChapters discovers
 #  (it has a qualifying loose-image extension) but whose only loose file
 #  is a STALE leftover - a valid, same-basename .jxl already exists (e.g.
 #  a prior run's source-deletion failed after a real successful
@@ -627,21 +615,20 @@ Test-Assert (-not (Test-Path -LiteralPath $chD2)) "the chapter folder was delete
 Write-Host ""
 
 # ==============================================================================
-#  Scenario D3 (2026-09-01 live-shakedown fix): the discovery-level twin of
-#  D2's gap, actually reproduced this time. D2 keeps one real loose-
+#  Scenario D3: the discovery-level twin of
+#  D2's gap. D2 keeps one real loose-
 #  extension file around (stale though it is), so Get-SeriesChapters still
 #  DISCOVERS the chapter - only the per-chapter "0 candidates" short-
 #  circuit needed fixing there. Here there is no loose file at all - a
 #  chapter that finished converting cleanly on an earlier run (source
-#  already deleted) and has ONLY a .jxl left. Confirmed live against this
-#  project's real cjxl.exe/magick.exe: with -FolderQualifyingExtensions
+#  already deleted) and has ONLY a .jxl left. With -FolderQualifyingExtensions
 #  still defaulting to the bare Get-LooseImageExtensions() list (no
 #  ".jxl"), Test-ZippableLeafDirCandidate's own qualifying-file check
 #  never matches anything in this folder, so Get-SeriesChapters never
 #  finds it - the chapter is silently invisible to every later Full
-#  Pipeline run, permanently, with no warning logged. Fixed by adding
-#  ".jxl" to Invoke-FullPipeline's own -FolderQualifyingExtensions
-#  default - see that parameter's own comment in Controller.ps1.
+#  Pipeline run, permanently, with no warning logged. Invoke-FullPipeline's
+#  own -FolderQualifyingExtensions default therefore includes ".jxl" - see
+#  that parameter's own comment in Controller.ps1.
 # ==============================================================================
 Write-Host "=== Scenario D3: a chapter with ONLY already-converted .jxl (zero loose files) is still discovered and zipped ===" -ForegroundColor Cyan
 $chD3 = New-Dir "scenario-d3\Series\Chapter 1"
@@ -656,7 +643,7 @@ Test-Assert (-not (Test-Path -LiteralPath $chD3)) "the chapter folder was delete
 Write-Host ""
 
 # ==============================================================================
-#  Scenario D3b (2026-09-22, A fix): D3's zip-only chapter, but with CCR ON.
+#  Scenario D3b: D3's zip-only chapter, but with CCR ON.
 #  A moved the ChapterStarted announcement out of the dispatch walk-ahead
 #  and into the point where an engine actually has conversion work, so a
 #  chapter with zero conversion work in BOTH engines (already converted,
@@ -707,7 +694,7 @@ Test-Assert (@($script:completeCallsD3b | Where-Object { $_.Status -eq "Success"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario D3c (2026-09-22, A follow-ups): aborting mid-run with a series
+#  Scenario D3c: aborting mid-run with a series
 #  the run never reached. Series A has 4 sleeping image chapters (fills the
 #  image engine's -MaxQueueAhead=3 walk-ahead so it stays in Series A);
 #  Series B's chapters are never reached by the image engine, but the
@@ -716,7 +703,7 @@ Write-Host ""
 #  once Series A's chapter 1 starts must:
 #    (a) NOT crash in the leftover handler - Series B's chapters were never
 #        announced (Start-ChapterProgress), so Complete-ChapterProgress must
-#        be skipped for them (the fatal this session fixed); and
+#        be skipped for them (otherwise the leftover handler would crash); and
 #    (b) never Start-SeriesProgress for the unreached Series B - it must not
 #        show as "0/N" before the run gets to it (the series-level deferral).
 #  CCR on; Start-SeriesProgress spy; C6-style marker-polling abort.
@@ -862,14 +849,14 @@ Test-Assert ($totalsH.ZipCreatedSuccess -eq 1) "a Warning-tier outcome (a skip, 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario H2 (2026-09-03 fix, real bug, live-reported): a series with zero
+#  Scenario H2: a series with zero
 #  qualifying chapters (e.g. already fully converted and zipped - nothing
 #  left in the folder but a .cbz and an info file, no chapter subfolders at
-#  all) must NEVER call Start-SeriesProgress at all. Before this fix it did
-#  - Start-SeriesProgress's own docstring says a 0-chapter call "is
+#  all) must NEVER call Start-SeriesProgress at all. Otherwise
+#  Start-SeriesProgress's own docstring says a 0-chapter call "is
 #  rendered as an immediately-frozen '0/0' line" via Update-CleanConsoleDisplay,
-#  which is exactly the unwanted line the project owner asked to have
-#  suppressed entirely, not just re-rendered differently. $script:ccrActiveSeries
+#  which is an unwanted line that must be suppressed entirely, not just
+#  re-rendered differently. $script:ccrActiveSeries
 #  itself is NOT the right observable here (a 0-chapter call never enters
 #  it either way, by that same existing design) - spies directly on
 #  Start-SeriesProgress instead (same function-swap technique as Scenario
@@ -905,11 +892,10 @@ Write-Host ""
 #  has no multi-frame support - Convert-ImageBatch SKIPS it, does not fail
 #  it) plus a real animated .avif that converts successfully - zero .jxl
 #  entries despite ChapterImageFiles.Count > 0, a legitimate Warning, not
-#  an Error. Regression test for a real bug this session's code review
-#  found: -RequireJxlEntry was originally computed from "did this chapter
-#  have image files queued" rather than "did the image engine actually
-#  convert anything" - this exact case would have wrongly required a
-#  .jxl entry and thrown, turning a correct Warning-tier chapter into a
+#  an Error. -RequireJxlEntry has to be computed from "did the image
+#  engine actually convert anything", not "did this chapter have image
+#  files queued" - otherwise this exact case would wrongly require a
+#  .jxl entry and throw, turning a correct Warning-tier chapter into a
 #  reported zip failure.
 # ==============================================================================
 Write-Host "=== Scenario I: all-skipped image files (animated WebP) don't force a spurious RequireJxlEntry ===" -ForegroundColor Cyan
@@ -947,9 +933,9 @@ function New-FakeErrorRecord {
     <#
     .SYNOPSIS
         Constructs an ErrorRecord directly rather than throwing the
-        exception through the pipeline - see AbortPipeline.Harness.ps1's
-        own real bug (a literally-thrown PipelineStoppedException killed
-        the whole harness process, even caught) for why this matters.
+        exception through the pipeline - a literally-thrown
+        PipelineStoppedException kills the whole harness process, even
+        caught (see AbortPipeline.Harness.ps1).
     #>
     param([Parameter(Mandatory)][System.Exception]$Exception)
     return [System.Management.Automation.ErrorRecord]::new($Exception, "TestError", [System.Management.Automation.ErrorCategory]::NotSpecified, $null)
@@ -961,11 +947,10 @@ $fakeSettings = @{
     ZipParallelThreads = 2; PermanentDelete = $true
     CleanConsoleOutputEnabled = $false
     RunCoverDeletionBeforeConversion = $false
-    # Deliberately distinct from MaxCjxlProcs (2026-09-03 addition, real
-    # bug fix, see CHANGELOG.md) - Scenario N below asserts THIS value,
-    # not MaxCjxlProcs, reaches Invoke-Mode's FullPipeline dispatch; the
-    # two used to be silently the same because the call site reused
-    # MaxCjxlProcs directly.
+    # Deliberately distinct from MaxCjxlProcs - Scenario N below asserts
+    # THIS value, not MaxCjxlProcs, reaches Invoke-Mode's FullPipeline
+    # dispatch; if the call site reused MaxCjxlProcs directly, the two
+    # would silently be the same.
     FullPipelineMaxConcurrentProcs = 9
 }
 
@@ -983,7 +968,7 @@ Test-Assert ($capturedJ.Path -eq "C:\fake\lib" -and $capturedJ.CjxlExe -eq "fake
 Test-Assert ($statsJ.LooseImgConverted.Success -eq 3 -and $statsJ.LooseImgConverted.Fail -eq 1 -and $statsJ.LooseImgConverted.Skipped -eq 2) "ImageConversion: LooseImgConverted mapped correctly"
 Test-Assert ($statsJ.LooseImgDeleted.Success -eq 3 -and $statsJ.LooseStaleCleaned.Success -eq 1) "ImageConversion: LooseImgDeleted/LooseStaleCleaned mapped correctly"
 Test-Assert ($statsJ.InspectFailed.Count -eq 2) "ImageConversion: InspectFailedCount mapped onto InspectFailed.Count"
-Test-Assert ($statsJ.Aborted -eq $true -and $statsJ.ForceKilledCount -eq 5) "ImageConversion: Aborted/ForceKilledCount mapped onto Stats (2026-09-03 fix, Todo.md finding)"
+Test-Assert ($statsJ.Aborted -eq $true -and $statsJ.ForceKilledCount -eq 5) "ImageConversion: Aborted/ForceKilledCount mapped onto Stats"
 Write-Host ""
 
 Write-Host "=== Scenario K: Invoke-Mode / AnimatedConversion - param translation + result mapping ===" -ForegroundColor Cyan
@@ -994,7 +979,7 @@ $statsK = Invoke-Mode -Resolved @{ Mode = 'AnimatedConversion' } -TargetPath "C:
 Test-Assert ($statsK.LooseAnimatedConverted.Success -eq 4 -and $statsK.LooseAnimatedConverted.Skipped -eq 1) "AnimatedConversion: LooseAnimatedConverted mapped correctly"
 Test-Assert ($statsK.LooseAnimatedDeleted.Success -eq 4) "AnimatedConversion: LooseAnimatedDeleted mapped correctly"
 Test-Assert ($statsK.InspectFailed.Count -eq 1) "AnimatedConversion: InspectFailedCount mapped onto InspectFailed.Count"
-Test-Assert ($statsK.Aborted -eq $true -and $statsK.ForceKilledCount -eq 2) "AnimatedConversion: Aborted/ForceKilledCount mapped onto Stats (2026-09-03 fix, Todo.md finding)"
+Test-Assert ($statsK.Aborted -eq $true -and $statsK.ForceKilledCount -eq 2) "AnimatedConversion: Aborted/ForceKilledCount mapped onto Stats"
 Write-Host ""
 
 Write-Host "=== Scenario L: Invoke-Mode / ZipFolders - result mapping ===" -ForegroundColor Cyan
@@ -1004,8 +989,7 @@ $fakeZipHandlerL = { param($Path, $MaxParallel, $DeleteFolders, $PermanentDelete
 $statsL = Invoke-Mode -Resolved @{ Mode = 'ZipFolders' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -ZipFoldersHandler $fakeZipHandlerL
 Test-Assert ($statsL.ZipOnlyZipped.Success -eq 4 -and $statsL.ZipOnlyZipped.Fail -eq 1 -and $statsL.ZipOnlyZipped.Skipped -eq 1) "ZipFolders: ZipOnlyZipped mapped correctly, including pair-blocked folders as Skipped"
 Test-Assert ($statsL.ZipOnlyFolderDeleted.Success -eq 4) "ZipFolders: ZipOnlyFolderDeleted mapped correctly"
-# 2026-09-03 fix, real bug caught by a same-session /code-review pass:
-# ZipFolders used to map neither Aborted nor a force-killed count at all.
+# ZipFolders must map Aborted and a force-killed count too.
 Test-Assert ($statsL.Aborted -eq $true -and $statsL.ForceKilledCount -eq 3) "ZipFolders: Aborted/ForceKilledCount (from ForceStoppedCount) mapped onto Stats"
 Write-Host ""
 
@@ -1025,18 +1009,17 @@ $fakeFullHandlerN = { param($Path, $CjxlExe, $MagickExe, $JpegLossless, $JpegQua
 $statsN = Invoke-Mode -Resolved @{ Mode = 'FullPipeline' } -TargetPath "C:\fake\lib" -Settings $fakeSettings -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -FullPipelineHandler $fakeFullHandlerN
 Test-Assert ($statsN.LooseImgConverted.Success -eq 5 -and $statsN.LooseAnimatedConverted.Success -eq 2 -and $statsN.LooseFolderZipped.Success -eq 3) "FullPipeline: image + animated + zip stat groups all mapped in one call"
 Test-Assert ($statsN.InspectFailed.Count -eq 4) "FullPipeline: InspectFailedCount (both engines summed by Controller.ps1) mapped onto InspectFailed.Count"
-Test-Assert ($statsN.Aborted -eq $true -and $statsN.ForceKilledCount -eq 7) "FullPipeline: Aborted/ForceKilledCount mapped onto Stats (2026-09-03 fix, Todo.md finding)"
-# 2026-09-03 addition, real bug fix (see CHANGELOG.md) - this call site
-# used to reuse $Settings.MaxCjxlProcs (6 in $fakeSettings) directly;
-# confirms it now reads the dedicated $Settings.FullPipelineMaxConcurrentProcs
+Test-Assert ($statsN.Aborted -eq $true -and $statsN.ForceKilledCount -eq 7) "FullPipeline: Aborted/ForceKilledCount mapped onto Stats"
+# This call site must not reuse $Settings.MaxCjxlProcs (6 in $fakeSettings);
+# confirms it reads the dedicated $Settings.FullPipelineMaxConcurrentProcs
 # (9) instead, not silently the same value.
 Test-Assert ($capturedN.FullPipelineMaxConcurrentProcs -eq 9) ("FullPipeline: Settings.FullPipelineMaxConcurrentProcs (9), not MaxCjxlProcs (6), reached the handler (got " + $capturedN.FullPipelineMaxConcurrentProcs + ")")
 Test-Assert ($capturedN.RunCoverDeletionBeforeConversion -eq $false) "FullPipeline: Settings.RunCoverDeletionBeforeConversion (false in `$fakeSettings) reached the handler"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario N2 (2026-08-31 fix): Invoke-Mode's ZipFolders/FullPipeline
-#  branches used to pass $Settings.FullLogging/PermanentDelete
+#  Scenario N2: Invoke-Mode's ZipFolders/FullPipeline
+#  branches must not pass $Settings.FullLogging/PermanentDelete
 #  UNCAST into the real handlers' own [Parameter(Mandatory)][bool] params -
 #  the same crash-on-$null-key species already fixed today at other call
 #  sites (Invoke-MainLoop's re-sync, the bootstrap script). The earlier
@@ -1077,8 +1060,7 @@ $fakeFullHandlerN2 = { param([string]$Path, [string]$CjxlExe, [string]$MagickExe
 $statsN2Full = Invoke-Mode -Resolved @{ Mode = 'FullPipeline' } -TargetPath "C:\fake\lib" -Settings $fakeSettingsN2 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -FullPipelineHandler $fakeFullHandlerN2
 Test-Assert ($null -ne $statsN2Full -and $statsN2Full.LooseImgConverted.Success -eq 7) "FullPipeline completes normally (not swallowed into the fatal-handler `$null path) despite `$Settings missing FullLogging/PermanentDelete"
 
-# 2026-08-31 fix (found by a FOURTH-pass re-review): confirmed directly
-# that a non-Mandatory [bool]$X = $false parameter ALSO throws on an
+# A non-Mandatory [bool]$X = $false parameter ALSO throws on an
 # explicitly-passed $null - Mandatory only affects whether OMITTING the
 # param is allowed, not the [bool] type coercion once a value (even
 # $null) is actually passed. $fakeSettingsN2 above still includes
@@ -1089,9 +1071,8 @@ $fakeSettingsN3 = @{ MaxCjxlProcs = 2; JpegQuality = 90; AnimatedQuality = 90; A
 $statsN3Full = Invoke-Mode -Resolved @{ Mode = 'FullPipeline' } -TargetPath "C:\fake\lib" -Settings $fakeSettingsN3 -CjxlExe "fake_cjxl.exe" -MagickExe "fake_magick.exe" -FullPipelineHandler $fakeFullHandlerN2
 Test-Assert ($null -ne $statsN3Full -and $statsN3Full.LooseImgConverted.Success -eq 7) "FullPipeline completes normally despite `$Settings missing JpegLossless/AnimatedLossless/AnimatedOverwrite/AnimatedDeleteSource/FullLogging/PermanentDelete entirely (non-Mandatory bool params, not just Mandatory ones)"
 
-# 2026-08-31 fix (found by a re-review after the first N2 pass): the
-# ImageConversion/AnimatedConversion cases were missed by the original
-# bool-cast fix - same species, same file, just two more switch cases.
+# The ImageConversion/AnimatedConversion switch cases need the same
+# bool-cast protection - same species, same function.
 $fakeImageHandlerN2 = { param([string]$Path, [string]$CjxlExe, [string]$MagickExe, [bool]$JpegLossless, [int]$JpegQuality, [int]$MaxCjxlProcs, [Parameter(Mandatory)][bool]$FullLogging)
     return @{ ConvertedSuccess = 4; ConvertedFail = 0; ConvertedSkipped = 0; DeletedSuccess = 4; DeletedFail = 0; StaleCleanedSuccess = 0; StaleCleanedFail = 0; ForceKilledCount = 0; InspectFailedCount = 0 }
 }
@@ -1136,23 +1117,17 @@ Test-Assert ($fatalMsgsR.Count -eq 1 -and $fatalMsgsR[0] -match "unrecognized mo
 Write-Host ""
 
 # ==============================================================================
-#  Scenario S (rewritten 2026-09-09 for the dispatch-redesign migration):
-#  a Test-AvifAnimated failure is summed into Invoke-FullPipeline's own
-#  InspectFailedCount. The OLD version of this scenario deliberately
-#  disabled animated-candidate discovery (-AnimatedFileExtensions @()) to
-#  isolate "Convert-ImageBatch's own solo classification path" from the
-#  cross-engine one - that whole distinction no longer exists in the new
-#  architecture: Full Pipeline never calls Convert-ImageBatch directly
-#  any more (see this module's own header), and AVIF classification is
-#  now ALWAYS the single, shared, per-chapter
+#  Scenario S: a Test-AvifAnimated failure is summed into
+#  Invoke-FullPipeline's own InspectFailedCount. There is no separate
+#  "image engine's own classification path" to isolate: Full Pipeline
+#  never calls Convert-ImageBatch directly (see this module's own header),
+#  and AVIF classification is ALWAYS the single, shared, per-chapter
 #  Get-OrCreateFullPipelineChapterClassification path regardless of which
-#  engine's JobBuilder reaches a contested file first - there's no
-#  separate "image engine's own path" left to isolate. Its own OLD "NOTE
-#  ON SCOPE" comment (claiming Invoke-FullPipeline's own
-#  -LooseImageExtensions default excludes .avif) was already stale before
-#  this migration too - Get-LooseImageExtensions() (that default's real
-#  source) includes .avif, confirmed live. Real defaults, no override -
-#  matches how Invoke-FullPipeline is actually called in production.
+#  engine's JobBuilder reaches a contested file first.
+#  Get-LooseImageExtensions() (the real source of
+#  Invoke-FullPipeline's -LooseImageExtensions default) includes .avif.
+#  Real defaults, no override - matches how Invoke-FullPipeline is
+#  actually called in production.
 # ==============================================================================
 Write-Host "=== Scenario S: Invoke-FullPipeline sums a classification failure into InspectFailedCount ===" -ForegroundColor Cyan
 $chS = New-Dir "scenario-s\Series\Chapter 1"
@@ -1164,7 +1139,7 @@ Test-Assert ($totalsS.InspectFailedCount -eq 1) ("the image engine's inspect-fai
 Write-Host ""
 
 # ==============================================================================
-#  Scenario AA-AA4 (2026-09-09): RunCoverDeletionBeforeConversion pre-scan.
+#  Scenario AA-AA4: RunCoverDeletionBeforeConversion pre-scan.
 #  All four use the same minimal "Empty Series" layout Scenario F already
 #  established (SeriesCount goes to 1 the moment discovery actually runs,
 #  even with zero chapters inside) - a cheap, unambiguous signal for
@@ -1205,7 +1180,7 @@ New-Dir "scenario-aa3\Empty Series" | Out-Null
 $fakeScanAA3 = { param($Path) throw "fake scan failure AA3" }
 # A hashtable field (mutated through the reference, not reassigned), not a
 # plain array + += (would reassign the variable - the exact GetNewClosure()
-# breaks-$script:-writes gotcha CLAUDE.md's lessons learned documents).
+# breaks-$script:-writes gotcha).
 $capturedAA3 = @{ Message = $null; CallCount = 0 }
 $fakePromptAA3 = { param($Message) $script:capturedAA3.Message = $Message; $script:capturedAA3.CallCount++; return "Y" }.GetNewClosure()
 $totalsAA3 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-aa3") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true -RunCoverDeletionBeforeConversion $true -CoverDeletionScanHandler $fakeScanAA3 -PromptFunc $fakePromptAA3
@@ -1223,10 +1198,9 @@ Test-Assert ($totalsAA4.SeriesCount -eq 0) "chapter discovery/dispatch never sta
 Write-Host ""
 
 # ==============================================================================
-#  Scenario AA5 (2026-09-16 fix, real bug found by a Gemini review,
-#  confirmed live): Read-Host (the real default -PromptFunc) returns
+#  Scenario AA5: Read-Host (the real default -PromptFunc) returns
 #  $null, not "", when stdin is genuinely closed/at EOF rather than just
-#  an empty line - `(& $PromptFunc ...).Trim()` used to call .Trim()
+#  an empty line - `(& $PromptFunc ...).Trim()` would call .Trim()
 #  directly on that $null, throwing a NullReferenceException that
 #  escaped this catch block entirely instead of the graceful abort it
 #  exists to provide. Distinct from Scenario AA4 above, which only covers
@@ -1249,7 +1223,7 @@ Test-Assert ($null -ne $totalsAA5 -and $totalsAA5.SeriesCount -eq 0) "chapter di
 Write-Host ""
 
 # ==============================================================================
-#  Scenario T: Invoke-MainLoop (2026-08-28) - the run loop moved out of the
+#  Scenario T: Invoke-MainLoop - the run loop moved out of the
 #  main script. Every handler injected, so this proves the LOOP's own
 #  control flow (how many iterations, what stops it) without a real
 #  interactive prompt or real pipeline.
@@ -1270,10 +1244,9 @@ $fakePostRunT = {
     if ($script:postRunCallsT -ge 3) { return 'Exit' }
     return 'ReturnToMenu'
 }
-# 2026-08-28: proves Invoke-MainLoop calls -ResetAbortHandler once per
-# iteration, BEFORE resolving that iteration's mode (real bug fix - see
-# CHANGELOG.md/Todo.md, "abort state never reset" - a Ctrl+C used to
-# poison every later run in the same session). Order matters, not just
+# Proves Invoke-MainLoop calls -ResetAbortHandler once per
+# iteration, BEFORE resolving that iteration's mode (otherwise a Ctrl+C
+# would poison every later run in the same session). Order matters, not just
 # count: recorded here so the assertion below can confirm reset genuinely
 # happens before GetMode, not just somewhere in the iteration.
 $resetAbortCallsT = 0
@@ -1319,11 +1292,11 @@ Reset-AbortState
 Write-Host ""
 
 # ==============================================================================
-#  Scenario T3 (2026-08-31 fix): the per-iteration re-sync
+#  Scenario T3: the per-iteration re-sync
 #  (Initialize-CleanConsoleOutput/-FileDeletion) must not hard-crash the
 #  whole run loop just because $Settings is missing one of the two keys
 #  it reads - both are [Parameter(Mandatory)][bool], and an omitted
-#  hashtable key is $null, which used to fail PowerShell's own boolean
+#  hashtable key is $null, which would fail PowerShell's own boolean
 #  type coercion with an uncaught terminating error. Uses a $Settings
 #  hashtable with NEITHER CleanConsoleOutputEnabled nor PermanentDelete
 #  set - Config.ps1 always defaults both in real use, so this only
@@ -1353,10 +1326,10 @@ Test-Assert ($script:callsT3 -eq 1) "the loop still ran a full iteration and rea
 Write-Host ""
 
 # ==============================================================================
-#  Scenario T4 (2026-08-31 fix): Invoke-FullPipeline's own $fullCts/
-#  $sharedBudget construction and Register-AbortCancellationSource call were
-#  moved INSIDE the function's try block (same species as
-#  ZipParallelProcessing.ps1's mutex-leak fix from earlier today) - if
+#  Scenario T4: Invoke-FullPipeline's own $fullCts/
+#  $sharedBudget construction and Register-AbortCancellationSource call sit
+#  INSIDE the function's try block (same species as
+#  ZipParallelProcessing.ps1's mutex-leak handling) - if
 #  Register-AbortCancellationSource throws, the finally block must still
 #  run and dispose $fullCts (already constructed by that point).
 #  Register-AbortCancellationSource is temporarily replaced with a fake
@@ -1396,10 +1369,9 @@ Test-Assert $disposedT4 "the Cts was disposed via the finally block despite the 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario T5 (2026-08-31 fix, found by a THIRD-pass re-review):
-#  Invoke-MainLoop's own call to Write-SummaryReport (after a real,
-#  non-null $stats comes back) was missed by both earlier bool-cast fix
-#  passes - unlike T3 (which deliberately included FullLogging specifically
+#  Scenario T5: Invoke-MainLoop's own call to Write-SummaryReport (after a
+#  real, non-null $stats comes back) needs the same bool-cast protection
+#  as T3 - unlike T3 (which deliberately included FullLogging specifically
 #  to NOT exercise this exact call), this scenario omits FullLogging
 #  entirely and drives the loop all the way to Write-SummaryReport.
 #  Invoke-MainLoop has NO try/catch of its own around its while loop body
@@ -1442,7 +1414,7 @@ Write-Host ""
 
 # ==============================================================================
 #  Scenario U2: Invoke-MainLoop re-syncs PermanentDelete/CleanConsoleOutput
-#  from $Settings on every iteration (2026-08-31 fix) - an options-menu
+#  from $Settings on every iteration - an options-menu
 #  change made during one iteration's Get-SelectedMode call must take
 #  effect on THAT SAME iteration's run, not just the next process launch.
 #  Uses the real Initialize-FileDeletion/Initialize-CleanConsoleOutput
@@ -1457,7 +1429,7 @@ $fakeGetModeU2 = { param($Settings, $SettingsPath) return @{ Mode = 'ImageConver
 $fakeInvokeModeU2 = {
     param($Resolved, $TargetPath, $Settings, $CjxlExe, $MagickExe)
     # Record what the module-level state actually is AT THE TIME this
-    # iteration's mode runs - the real bug was these staying stuck at
+    # iteration's mode runs - the failure mode is these staying stuck at
     # their bootstrap values across iterations.
     $script:permDeleteSeenU2.Add($script:PermanentDelete)
     $script:ccrSeenU2.Add($script:CleanConsoleOutputEnabled)
@@ -1477,14 +1449,12 @@ Test-Assert (@($script:ccrSeenU2)[0] -eq $false -and @($script:ccrSeenU2)[1] -eq
 Write-Host ""
 
 # ==============================================================================
-#  Scenario U2b (2026-09-03 fix - Todo.md's mid-session Full Logging /
-#  DisableSummaryFile toggle finding): Invoke-MainLoop only re-calls
+#  Scenario U2b: Invoke-MainLoop only re-calls
 #  Initialize-LogPaths when FullLogging/DisableSummaryFile actually
 #  changed since the last iteration, not on every one (unlike
 #  PermanentDelete/CleanConsoleOutput above, which ARE safe to re-apply
-#  unconditionally). (Until 2026-09-22 it also checked the refreshed log
-#  paths were threaded into Invoke-Mode; nothing downstream reads them any
-#  more - worker log lines reach the files via the main thread's queue.)
+#  unconditionally). (Nothing downstream reads the refreshed log paths -
+#  worker log lines reach the files via the main thread's queue.)
 # ==============================================================================
 Write-Host "=== Scenario U2b: FullLogging/DisableSummaryFile re-sync only fires on an actual change ===" -ForegroundColor Cyan
 $fakeSettingsU2b = @{ PermanentDelete = $false; CleanConsoleOutputEnabled = $false; FullLogging = $false; DisableSummaryFile = $false }
@@ -1523,10 +1493,9 @@ Invoke-MainLoop -TargetPath "C:\fake\lib" -Settings $fakeSettingsU2b -SettingsPa
 Test-Assert ($script:initLogPathsCallsU2b.Count -eq 1 -and @($script:initLogPathsCallsU2b)[0] -eq $true) ("Initialize-LogPaths was re-called exactly once, only on the iteration where FullLogging actually changed (got " + (@($script:initLogPathsCallsU2b) -join ',') + ")")
 Test-Assert ($script:initLogMutexCallsU2b -eq 1) "Initialize-LogMutex was re-called the same one time"
 Test-Assert ($script:completeLogRunCallsU2b -eq 3) "Complete-LogRun runs every iteration regardless of whether the toggle changed"
-# 2026-09-03 fix, real bug caught by a same-session /code-review pass:
 # Start-LogRun must ALSO run every iteration (paired with Complete-LogRun),
 # unlike Initialize-LogPaths which only re-fires on an actual toggle
-# change - conflating the two used to leave every run after the first in
+# change - conflating the two would leave every run after the first in
 # a session with no run header and a stale prior-content snapshot.
 Test-Assert ($script:startLogRunCallsU2b -eq 3) "Start-LogRun runs every iteration too - not gated on the FullLogging/DisableSummaryFile toggle"
 # Reset the fake handler's relative "fake-log-*.log" paths back to $null -
@@ -1540,8 +1509,7 @@ $script:logWarnFile  = $null
 Write-Host ""
 
 # ==============================================================================
-#  Scenario U2c (2026-09-03 fix, real bug caught by a same-session
-#  /code-review pass): the mid-loop mutex re-init used to abandon the
+#  Scenario U2c: the mid-loop mutex re-init must not abandon the
 #  PREVIOUS mutex object without disposing it - $TargetPath never changes
 #  mid-session, so every toggle flip re-created a handle to the exact same
 #  named mutex, leaking the old .NET object. Uses the REAL Initialize-
@@ -1578,17 +1546,16 @@ Test-Assert $newMutexUsableU2c "the NEW mutex is still genuinely usable (disposi
 Write-Host ""
 
 # ==============================================================================
-#  Scenario U2c2 (2026-09-14 code-review finding, real bug in THIS session's
-#  own -ReinitLogPathsHandler fix): unlike U2c above (Invoke-MainLoop's own
+#  Scenario U2c2: unlike U2c above (Invoke-MainLoop's own
 #  POST-Get-SelectedMode re-init, a plain function call, not a closure), the
 #  -ReinitLogPathsHandler passed INTO Get-SelectedMode/Show-ModeMenu (so
 #  Cover Deletion can re-init log paths BEFORE it runs, in the SAME menu
 #  visit) is a .GetNewClosure()'d scriptblock. A $script:logMutex read
-#  directly inside such a closure doesn't see the real value (confirmed
-#  live - Docs/lessons-learned.md's 9th entry) - $previousLogMutexForDispose
-#  was always $null there, so the OLD mutex was never disposed on this path
-#  specifically, even though U2c's own path (not a closure) worked fine.
-#  Fixed via a $GetLogMutexHandler indirection (Get-LogMutex, Logging.ps1) -
+#  directly inside such a closure doesn't see the real value -
+#  $previousLogMutexForDispose would always be $null there, so the OLD
+#  mutex would never be disposed on this path specifically, even though
+#  U2c's own path (not a closure) works fine. A $GetLogMutexHandler
+#  indirection (Get-LogMutex, Logging.ps1) -
 #  this scenario simulates Show-ModeMenu invoking -ReinitLogPathsHandler by
 #  having the fake -GetModeHandler call it directly. Uses the REAL
 #  Initialize-LogPaths/Initialize-LogMutex/Get-LogMutex (not fakes) so a
@@ -1627,8 +1594,8 @@ Test-Assert $disposedU2c2 "the PREVIOUS mutex was disposed via the -ReinitLogPat
 Write-Host ""
 
 # ==============================================================================
-#  Scenario U2d (2026-09-04 fix, real bug): when $InvokeModeHandler returns
-#  $null (a crashed/aborted run), the "Run did not complete" Warn used to
+#  Scenario U2d: when $InvokeModeHandler returns
+#  $null (a crashed/aborted run), the "Run did not complete" Warn must not
 #  be logged AFTER CompleteLogRunHandler had already run - in split-log
 #  mode that meant the Warn landed appended below the just-reordered
 #  block instead of being part of it, and the NEXT run's Start-LogRun then
@@ -1669,7 +1636,7 @@ Test-Assert (@($script:eventOrderU2d)[0] -eq "WARN" -and @($script:eventOrderU2d
 Write-Host ""
 
 # ==============================================================================
-#  Scenario U2e (2026-09-08 addition): SetQuickEditHandler is called
+#  Scenario U2e: SetQuickEditHandler is called
 #  $false right before InvokeModeHandler and $true right after, even when
 #  InvokeModeHandler throws - same try/finally bracketing as
 #  SetRunActiveHandler, proving Console QuickEdit mode can never be left
@@ -1705,9 +1672,9 @@ Test-Assert ((@($script:quickEditCallsU2e)[0] -eq $false) -and (@($script:quickE
 Write-Host ""
 
 # ==============================================================================
-#  Scenario U2f (2026-10-12): QuickEdit is only turned back on if it was on
+#  Scenario U2f: QuickEdit is only turned back on if it was on
 #  before the run. A console that had it off (0), or no real console (-1),
-#  is never touched - it used to get QuickEdit switched ON after every run.
+#  is never touched.
 # ==============================================================================
 Write-Host "=== Scenario U2f: QuickEdit is left alone when it was not on before the run ===" -ForegroundColor Cyan
 foreach ($stateU2f in @(0, -1)) {
@@ -1723,7 +1690,7 @@ foreach ($stateU2f in @(0, -1)) {
 Write-Host ""
 
 # ==============================================================================
-#  Scenario U2g (2026-10-22): the PC is kept from idle-sleeping during the
+#  Scenario U2g: the PC is kept from idle-sleeping during the
 #  run itself and released BEFORE the summary/post-run prompt, so the menu
 #  sleeps normally - including when the run throws.
 # ==============================================================================
@@ -1753,12 +1720,12 @@ foreach ($throwU2g in @($false, $true)) {
 Write-Host ""
 
 # ==============================================================================
-#  Scenario U3 (2026-09-02 review fix): mode 5 (Cover Deletion)'s real work
+#  Scenario U3: mode 5 (Cover Deletion)'s real work
 #  runs INSIDE $GetModeHandler (Get-SelectedMode -> Show-ModeMenu ->
 #  Show-CoverDeletionMenu), not inside $InvokeModeHandler like every other
-#  mode - so it was never covered by Invoke-Mode's own try/catch. Before
-#  this fix, a throw from $GetModeHandler had nothing to catch it in this
-#  loop at all - it escaped straight to the bootstrap's top-level catch,
+#  mode - so it was never covered by Invoke-Mode's own try/catch. Without
+#  handling here, a throw from $GetModeHandler has nothing to catch it in this
+#  loop at all - it escapes straight to the bootstrap's top-level catch,
 #  taking down the whole script instead of being logged and returning to
 #  the menu like every other mode's own crash already does (Scenario U,
 #  above, proves the $InvokeModeHandler side of this same contract).
@@ -1781,7 +1748,7 @@ Test-Assert ($script:postRunCallsU3 -eq 1) "the loop still reached Show-PostRunP
 Write-Host ""
 
 # ==============================================================================
-#  Scenario V: the Full-Pipeline AVIF race fix (2026-08-28) - a static and
+#  Scenario V: the Full-Pipeline AVIF race handling - a static and
 #  an animated AVIF in the SAME chapter are each routed to exactly one
 #  engine, proving the reconciliation actually prevents double-discovery/
 #  double-dispatch, not just that both engines still individually work.
@@ -1799,9 +1766,9 @@ Test-Assert ($totalsV.InspectFailedCount -eq 0) "no classification failures for 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario V2 (2026-08-31 efficiency fix): the animated AVIF from Scenario
+#  Scenario V2: the animated AVIF from Scenario
 #  V's own setup is classified by Controller.ps1's own reconciliation step
-#  AND handed to Convert-AnimatedBatch - before the fix, that meant TWO
+#  AND handed to Convert-AnimatedBatch - without threading the result through, that would mean TWO
 #  separate `magick identify` spawns for the same file (one during
 #  classification, one from Convert-AnimatedBatch's own re-check). The
 #  fake magick.exe now logs every identify call's target path (gated on
@@ -1828,11 +1795,10 @@ Test-Assert ($identifyCallsV2.Count -eq 1) ("the file was identified exactly onc
 Write-Host ""
 
 # ==============================================================================
-#  Scenario V3 (2026-08-31 efficiency fix, mirror of V2): a STATIC ambiguous
-#  AVIF is identified ONCE too - before this fix, only the animated side
-#  got a -KnownAnimatedPaths equivalent; a Static-classified file still
-#  fell through to Convert-ImageBatch's own unconditional Test-AvifAnimated
-#  re-check. Convert-ImageBatch now takes -KnownStaticPaths, mirroring
+#  Scenario V3 (mirror of V2): a STATIC ambiguous
+#  AVIF is identified ONCE too - a Static-classified file must not fall
+#  through to Convert-ImageBatch's own unconditional Test-AvifAnimated
+#  re-check. Convert-ImageBatch takes -KnownStaticPaths, mirroring
 #  Convert-AnimatedBatch's own parameter exactly.
 # ==============================================================================
 Write-Host "=== Scenario V3: a static ambiguous AVIF is identified ONCE, not twice (mirror of V2 for the image engine) ===" -ForegroundColor Cyan
@@ -1998,28 +1964,27 @@ Test-Assert ($totalsW.ConvertedImageSuccess -eq 0 -and $totalsW.ConvertedImageFa
 Test-Assert ($totalsW.ConvertedAnimatedSuccess -eq 1) "the OTHER, real animated file in the same chapter still converted normally"
 Test-Assert ($totalsW.InspectFailedCount -eq 1) ("the classification failure was counted exactly once, directly in Invoke-FullPipeline's own InspectFailedCount, not through either engine (got " + $totalsW.InspectFailedCount + ")")
 Test-Assert (Test-Path -LiteralPath (Join-Path $chW "corrupt.avif")) "the unclassifiable source file was left untouched, not deleted by either engine"
-Test-Assert ($totalsW.ZipCreatedSuccess -eq 0) "the chapter was NOT zipped at all - a real bug this scenario caught live: without blocking zip here too, the unclassified source got swept into the zip in raw form and its loose folder deleted anyway"
-# 2026-08-31 fix: a chapter forced un-zippable by a classification
-# failure used to be invisible in EVERY zip-outcome counter (IsZippable
+Test-Assert ($totalsW.ZipCreatedSuccess -eq 0) "the chapter was NOT zipped at all: without blocking the zip here too, the unclassified source would be swept into the zip in raw form and its loose folder deleted"
+# A chapter forced un-zippable by a classification
+# failure must not be invisible in EVERY zip-outcome counter (IsZippable
 # was already false, so the existing ZipSkippedDueToError elseif never
-# fired for it) - the run summary's zip section looked complete while
-# silently omitting a chapter that should have zipped and didn't.
+# fires for it) - otherwise the run summary's zip section would look complete
+# while silently omitting a chapter that should have zipped and didn't.
 Test-Assert ($totalsW.ZipSkippedDueToError -eq 1) ("the classification-blocked chapter is now counted in ZipSkippedDueToError, not invisible (got " + $totalsW.ZipSkippedDueToError + ")")
 Write-Host ""
 
 # ==============================================================================
-#  Scenario X (2026-08-31 fix, from ImageConversionPipeline.ps1's own
-#  dedicated per-module /code-review): a same-basename naming collision
+#  Scenario X: a same-basename naming collision
 #  (a source not older than a pre-existing, unrelated .jxl it did not
-#  produce) used to be completely invisible to Full Pipeline - Get-
+#  produce) must not be invisible to Full Pipeline - Get-
 #  LooseImageCandidates excluded it from both NeedsConversion and
 #  StaleSources with no counter and no zip-block, so a chapter whose only
 #  loose file was such a collision reported a clean Success and could get
 #  zipped with the raw, unconverted collision file still inside it.
-#  Get-LooseImageCandidates now returns it via NamingCollisions, and
+#  Get-LooseImageCandidates returns it via NamingCollisions, and
 #  Controller.ps1 folds it into InspectFailedCount and
 #  $failedClassificationDirs the same way an AVIF classification failure
-#  already was.
+#  is.
 # ==============================================================================
 Write-Host "=== Scenario X: a naming collision blocks its own chapter from zipping, same as an AVIF classification failure ===" -ForegroundColor Cyan
 $chX = New-Dir "scenario-x\Series\Chapter 1"
@@ -2037,10 +2002,10 @@ Test-Assert ($totalsX.ZipSkippedDueToError -eq 1) ("the naming-collision-blocked
 Write-Host ""
 
 # ==============================================================================
-#  Scenario X2 (2026-09-09, zip-blocked-status fix): the live CCR display
+#  Scenario X2: the live CCR display
 #  actually shows the real reason a chapter's zip was blocked, for both
 #  the naming-collision and AVIF-classification-failure causes - not just
-#  a clean, misleading Success/Warning the way it did before this fix.
+#  a clean, misleading Success/Warning.
 #  Two chapters, one series, one cause each, same fixture shapes as
 #  Scenario X (collision) and Scenario W (classification failure).
 # ==============================================================================
@@ -2079,14 +2044,13 @@ Test-Assert ($null -ne $callX2b -and $callX2b.Status -eq 'Warning' -and $callX2b
 Write-Host ""
 
 # ==============================================================================
-#  Scenario X3 (2026-09-09, code-review fix on the zip-blocked-status fix
-#  itself): a SINGLE chapter hitting BOTH block reasons at once (a naming
-#  collision AND its own AVIF classification failure) used to silently
-#  lose one of the two - $failedClassificationDirs's AVIF-failure add-site
-#  used plain indexer assignment, which overwrote whatever reason the
-#  naming-collision prepass had already written for that same directory.
-#  Now the second write appends instead of overwriting, so the live CCR
-#  Detail names both.
+#  Scenario X3: a SINGLE chapter hitting BOTH block reasons at once (a naming
+#  collision AND its own AVIF classification failure) must not silently
+#  lose one of the two - a plain indexer assignment at
+#  $failedClassificationDirs's AVIF-failure add-site would overwrite
+#  whatever reason the naming-collision prepass had already written for
+#  that same directory. The second write appends instead of overwriting,
+#  so the live CCR Detail names both.
 # ==============================================================================
 Write-Host "=== Scenario X3: a chapter with BOTH a naming collision and an AVIF classification failure shows BOTH reasons, not just one ===" -ForegroundColor Cyan
 $chX3 = New-Dir "scenario-x3\Series\Chapter 1"
@@ -2118,14 +2082,13 @@ Test-Assert ($null -ne $callX3 -and $callX3.Detail -like '*naming collision*' -a
 Write-Host ""
 
 # ==============================================================================
-#  Scenario X4 (2026-09-09, code-review fix on the zip-blocked-status fix
-#  itself): an "extra" chapter-equivalent entry (IsZippable=$false
+#  Scenario X4: an "extra" chapter-equivalent entry (IsZippable=$false
 #  unconditionally, ZipOut=$null - a directory chapter discovery didn't
 #  find, folded in via $extraDirPaths so its content still gets converted)
-#  was never going to zip regardless of $failedClassificationDirs. Before
-#  this fix, if that directory's own naming collision ALSO landed it in
-#  $failedClassificationDirs, its live CCR line got a "zip skipped: ..."
-#  note anyway - misleading, since no zip was ever going to happen there
+#  was never going to zip regardless of $failedClassificationDirs. If that
+#  directory's own naming collision ALSO lands it in
+#  $failedClassificationDirs, its live CCR line must not get a "zip skipped: ..."
+#  note - that would be misleading, since no zip was ever going to happen there
 #  in the first place. Same guard ImageConversionPipeline.ps1's own
 #  IsExtra flag already applies for its naming-collision case.
 #
@@ -2141,9 +2104,8 @@ New-FakeImageIn -DirPath $chX4 -Name "photo.png" | Out-Null
 New-FakeImageIn -DirPath $chX4 -Name "page2.jpg" | Out-Null
 
 $realGetSeriesChaptersX4 = ${function:Get-SeriesChapters}
-# 2026-09-09 rewrite (dispatch-redesign migration) - see Scenario Z5's own
-# comment above for why the old script-scope-variable shadow technique no
-# longer works safely (Get-SeriesChapters now runs inside a worker
+# See Scenario Z5's own comment above for why a script-scope-variable
+# shadow technique doesn't work safely (Get-SeriesChapters now runs inside a worker
 # runspace, not the main thread).
 $excludedPathX4 = (Get-Item -LiteralPath $chX4).FullName
 Invoke-Expression @"
@@ -2178,8 +2140,7 @@ Test-Assert ($null -ne $callX4 -and $callX4.Detail -notlike '*zip skipped*') ("t
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Y (2026-08-31 fix, caught by verifying a same-day /code-review
-#  4th pass on ImageConversionPipeline.ps1): an orphaned "_tmp_*" scratch
+#  Scenario Y: an orphaned "_tmp_*" scratch
 #  file (its owning cleanup couldn't run) sitting in a chapter this
 #  function is about to zip. Full Pipeline calls Compress-FolderToZip
 #  DIRECTLY (this function's own comment above explains why - .webp is
@@ -2202,9 +2163,8 @@ New-FakeImageIn -DirPath $chY -Name "page1.jpg" | Out-Null
 
 $totalsY = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-y") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true
 
-# 2026-09-02 review fix: the BMP/HEIC/HEIF scratch patterns (and the
-# numbered iccstrip variant) were confirmed live to be missed by the
-# pre-widening regex here.
+# The BMP/HEIC/HEIF scratch patterns (and the numbered iccstrip variant)
+# must be matched by the sweep's regex too.
 Test-Assert ($totalsY.ZipCreatedSuccess -eq 1) ("the chapter still zipped cleanly, not blocked by the scratch files (got ZipCreatedSuccess=" + $totalsY.ZipCreatedSuccess + ")")
 $zipOutY = Join-Path $scratchDir "scenario-y\Series\Chapter 1.zip"
 Test-Assert (Test-Path -LiteralPath $zipOutY) "the zip file was created"
@@ -2218,15 +2178,15 @@ Test-Assert (@($entryNamesY | Where-Object { $_ -match '_tmp_' }).Count -eq 0) (
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Y2 (2026-09-02 review fix): a chapter whose ONLY content is an
+#  Scenario Y2: a chapter whose ONLY content is an
 #  orphaned scratch file - Get-LooseImageCandidates excludes it from both
 #  engines, so nothing gets dispatched or blocks zipping, but the scratch
 #  sweep right before zipping then empties the folder entirely. The
 #  resulting zip has 0 entries - Test-ZipArchive throws even before
 #  checking -RequireJxlEntry - a REAL failure that leaves a REAL,
 #  complete-looking (if empty) zip file on disk, exactly the gap
-#  ZipPipeline.ps1's own Invoke-LooseFolderZip had (same day's matching
-#  fix, ZipPipeline.Harness.ps1 Scenario H). Confirms the broken zip is
+#  ZipPipeline.ps1's own Invoke-LooseFolderZip guards against
+#  (ZipPipeline.Harness.ps1 Scenario H). Confirms the broken zip is
 #  now deleted here too, not left behind to permanently hide this
 #  chapter from Get-SeriesChapters on every later run via the staleness
 #  guard.
@@ -2243,9 +2203,9 @@ Test-Assert (-not (Test-Path -LiteralPath $zipOutY2)) "the broken 0-entry zip it
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Z1c (2026-09-23): Invoke-Mode refuses to START a run that
+#  Scenario Z1c: Invoke-Mode refuses to START a run that
 #  would delete anything when the library's drive has no Recycle Bin and
-#  Permanent Delete is off (owner decision) - one clear message instead of
+#  Permanent Delete is off - one clear message instead of
 #  every item failing one by one. Drive type forced via RecycleBinProbe's
 #  test override; the handler must never be called.
 # ==============================================================================
@@ -2274,12 +2234,11 @@ try {
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Z2 (2026-08-31 fix, caught by a same-day /code-review
-#  full-codebase pass): every -FullLogging/-DoFullLogging argument Invoke-Mode
+#  Scenario Z2: every -FullLogging/-DoFullLogging argument Invoke-Mode
 #  passes now reads $script:FullLogging (the value Initialize-LogPaths froze
 #  at bootstrap, matching the ALSO-frozen $LogFile/$LogErrorFile/$LogWarnFile
-#  paths threaded alongside it), NOT live $Settings.FullLogging. Before this
-#  fix, a user toggling Full Logging in the Options menu mid-session changed
+#  paths threaded alongside it), NOT live $Settings.FullLogging. If it read the live flag,
+#  a user toggling Full Logging in the Options menu mid-session would change
 #  ONLY the live flag - the frozen paths never moved - so a worker runspace
 #  (which sets its OWN fresh $script:FullLogging from whatever this switch
 #  passed it) ended up with a live post-toggle flag paired against the OLD
@@ -2306,23 +2265,19 @@ Test-Assert ($capturedZ2.FullLogging -eq $true) ("the handler received the froze
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Z3 (2026-09-02, recurring-bug-pattern coverage; rewritten
-#  2026-09-09 for the dispatch-redesign migration - see Controller.ps1's
-#  own "DISPATCH-REDESIGN STEP 4" header): the REAL
+#  Scenario Z3: the REAL
 #  $script:fullPipelineEngineWorker scriptblock's own defaults, invoked
 #  directly - distinct from Convert-ImageBatch/Convert-AnimatedBatch's OWN
 #  defaults (already proven safe by ImageConversionPipeline.Harness.ps1's
 #  own Scenario AI). This worker forwards -DoJpegQuality/-AnimatedQuality/
 #  -DoAnimatedDeleteSource to those functions EXPLICITLY, so an omitted
 #  key here overrides whatever safe default they have, regardless of it.
-#  The worker's OWN signature changed with this migration (it now takes
-#  -Path, a whole library root it walks itself via its own
-#  -ChapterProvider, instead of a pre-built -Files list) - this scenario
+#  The worker takes -Path, a whole library root it walks itself via its own
+#  -ChapterProvider - this scenario
 #  builds the full set of shared objects a real Invoke-FullPipeline call
-#  would build (New-FullPipelineTestSharedObjects, a small helper added
-#  for this rewrite, reused by Scenario Z4 below too) and invokes the
-#  worker directly against a real scratch library, same idea as before
-#  just through the new calling shape.
+#  would build (New-FullPipelineTestSharedObjects, reused by Scenario Z4
+#  below too) and invokes the worker directly against a real scratch
+#  library.
 # ==============================================================================
 function New-FullPipelineTestSharedObjects {
     <# Bundles the shared objects a real Invoke-FullPipeline call builds
@@ -2380,19 +2335,14 @@ $sharedZ3b.SharedBudget.Dispose()
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Z4 (2026-09-03 fix, real bug; rewritten 2026-09-09 for the
-#  dispatch-redesign migration - see Controller.ps1's own "DISPATCH-
-#  REDESIGN STEP 4" header): AVIF classification must happen lazily, per
+#  Scenario Z4: AVIF classification must happen lazily, per
 #  CHAPTER (Get-OrCreateFullPipelineChapterClassification), not eagerly
-#  for a whole series before its first chapter can dispatch - a real
-#  regression this migration's own first draft reintroduced (folding
-#  classification into the per-SERIES bundle factory instead) and this
-#  scenario itself caught, live, before it shipped - see
-#  Get-OrCreateFullPipelineSeriesBundle's own header comment for the full
-#  story.
+#  for a whole series before its first chapter can dispatch - folding
+#  classification into the per-SERIES bundle factory would break that. See
+#  Get-OrCreateFullPipelineSeriesBundle's own header comment.
 #
-#  The OLD proof technique (spying on Test-AvifAnimated/Start-ChapterProgress
-#  via function redefinition) no longer works safely: both now run inside
+#  Spying on Test-AvifAnimated/Start-ChapterProgress via function
+#  redefinition doesn't work safely: both run inside
 #  a worker RUNSPACE (either engine's own), not the main thread - a
 #  locally-redefined function referencing this scope's own $script: state
 #  isn't reachable from inside a fresh runspace (see Controller.ps1's own
@@ -2432,16 +2382,17 @@ Test-Assert ($totalsZ4.ConvertedImageSuccess -eq 1 -and $totalsZ4.ConvertedAnima
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Z5 (2026-09-03 fix, real bug found by code review): a directory
+#  Scenario Z5: a directory
 #  Get-SeriesChapters doesn't discover as a real chapter (e.g. because it's
 #  already fully converted and zipped, excluded by that function's own "up
 #  to date" guard) but that still holds a leftover STALE source file must
-#  still get that file cleaned up - not silently orphaned forever. Before
-#  this fix, $extraDirPaths (the "chapter discovery missed this directory"
-#  completeness fallback) only looked at $imagesByDir/$animatedByDir
-#  (directories with something to CONVERT), never $staleByDir (directories
-#  with only something to CLEAN UP) - so a stale-only directory never
-#  entered $chapterEntries at all, and its own $chStale was never reached.
+#  still get that file cleaned up - not silently orphaned forever.
+#  $extraDirPaths (the "chapter discovery missed this directory"
+#  completeness fallback) must look at $staleByDir (directories with only
+#  something to CLEAN UP) as well as $imagesByDir/$animatedByDir
+#  (directories with something to CONVERT) - otherwise a stale-only
+#  directory never enters $chapterEntries at all, and its own $chStale is
+#  never reached.
 #
 #  Function-swaps Get-SeriesChapters to simulate real exclusion (calls the
 #  REAL function, then filters OUT the stale-only chapter's directory from
@@ -2459,8 +2410,7 @@ Start-Sleep -Milliseconds 50
 [System.IO.File]::WriteAllText((Join-Path $chZ5StaleOnly "old.jxl"), "already converted on a prior run")
 
 $realGetSeriesChaptersZ5 = ${function:Get-SeriesChapters}
-# 2026-09-09 rewrite (dispatch-redesign migration) - the OLD shadow body
-# called the real function via a captured `$script:...Ref` script-scope
+# The shadow body can't call the real function via a captured `$script:...Ref` script-scope
 # variable, which no longer works: Get-SeriesChapters now runs inside a
 # worker RUNSPACE (Get-OrCreateFullPipelineSeriesBundle's own factory), and
 # -SharedFunctionNames propagation only carries a function's own raw
@@ -2492,21 +2442,19 @@ Test-Assert ($totalsZ5.StaleImageCleanedSuccess -eq 1) ("chapter 2's stale lefto
 Write-Host ""
 
 # ==============================================================================
-#  Scenario Z6 (2026-09-04 fix, real bug; rewritten 2026-09-09 for the
-#  dispatch-redesign migration - see Scenario Z4's own comment above for
-#  why): an abort raised mid per-chapter AVIF classification must (a) stop
+#  Scenario Z6 (see Scenario Z4's own comment above for why the
+#  worker-runspace technique): an abort raised mid per-chapter AVIF classification must (a) stop
 #  classifying further contested files in THAT chapter immediately, not
 #  spawn every remaining ~10-17s magick identify first, and (b) stop that
 #  chapter's own Remove-StaleLooseSources deletion from running at all.
 #
-#  The OLD proof (shadowing Test-AvifAnimated to set the abort flag on its
-#  own first call) no longer works safely here either - classification now
-#  runs inside Get-OrCreateFullPipelineChapterClassification, itself
+#  Shadowing Test-AvifAnimated to set the abort flag on its own first call
+#  doesn't work safely here either - classification runs inside Get-OrCreateFullPipelineChapterClassification, itself
 #  called from inside a worker runspace, where a shadow function closing
 #  over this scope's own script-scope variable isn't reachable (same
 #  reasoning as Z4). [ConsoleCtrl] itself IS a real, process-wide static
 #  type (not runspace-local) - safe to flip from any thread - so this
-#  rewrite uses a background runspace that polls HARNESS_IDENTIFY_LOG
+#  scenario uses a background runspace that polls HARNESS_IDENTIFY_LOG
 #  (the fake magick.exe's own real identify-call log, already used
 #  elsewhere in this file) for its FIRST line to appear, then sets
 #  [ConsoleCtrl]::AbortRequested directly - no shadow function needed at
@@ -2540,14 +2488,13 @@ $null = $abortPsZ6.AddScript({
     param($LogPath)
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     while ([DateTime]::UtcNow -lt $deadline) {
-        # 2026-09-16 fix, real bug (found by a Gemini review, verified
-        # live): Get-Content against a file the fake magick.exe is
+        # Get-Content against a file the fake magick.exe is
         # concurrently appending to (via File.AppendAllText, its own
         # writer guarded by a separate named mutex - see that C# source's
         # own comment) has a real, if narrow, window to hit a sharing
         # violation - and this scriptblock had no try/catch, so that
-        # exception used to terminate the whole background runspace
-        # silently, meaning [ConsoleCtrl]::AbortRequested never got set at
+        # exception would terminate the whole background runspace
+        # silently, meaning [ConsoleCtrl]::AbortRequested never gets set at
         # all. Raw .NET read (matching this project's own established
         # avoid-cmdlets-in-a-runspace convention anyway) plus a try/catch
         # so a transient sharing violation just gets retried on the next
@@ -2566,10 +2513,10 @@ $null = $abortPsZ6.AddScript({
 $abortHandleZ6 = $abortPsZ6.BeginInvoke()
 
 try {
-    # -AbortTimeoutSeconds explicit and small (2026-09-16 fix) - the
+    # -AbortTimeoutSeconds explicit and small - the
     # default is 60s, meant for a real run's own graceful-drain window,
     # not a test scenario. If the background poller above ever DOES miss
-    # its window despite the fix just above, this bounds the resulting
+    # its window despite the try/catch just above, this bounds the resulting
     # wait to a few seconds instead of the real 60s default.
     $totalsZ6 = Invoke-FullPipeline -Path (Join-Path $scratchDir "scenario-z6") -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $false -PermanentDelete $true -AbortTimeoutSeconds 3
 } finally {
@@ -2636,9 +2583,9 @@ Test-Assert ($totalsD3d.ZipCreatedSuccess -eq 2) ("both chapters still converted
 Write-Host ""
 
 # ==============================================================================
-#  Scenario D3e (2026-09-23): Full Pipeline with animated conversion OFF.
+#  Scenario D3e: Full Pipeline with animated conversion OFF.
 #  Only the image engine runs; the chapter's animated AVIF is skipped with a
-#  warning (counted like Mode 8's skip), the static AVIF and the JPEG still
+#  warning (counted like Animated Conversion's skip), the static AVIF and the JPEG still
 #  convert, and the chapter still zips - with the raw animated .avif inside.
 #  A chapter must not be left waiting for an animated-engine report that
 #  never comes (that would leave it unzipped as "left incomplete").
@@ -2671,8 +2618,7 @@ Test-Assert (($entriesD3e -contains "anim.avif") -and ($entriesD3e -contains "pa
 Write-Host ""
 
 # ==============================================================================
-#  Scenario AA7 (2026-09-23 review fix, default flipped the same day by
-#  the owner): Invoke-Mode with a $Settings that has no
+#  Scenario AA7: Invoke-Mode with a $Settings that has no
 #  CoverDeletionDryRun key passes the built-in default (off = real run)
 #  to Full Pipeline, matching Config.ps1's default.
 # ==============================================================================
@@ -2692,7 +2638,7 @@ Test-Assert ($capturedAA7.DryRun -eq $false) ("a missing CoverDeletionDryRun key
 Write-Host ""
 
 # ==============================================================================
-#  Scenario HX (2026-09-23 hang fix): the delegate-free replacements for
+#  Scenario HX: the delegate-free replacements for
 #  System.Lazy and ConcurrentDictionary.AddOrUpdate keep their semantics -
 #  a cache entry's factory runs once, a factory exception is cached and
 #  rethrown to later callers (like Lazy's ExecutionAndPublication), and

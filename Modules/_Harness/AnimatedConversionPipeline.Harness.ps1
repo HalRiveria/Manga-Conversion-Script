@@ -4,17 +4,11 @@
 
 .DESCRIPTION
     Scenario A: direct unit coverage of Test-AvifAnimated (a standalone
-    exported function, not part of the dead Convert-AnimatedBatch that
-    used to anchor a "PART 1"). Dot-sources the real module and stubs
+    exported function). Dot-sources the real module and stubs
     Write-Log/Remove-Source/$script:PermanentDelete so this module doesn't
     need Logging.ps1/FileDeletion.ps1 built/working to be tested.
 
-    Every other scenario (B onward, 2026-09-14: originally split into a
-    lightweight "PART 1" against the now-deleted Convert-AnimatedBatch and
-    an integration-style "PART 2" against the live
-    Invoke-LooseAnimatedConversionPipeline - collapsed into one style once
-    PART 1's direct-call scenarios were ported to the live pipeline, see
-    Todo.md's matching entry) dot-sources the REAL
+    Every other scenario (B onward) dot-sources the REAL
     AbortPipeline.ps1/LeafDirectoryDiscovery.ps1/CleanConsoleRendering.ps1/
     ChapterDispatch.ps1 too, since Invoke-LooseAnimatedConversionPipeline
     is an orchestration-tier function whose real value is in proving the
@@ -47,8 +41,8 @@ function Write-Log {
 . (Join-Path $modulesDirAC "AbortPipeline.ps1")
 . (Join-Path $modulesDirAC "LeafDirectoryDiscovery.ps1")
 . (Join-Path $modulesDirAC "CleanConsoleRendering.ps1")
-# ChapterDispatch.ps1 (2026-09-09) - Invoke-LooseAnimatedConversionPipeline's
-# own real dependency now, PART 2's migration onto it. Dot-sourced before
+# ChapterDispatch.ps1 - Invoke-LooseAnimatedConversionPipeline's
+# own real dependency. Dot-sourced before
 # AnimatedConversionPipeline.ps1 itself, matching Conversion Script Main.ps1's
 # own intended load order once this module is wired in for real.
 . (Join-Path $modulesDirAC "ChapterDispatch.ps1")
@@ -79,7 +73,7 @@ function Test-Assert {
 }
 
 # ------------------------------------------------------------------
-#  PART 2 abort spies - same idiom as
+#  Abort spies - same idiom as
 #  ImageConversionPipeline.Harness.ps1's own (capture the real
 #  originals, wrap with call-tracking, restore afterward). Only used by
 #  the abort scenario below.
@@ -141,7 +135,7 @@ function New-FakeAvif {
 }
 
 # ------------------------------------------------------------------
-#  PART 2 helpers - mirror ImageConversionPipeline.Harness.ps1's own
+#  Helpers - mirror ImageConversionPipeline.Harness.ps1's own
 #  New-Dir/New-FakeImage exactly (same shape, "animated" instead of
 #  "image" naming).
 # ------------------------------------------------------------------
@@ -165,9 +159,9 @@ function New-FakeAvifIn {
 #     real fixture (the trailing "[0]" frame-selector is stripped first
 #     to find it) and writes back a simulated animation delay - "0" for
 #     FRAMES:1 (static), nonzero for FRAMES:N>1 (animated), written
-#     exactly once (2026-09-09: Test-AvifAnimated now addresses frame [0]
-#     only, so the format string is never repeated per-frame the way the
-#     old no-index "%n" call was). Also writes the raw args it received
+#     exactly once (Test-AvifAnimated addresses frame [0]
+#     only, so the format string is never repeated per-frame the way a
+#     no-index "%n" call would). Also writes the raw args it received
 #     to "<path>.identify-args.txt" so a scenario can assert the real
 #     -ping/%T/[0] shape actually reached the process, not just that
 #     classification came out correct. FAIL_IDENTIFY -> exit 1.
@@ -193,7 +187,7 @@ class Program {
                 // warning/error dump - large enough to fill the OS pipe
                 // buffer (typically 4-64KB) if the parent isn't actively
                 // draining stderr while this process is still running.
-                // Proves the 2026-08-31 deadlock fix (Test-AvifAnimated
+                // Proves the deadlock fix (Test-AvifAnimated
                 // now reads both streams asynchronously before
                 // WaitForExit) - without it, this would hang the whole
                 // test instead of completing quickly.
@@ -217,11 +211,11 @@ class Program {
         string srcContent = File.Exists(src) ? File.ReadAllText(src) : "";
 
         if (srcContent.Contains("STDERR_FLOOD")) {
-            // 2026-09-08 addition, same technique as the "identify" branch's
+            // Same technique as the "identify" branch's
             // own FAIL_IDENTIFY_HUGE_STDERR above and ImageConversionPipeline's
             // fake cjxl.exe - simulates a magick conversion (not identify)
             // that emits more than the OS pipe buffer of stderr before
-            // exiting, proving Convert-AnimatedBatch's async dispatch
+            // exiting, proving the pipeline's async dispatch
             // (polled via HasExited rather than read synchronously inline)
             // doesn't deadlock on it.
             string floodLine = new string('E', 200) + Environment.NewLine;
@@ -229,7 +223,7 @@ class Program {
         }
         if (srcContent.Contains("FAIL_MAGICK_AFTER_PARTIAL_WRITE")) {
             // Simulates magick actually opening/writing to its output
-            // path before crashing mid-encode - proves the 2026-08-31
+            // path before crashing mid-encode - proves the
             // fix (magick is pointed at a temp path when overwriting a
             // pre-existing file, not the real path directly) actually
             // protects the original: without the fix, this would
@@ -288,9 +282,9 @@ Test-Assert ((Test-AvifAnimated -AvifPath $animA.FullName -MagickExe $fakeMagick
 $staticA = New-FakeAvif -Name "static-a.avif" -Content "FRAMES:1"
 Test-Assert ((Test-AvifAnimated -AvifPath $staticA.FullName -MagickExe $fakeMagickExe) -eq $false) "a 1-frame AVIF is detected as static"
 
-# 2026-09-09 perf fix verification: proves the REAL command shape reached
+# Proves the REAL command shape reached
 # the process (-ping, %T format, trailing "[0]" frame selector), not just
-# that classification came out correct - a regression back to the old
+# that classification came out correct - a regression to the
 # "%n", no-index, no-ping call would still pass the two assertions above
 # (the fake derives its answer from FRAMES:<n> either way) but would fail
 # this one.
@@ -301,8 +295,8 @@ Test-Assert ($capturedArgsA -match '-ping') "the real identify call passes -ping
 Test-Assert ($capturedArgsA -match '%T') "the real identify call reads %T (delay), not %n (frame count)"
 Test-Assert ($capturedArgsA -match [regex]::Escape($animA.FullName + "[0]")) "the real identify call addresses frame [0] only, not the whole sequence"
 
-# Bracket-in-filename safety (2026-09-09, live-verified against real
-# scanlation-group-style names before this fix shipped): appending "[0]"
+# Bracket-in-filename safety (checked against real
+# scanlation-group-style names): appending "[0]"
 # must not misfire when the real filename/path already contains literal
 # "["/"]" - ImageMagick only treats a TRAILING bracket construct as a
 # frame selector, so an earlier bracket pair must be left alone.
@@ -314,12 +308,12 @@ $threwA = $false
 try { Test-AvifAnimated -AvifPath $failA.FullName -MagickExe $fakeMagickExe } catch { $threwA = $true }
 Test-Assert $threwA "a failed identify call throws, letting the caller decide how to handle it"
 
-# 2026-08-31 fix: Test-AvifAnimated used to read stdout to completion,
+# Test-AvifAnimated must not read stdout to completion,
 # then stderr, then call WaitForExit - the classic Process redirect
 # deadlock ordering. A huge stderr dump (simulating a malformed AVIF's
 # real identify output) large enough to fill the OS pipe buffer would
-# hang this call forever before the fix (both async reads draining
-# concurrently now prevent either pipe from ever filling). Same
+# hang this call forever (both async reads draining
+# concurrently prevent either pipe from ever filling). Same
 # precedent as this file's own Scenario Y-equivalent hang-fix tests -
 # a real regression here would hang the whole harness run, not just fail
 # an assertion, same tradeoff already accepted elsewhere in this project
@@ -334,16 +328,12 @@ Test-Assert ($swA.Elapsed.TotalSeconds -lt 15) ("returned promptly instead of de
 Write-Host ""
 
 # ==============================================================================
-#  Scenarios B through L2 (2026-09-14, dead-code-removal, Todo.md's
-#  matching entry): ported from direct Convert-AnimatedBatch calls to the
-#  live Invoke-LooseAnimatedConversionPipeline path - jobBuilder/
-#  jobStarter/jobPollCompleted/Complete-AnimatedDispatchJob (PART 2's live
-#  twins) have the identical logic these scenarios exercise, but nothing
-#  previously proved most of it through the real pipeline. Scenario M
-#  (empty-batch input) was dropped outright rather than ported - every
+#  Scenarios B through L2: exercise the live
+#  Invoke-LooseAnimatedConversionPipeline path - jobBuilder/
+#  jobStarter/jobPollCompleted/Complete-AnimatedDispatchJob. There is no
+#  separate empty-batch scenario - every
 #  other scenario in this file already exercises a chapter with zero
-#  qualifying animated files as a side effect of its own setup, so there's
-#  no real gap to close by adding a scenario for it explicitly.
+#  qualifying animated files as a side effect of its own setup.
 # ==============================================================================
 Write-Host "=== Scenario B: end-to-end success ===" -ForegroundColor Cyan
 $chB = New-Dir "scenario-b\Series\Chapter 1"
@@ -358,14 +348,14 @@ Test-Assert (Test-Path -LiteralPath $webpB) "output .webp was created"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario B2 (2026-09-08 fix, real bug, live-reproduced): the magick
+#  Scenario B2: the magick
 #  conversion job in the dispatch loop is polled via HasExited, not read
 #  synchronously inline - both redirected streams must be drained as soon
 #  as the process starts (not only once it's found HasExited), or a
 #  magick that writes more than the OS pipe buffer to stderr before
 #  exiting would block on that write forever, hanging the whole batch
 #  with no error and no timeout - the exact species already fixed in
-#  ImageConversionPipeline.ps1's cjxl dispatch, missed here.
+#  ImageConversionPipeline.ps1's cjxl dispatch.
 #  Run on a background runspace with a bounded wait, NOT called directly -
 #  a real regression here would hang forever, and this proves it fails the
 #  assertion instead of hanging the whole harness process.
@@ -415,11 +405,10 @@ if ($completedB2) {
 Write-Host ""
 
 # ==============================================================================
-#  Scenario B3 (2026-09-08 fix, real bug caught by a full-codebase audit,
-#  same species as this project's other Remove-Source call sites):
+#  Scenario B3 (same species as this project's other Remove-Source call sites):
 #  Remove-Source's $false return (the source already vanished before
-#  deletion - a real TOCTOU gap) was discarded here, reporting a
-#  successful delete regardless. Remove-Source shadowed to return $false
+#  deletion - a real TOCTOU gap) must not be discarded, or a
+#  successful delete gets reported regardless. Remove-Source shadowed to return $false
 #  unconditionally.
 # ==============================================================================
 Write-Host "=== Scenario B3: an already-gone source is not miscounted as deleted ===" -ForegroundColor Cyan
@@ -503,12 +492,11 @@ Test-Assert (-not (Test-Path -LiteralPath $webpF)) "no leftover partial .webp"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario F2 (2026-08-31 fix): -AnimatedOverwrite $true points a
+#  Scenario F2: -AnimatedOverwrite $true points a
 #  (now-failing) re-conversion at an already-existing, good .webp from a
 #  prior successful run - the failure must NOT delete that pre-existing
-#  file. Before the fix, the failure catch deleted $Job.WebpPath
-#  unconditionally whenever it existed, destroying a previously-good
-#  output over an unrelated later failure.
+#  file. Deleting $Job.WebpPath unconditionally whenever it existed
+#  would destroy a previously-good output over an unrelated later failure.
 # ==============================================================================
 Write-Host "=== Scenario F2: a failed re-conversion does NOT delete the pre-existing good .webp it was overwriting ===" -ForegroundColor Cyan
 $chF2 = New-Dir "scenario-f2\Series\Chapter 1"
@@ -524,15 +512,15 @@ Test-Assert ((Get-Content -LiteralPath $webpF2 -Raw) -eq "pre-existing good webp
 Write-Host ""
 
 # ==============================================================================
-#  Scenario F3 (2026-08-31 fix): -AnimatedOverwrite $true points a
+#  Scenario F3: -AnimatedOverwrite $true points a
 #  re-conversion at an already-existing, good .webp - the conversion
 #  attempt actually WRITES PARTIAL GARBAGE to its output path before
 #  crashing (unlike F2's FAIL_MAGICK, which fails before writing
 #  anything). Scenario F2's own "not deleted" guard is not enough here -
-#  WebpExistedBeforeJob only ever stopped THIS SCRIPT from deleting the
-#  file, it never stopped magick.exe itself from overwriting it in
-#  place. Fixed by pointing magick at a temp path when overwriting an
-#  existing file, only replacing the real path after a verified success.
+#  WebpExistedBeforeJob only stops THIS SCRIPT from deleting the
+#  file, not magick.exe itself from overwriting it in
+#  place. So magick is pointed at a temp path when overwriting an
+#  existing file, and the real path is replaced only after a verified success.
 # ==============================================================================
 Write-Host "=== Scenario F3: a crash mid-write does NOT corrupt the pre-existing good .webp (magick targets a temp path, not the original) ===" -ForegroundColor Cyan
 $chF3 = New-Dir "scenario-f3\Series\Chapter 1"
@@ -643,11 +631,11 @@ Test-Assert ($totalsL.ConvertedSuccess -eq 1 -and $totalsL.ForceKilledCount -eq 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario L2 (2026-08-31 fix): the force-kill path (past -AbortTimeoutSeconds,
+#  Scenario L2: the force-kill path (past -AbortTimeoutSeconds,
 #  NOT the graceful-drain-lets-it-finish path Scenario L covers) must not
-#  delete a pre-existing good .webp it was overwriting. Before the fix,
-#  this separate cleanup site deleted $j.WebpPath unconditionally whenever
-#  it existed - the same bug Scenario F2 already covers, left open on this
+#  delete a pre-existing good .webp it was overwriting. This separate
+#  cleanup site must not delete $j.WebpPath unconditionally whenever
+#  it exists - the same rule Scenario F2 covers, on a
 #  different code path. SLEEP_MS deliberately exceeds -AbortTimeoutSeconds
 #  so the job is still running when the drain gives up and force-kills it.
 # ==============================================================================
@@ -694,8 +682,7 @@ Test-Assert (-not $totalsN.Aborted) "not marked aborted"
 Write-Host ""
 
 # ==============================================================================
-#  Scenario N2 (2026-09-09, mode 3's ChapterDispatch.ps1 migration): THE
-#  actual point of the migration, tested directly - an idle concurrency
+#  Scenario N2: the point of dispatching through ChapterDispatch.ps1, tested directly - an idle concurrency
 #  slot picks up the NEXT chapter's job while the CURRENT chapter still
 #  has work outstanding, instead of blocking on one chapter's conversion
 #  finishing before the next chapter's files are even dispatched. Chapter
@@ -749,10 +736,9 @@ $totalsP = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "
 Test-Assert ($totalsP.SeriesCount -eq 1) "the empty series was still walked"
 Test-Assert ($totalsP.ChapterCount -eq 0) "zero chapters counted"
 
-# 2026-09-08 fix, real bug caught by a full-codebase review - same fix as
-# ImageConversionPipeline.ps1/Controller.ps1 already got 2026-09-03: the
-# empty-chapters check used to run AFTER Start-SeriesProgress, so a series
-# with nothing to convert still registered a 0/0-chapter entry with CCR,
+# Same rule as ImageConversionPipeline.ps1/Controller.ps1: the
+# empty-chapters check must run BEFORE Start-SeriesProgress, or a series
+# with nothing to convert still registers a 0/0-chapter entry with CCR,
 # printing a frozen "0/0 chapters" line. Start-SeriesProgress shadowed to
 # prove it's never called for an empty series with Clean Console Output on.
 $script:startSeriesProgressCallsP = 0
@@ -808,10 +794,10 @@ Test-Assert ($statusNullR -eq "Success" -and $null -eq $detailNullR) "`$null Cha
 $statusErrR, $detailErrR = Get-ChapterAnimatedStatus -ChapterResult @{ FailedCount = 2; ForceKilledCount = 1; DeleteFailedCount = 0; SkippedCount = 0; InspectFailedCount = 0 }
 Test-Assert ($statusErrR -eq "Error" -and $detailErrR -match "2 failed" -and $detailErrR -match "1 force-stopped") "Error tier wins and lists both failure kinds"
 
-# 2026-08-31 fix: InspectFailedCount is now Error-tier, not Warning - an
+# InspectFailedCount is Error-tier, not Warning - an
 # inspect failure leaves a raw, completely unconverted .avif on disk, which
 # must block Controller.ps1's zip gate the same way a real FailedCount does
-# (a Warning-tier chapter still zips). Confirmed via a same-day /code-review.
+# (a Warning-tier chapter still zips).
 $statusInspErrR, $detailInspErrR = Get-ChapterAnimatedStatus -ChapterResult @{ FailedCount = 0; ForceKilledCount = 0; DeleteFailedCount = 0; SkippedCount = 0; InspectFailedCount = 1 }
 Test-Assert ($statusInspErrR -eq "Error" -and $detailInspErrR -match "1 inspect failure") "InspectFailedCount alone is Error tier, not Warning - it means a file was left completely unconverted"
 
@@ -873,7 +859,7 @@ New-FakeAvifIn -DirPath $chU -Name "page1.avif" | Out-Null
 
 # Same call-sequence reasoning as ImageConversionPipeline.Harness.ps1's
 # Scenario H: call 1 = series while-loop top check, call 2 = chapter
-# foreach-loop top check, call 3 = Convert-AnimatedBatch's first
+# foreach-loop top check, call 3 = the dispatch loop's first
 # AbortPollCallback (before dispatch), call 4 = its second - by then the
 # fake magick process is dispatched and still sleeping.
 $script:testAbortSignalTriggerAt = 4
@@ -895,11 +881,11 @@ ${function:Test-AbortSignal}                   = $originalTestAbortSignal
 Write-Host ""
 
 # ==============================================================================
-#  Scenario W (2026-08-31 fix): $animatedCts's construction and
+#  Scenario W: $animatedCts's construction and
 #  Register-AbortCancellationSource call were moved INSIDE the function's
-#  try block (same species as ZipParallelProcessing.ps1's mutex-leak fix
-#  from earlier today, and ImageConversionPipeline.ps1's own analogous
-#  fix). Register-AbortCancellationSource is temporarily replaced with a
+#  try block (same species as ZipParallelProcessing.ps1's mutex-leak handling
+#  and ImageConversionPipeline.ps1's own analogous
+#  handling). Register-AbortCancellationSource is temporarily replaced with a
 #  fake that captures the real $Cts (so the test can inspect it
 #  afterward) and throws, simulating a real registration failure.
 #  Verified via a disposed Cts's own .Cancel() throwing
@@ -932,19 +918,17 @@ Test-Assert $disposedW "the Cts was disposed via the finally block despite the t
 Write-Host ""
 
 # ==============================================================================
-#  Scenarios X/Z/AA/AB (2026-09-14, dead-code-removal, Todo.md's matching
-#  entry) removed outright rather than ported: X/AA/AB proved generic
+#  Scenarios X/Z/AA/AB are not present here: X/AA/AB proved generic
 #  dispatch-loop mechanics (stale-list SlotReleased guard, straggler-drain
 #  throw cleanup, IsCloseEvent force-kill) that now live in the SHARED
 #  Invoke-ChapterDispatch, not this module - that coverage now lives in
-#  ChapterDispatch.Harness.ps1's Scenarios 11/13/12. Z proved a bug shape
-#  specific to Complete-AnimatedConversionJob's own internal structure (it
-#  set SlotReleased in its OWN try/finally, before its success/failure
-#  logic could throw) - the live twin, Complete-AnimatedDispatchJob, has
-#  no such internal try/finally; SlotReleased is now set by
+#  ChapterDispatch.Harness.ps1's Scenarios 11/13/12. Z's bug shape
+#  (SlotReleased set in a job's OWN try/finally, before its success/failure
+#  logic could throw) can't occur: Complete-AnimatedDispatchJob has
+#  no such internal try/finally; SlotReleased is set by
 #  Invoke-ChapterDispatch itself, only after JobFinalize returns without
-#  throwing, so the specific "already-SlotReleased-but-still-orphaned-temp-
-#  file" condition Z exercised can no longer occur - nothing to port.
+#  throwing, so an "already-SlotReleased-but-still-orphaned-temp-
+#  file" condition can't arise.
 #
 #  Scenario Y ported to the live pipeline below, analogous to
 #  ImageConversionPipeline.Harness.ps1's own ported Scenario AG: what's
@@ -1062,10 +1046,10 @@ Test-Assert ($totalsQD.ConvertedSuccess -eq 2) ("both chapters still converted (
 Write-Host ""
 
 # ==============================================================================
-#  Scenario AN (2026-10-12): Complete-AnimatedDispatchJob's read of the finished
-#  process's stdout/stderr is bounded and tolerates a failed read. It used to
-#  be a bare GetAwaiter().GetResult(): a pipe held open (a delegate process
-#  magick spawned) stalled the engine forever, and a faulted read threw out
+#  Scenario AN: Complete-AnimatedDispatchJob's read of the finished
+#  process's stdout/stderr is bounded and tolerates a failed read. A bare
+#  GetAwaiter().GetResult() would let a pipe held open (a delegate process
+#  magick spawned) stall the engine forever, and a faulted read would throw out
 #  of JobFinalize. Success is still judged by exit code and output file.
 #  DOCUMENTED DUPLICATE of ImageConversionPipeline.Harness.ps1's own Scenario AN -
 #  keep both in sync.

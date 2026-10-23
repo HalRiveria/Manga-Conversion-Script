@@ -103,9 +103,8 @@ function New-ManualChapterFeed {
         NOT $script: variables. A $script:-prefixed variable read/written
         from inside a .GetNewClosure()'d scriptblock resolves against that
         closure's own private, isolated scope, not the real script scope -
-        confirmed live while building this harness (a real instance of
-        this project's own documented "closures that lose mutated state"
-        lesson, CLAUDE.md's "Lessons learned") - local-variable capture
+        (a closure that loses mutated state, a known PowerShell trap) -
+        local-variable capture
         (a hashtable/queue, both reference types) is the correct pattern
         here, matching every other scriptblock-returning function in this
         codebase.
@@ -157,7 +156,7 @@ Test-Assert (-not $result1.Aborted -and $result1.ForceKilledCount -eq 0) "run wa
 Write-Host ""
 
 # ==============================================================================
-#  Scenario 2 (2026-09-09 - THE point of the whole redesign, tested
+#  Scenario 2 (THE point of the whole redesign, tested
 #  directly): an idle slot from one chapter picks up ANOTHER chapter's job
 #  before the first chapter has fully finished - not after. Chapter A gets
 #  a fast job and a slow job; Chapter B gets one fast job. With
@@ -300,13 +299,13 @@ Test-Assert ($script:finalizedCount4 -eq 1) ("job A4 finished gracefully through
 Test-Assert ($script:abortCleanupCount4 -eq 1 -and $script:abortCleanupIds4[0] -eq "B4") ("only job B4 (the one that never finished) got JobAbortCleanup, not job A4 (got count=" + $script:abortCleanupCount4 + ", ids=" + ($script:abortCleanupIds4 -join ",") + ")")
 Test-Assert ($result4.ForceKilledCount -eq 1) ("exactly one job (B4) was force-killed (got " + $result4.ForceKilledCount + ")")
 Test-Assert ($budget4.CurrentCount -eq 2) ("both jobs' budget slots were released exactly once each - semaphore back to its full count of 2 (got " + $budget4.CurrentCount + ")")
-# 2026-09-15 fix (real bug, found by the full line-by-line review series):
 # Chapter4 never reaches Outstanding=0 through the normal paths here - A4's
 # JobFinalize decrements it from 2 to 1, but B4's force-kill (unlike a
-# normal JobFinalize) never touches Outstanding at all. Before the fix,
-# $ChapterCompleteCallback was NEVER invoked for a chapter like this one,
-# so A4's own already-finished, real work (a converted+deleted file in the
-# real engines) silently never made it into the caller's summary totals.
+# normal JobFinalize) never touches Outstanding at all. So
+# $ChapterCompleteCallback must be invoked explicitly for a chapter like
+# this one, or A4's own already-finished, real work (a converted+deleted
+# file in the real engines) would silently never make it into the caller's
+# summary totals.
 Test-Assert ($script:chapterCompleteCount4 -eq 1) ("ChapterCompleteCallback still fires exactly once for Chapter4 even though it was force-killed mid-flight, not fully completed through the normal path (got " + $script:chapterCompleteCount4 + ") - this is what actually credits A4's already-finished work to the caller's totals")
 Write-Host ""
 
@@ -314,18 +313,17 @@ Write-Host ""
 #  Scenario 5: the final-completion-check-before-force-kill race
 #  specifically - a job whose JobPollCompleted flips $true right as the
 #  timeout elapses must still be finalized normally, not force-killed.
-#  This is the exact live-caught bug class from the real code (see this
+#  This is the exact bug class the real code has to handle (see this
 #  module's own header) - worth a dedicated scenario, not just trusting
 #  the generalization by inspection.
 #
-#  Made fully deterministic (2026-09-09, fixing a real flaky-test bug -
-#  an earlier version raced two independent wall clocks: an absolute
-#  "finish at" timestamp set once at test setup, against
-#  -AbortTimeoutSeconds measured from whenever cancellation actually got
-#  detected - the two weren't tightly coupled, so under real timing
-#  jitter the job sometimes finished too late to prove anything and was
-#  genuinely, correctly force-killed instead, an intermittent failure
-#  with no bug behind it). -AbortTimeoutSeconds 0 makes the timed drain
+#  Made fully deterministic: racing two independent wall clocks (an
+#  absolute "finish at" timestamp set once at test setup, against
+#  -AbortTimeoutSeconds measured from whenever cancellation actually gets
+#  detected) isn't tightly coupled, so under real timing jitter the job
+#  could finish too late to prove anything and be genuinely, correctly
+#  force-killed instead, an intermittent failure with no bug behind it.
+#  -AbortTimeoutSeconds 0 makes the timed drain
 #  while loop's own condition (Elapsed.TotalSeconds -lt 0) permanently
 #  false, so that loop runs ZERO iterations, guaranteed, regardless of
 #  timing - the ONLY code path left that can ever poll this job again is
@@ -499,19 +497,13 @@ Test-Assert ($budget9.CurrentCount -eq 1) ("the shared budget is back to its ful
 Write-Host ""
 
 # ==============================================================================
-#  Scenario 10 (2026-09-14, dead-code-removal triage - see Todo.md's
-#  matching entry): an unrelated exception from INSIDE the main dispatch
+#  Scenario 10: an unrelated exception from INSIDE the main dispatch
 #  loop (here, -AbortPollCallback throwing on its second pass, once a job
 #  is genuinely still running - NOT a caught -JobStarter failure, that's
 #  Scenario 6's own case) must still release the still-running job via
-#  -JobAbortCleanup and the shared budget before rethrowing. Same bug
-#  species ImageConversionPipeline.Harness.ps1's Scenario AB used to
-#  prove against Convert-ImageBatch's own now-deleted copy of this same
-#  try/catch shape - this is the one, shared copy that replaced it
-#  (AnimatedConversionPipeline.Harness.ps1 never had a scenario for this
-#  exact species - its own same-pass-throw scenario, Scenario X, is the
-#  SlotReleased-double-clean species instead, covered by Scenario 11
-#  below).
+#  -JobAbortCleanup and the shared budget before rethrowing. This is the
+#  one shared copy of that try/catch shape for all the pipelines; the
+#  SlotReleased-double-clean species is covered by Scenario 11 below.
 # ==============================================================================
 Write-Host "=== Scenario 10: an unrelated throw mid-dispatch still releases a genuinely-running job ===" -ForegroundColor Cyan
 $budget10 = [System.Threading.SemaphoreSlim]::new(2, 2)
@@ -544,18 +536,13 @@ Test-Assert ($budget10.CurrentCount -eq 2) ("the running job's budget slot was r
 Write-Host ""
 
 # ==============================================================================
-#  Scenario 11 (2026-09-14, dead-code-removal triage): a same-pass throw
+#  Scenario 11: a same-pass throw
 #  (here, -JobFinalize throwing for the SECOND job in this poll pass) must
 #  not double-clean an EARLIER job in the same pass that already finished
 #  normally (SlotReleased already true) - the outer catch's own
 #  -JobAbortCleanup call is gated on "not SlotReleased" for exactly this
-#  reason. Same bug species ImageConversionPipeline.Harness.ps1's Scenario
-#  AF and AnimatedConversionPipeline.Harness.ps1's Scenario X used to prove
-#  against Convert-ImageBatch/Convert-AnimatedBatch's own now-deleted copy
-#  of this same try/catch shape (Animated Scenario Y is unrelated - it
-#  tests a force-killed job's JobAbortCleanup, the same species as image
-#  Scenario AG, and was ported rather than deleted - see
-#  AnimatedConversionPipeline.Harness.ps1's own header on that scenario).
+#  reason. This is the one shared copy of that try/catch shape for the
+#  image and animated pipelines.
 # ==============================================================================
 Write-Host "=== Scenario 11: a same-pass throw does not double-clean an earlier job that already finished normally ===" -ForegroundColor Cyan
 $budget11 = [System.Threading.SemaphoreSlim]::new(2, 2)
@@ -591,14 +578,12 @@ Test-Assert ($budget11.CurrentCount -eq 2) ("both jobs' budget slots were releas
 Write-Host ""
 
 # ==============================================================================
-#  Scenario 12 (2026-09-14, dead-code-removal triage): [ConsoleCtrl]::IsCloseEvent
+#  Scenario 12: [ConsoleCtrl]::IsCloseEvent
 #  skips the graceful-wait drain loop entirely and goes straight to
 #  force-kill - a window-close abort force-kills the whole process ~5s
 #  later regardless, so waiting out any part of -AbortTimeoutSeconds can
-#  never fit. Same bug species ImageConversionPipeline.Harness.ps1's
-#  Scenario AK and AnimatedConversionPipeline.Harness.ps1's Scenario AB
-#  used to prove against Convert-ImageBatch/Convert-AnimatedBatch's own
-#  now-deleted copy of this same drain-loop shape.
+#  never fit. This is the one shared copy of that drain-loop shape for
+#  the image and animated pipelines.
 # ==============================================================================
 Write-Host "=== Scenario 12: IsCloseEvent skips the graceful drain wait entirely, force-kills immediately ===" -ForegroundColor Cyan
 $job12 = New-FakeJob -Id "J12"
@@ -628,16 +613,13 @@ Test-Assert ($script:abortCleanupCount12 -eq 1) ("JobAbortCleanup fired once for
 Write-Host ""
 
 # ==============================================================================
-#  Scenario 13 (2026-09-14, dead-code-removal triage): an unrelated
+#  Scenario 13: an unrelated
 #  exception from INSIDE the drain's own force-kill step (here, the
 #  "force-stopping N job(s)..." Write-Log call itself, which sits OUTSIDE
 #  each job's own per-job try/catch in that loop) must still kill/dispose/
 #  JobAbortCleanup every job still in $running via that block's own catch,
-#  not leave them dangling. Same bug species
-#  ImageConversionPipeline.Harness.ps1's Scenario AH and
-#  AnimatedConversionPipeline.Harness.ps1's Scenario AA used to prove
-#  against Convert-ImageBatch/Convert-AnimatedBatch's own now-deleted
-#  copy of this same drain-loop shape.
+#  not leave them dangling. This is the one shared copy of that
+#  drain-loop shape for the image and animated pipelines.
 # ==============================================================================
 Write-Host "=== Scenario 13: an unrelated throw during the drain's force-stop logging still cleans up every remaining job ===" -ForegroundColor Cyan
 $job13a = New-FakeJob -Id "A13"
@@ -703,12 +685,11 @@ Test-Assert ($null -eq (& $providerP)) "calling again after exhaustion keeps ret
 Write-Host ""
 
 # ==============================================================================
-#  Scenario 14 (2026-09-15, full line-by-line review series - real bug):
-#  a job still sitting in $pending (never even started via $JobStarter)
-#  when cancellation fires was previously silently dropped - nothing
-#  decremented its chapter's Outstanding, nothing called $JobAbortCleanup
-#  on it, and (worse) that meant its chapter's Outstanding could never
-#  reach 0, so $ChapterCompleteCallback never fired for it either -
+#  Scenario 14: a job still sitting in $pending (never even started via
+#  $JobStarter) when cancellation fires must not be silently dropped -
+#  something has to decrement its chapter's Outstanding and call
+#  $JobAbortCleanup on it, otherwise that chapter's Outstanding could never
+#  reach 0 and $ChapterCompleteCallback would never fire for it either -
 #  distinct from Scenario 4's already-running/force-killed job case.
 #  -MaxConcurrent 1 with 2 jobs in the same chapter: job A starts and
 #  never finishes (force-killed via the normal running-job path), job B
@@ -753,14 +734,14 @@ Test-Assert ($script:chapterCompleteCount14 -eq 1) ("ChapterCompleteCallback sti
 Write-Host ""
 
 # ==============================================================================
-#  Scenario 15 (2026-09-22, the "magick identify times out" Todo item):
+#  Scenario 15 (the "magick identify times out" problem):
 #  Initialize-ChildProcessReadThreadPool keeps a short-lived process's
 #  stream reads from starving behind long-running ones. Every child process
 #  in this project gets two ReadToEndAsync readers; on .NET Framework a
 #  redirected pipe is a synchronous handle, so each reader pins a
 #  thread-pool worker until the child exits. Once more readers are pinned
 #  than the pool's floor (default = core count), a new reader waits on the
-#  pool's slow thread injection - measured live at 8-30s for an identify
+#  pool's slow thread injection - measured at 8-30s for an identify
 #  call that had already exited in ~200ms. Runs in a child powershell.exe
 #  so it gets a fresh, untouched thread pool. Blockers are ping.exe (a
 #  cheap long-lived console process; waitfor.exe does NOT work here - its
@@ -882,7 +863,7 @@ Test-Assert ($sw16c.Elapsed.TotalSeconds -lt 15) ("16c: cancellation still ends 
 Write-Host ""
 
 # ==============================================================================
-#  Scenario 17 (2026-10-12): the force-kill path with a REAL process returns
+#  Scenario 17: the force-kill path with a REAL process returns
 #  exactly one result object. Every other scenario's fake jobs carry
 #  Proc = $null, so the kill/WaitForExit lines never actually ran here -
 #  which is how an uncaptured $job.Proc.WaitForExit(5000) (returns bool)
@@ -914,7 +895,7 @@ $cts17.Dispose()
 Write-Host ""
 
 # ==============================================================================
-#  Scenario 18 (2026-10-12): output emitted by the callbacks whose result
+#  Scenario 18: output emitted by the callbacks whose result
 #  isn't used (-ChapterCompleteCallback, -AbortPollCallback, -JobAbortCleanup)
 #  does not leak into Invoke-ChapterDispatch's return value. Same class as
 #  Scenario 17's WaitForExit leak. 18 is a clean run; 18b is the abort path
