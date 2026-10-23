@@ -20,7 +20,8 @@ function New-StatsTracker {
 function Format-ElapsedTime {
     param([Parameter(Mandatory)][timespan]$Elapsed)
 
-    return ("{0:D2}h {1:D2}m {2:D2}s" -f $Elapsed.Hours, $Elapsed.Minutes, $Elapsed.Seconds)
+    # Total hours, not .Hours: a run longer than a day must not wrap (25h -> "01h").
+    return ("{0:D2}h {1:D2}m {2:D2}s" -f [int][Math]::Floor($Elapsed.TotalHours), $Elapsed.Minutes, $Elapsed.Seconds)
 }
 
 function Get-SummaryLines {

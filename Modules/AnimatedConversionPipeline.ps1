@@ -340,6 +340,11 @@ function Invoke-LooseAnimatedConversionPipeline {
         $chapterProviderState = @{ SeriesExhausted = $false }
         $chapterProvider = {
             while ($chapterQueue.Count -eq 0 -and -not $chapterProviderState.SeriesExhausted) {
+                # Stop walking new series once an abort is in progress, as
+                # Image Conversion's provider does. Reads the flag directly:
+                # announcing the abort and cancelling the run stay with the
+                # dispatch loop's abort-poll callback.
+                if ([ConsoleCtrl]::AbortRequested) { $chapterProviderState.SeriesExhausted = $true; break }
                 $series = & $seriesProvider
                 if ($null -eq $series) { $chapterProviderState.SeriesExhausted = $true; break }
                 $totals.SeriesCount++

@@ -1070,6 +1070,25 @@ Write-Host ""
 #  DOCUMENTED DUPLICATE of ImageConversionPipeline.Harness.ps1's own Scenario AN -
 #  keep both in sync.
 # ==============================================================================
+#  Scenario AO: with an abort already in progress, the chapter provider
+#  doesn't walk into any series (same as Image Conversion's provider).
+# ==============================================================================
+Write-Host "=== Scenario AO: abort in progress -> no series walked ===" -ForegroundColor Cyan
+foreach ($seriesAO in @("Series One", "Series Two")) {
+    $chAO = New-Dir ("scenario-ao\" + $seriesAO + "\Chapter 1")
+    New-FakeAvifIn -DirPath $chAO -Name "anim.avif" | Out-Null
+}
+[ConsoleCtrl]::AbortRequested = $true
+try {
+    $totalsAO = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-ao") -MagickExe $fakeMagickExe -AnimatedThreads 2 -FullLogging $false
+} finally {
+    Reset-AbortState
+}
+Test-Assert ($totalsAO.SeriesCount -eq 0 -and $totalsAO.ConvertedSuccess -eq 0) ("no series is walked once an abort is in progress (got SeriesCount=" + $totalsAO.SeriesCount + ")")
+Test-Assert ($totalsAO.Aborted -eq $true) "the run reports itself as aborted"
+Write-Host ""
+
+# ==============================================================================
 Write-Host "=== Scenario AN: a stuck or failed output-stream read does not stall or crash job finalize ===" -ForegroundColor Cyan
 $dirAN = New-Dir "scenario-an"
 function New-StreamJobAN {

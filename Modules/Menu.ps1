@@ -294,11 +294,11 @@ function Show-OptionsMenuLevel {
             'Int' {
                 $rangeText = Get-OptionsIntRangeText -Item $match
                 $promptMessage = $match.Label + " " + $rangeText + ", currently " + $Settings[$match.SettingsKey] + ". Enter new value (blank to cancel)"
-                $input = (& $PromptFunc $promptMessage).Trim()
-                if ([string]::IsNullOrEmpty($input)) { continue }
+                $enteredValue = (& $PromptFunc $promptMessage).Trim()   # not $input: that name is a PowerShell automatic variable
+                if ([string]::IsNullOrEmpty($enteredValue)) { continue }
 
                 $parsed = 0
-                if ([int]::TryParse($input, [ref]$parsed) -and $parsed -ge $match.Min -and $parsed -le $match.Max) {
+                if ([int]::TryParse($enteredValue, [ref]$parsed) -and $parsed -ge $match.Min -and $parsed -le $match.Max) {
                     $Settings[$match.SettingsKey] = $parsed
                     Export-ScriptSettings -Settings $Settings -Path $SettingsPath
                 } else {

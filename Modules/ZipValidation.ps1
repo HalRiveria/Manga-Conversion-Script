@@ -10,7 +10,13 @@ function Test-ZipArchive {
         [bool]$RequireJxlEntry = $true
     )
 
-    $archive    = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+    # Inside its own try so a missing, locked or corrupt file gets a message
+    # naming the zip, not a bare .NET exception.
+    try {
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+    } catch {
+        throw ("Could not open '" + $ZipPath + "' to verify it (missing, locked by another program, or not a valid zip): " + $_.Exception.Message)
+    }
     $entryCount = 0
     $jxlCount   = 0
     try {

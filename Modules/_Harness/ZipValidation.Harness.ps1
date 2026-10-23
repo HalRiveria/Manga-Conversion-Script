@@ -163,6 +163,16 @@ Test-Assert ([bool]$attrI.Mandatory) "-ZipPath is Mandatory on Test-ZipArchive"
 Write-Host ""
 
 # ==============================================================================
+#  Scenario F: a zip that can't be opened gets a message naming it
+# ==============================================================================
+Write-Host "=== Scenario F: missing zip -> clear error naming the file ===" -ForegroundColor Cyan
+$missingF = Join-Path ([System.IO.Path]::GetTempPath()) ("no-such-" + [guid]::NewGuid().ToString("N") + ".zip")
+$messageF = $null
+try { $null = Test-ZipArchive -ZipPath $missingF } catch { $messageF = $_.ToString() }
+Test-Assert ($null -ne $messageF -and $messageF -like ("*Could not open '" + $missingF + "' to verify it*")) "a missing zip throws a message that names the file and says what's wrong"
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

@@ -75,7 +75,8 @@ Write-Host ""
 Write-Host "=== Scenario B: Format-ElapsedTime ===" -ForegroundColor Cyan
 Test-Assert ((Format-ElapsedTime -Elapsed ([timespan]::new(1, 2, 3))) -eq "01h 02m 03s") "1h2m3s formats zero-padded"
 Test-Assert ((Format-ElapsedTime -Elapsed ([timespan]::new(0, 0, 0))) -eq "00h 00m 00s") "zero elapsed formats as all zeros"
-Test-Assert ((Format-ElapsedTime -Elapsed ([timespan]::new(25, 5, 9))) -eq "01h 05m 09s") "a >24h TimeSpan uses .Hours (25h wraps to 1 day + 1h), matching the reference's exact behavior, not total hours"
+Test-Assert ((Format-ElapsedTime -Elapsed ([timespan]::new(25, 5, 9))) -eq "25h 05m 09s") "a run longer than a day shows its total hours (25h), not a wrapped 01h"
+Test-Assert ((Format-ElapsedTime -Elapsed ([timespan]::new(0, 59, 59) + [timespan]::FromMilliseconds(900))) -eq "00h 59m 59s") "a fraction of a second below the hour doesn't round up to the next hour"
 Write-Host ""
 
 # ==============================================================================
