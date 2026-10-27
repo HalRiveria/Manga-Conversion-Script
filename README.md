@@ -2,8 +2,9 @@
 
 A PowerShell 5.1 tool for keeping a manga library small and tidy. It converts loose chapter images to [JPEG XL](https://jpegxl.info/) (`.jxl`), converts animated AVIF files to animated WebP for mobile reader compatibility (optional), zips each finished chapter folder, and can sweep out known unwanted images (scanlator credit pages and the like) before it starts.
 
-It works on a library laid out as folders: `Library\Series\Chapter\images`.
-Everything runs from one interactive menu.
+It works on a library laid out as folders: `Library\Series\Chapter\images`. Everything runs from one interactive menu.
+
+Built with Claude Code.
 
 ## Features
 
@@ -156,7 +157,6 @@ Each one ends with `ALL PASSED` or a count of failures, and exits with 0 or 1.
 - `Conversion Script Main.ps1` only bootstraps: it finds `Modules\`, loads settings, locates `cjxl`/`magick`, and hands over to `Controller.ps1`.
 - `Modules\` holds the 18 modules, one per job (logging, deletion, zip creation, the conversion pipelines, the menu, and so on). Each is a file of plain function definitions with its own test suite in `_Harness\`.
 - [`module-descriptions.md`](module-descriptions.md) has a detailed write-up of each module: what it does, why it's built the way it is, and the problems it was built to avoid.
-- This project was developed with Claude Code as a pair programmer.
 
 ## License
 
