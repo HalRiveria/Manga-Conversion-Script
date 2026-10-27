@@ -47,7 +47,7 @@ Everything runs from one interactive menu.
 
    Or use the installers linked above. For libjxl, unzip a Windows release somewhere such as `C:\Program Files\libjxl\`.
 2. Open a new terminal so the tools are on your `PATH`.
-3. Download or clone this repository. Keep `Conversion Script Main.ps1` and the `Modules` folder together.
+3. Download the repo, install package, or clone this repository. You only need `Conversion Script Main.ps1` and the `Modules` folder.
 4. If you downloaded a ZIP and Windows blocks the scripts, unblock them once from inside the folder:
 
    ```powershell
@@ -55,6 +55,7 @@ Everything runs from one interactive menu.
    ```
 
 The script looks for `cjxl` and `magick` on your `PATH` and in the usual install folders. If it can't find one, pass the path once with `-CjxlPath` or `-MagickPath`. It remembers the location after that.
+5. Drop the `Modules` folder wherever you want it to live. Conversion Script Main can live anywhere and be run on a directory using a file path or search recursively down from the folder it's placed in.
 
 ## Usage
 
