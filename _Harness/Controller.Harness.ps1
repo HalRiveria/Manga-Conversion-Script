@@ -33,12 +33,12 @@
     identical whether real sharing happened or not.
 
 .EXAMPLE
-    .\Modules\_Harness\Controller.Harness.ps1
+    .\_Harness\Controller.Harness.ps1
 #>
 
 $ErrorActionPreference = "Stop"
 
-$modulesDir = Join-Path $PSScriptRoot ".."
+$modulesDir = Join-Path $PSScriptRoot "..\Modules"
 . (Join-Path $modulesDir "Logging.ps1")
 . (Join-Path $modulesDir "FileDeletion.ps1")
 . (Join-Path $modulesDir "ZipCreation.ps1")

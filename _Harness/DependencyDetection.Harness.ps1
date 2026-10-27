@@ -11,12 +11,12 @@
     need them either, by design).
 
 .EXAMPLE
-    .\Modules\_Harness\DependencyDetection.Harness.ps1
+    .\_Harness\DependencyDetection.Harness.ps1
 #>
 
 $ErrorActionPreference = "Stop"
 
-. (Join-Path $PSScriptRoot "..\DependencyDetection.ps1")
+. (Join-Path $PSScriptRoot "..\Modules\DependencyDetection.ps1")
 
 $script:passCount = 0
 $script:failCount = 0

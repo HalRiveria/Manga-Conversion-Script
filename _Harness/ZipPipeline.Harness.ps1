@@ -20,12 +20,12 @@
     undefined).
 
 .EXAMPLE
-    .\Modules\_Harness\ZipPipeline.Harness.ps1
+    .\_Harness\ZipPipeline.Harness.ps1
 #>
 
 $ErrorActionPreference = "Stop"
 
-$modulesDir = Join-Path $PSScriptRoot ".."
+$modulesDir = Join-Path $PSScriptRoot "..\Modules"
 . (Join-Path $modulesDir "FileDeletion.ps1")
 . (Join-Path $modulesDir "ZipCreation.ps1")
 . (Join-Path $modulesDir "ZipValidation.ps1")

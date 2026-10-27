@@ -11,12 +11,12 @@
     module built first.
 
 .EXAMPLE
-    .\Modules\_Harness\Config.Harness.ps1
+    .\_Harness\Config.Harness.ps1
 #>
 
 $ErrorActionPreference = "Stop"
 
-. (Join-Path $PSScriptRoot "..\Config.ps1")
+. (Join-Path $PSScriptRoot "..\Modules\Config.ps1")
 
 $script:logCalls = New-Object System.Collections.Generic.List[string]
 function Write-Log {

@@ -13,15 +13,15 @@
     Remove-ItemPermanently's behavior.
 
 .EXAMPLE
-    .\Modules\_Harness\FileDeletion.Harness.ps1
+    .\_Harness\FileDeletion.Harness.ps1
 #>
 
 $ErrorActionPreference = "Stop"
 
 # Real Logging.ps1 for Get-WorkerRunspaceValue (Remove-Source's Permanent
 # Delete lookup) - Scenario P needs the real $global: fallback, not a stub.
-. (Join-Path $PSScriptRoot "..\Logging.ps1")
-. (Join-Path $PSScriptRoot "..\FileDeletion.ps1")
+. (Join-Path $PSScriptRoot "..\Modules\Logging.ps1")
+. (Join-Path $PSScriptRoot "..\Modules\FileDeletion.ps1")
 
 $script:passCount = 0
 $script:failCount = 0

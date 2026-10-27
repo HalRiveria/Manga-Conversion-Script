@@ -137,16 +137,16 @@ Fix the cause and run it again. Finished chapters are skipped.
 
 ## Testing
 
-Each module has its own test suite in `Modules\_Harness\`. They use small stand-in `cjxl`/`magick` programs built on the fly, so they don't need the real tools or any images. Run one directly:
+Each module has its own test suite in `_Harness\`. They use small stand-in `cjxl`/`magick` programs built on the fly, so they don't need the real tools or any images. Run one directly:
 
 ```powershell
-powershell -NoProfile -File .\Modules\_Harness\Controller.Harness.ps1
+powershell -NoProfile -File .\_Harness\Controller.Harness.ps1
 ```
 
 or all of them:
 
 ```powershell
-Get-ChildItem .\Modules\_Harness\*.Harness.ps1 | ForEach-Object { powershell -NoProfile -File $_.FullName }
+Get-ChildItem .\_Harness\*.Harness.ps1 | ForEach-Object { powershell -NoProfile -File $_.FullName }
 ```
 
 Each one ends with `ALL PASSED` or a count of failures, and exits with 0 or 1.
@@ -154,7 +154,7 @@ Each one ends with `ALL PASSED` or a count of failures, and exits with 0 or 1.
 ## How it's put together
 
 - `Conversion Script Main.ps1` only bootstraps: it finds `Modules\`, loads settings, locates `cjxl`/`magick`, and hands over to `Controller.ps1`.
-- `Modules\` holds the 18 modules, one per job (logging, deletion, zip creation, the conversion pipelines, the menu, and so on). Each is a file of plain function definitions with its own test suite in `Modules\_Harness\`.
+- `Modules\` holds the 18 modules, one per job (logging, deletion, zip creation, the conversion pipelines, the menu, and so on). Each is a file of plain function definitions with its own test suite in `_Harness\`.
 - [`module-descriptions.md`](module-descriptions.md) has a detailed write-up of each module: what it does, why it's built the way it is, and the problems it was built to avoid.
 - This project was developed with Claude Code as a pair programmer.
 

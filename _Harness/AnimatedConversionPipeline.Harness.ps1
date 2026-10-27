@@ -27,12 +27,12 @@
     (lossless vs quality) were actually passed.
 
 .EXAMPLE
-    .\Modules\_Harness\AnimatedConversionPipeline.Harness.ps1
+    .\_Harness\AnimatedConversionPipeline.Harness.ps1
 #>
 
 $ErrorActionPreference = "Stop"
 
-$modulesDirAC = Join-Path $PSScriptRoot ".."
+$modulesDirAC = Join-Path $PSScriptRoot "..\Modules"
 $script:logCalls = New-Object System.Collections.Generic.List[string]
 function Write-Log {
     param([string]$Message, [string]$Level = "Info")

@@ -12,12 +12,12 @@
     hash/dimensions, not invented.
 
 .EXAMPLE
-    .\Modules\_Harness\UnwantedImage.Harness.ps1
+    .\_Harness\UnwantedImage.Harness.ps1
 #>
 
 $ErrorActionPreference = "Stop"
 
-. (Join-Path $PSScriptRoot "..\UnwantedImage.ps1")
+. (Join-Path $PSScriptRoot "..\Modules\UnwantedImage.ps1")
 
 # Fake, not the real AbortPipeline.ps1 (for the abort-
 # poll in Invoke-UnwantedImageScan's own scan loop) - this harness's own

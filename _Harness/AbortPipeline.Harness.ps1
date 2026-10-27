@@ -16,7 +16,7 @@
     poll interval, not perfectly deterministic - see its comment.
 
 .EXAMPLE
-    .\Modules\_Harness\AbortPipeline.Harness.ps1
+    .\_Harness\AbortPipeline.Harness.ps1
 #>
 
 $ErrorActionPreference = "Stop"
@@ -25,8 +25,8 @@ $ErrorActionPreference = "Stop"
 # (Get-WorkerRunspaceValue) - the real one, since its $global: fallback is
 # exactly what Scenario A3 exercises. Its Flush-ConsoleQueue is overridden
 # by the call-tracking stub below.
-. (Join-Path $PSScriptRoot "..\Logging.ps1")
-. (Join-Path $PSScriptRoot "..\AbortPipeline.ps1")
+. (Join-Path $PSScriptRoot "..\Modules\Logging.ps1")
+. (Join-Path $PSScriptRoot "..\Modules\AbortPipeline.ps1")
 
 function Flush-ConsoleQueue {
     param([System.Collections.Concurrent.ConcurrentQueue[object]]$Queue)
@@ -276,7 +276,7 @@ $assigned = [ChildProcessJob]::Assign($child)
 function Invoke-A4ForceKillRun {
     param([bool]$UseJob)
     $pidFile = Join-Path ([System.IO.Path]::GetTempPath()) ("abortpipeline-harness-jobpid-" + [guid]::NewGuid().ToString("N") + ".txt")
-    $argList = '-NoProfile -ExecutionPolicy Bypass -File "' + $a4Script + '" -ModulePath "' + (Join-Path $PSScriptRoot "..\AbortPipeline.ps1") + '" -PidFile "' + $pidFile + '"'
+    $argList = '-NoProfile -ExecutionPolicy Bypass -File "' + $a4Script + '" -ModulePath "' + (Join-Path $PSScriptRoot "..\Modules\AbortPipeline.ps1") + '" -PidFile "' + $pidFile + '"'
     if (-not $UseJob) { $argList += ' -NoJob' }
     $parentPsi = [System.Diagnostics.ProcessStartInfo]::new('powershell.exe', $argList)
     $parentPsi.UseShellExecute = $false; $parentPsi.CreateNoWindow = $true

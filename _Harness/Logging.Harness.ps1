@@ -8,12 +8,12 @@
     behavior, not a guess at it.
 
 .EXAMPLE
-    .\Modules\_Harness\Logging.Harness.ps1
+    .\_Harness\Logging.Harness.ps1
 #>
 
 $ErrorActionPreference = "Stop"
 
-. (Join-Path $PSScriptRoot "..\Logging.ps1")
+. (Join-Path $PSScriptRoot "..\Modules\Logging.ps1")
 
 $script:passCount = 0
 $script:failCount = 0

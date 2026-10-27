@@ -35,12 +35,12 @@
     content-generation functions considered alone.
 
 .EXAMPLE
-    .\Modules\_Harness\CleanConsoleRendering.Harness.ps1
+    .\_Harness\CleanConsoleRendering.Harness.ps1
 #>
 
 $ErrorActionPreference = "Stop"
 
-. (Join-Path $PSScriptRoot "..\CleanConsoleRendering.ps1")
+. (Join-Path $PSScriptRoot "..\Modules\CleanConsoleRendering.ps1")
 
 $script:passCount = 0
 $script:failCount = 0

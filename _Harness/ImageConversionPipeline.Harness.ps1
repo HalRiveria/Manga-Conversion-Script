@@ -33,12 +33,12 @@
     the call even started would never exercise the pipeline's own abort path).
 
 .EXAMPLE
-    .\Modules\_Harness\ImageConversionPipeline.Harness.ps1
+    .\_Harness\ImageConversionPipeline.Harness.ps1
 #>
 
 $ErrorActionPreference = "Stop"
 
-$modulesDir = Join-Path $PSScriptRoot ".."
+$modulesDir = Join-Path $PSScriptRoot "..\Modules"
 . (Join-Path $modulesDir "FileDeletion.ps1")
 . (Join-Path $modulesDir "AbortPipeline.ps1")
 . (Join-Path $modulesDir "LeafDirectoryDiscovery.ps1")
@@ -391,7 +391,7 @@ $expectedExtA0 = @(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif", "
 $actualExtA0 = @(Get-LooseImageExtensions)
 Test-Assert (($actualExtA0 -join ",") -eq ($expectedExtA0 -join ",")) ("Get-LooseImageExtensions returns the expected 11-element list in order (got: " + ($actualExtA0 -join ",") + ")")
 
-$animatedPipelinePath = Join-Path $PSScriptRoot "..\AnimatedConversionPipeline.ps1"
+$animatedPipelinePath = Join-Path $PSScriptRoot "..\Modules\AnimatedConversionPipeline.ps1"
 $animatedPipelineSource = Get-Content -LiteralPath $animatedPipelinePath -Raw
 $expectedLiteral = '@(".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".avif", ".gif", ".bmp", ".heic", ".heif")'
 Test-Assert ($animatedPipelineSource.Contains($expectedLiteral)) "AnimatedConversionPipeline.ps1's own deliberately-kept-literal still matches the canonical list exactly (not drifted)"
@@ -419,7 +419,7 @@ Test-Assert (Test-OrphanedScratchFileName -Name "photo_tmp_tiff2png.png") "'_tmp
 Test-Assert (Test-OrphanedScratchFileName -Name "anim_tmp_overwrite.webp") "'_tmp_overwrite.webp' matches"
 Test-Assert (-not (Test-OrphanedScratchFileName -Name "page1.jpg")) "a genuine loose image does NOT match"
 
-$zipPipelinePath   = Join-Path $PSScriptRoot "..\ZipPipeline.ps1"
+$zipPipelinePath   = Join-Path $PSScriptRoot "..\Modules\ZipPipeline.ps1"
 $zipPipelineSource = Get-Content -LiteralPath $zipPipelinePath -Raw
 foreach ($patternA0b in @('_tmp_iccstrip(-\d+)?\.png$', '_tmp_(webp|avif|bmp|heic|heif|tiff)2png\.png$', '_tmp_overwrite\.webp$')) {
     Test-Assert ($zipPipelineSource.Contains($patternA0b)) ("ZipPipeline.ps1's own deliberately-kept-literal still contains pattern '" + $patternA0b + "' (not drifted)")

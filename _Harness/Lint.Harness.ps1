@@ -6,7 +6,7 @@
     (or, for Rule 5, real AST parsing) instead of by a live-debugging
     session.
 
-    Scans Modules\*.ps1 and Tools\*.ps1 (not _Harness or _Reference).
+    Scans Modules\*.ps1 and Tools\*.ps1 (not the harnesses or old script references).
 
     Suppressing a finding, when the code is deliberately written that way:
       - put "# lint:ignore" on the offending line, or
@@ -21,7 +21,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$projectRoot = Split-Path -Parent $PSScriptRoot
 
 # file (leaf name) + rule + why. Anything listed here is a KNOWN, decided
 # case - not a backlog. If it isn't deliberate, fix the code instead.

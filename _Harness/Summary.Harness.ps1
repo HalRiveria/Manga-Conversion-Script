@@ -8,12 +8,12 @@
     module doesn't need the real Logging.ps1 built/working to be tested.
 
 .EXAMPLE
-    .\Modules\_Harness\Summary.Harness.ps1
+    .\_Harness\Summary.Harness.ps1
 #>
 
 $ErrorActionPreference = "Stop"
 
-. (Join-Path $PSScriptRoot "..\Summary.ps1")
+. (Join-Path $PSScriptRoot "..\Modules\Summary.ps1")
 
 $script:writeLogCalls = New-Object System.Collections.Generic.List[object]
 function Write-Log {

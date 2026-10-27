@@ -17,12 +17,12 @@
     under-scripted scenario fails loudly instead of hanging.
 
 .EXAMPLE
-    .\Modules\_Harness\Menu.Harness.ps1
+    .\_Harness\Menu.Harness.ps1
 #>
 
 $ErrorActionPreference = "Stop"
 
-. (Join-Path $PSScriptRoot "..\Config.ps1")
+. (Join-Path $PSScriptRoot "..\Modules\Config.ps1")
 # Logging.ps1/FileDeletion.ps1 dot-sourced too (for the scenario covering
 # the PermanentDelete/CleanConsoleOutput re-sync on
 # Show-ModeMenu's '5' branch) - just for their real, trivial
@@ -30,16 +30,16 @@ $ErrorActionPreference = "Stop"
 # Menu.ps1 forward-references. Write-Log below is stubbed AFTER this,
 # overriding Logging.ps1's real one - this
 # harness never touches a real log file.
-. (Join-Path $PSScriptRoot "..\Logging.ps1")
-. (Join-Path $PSScriptRoot "..\FileDeletion.ps1")
+. (Join-Path $PSScriptRoot "..\Modules\Logging.ps1")
+. (Join-Path $PSScriptRoot "..\Modules\FileDeletion.ps1")
 # AbortPipeline.ps1 dot-sourced too (for the real
 # Set-AbortHandlerRunActive/Complete-AbortDrain calls Show-ModeMenu's '5'
 # branch makes - see its own comment in Menu.ps1).
 # Same "real module, not stubbed" reasoning as Logging.ps1/FileDeletion.ps1
 # above - this harness needs the real [ConsoleCtrl]::RunActive/DrainComplete
 # state to assert against, not a fake.
-. (Join-Path $PSScriptRoot "..\AbortPipeline.ps1")
-. (Join-Path $PSScriptRoot "..\Menu.ps1")
+. (Join-Path $PSScriptRoot "..\Modules\AbortPipeline.ps1")
+. (Join-Path $PSScriptRoot "..\Modules\Menu.ps1")
 
 $script:logCalls = New-Object System.Collections.Generic.List[string]
 function Write-Log {

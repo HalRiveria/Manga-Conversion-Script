@@ -22,7 +22,7 @@
     shape in a scratch temp directory.
 
 .EXAMPLE
-    .\Modules\_Harness\LeafDirectoryDiscovery.Harness.ps1
+    .\_Harness\LeafDirectoryDiscovery.Harness.ps1
 #>
 
 $ErrorActionPreference = "Stop"
@@ -43,9 +43,9 @@ function Flush-ConsoleQueue { param($Queue) }   # no-op; nothing gets queued (Sh
 function Initialize-LogMutex { param([string]$PathHash) $script:logMutex = $null }
 function Invoke-GracefulDrain { param($Handles, $ResultHandler, $ConsoleQueue, $ErrorHandler, $TimeoutSeconds, $AbortWaitMessage) return @{ ForceStoppedCount = 0 } }   # never actually exercised - Scenario O never aborts
 
-. (Join-Path $PSScriptRoot "..\ZipParallelProcessing.ps1")
+. (Join-Path $PSScriptRoot "..\Modules\ZipParallelProcessing.ps1")
 
-. (Join-Path $PSScriptRoot "..\LeafDirectoryDiscovery.ps1")
+. (Join-Path $PSScriptRoot "..\Modules\LeafDirectoryDiscovery.ps1")
 
 $script:passCount = 0
 $script:failCount = 0

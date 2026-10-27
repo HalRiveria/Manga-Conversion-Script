@@ -23,7 +23,7 @@ The rest are shared building blocks:
 - **Output:** `Logging.ps1` writes the console and log files; `CleanConsoleRendering.ps1` draws the optional live progress view; `Summary.ps1` prints the end-of-run report.
 - **Setup:** `Config.ps1` (settings), `DependencyDetection.ps1` (finding cjxl/magick).
 
-Every module is a file of function (and type) definitions with no side effects when loaded, and each has a test suite in `Modules\_Harness\`.
+Every module is a file of function (and type) definitions with no side effects when loaded, and each has a test suite in `_Harness\`.
 
 ## Rules for code that runs in worker runspaces
 
@@ -33,7 +33,7 @@ Zip Folders' workers and Full Pipeline's two engines run in separate PowerShell 
 2. **Don't call cmdlets; use .NET calls.** Two fresh runspaces calling the same cmdlet for the first time at the same moment can deadlock in Windows PowerShell 5.1.
 3. **Don't hand a scriptblock to .NET as a delegate** (`[Func[...]]{ }`, or a scriptblock passed to a .NET method such as `ConcurrentDictionary.GetOrAdd`). Nested, these deadlock.
 
-A runspace starts with only the functions it's given, so a function a worker calls must be in its caller's `-SharedFunctionNames` list (built from each module's `Get-...SharedFunctionNames`). `Modules\_Harness\Lint.Harness.ps1` checks all of this.
+A runspace starts with only the functions it's given, so a function a worker calls must be in its caller's `-SharedFunctionNames` list (built from each module's `Get-...SharedFunctionNames`). `_Harness\Lint.Harness.ps1` checks all of this.
 
 ---
 
@@ -504,7 +504,7 @@ A shared runspace-pool dispatcher. It runs a worker scriptblock once per job in 
 
 **Things to watch out for**
 
-- Worker code runs in a separate runspace with no access to the caller's `$script:` variables, no caller-defined functions beyond `-SharedFunctionNames`, and no closures from the caller. Everything a worker needs must arrive through its job parameters. A function listed in `-SharedFunctionNames` that calls another user-defined function not on the list fails with "term not recognized" at run time. Each module that owns such a group exports a `Get-...SharedFunctionNames` getter, and `Modules\_Harness\Lint.Harness.ps1` checks the call graph for gaps.
+- Worker code runs in a separate runspace with no access to the caller's `$script:` variables, no caller-defined functions beyond `-SharedFunctionNames`, and no closures from the caller. Everything a worker needs must arrive through its job parameters. A function listed in `-SharedFunctionNames` that calls another user-defined function not on the list fails with "term not recognized" at run time. Each module that owns such a group exports a `Get-...SharedFunctionNames` getter, and `_Harness\Lint.Harness.ps1` checks the call graph for gaps.
 - `-WorkerScript` itself is passed as a script block, so it also can't capture the caller's variables. Pass state as job parameters (thread-safe collections, semaphores and so on, which are shared by reference).
 - The stop and close calls on an abandoned worker are the asynchronous versions (`BeginStop`, `BeginClose`) on purpose. A worker blocked inside a .NET call can't be interrupted, and `Stop`, `Dispose` and `Close` would all wait for it, so a plain call would hang the run.
 - `-ResultHandler`, `-PollCallback` and `-JobCrashedHandler` all run on the main thread. `-PollCallback` is also where Full Pipeline drains its event queue and does per-chapter zipping, so a slow callback slows polling for every worker.
@@ -774,7 +774,7 @@ The menu is: 1 Full Pipeline, 2 Image Conversion, 3 Animated Conversion, 4 Zip F
 
 **How it works**
 
-- Every prompt goes through a `-PromptFunc` scriptblock (default: `Read-Host`). Screen clearing, the options-menu actions, and every Cover Deletion step (run, add image, trailing-zero audit, open folder) are also injectable scriptblocks. This lets `Modules\_Harness\Menu.Harness.ps1` drive whole menu sessions with canned input.
+- Every prompt goes through a `-PromptFunc` scriptblock (default: `Read-Host`). Screen clearing, the options-menu actions, and every Cover Deletion step (run, add image, trailing-zero audit, open folder) are also injectable scriptblocks. This lets `_Harness\Menu.Harness.ps1` drive whole menu sessions with canned input.
 - Options menu layout: 1 Full Pipeline Settings, 2 Image Conversion Settings, 3 Animated Conversion Settings, 4 Zip Settings, 5 Logging (Full Logging, Disable Summary File, Clean Console Output), 6 Permanent Delete, 7 Open Settings File Location. Adding an option means editing the schema, not the loop.
 - Every Bool toggle and accepted Int value is applied to the in-memory `$Settings` hashtable and written to the settings file immediately through `Export-ScriptSettings`. A blank Int entry cancels; a non-number or out-of-range entry shows "Invalid value." and changes nothing.
 - All three menu loops (`Show-ModeMenu`, `Show-OptionsMenuLevel`, `Show-CoverDeletionMenu`) clear the screen before redrawing, and show a one-shot yellow notice such as "Invalid selection." under the menu. Clearing is skipped when output is redirected.

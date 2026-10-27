@@ -9,14 +9,14 @@
     established harness philosophy).
 
 .EXAMPLE
-    .\Modules\_Harness\ZipValidation.Harness.ps1
+    .\_Harness\ZipValidation.Harness.ps1
 #>
 
 $ErrorActionPreference = "Stop"
 
 Add-Type -AssemblyName "System.IO.Compression"   # ZipArchiveMode, for this harness's own New-TestZip helper
 
-. (Join-Path $PSScriptRoot "..\ZipValidation.ps1")
+. (Join-Path $PSScriptRoot "..\Modules\ZipValidation.ps1")
 
 $script:passCount = 0
 $script:failCount = 0

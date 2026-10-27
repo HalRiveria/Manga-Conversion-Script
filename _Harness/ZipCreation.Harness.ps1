@@ -11,7 +11,7 @@
     must stay standalone-testable without either dependency existing.
 
 .EXAMPLE
-    .\Modules\_Harness\ZipCreation.Harness.ps1
+    .\_Harness\ZipCreation.Harness.ps1
 #>
 
 $ErrorActionPreference = "Stop"
@@ -37,7 +37,7 @@ function Remove-ItemPermanently {
 $script:PermanentDelete = $false
 function Get-WorkerRunspaceValue { param($Name) if ($Name -eq 'PermanentDelete') { return [bool]$script:PermanentDelete }; return $null }
 
-. (Join-Path $PSScriptRoot "..\ZipCreation.ps1")
+. (Join-Path $PSScriptRoot "..\Modules\ZipCreation.ps1")
 
 $script:passCount = 0
 $script:failCount = 0

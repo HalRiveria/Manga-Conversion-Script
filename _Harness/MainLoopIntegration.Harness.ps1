@@ -45,13 +45,13 @@
     proven, with real pipeline engines, by Controller.Harness.ps1 itself.
 
 .EXAMPLE
-    .\Modules\_Harness\MainLoopIntegration.Harness.ps1
+    .\_Harness\MainLoopIntegration.Harness.ps1
 #>
 
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
 
-$modulesDir = Join-Path $PSScriptRoot ".."
+$modulesDir = Join-Path $PSScriptRoot "..\Modules"
 . (Join-Path $modulesDir "Config.ps1")
 . (Join-Path $modulesDir "Logging.ps1")
 . (Join-Path $modulesDir "FileDeletion.ps1")

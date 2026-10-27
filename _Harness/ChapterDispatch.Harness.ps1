@@ -22,7 +22,7 @@
     dependency).
 
 .EXAMPLE
-    .\Modules\_Harness\ChapterDispatch.Harness.ps1
+    .\_Harness\ChapterDispatch.Harness.ps1
 #>
 
 $ErrorActionPreference = "Stop"
@@ -33,9 +33,9 @@ function Write-Log {
     # own control flow, not real logging output.
 }
 
-. (Join-Path $PSScriptRoot "..\AbortPipeline.ps1")
-. (Join-Path $PSScriptRoot "..\LeafDirectoryDiscovery.ps1")
-. (Join-Path $PSScriptRoot "..\ChapterDispatch.ps1")
+. (Join-Path $PSScriptRoot "..\Modules\AbortPipeline.ps1")
+. (Join-Path $PSScriptRoot "..\Modules\LeafDirectoryDiscovery.ps1")
+. (Join-Path $PSScriptRoot "..\Modules\ChapterDispatch.ps1")
 
 $script:passCount = 0
 $script:failCount = 0
@@ -773,7 +773,7 @@ try {
     foreach ($b in $pinned) { try { $b.P.Kill() } catch { } }
 }
 '@)
-$out15 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $probeScript15 -ModulePath (Join-Path $PSScriptRoot "..\ChapterDispatch.ps1")
+$out15 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $probeScript15 -ModulePath (Join-Path $PSScriptRoot "..\Modules\ChapterDispatch.ps1")
 Remove-Item -LiteralPath $probeScript15 -Force -ErrorAction SilentlyContinue
 $result15 = @($out15 | Where-Object { "$_" -like "RESULT *" }) -join ""
 Test-Assert ($result15 -like "RESULT done=True*") ("with the floor raised, an exited process's stream reads finish within 3s despite 2x-cores+8 pinned readers (got '" + $result15 + "')")

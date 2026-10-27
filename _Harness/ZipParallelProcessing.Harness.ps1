@@ -33,8 +33,8 @@
     (A, B, D - a few seconds total).
 
 .EXAMPLE
-    .\Modules\_Harness\ZipParallelProcessing.Harness.ps1
-    .\Modules\_Harness\ZipParallelProcessing.Harness.ps1 -RunSlowTest
+    .\_Harness\ZipParallelProcessing.Harness.ps1
+    .\_Harness\ZipParallelProcessing.Harness.ps1 -RunSlowTest
 #>
 
 param(
@@ -43,7 +43,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$modulesDir = Join-Path $PSScriptRoot ".."
+$modulesDir = Join-Path $PSScriptRoot "..\Modules"
 . (Join-Path $modulesDir "AbortPipeline.ps1")
 . (Join-Path $modulesDir "Logging.ps1")
 . (Join-Path $modulesDir "ZipParallelProcessing.ps1")
