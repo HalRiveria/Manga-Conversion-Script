@@ -68,9 +68,9 @@ Without `-Path`, it works on the current folder.
 
 **OR**
 
-Drop Conversion Script Main in the same folder as your Series, or in a folder above, then run with Powershell. C:\Manga Library\Completed Series\Series\Chapters\Images.
-- Conversion Script Main will work in Manga Library (Alongside the Completed Series folder), in Completed Series (alongside the Series folders), but not *inside* a Series folder (alongside the Chapters folders).
-Point the script to your Modules folder (located anywhere on your PC). The script will prompt for the location if one isn't already in the settings file.
+1. Drop Conversion Script Main in the same folder as your Series, or in a folder above, then run with Powershell. (e.g., C:\Manga Library\Completed Series\Series\Chapters\Images)
+    - Conversion Script Main will work in Manga Library (Alongside the Completed Series folder), in Completed Series (alongside the Series folders), but not *inside* a Series folder (alongside the Chapters folders).
+2. Point the script to your Modules folder (located anywhere on your PC). The script will prompt for the location if one isn't already in the settings file.
 
 ### Library layout
 
