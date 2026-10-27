@@ -256,10 +256,16 @@ class Program {
             return 0;
         }
 
-        string src = args[0];
+        string src = Regex.Replace(args[0], "\\[\\d+\\]$", "");
         string dst = args[args.Length - 1];
         string srcContent = File.Exists(src) ? File.ReadAllText(src) : "";
 
+        if (srcContent.Contains("FAIL_MAGICK_PARTIAL")) {
+            // Leaves a truncated output behind, like a real magick dying mid-write.
+            File.WriteAllText(dst, "partial");
+            Console.Error.WriteLine("simulated magick failure after a partial write");
+            return 1;
+        }
         if (srcContent.Contains("FAIL_MAGICK")) {
             Console.Error.WriteLine("simulated magick conversion failure");
             return 1;
@@ -2662,6 +2668,74 @@ Add-FullPipelineZipBlockReason -Dict $reasonsHX -ChapterKey $keyHX -Reason "nami
 Add-FullPipelineZipBlockReason -Dict $reasonsHX -ChapterKey $keyHX -Reason "AVIF classification failure"
 Add-FullPipelineZipBlockReason -Dict $reasonsHX -ChapterKey $keyHX -Reason "naming collision"
 Test-Assert ($reasonsHX[$keyHX] -eq "naming collision, AVIF classification failure") ("zip-block reasons append once each (got '" + $reasonsHX[$keyHX] + "')")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario CV: series covers in Full Pipeline. The series bundle (built in a
+#  worker runspace) normalises each series' cover.* to a lower-case cover.jpg
+#  before the candidate scan, so neither engine ever converts it. A cover.*
+#  inside a chapter folder is an ordinary page.
+# ==============================================================================
+Write-Host "=== Scenario CV: Full Pipeline skips and normalises series covers ===" -ForegroundColor Cyan
+$rootCV = New-Dir "scenario-cv"
+$seriesNamesCV = @("Webp", "Jpeg", "Jpg", "MixedCase", "Both", "Fail", "ChapterCover", "AnimCover")
+foreach ($n in $seriesNamesCV) { New-FakeImageIn -DirPath (New-Dir ("scenario-cv\" + $n + "\Ch1")) -Name "page1.jpg" | Out-Null }
+$sCV = @{}; foreach ($n in $seriesNamesCV) { $sCV[$n] = Join-Path $rootCV $n }
+
+[System.IO.File]::WriteAllText((Join-Path $sCV.Webp "cover.webp"), "webp cover pixels")
+[System.IO.File]::WriteAllText((Join-Path $sCV.Jpeg "Cover.JPEG"), "jpeg cover pixels")
+$jpgCV = Join-Path $sCV.Jpg "COVER.Jpg"
+[System.IO.File]::WriteAllText($jpgCV, "jpg cover pixels")
+$jpgStampCV = [datetime]::new(2020, 1, 2, 3, 4, 5, [System.DateTimeKind]::Utc)
+[System.IO.File]::SetLastWriteTimeUtc($jpgCV, $jpgStampCV)
+[System.IO.File]::WriteAllText((Join-Path $sCV.MixedCase "CoVeR.PNG"), "png cover pixels")
+[System.IO.File]::WriteAllText((Join-Path $sCV.Both "cover.jpg"), "jpg cover pixels")
+[System.IO.File]::WriteAllText((Join-Path $sCV.Both "cover.webp"), "webp cover pixels")
+[System.IO.File]::WriteAllText((Join-Path $sCV.Fail "cover.webp"), "FAIL_MAGICK_PARTIAL")
+New-FakeImageIn -DirPath (Join-Path $sCV.ChapterCover "Ch1") -Name "cover.jpg" | Out-Null
+New-FakeAvifIn -DirPath $sCV.AnimCover -Name "cover.avif" | Out-Null
+
+Initialize-LogPaths -TargetPath $rootCV -FullLogging $true -ScriptDir $scratchDir
+$logFileCV = $script:logFile
+try {
+    $totalsCV = Invoke-FullPipeline -Path $rootCV -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -FullPipelineMaxConcurrentProcs 4 -FullLogging $true -PermanentDelete $true
+} finally {
+    Initialize-LogPaths -TargetPath $scratchDir -FullLogging $false -ScriptDir $scratchDir
+}
+$logLinesCV = @(Get-Content -LiteralPath $logFileCV)
+function Read-TextOrNullCV { param([string]$Path) if ([System.IO.File]::Exists($Path)) { return [System.IO.File]::ReadAllText($Path) } return $null }
+function Get-NamesCV { param([string]$Dir) return ,@([System.IO.Directory]::GetFiles($Dir) | ForEach-Object { [System.IO.Path]::GetFileName($_) }) }
+
+Test-Assert ($totalsCV.ConvertedImageSuccess -eq 9 -and $totalsCV.ConvertedImageFail -eq 0) ("only the 8 chapter pages and the chapter-folder cover.jpg were converted (got ConvertedImageSuccess=" + $totalsCV.ConvertedImageSuccess + ", Fail=" + $totalsCV.ConvertedImageFail + ")")
+Test-Assert ($totalsCV.ConvertedAnimatedSuccess -eq 0) ("the animated series-root cover.avif was not converted to WebP (got ConvertedAnimatedSuccess=" + $totalsCV.ConvertedAnimatedSuccess + ")")
+Test-Assert ($totalsCV.ZipCreatedSuccess -eq 8) ("every chapter still zipped, including the failed cover's series (got ZipCreatedSuccess=" + $totalsCV.ZipCreatedSuccess + ")")
+Test-Assert ($totalsCV.CoverNormalizedSuccess -eq 4 -and $totalsCV.CoverNormalizedFail -eq 1) ("4 covers normalised, 1 failed (got Success=" + $totalsCV.CoverNormalizedSuccess + ", Fail=" + $totalsCV.CoverNormalizedFail + ")")
+Test-Assert (@($seriesNamesCV | Where-Object { Test-Path -LiteralPath (Join-Path $sCV[$_] "cover.jxl") }).Count -eq 0) "no series-root cover was converted to cover.jxl"
+
+$namesWebpCV = Get-NamesCV $sCV.Webp
+Test-Assert (($namesWebpCV -ccontains 'cover.jpg') -and -not ($namesWebpCV -contains 'cover.webp')) ("cover.webp was converted to cover.jpg and the original removed (files: " + ($namesWebpCV -join ', ') + ")")
+Test-Assert ((Read-TextOrNullCV (Join-Path $sCV.Webp "cover.jpg")) -like "*cover.webp[[]0[]]*-quality 95*") "magick was asked for the first frame at JPEG quality 95"
+$namesJpegCV = Get-NamesCV $sCV.Jpeg
+Test-Assert (($namesJpegCV -ccontains 'cover.jpg') -and -not ($namesJpegCV -match '(?i)\.jpeg$')) ("Cover.JPEG was renamed to lower-case cover.jpg (files: " + ($namesJpegCV -join ', ') + ")")
+Test-Assert ((Read-TextOrNullCV (Join-Path $sCV.Jpeg "cover.jpg")) -eq "jpeg cover pixels") "the rename kept the original bytes - no re-encode"
+$namesJpgCV = Get-NamesCV $sCV.Jpg
+Test-Assert ($namesJpgCV -ccontains 'COVER.Jpg') ("COVER.Jpg was left exactly as named (files: " + ($namesJpgCV -join ', ') + ")")
+Test-Assert ([System.IO.File]::GetLastWriteTimeUtc($jpgCV) -eq $jpgStampCV) "COVER.Jpg's timestamp is unchanged - not touched"
+$namesMixedCV = Get-NamesCV $sCV.MixedCase
+Test-Assert (($namesMixedCV -ccontains 'cover.jpg') -and -not ($namesMixedCV -match '(?i)\.png$')) ("CoVeR.PNG was converted to lower-case cover.jpg (files: " + ($namesMixedCV -join ', ') + ")")
+$namesAnimCV = Get-NamesCV $sCV.AnimCover
+Test-Assert (($namesAnimCV -ccontains 'cover.jpg') -and -not ($namesAnimCV -contains 'cover.avif') -and -not ($namesAnimCV -contains 'cover.webp')) ("an animated cover.avif became cover.jpg, not cover.webp (files: " + ($namesAnimCV -join ', ') + ")")
+$namesBothCV = Get-NamesCV $sCV.Both
+Test-Assert (($namesBothCV -contains 'cover.jpg') -and ($namesBothCV -contains 'cover.webp')) ("a JPEG cover plus another cover: both left alone (files: " + ($namesBothCV -join ', ') + ")")
+Test-Assert (@($logLinesCV | Where-Object { $_ -like "*[[]Warn]*\Both' has more than one cover file*" }).Count -eq 1) "and a warning was logged for it"
+$namesFailCV = Get-NamesCV $sCV.Fail
+Test-Assert (($namesFailCV -contains 'cover.webp') -and -not ($namesFailCV -contains 'cover.jpg')) ("a failed conversion leaves the original and removes the partial cover.jpg (files: " + ($namesFailCV -join ', ') + ")")
+Test-Assert (@($logLinesCV | Where-Object { $_ -like "*[[]Error]*FAILED to convert series cover*Fail*" }).Count -eq 1) "and an error was logged for it"
+
+$zipCV = [System.IO.Compression.ZipFile]::OpenRead((Join-Path $sCV.ChapterCover "Ch1.zip"))
+try { $entriesCV = @($zipCV.Entries | ForEach-Object { $_.FullName }) } finally { $zipCV.Dispose() }
+Test-Assert (($entriesCV -contains 'cover.jxl') -and -not ($entriesCV -contains 'cover.jpg')) ("a cover.jpg inside a chapter folder was converted as a page (zip entries: " + ($entriesCV -join ', ') + ")")
+Test-Assert (@($logLinesCV | Where-Object { $_ -like "*[[]Info]*series cover*" }).Count -eq 4) "one log line per cover renamed or converted"
 Write-Host ""
 
 Write-Host "==============================================="

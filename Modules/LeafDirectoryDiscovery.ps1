@@ -346,6 +346,18 @@ function Get-SeriesChapters {
     }
 }
 
+function Test-SeriesCoverFile {
+    param(
+        [Parameter(Mandatory)]
+        [System.IO.FileInfo]$File,
+        [Parameter(Mandatory)]
+        [string]$SeriesPath
+    )
+    if ([System.IO.Path]::GetFileNameWithoutExtension($File.Name) -ine 'cover') { return $false }
+    $seriesFull = [System.IO.Path]::GetFullPath($SeriesPath).TrimEnd('\', '/')
+    return $File.DirectoryName.TrimEnd('\', '/').Equals($seriesFull, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
 function Get-LeafDirectoryDiscoverySharedFunctionNames {
-    return @('New-SeriesProvider', 'Test-SeriesCategoryFolder', 'Get-SeriesChapters', 'Get-ZippableLeafDirs', 'Test-ZippableLeafDirCandidate', 'Get-FilesRecursiveSafe')
+    return @('New-SeriesProvider', 'Test-SeriesCategoryFolder', 'Get-SeriesChapters', 'Get-ZippableLeafDirs', 'Test-ZippableLeafDirCandidate', 'Get-FilesRecursiveSafe', 'Test-SeriesCoverFile')
 }

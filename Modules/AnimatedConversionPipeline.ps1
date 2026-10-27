@@ -26,9 +26,9 @@ function Test-AvifAnimated {
     $psi.RedirectStandardError  = $true
     $psi.CreateNoWindow         = $true
 
-    # DOCUMENTED DUPLICATE: Invoke-IccStripRetryOrFail in
-    # ImageConversionPipeline.ps1 uses the identical raw-handle-wait
-    # pattern below - keep both in sync.
+    # DOCUMENTED DUPLICATE: Invoke-IccStripRetryOrFail and
+    # Invoke-SeriesCoverNormalization in ImageConversionPipeline.ps1 use the
+    # identical raw-handle-wait pattern below - keep all three in sync.
     $proc = [System.Diagnostics.Process]::Start($psi)
     $null = [ChildProcessJob]::Assign($proc)  # see AbortPipeline.ps1's ChildProcessJob
     try {
@@ -54,9 +54,10 @@ function Test-AvifAnimated {
             throw "magick identify did not exit within 30s - killed"
         }
 
-        # DOCUMENTED DUPLICATE: Invoke-IccStripRetryOrFail in
-        # ImageConversionPipeline.ps1 uses the identical bounded-stream-read
-        # pattern below - keep both in sync.
+        # DOCUMENTED DUPLICATE: Invoke-IccStripRetryOrFail and
+        # Invoke-SeriesCoverNormalization in ImageConversionPipeline.ps1 use
+        # the identical bounded-stream-read pattern below - keep all three
+        # in sync.
         # 15s gives margin; the usual cause of slow reads is thread-pool
         # starvation, not a CPU-starved process (see ChapterDispatch.ps1's
         # Initialize-ChildProcessReadThreadPool).
@@ -125,6 +126,7 @@ function Get-LooseAnimatedCandidates {
     $candidates = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
     foreach ($file in (Get-FilesRecursiveSafe -ScanPath $ScanPath)) {
         if ($AnimatedFileExtensions -inotcontains $file.Extension) { continue }
+        if (Test-SeriesCoverFile -File $file -SeriesPath $ScanPath) { continue }
         $fileDir = $file.DirectoryName
         $isStaged = $false
         foreach ($stagingDir in $zipBaseDirs) {

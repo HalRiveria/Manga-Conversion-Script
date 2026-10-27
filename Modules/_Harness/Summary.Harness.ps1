@@ -94,6 +94,15 @@ Test-Assert ($blobD -match "Loose Folders Zipped") "shows the zip-after-conversi
 Test-Assert ($blobD -notmatch "ZIPs Extracted") "does not show the (unrelated) ZIP-pipeline rows"
 Test-Assert ($blobD -notmatch "Zip-only") "does not show the (unrelated) zip-only rows"
 Test-Assert ($blobD -match "Inspect Failed\s*: 3 file\(s\)") "shows Inspect Failed with the real count"
+$statsD.CoversNormalized.Success = 4; $statsD.CoversNormalized.Fail = 1
+$blobDc = (Get-SummaryLines -Stats $statsD -ElapsedString "00h 00m 05s" -ModeFlags $flagsD) -join "`n"
+Test-Assert ($blobDc -match "Covers Normalised\s*: Success = 4  \|  Failed = 1") "shows the Covers Normalised row with its counts"
+$flagsDi = Get-AllModeFlagsFalse
+$flagsDi.RunImageConversion = $true
+Test-Assert (((Get-SummaryLines -Stats (New-StatsTracker) -ElapsedString "00h 00m 01s" -ModeFlags $flagsDi) -join "`n") -match "Covers Normalised\s*: Success = 0  \|  Failed = 0") "Image Conversion alone shows the row too, even at zero, like the other rows"
+$flagsDa = Get-AllModeFlagsFalse
+$flagsDa.RunAnimatedConversion = $true
+Test-Assert (((Get-SummaryLines -Stats (New-StatsTracker) -ElapsedString "00h 00m 01s" -ModeFlags $flagsDa) -join "`n") -notmatch "Covers Normalised") "Animated Conversion alone does not show it - covers are only normalised by the image modes"
 Write-Host ""
 
 # ==============================================================================

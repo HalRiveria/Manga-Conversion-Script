@@ -18,6 +18,13 @@ Everything runs from one interactive menu.
   is left untouched for the next run.
 - **Individual steps:** Image Conversion, Animated Conversion and Zip
   Folders can each run on their own.
+- **Series covers:** a `cover.*` sitting directly in a series folder is
+  never converted to `.jxl` or `.webp`. Full Pipeline and Image Conversion
+  turn it into a lower-case `cover.jpg` (the name readers look for) once per
+  series: a `.jpg` is left alone, a `.jpeg` is renamed, and any other image
+  format is converted with ImageMagick (first frame, quality 95) before the
+  original is deleted. If a series has more than one cover file, all of them
+  are left alone with a warning.
 - **Cover Deletion:** finds and deletes images you've taught it to recognise
   (by size, dimensions and file hash), with a dry-run mode and a report of
   suspicious "trailing-zero" file names.
@@ -45,6 +52,7 @@ Everything runs from one interactive menu.
 | `.png`, `.webp`, `.bmp`, `.tif`, `.tiff`, `.heic`, `.heif`, static `.avif` | `.jxl` (quality 90) |
 | animated `.avif` | animated `.webp` |
 | animated `.webp`, `.gif` | left as they are |
+| series `cover.*` (directly in the series folder) | `cover.jpg` (see Series covers above) |
 
 ## Requirements
 
@@ -95,6 +103,7 @@ Without `-Path`, it works on the current folder.
 ```
 D:\Manga\
 ├── Series A\
+│   ├── cover.jpg      <- series cover, never converted or zipped
 │   ├── Chapter 001\   <- images
 │   ├── Chapter 002\
 │   └── Chapter 003.zip   (already done - skipped)

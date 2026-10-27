@@ -1111,6 +1111,23 @@ Test-Assert (@($script:logCalls | Where-Object { $_ -like "Warn: *simulated brok
 Write-Host ""
 
 # ==============================================================================
+#  Scenario CV: an animated cover.* directly in a series folder is never
+#  converted (the image modes normalise it to cover.jpg instead). The same
+#  name inside a chapter folder is an ordinary page and still converts.
+# ==============================================================================
+Write-Host "=== Scenario CV: series-root animated cover is skipped ===" -ForegroundColor Cyan
+$seriesCV = New-Dir "scenario-cv\Series"
+$chCV = New-Dir "scenario-cv\Series\Chapter 1"
+$rootCoverCV = New-FakeAvifIn -DirPath $seriesCV -Name "Cover.AVIF" -Frames 5
+New-FakeAvifIn -DirPath $chCV -Name "cover.avif" -Frames 5 | Out-Null
+Test-Assert (@(Get-LooseAnimatedCandidates -ScanPath $seriesCV | Where-Object { $_.FullName -eq $rootCoverCV }).Count -eq 0) "Get-LooseAnimatedCandidates leaves the series-root cover out"
+$totalsCV = Invoke-LooseAnimatedConversionPipeline -Path (Join-Path $scratchDir "scenario-cv") -MagickExe $fakeMagickExe -AnimatedThreads 2 -FullLogging $false
+Test-Assert ($totalsCV.ConvertedSuccess -eq 1 -and $totalsCV.ConvertedFail -eq 0) ("only the chapter's cover.avif was converted (got ConvertedSuccess=" + $totalsCV.ConvertedSuccess + ")")
+Test-Assert ((Test-Path -LiteralPath $rootCoverCV) -and -not (Test-Path -LiteralPath (Join-Path $seriesCV "Cover.webp"))) "the series-root Cover.AVIF is untouched and no cover.webp was made"
+Test-Assert (Test-Path -LiteralPath (Join-Path $chCV "cover.webp")) "the chapter-folder cover.avif became cover.webp"
+Write-Host ""
+
+# ==============================================================================
 Write-Host "==============================================="
 if ($script:failCount -eq 0) {
     Write-Host ("ALL PASSED  (" + $script:passCount + " assertions)") -ForegroundColor Green

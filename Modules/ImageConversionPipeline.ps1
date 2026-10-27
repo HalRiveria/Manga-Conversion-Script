@@ -23,6 +23,145 @@ function Get-NeverConvertedExtensions {
     return @(".gif")
 }
 
+function Get-SeriesCoverConvertibleExtensions {
+    return @(".webp", ".png", ".avif", ".bmp", ".tif", ".tiff", ".heic", ".heif", ".jxl")
+}
+
+function Invoke-SeriesCoverNormalization {
+    param(
+        [Parameter(Mandatory)]
+        [string]$SeriesPath,
+        [string]$MagickExe
+    )
+    $result = @{ Success = 0; Fail = 0 }
+
+    $covers = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+    try {
+        foreach ($f in [System.IO.Directory]::EnumerateFiles($SeriesPath, "*")) {
+            $fi = [System.IO.FileInfo]::new($f)
+            if ([System.IO.Path]::GetFileNameWithoutExtension($fi.Name) -ieq 'cover') { $covers.Add($fi) }
+        }
+    } catch {
+        Write-Log ("Could not list series folder '" + $SeriesPath + "' to check for a cover - leaving any cover as it is: " + $_) -Level Warn
+        return $result
+    }
+    if ($covers.Count -eq 0) { return $result }
+
+    if ($covers.Count -gt 1) {
+        $nameList = [System.Collections.Generic.List[string]]::new()
+        foreach ($c in $covers) { $nameList.Add($c.Name) }
+        $names = $nameList -join "', '"
+        Write-Log ("Series folder '" + $SeriesPath + "' has more than one cover file ('" + $names + "') - left all of them alone. Keep one and delete the others.") -Level Warn
+        return $result
+    }
+
+    $cover = $covers[0]
+    $ext = $cover.Extension
+    if ($ext -ieq '.jpg') { return $result }
+
+    $target = [System.IO.Path]::Combine($SeriesPath, "cover.jpg")
+
+    if ($ext -ieq '.jpeg') {
+        try {
+            [System.IO.File]::Move($cover.FullName, $target)
+            Write-Log ("Renamed series cover '" + $cover.FullName + "' to 'cover.jpg'.")
+            $result.Success++
+        } catch {
+            Write-Log ("FAILED to rename series cover '" + $cover.FullName + "' to 'cover.jpg': " + $_) -Level Error
+            $result.Fail++
+        }
+        return $result
+    }
+
+    if ((Get-SeriesCoverConvertibleExtensions) -inotcontains $ext) {
+        Write-Log ("Series cover '" + $cover.FullName + "' is not a format this project converts to cover.jpg - left alone.") -Level Warn
+        return $result
+    }
+    if ([string]::IsNullOrWhiteSpace($MagickExe)) {
+        Write-Log ("FAILED to convert series cover '" + $cover.FullName + "' to cover.jpg: magick.exe was not found or configured. Original left in place.") -Level Error
+        $result.Fail++
+        return $result
+    }
+    if (Test-AbortSignal) { return $result }
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName               = $MagickExe
+    # %% on the output path only, as in Invoke-IccStripRetryOrFail.
+    $psi.Arguments              = "`"" + $cover.FullName + "[0]`" -background white -alpha remove -alpha off -quality 95 `"" + $target.Replace('%', '%%') + "`""
+    $psi.UseShellExecute        = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $psi.CreateNoWindow         = $true
+
+    $failure = $null
+    $proc = $null
+    try {
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $null = [ChildProcessJob]::Assign($proc)  # see AbortPipeline.ps1's ChildProcessJob
+        $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+        $stderrTask = $proc.StandardError.ReadToEndAsync()
+        # DOCUMENTED DUPLICATE: the same raw-handle wait and bounded stream
+        # read as Invoke-IccStripRetryOrFail in this module and
+        # Test-AvifAnimated in AnimatedConversionPipeline.ps1 - keep all
+        # three in sync.
+        $waitHandle = [System.Threading.ManualResetEvent]::new($false)
+        $origHandle = $waitHandle.SafeWaitHandle
+        $waitHandle.SafeWaitHandle = (
+            [Microsoft.Win32.SafeHandles.SafeWaitHandle]::new(
+                $proc.Handle, $false
+            )
+        )
+        try {
+            $exited = $waitHandle.WaitOne(120000)
+        } finally {
+            $waitHandle.SafeWaitHandle = $origHandle
+            $waitHandle.Dispose()
+        }
+        if (-not $exited) {
+            try { $proc.Kill() } catch { }   # already exited or access denied; the failure is reported either way
+            [System.Threading.Thread]::Sleep(200)
+            $failure = "magick did not exit within 120s - killed"
+        } elseif (-not [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 15000)) {
+            $failure = "magick exited but its output streams did not finish reading within 15s"
+        } else {
+            $null = $stdoutTask.Result
+            $stderrText = $stderrTask.Result
+            $exitCode = $proc.ExitCode
+            $outInfo = [System.IO.FileInfo]::new($target)
+            if ($exitCode -ne 0) {
+                $failure = "magick exited " + $exitCode
+                if ($stderrText) { $failure += ": " + $stderrText.Trim() }
+            } elseif (-not $outInfo.Exists -or $outInfo.Length -eq 0) {
+                $failure = "magick reported success but cover.jpg is missing or empty"
+            }
+        }
+    } catch {
+        $failure = "could not run magick: " + $_
+    } finally {
+        if ($null -ne $proc) { $proc.Dispose() }
+    }
+
+    if ($null -ne $failure) {
+        Write-Log ("FAILED to convert series cover '" + $cover.FullName + "' to cover.jpg: " + $failure + ". Original left in place.") -Level Error
+        if ([System.IO.File]::Exists($target)) { try { [System.IO.File]::Delete($target) } catch { } }  # partial output; nothing else to do if it won't go
+        $result.Fail++
+        return $result
+    }
+
+    try {
+        $removed = Remove-Source -ItemPath $cover.FullName
+        if (-not $removed) {
+            Write-Log ("Series cover '" + $cover.FullName + "' was already gone before it could be deleted.") -Level Warn
+        }
+        Write-Log ("Converted series cover '" + $cover.FullName + "' to 'cover.jpg'.")
+        $result.Success++
+    } catch {
+        Write-Log ("Converted series cover '" + $cover.FullName + "' to 'cover.jpg', but FAILED to delete the original: " + $_ + ". Delete it by hand; until then the next run will see two covers and leave both alone.") -Level Error
+        $result.Fail++
+    }
+    return $result
+}
+
 function Invoke-IccStripRetryOrFail {
     param(
         [Parameter(Mandatory)]
@@ -60,8 +199,9 @@ function Invoke-IccStripRetryOrFail {
         return $false
     }
     # DOCUMENTED DUPLICATE: Test-AvifAnimated in
-    # AnimatedConversionPipeline.ps1 uses the identical raw-handle-wait
-    # pattern below - keep both in sync.
+    # AnimatedConversionPipeline.ps1 and Invoke-SeriesCoverNormalization in
+    # this module use the identical raw-handle-wait pattern below - keep all
+    # three in sync.
     try {
         $stripStdoutTask = $stripProc.StandardOutput.ReadToEndAsync()
         $stripStderrTask = $stripProc.StandardError.ReadToEndAsync()
@@ -87,8 +227,9 @@ function Invoke-IccStripRetryOrFail {
         }
 
         # DOCUMENTED DUPLICATE: Test-AvifAnimated in
-        # AnimatedConversionPipeline.ps1 uses the identical bounded-stream-
-        # read pattern below - keep both in sync. 15s gives
+        # AnimatedConversionPipeline.ps1 and Invoke-SeriesCoverNormalization
+        # in this module use the identical bounded-stream-read pattern
+        # below - keep all three in sync. 15s gives
         # margin (see that module's own matching comment).
         if (-not [System.Threading.Tasks.Task]::WaitAll(@($stripStdoutTask, $stripStderrTask), 15000)) {
             # Same reasoning as Test-AvifAnimated's own
@@ -272,6 +413,7 @@ function Get-LooseImageCandidates {
     $allCandidates = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
     foreach ($file in (Get-FilesRecursiveSafe -ScanPath $ScanPath)) {
         if ($LooseImageExtensions -inotcontains $file.Extension) { continue }
+        if (Test-SeriesCoverFile -File $file -SeriesPath $ScanPath) { continue }
         if (Test-OrphanedScratchFileName -Name $file.Name) { continue }
         if ((Get-NeverConvertedExtensions) -icontains $file.Extension) {
             Write-Log ("SKIPPING '" + $file.FullName + "': not converted by this project (see Get-NeverConvertedExtensions's own comment for why). File left untouched.") -Level Warn
@@ -407,6 +549,8 @@ function Invoke-LooseImageConversionPipeline {
         DeletedFail         = 0
         StaleCleanedSuccess = 0
         StaleCleanedFail    = 0
+        CoverNormalizedSuccess = 0
+        CoverNormalizedFail    = 0
         ForceKilledCount    = 0
         InspectFailedCount  = 0
         LastCompletedPaths  = [System.Collections.Generic.List[string]]::new()
@@ -439,6 +583,11 @@ function Invoke-LooseImageConversionPipeline {
                 $series = & $seriesProvider
                 if ($null -eq $series) { $chapterProviderState.SeriesExhausted = $true; break }
                 $totals.SeriesCount++
+
+                # Before the candidate scan, so a converted cover is never seen as a loose image.
+                $coverResult = Invoke-SeriesCoverNormalization -SeriesPath $series.FullName -MagickExe $MagickExe
+                $totals.CoverNormalizedSuccess += $coverResult.Success
+                $totals.CoverNormalizedFail    += $coverResult.Fail
 
                 $chapters = Get-SeriesChapters -SeriesPath $series.FullName -QualifyingExtensions $FolderQualifyingExtensions `
                     -ExcludeStagingDirs $FolderExcludeStagingDirs -ForceRezip $false
@@ -853,5 +1002,6 @@ function Invoke-LooseImageConversionPipeline {
 }
 
 function Get-ImageConversionSharedFunctionNames {
-    return @('Invoke-IccStripRetryOrFail', 'Test-AvifAnimated', 'Get-NeverConvertedExtensions', 'Test-WebPAnimated')
+    return @('Invoke-IccStripRetryOrFail', 'Test-AvifAnimated', 'Get-NeverConvertedExtensions', 'Test-WebPAnimated',
+             'Invoke-SeriesCoverNormalization', 'Get-SeriesCoverConvertibleExtensions')
 }

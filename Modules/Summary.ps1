@@ -5,6 +5,7 @@ function New-StatsTracker {
         LooseImgConverted      = @{ Success = 0; Fail = 0; Skipped = 0 }
         LooseImgDeleted        = @{ Success = 0; Fail = 0 }
         LooseStaleCleaned      = @{ Success = 0; Fail = 0 }
+        CoversNormalized       = @{ Success = 0; Fail = 0 }
         LooseAnimatedConverted = @{ Success = 0; Fail = 0; Skipped = 0 }
         LooseAnimatedDeleted   = @{ Success = 0; Fail = 0 }
         LooseFolderZipped      = @{ Success = 0; Fail = 0; Skipped = 0 }
@@ -41,6 +42,7 @@ function Get-SummaryLines {
         $lines.Add("Loose Img Conv.     : Success = " + $Stats.LooseImgConverted.Success + "  |  Failed = " + $Stats.LooseImgConverted.Fail + "  |  Skipped (animated) = " + $Stats.LooseImgConverted.Skipped)
         $lines.Add("Loose Img Deleted   : Success = " + $Stats.LooseImgDeleted.Success   + "  |  Failed = " + $Stats.LooseImgDeleted.Fail)
         $lines.Add("Loose Stale Cleaned : Success = " + $Stats.LooseStaleCleaned.Success + "  |  Failed = " + $Stats.LooseStaleCleaned.Fail)
+        $lines.Add("Covers Normalised   : Success = " + $Stats.CoversNormalized.Success  + "  |  Failed = " + $Stats.CoversNormalized.Fail)
     }
 
     if ($ModeFlags.RunAnimatedConversion) {

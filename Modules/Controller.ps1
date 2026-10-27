@@ -66,6 +66,9 @@ function Get-OrCreateFullPipelineSeriesBundle {
     )
 
     $factory = {
+        # Before the candidate scan, so a converted cover is never seen as a loose image.
+        $coverResult = Invoke-SeriesCoverNormalization -SeriesPath $Series.FullName -MagickExe $MagickExe
+
         $chapters = Get-SeriesChapters -SeriesPath $Series.FullName -QualifyingExtensions $FolderQualifyingExtensions `
             -ExcludeStagingDirs $FolderExcludeStagingDirs -ForceRezip $false
 
@@ -141,6 +144,7 @@ function Get-OrCreateFullPipelineSeriesBundle {
         $EventQueue.Enqueue(@{
             Kind = 'SeriesReady'; SeriesName = $Series.Name; TotalChapters = $chapterEntries.Count
             InspectFailedCount = $inspectFailedCount
+            CoverNormalizedSuccess = $coverResult.Success; CoverNormalizedFail = $coverResult.Fail
         })
 
         return @{ ChapterEntries = $chapterEntries }
@@ -894,6 +898,7 @@ function Invoke-FullPipeline {
         ConvertedImageSuccess    = 0; ConvertedImageFail    = 0; ConvertedImageSkipped    = 0
         DeletedImageSuccess      = 0; DeletedImageFail      = 0
         StaleImageCleanedSuccess = 0; StaleImageCleanedFail = 0
+        CoverNormalizedSuccess   = 0; CoverNormalizedFail   = 0
         ConvertedAnimatedSuccess = 0; ConvertedAnimatedFail = 0; ConvertedAnimatedSkipped = 0
         DeletedAnimatedSuccess   = 0; DeletedAnimatedFail   = 0
         ZipCreatedSuccess        = 0; ZipCreatedFail        = 0; ZipSkippedDueToError = 0
@@ -1047,6 +1052,8 @@ function Invoke-FullPipeline {
                     'SeriesReady' {
                         $totals.SeriesCount++
                         $totals.InspectFailedCount += $evt.InspectFailedCount
+                        $totals.CoverNormalizedSuccess += $evt.CoverNormalizedSuccess
+                        $totals.CoverNormalizedFail    += $evt.CoverNormalizedFail
                         # Record the total only; Start-SeriesProgress is deferred to $ensureSeriesStarted.
                         if ($evt.TotalChapters -gt 0) {
                             $seriesChapterTotals[$evt.SeriesName] = $evt.TotalChapters
@@ -1303,6 +1310,7 @@ function Invoke-Mode {
                 $stats.LooseImgConverted.Success = $r.ConvertedSuccess; $stats.LooseImgConverted.Fail = $r.ConvertedFail; $stats.LooseImgConverted.Skipped = $r.ConvertedSkipped
                 $stats.LooseImgDeleted.Success   = $r.DeletedSuccess;   $stats.LooseImgDeleted.Fail   = $r.DeletedFail
                 $stats.LooseStaleCleaned.Success = $r.StaleCleanedSuccess; $stats.LooseStaleCleaned.Fail = $r.StaleCleanedFail
+                $stats.CoversNormalized.Success  = [int]$r.CoverNormalizedSuccess; $stats.CoversNormalized.Fail = [int]$r.CoverNormalizedFail
                 $stats.InspectFailed.Count       = $r.InspectFailedCount
                 $stats.Aborted                   = $r.Aborted
                 $stats.ForceKilledCount          = $r.ForceKilledCount
@@ -1336,6 +1344,7 @@ function Invoke-Mode {
                 $stats.LooseImgConverted.Success      = $r.ConvertedImageSuccess;    $stats.LooseImgConverted.Fail      = $r.ConvertedImageFail;    $stats.LooseImgConverted.Skipped = $r.ConvertedImageSkipped
                 $stats.LooseImgDeleted.Success        = $r.DeletedImageSuccess;      $stats.LooseImgDeleted.Fail        = $r.DeletedImageFail
                 $stats.LooseStaleCleaned.Success      = $r.StaleImageCleanedSuccess; $stats.LooseStaleCleaned.Fail      = $r.StaleImageCleanedFail
+                $stats.CoversNormalized.Success       = [int]$r.CoverNormalizedSuccess;  $stats.CoversNormalized.Fail       = [int]$r.CoverNormalizedFail
                 $stats.LooseAnimatedConverted.Success = $r.ConvertedAnimatedSuccess; $stats.LooseAnimatedConverted.Fail = $r.ConvertedAnimatedFail; $stats.LooseAnimatedConverted.Skipped = $r.ConvertedAnimatedSkipped
                 $stats.LooseAnimatedDeleted.Success   = $r.DeletedAnimatedSuccess;   $stats.LooseAnimatedDeleted.Fail   = $r.DeletedAnimatedFail
                 $stats.LooseFolderZipped.Success      = $r.ZipCreatedSuccess;        $stats.LooseFolderZipped.Fail      = $r.ZipCreatedFail;        $stats.LooseFolderZipped.Skipped = $r.ZipSkippedDueToError

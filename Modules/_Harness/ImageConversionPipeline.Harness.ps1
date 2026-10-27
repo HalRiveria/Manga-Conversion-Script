@@ -340,6 +340,12 @@ class Program {
             string line = new string('X', 200) + Environment.NewLine;
             for (int i = 0; i < 2000; i++) { Console.Error.Write(line); }
         }
+        if (srcContent.Contains("FAIL_MAGICK_PARTIAL")) {
+            // Leaves a truncated output behind, like a real magick dying mid-write.
+            File.WriteAllText(dst, "partial");
+            Console.Error.WriteLine("simulated magick failure after a partial write");
+            return 1;
+        }
         if (srcContent.Contains("FAIL_MAGICK")) {
             Console.Error.WriteLine("simulated magick pre-conversion failure");
             return 1;
@@ -628,7 +634,7 @@ $chC2c = New-Dir "scenario-c2c\Series\Chapter 1"
 [System.IO.File]::WriteAllText((Join-Path $chC2c "photo.jxl"), "real jxl bytes from a since-deleted photo.jpg")
 Start-Sleep -Milliseconds 50
 New-FakeImage -DirPath $chC2c -Name "photo.png" | Out-Null
-New-FakeImage -DirPath (Join-Path $rootC2c "Series") -Name "cover.jpg" | Out-Null   # the "extra" - no chapter subfolder
+New-FakeImage -DirPath (Join-Path $rootC2c "Series") -Name "extra.jpg" | Out-Null   # the "extra" - no chapter subfolder
 
 $script:ccrCallsC2c = New-Object System.Collections.Generic.List[hashtable]
 $realCompleteChapterProgressC2c = ${function:Complete-ChapterProgress}
@@ -953,12 +959,12 @@ Test-Assert ($totalsK.ConvertedSuccess -eq 1) ("image converted despite the up-t
 Write-Host "=== Scenario L: series-root loose image (no chapter subfolder) ===" -ForegroundColor Cyan
 $rootL = New-Dir "scenario-l"
 $seriesDirL = New-Dir "scenario-l\Lone Series"
-New-FakeImage -DirPath $seriesDirL -Name "cover.jpg" | Out-Null
+New-FakeImage -DirPath $seriesDirL -Name "extra.jpg" | Out-Null
 
 $totalsL = Invoke-LooseImageConversionPipeline -Path $rootL -CjxlExe $fakeCjxlExe -MaxCjxlProcs 2 -FullLogging $false
 
 Test-Assert ($totalsL.ConvertedSuccess -eq 1) ("series-root image converted (got ConvertedSuccess=" + $totalsL.ConvertedSuccess + ")")
-Test-Assert (Test-Path -LiteralPath (Join-Path $seriesDirL "cover.jxl")) "cover.jxl created directly in the series root"
+Test-Assert (Test-Path -LiteralPath (Join-Path $seriesDirL "extra.jxl")) "extra.jxl created directly in the series root"
 
 # ==============================================================================
 #  Scenario M: an "extra" merged-in directory (a stray image in the series
@@ -972,7 +978,7 @@ $ch1M = New-Dir "scenario-m\Series\Ch1"
 $ch2M = New-Dir "scenario-m\Series\Ch2"
 New-FakeImage -DirPath $ch1M -Name "p1.jpg" | Out-Null
 New-FakeImage -DirPath $ch2M -Name "p1.jpg" | Out-Null
-New-FakeImage -DirPath $seriesDirM -Name "cover.jpg" | Out-Null   # the "extra" - no chapter subfolder
+New-FakeImage -DirPath $seriesDirM -Name "extra.jpg" | Out-Null   # the "extra" - no chapter subfolder
 
 $callbackInfoM = [System.Collections.Generic.List[hashtable]]::new()
 $cbM = { param($Info) $callbackInfoM.Add($Info) }.GetNewClosure()
@@ -1812,6 +1818,81 @@ $resultAN2 = @($outputAN2 | Where-Object { $_ -is [hashtable] })
 Test-Assert (-not $threwAN2) "a faulted stream read does not throw out of job finalize"
 Test-Assert ($resultAN2.Count -eq 1 -and $resultAN2[0].Success -eq $true -and $crAN2.ConvertedCount -eq 1) "and the conversion is still judged by exit code and output file"
 Test-Assert (@($outputAN2 | Where-Object { "$_" -like "*simulated broken pipe*" }).Count -eq 1) "the failed read is logged as a warning with its cause"
+Write-Host ""
+
+# ==============================================================================
+#  Scenario AO: series covers. A cover.* directly in a series folder is never
+#  converted as a loose image; once per series it is normalised to a
+#  lower-case cover.jpg. A cover.* inside a chapter folder is an ordinary page.
+# ==============================================================================
+Write-Host "=== Scenario AO: series cover is skipped and normalised to cover.jpg ===" -ForegroundColor Cyan
+$rootAO = New-Dir "scenario-ao"
+$seriesNamesAO = @("Webp", "Jpeg", "Jpg", "MixedCase", "Both", "Fail", "ChapterCover")
+foreach ($n in $seriesNamesAO) { New-FakeImage -DirPath (New-Dir ("scenario-ao\" + $n + "\Ch1")) -Name "p1.jpg" | Out-Null }
+$sAO = @{}; foreach ($n in $seriesNamesAO) { $sAO[$n] = Join-Path $rootAO $n }
+
+[System.IO.File]::WriteAllText((Join-Path $sAO.Webp "cover.webp"), "webp cover pixels")
+[System.IO.File]::WriteAllText((Join-Path $sAO.Jpeg "Cover.JPEG"), "jpeg cover pixels")
+$jpgAO = Join-Path $sAO.Jpg "COVER.Jpg"
+[System.IO.File]::WriteAllText($jpgAO, "jpg cover pixels")
+$jpgStampAO = [datetime]::new(2020, 1, 2, 3, 4, 5, [System.DateTimeKind]::Utc)
+[System.IO.File]::SetLastWriteTimeUtc($jpgAO, $jpgStampAO)
+[System.IO.File]::WriteAllText((Join-Path $sAO.MixedCase "CoVeR.PNG"), "png cover pixels")
+[System.IO.File]::WriteAllText((Join-Path $sAO.Both "cover.jpg"), "jpg cover pixels")
+[System.IO.File]::WriteAllText((Join-Path $sAO.Both "cover.webp"), "webp cover pixels")
+[System.IO.File]::WriteAllText((Join-Path $sAO.Fail "cover.webp"), "FAIL_MAGICK_PARTIAL")
+New-FakeImage -DirPath (Join-Path $sAO.ChapterCover "Ch1") -Name "cover.jpg" | Out-Null
+
+$candidatesAO = Get-LooseImageCandidates -ScanPath $sAO.Webp
+Test-Assert (@($candidatesAO.NeedsConversion | Where-Object { $_.Name -eq 'cover.webp' }).Count -eq 0) "Get-LooseImageCandidates leaves the series-root cover out"
+Test-Assert (@($candidatesAO.NeedsConversion | Where-Object { $_.Name -eq 'p1.jpg' }).Count -eq 1) "and still returns the chapter's page"
+
+$script:logEntriesAO = [System.Collections.Generic.List[hashtable]]::new()
+$realWriteLogFnAO = ${function:Write-Log}
+function Write-Log {
+    param([string]$Message, [ValidateSet("Info", "Warn", "Error", "Summary")][string]$Level = "Info")
+    $script:logEntriesAO.Add(@{ Message = $Message; Level = $Level })
+    & $script:realWriteLogFnAORef -Message $Message -Level $Level
+}
+$script:realWriteLogFnAORef = $realWriteLogFnAO
+try {
+    $totalsAO = Invoke-LooseImageConversionPipeline -Path $rootAO -CjxlExe $fakeCjxlExe -MagickExe $fakeMagickExe -MaxCjxlProcs 2 -FullLogging $false
+} finally {
+    ${function:Write-Log} = $realWriteLogFnAO
+}
+function Read-TextOrNullAO { param([string]$Path) if ([System.IO.File]::Exists($Path)) { return [System.IO.File]::ReadAllText($Path) } return $null }
+function Get-NamesAO { param([string]$Dir) return ,@([System.IO.Directory]::GetFiles($Dir) | ForEach-Object { [System.IO.Path]::GetFileName($_) }) }
+
+Test-Assert ($totalsAO.ConvertedSuccess -eq 8 -and $totalsAO.ConvertedFail -eq 0) ("only the 7 chapter pages and the chapter-folder cover.jpg were converted (got ConvertedSuccess=" + $totalsAO.ConvertedSuccess + ", ConvertedFail=" + $totalsAO.ConvertedFail + ")")
+Test-Assert (@($seriesNamesAO | Where-Object { Test-Path -LiteralPath (Join-Path $sAO[$_] "cover.jxl") }).Count -eq 0) "no series-root cover was converted to cover.jxl"
+Test-Assert ($totalsAO.CoverNormalizedSuccess -eq 3 -and $totalsAO.CoverNormalizedFail -eq 1) ("3 covers normalised, 1 failed (got Success=" + $totalsAO.CoverNormalizedSuccess + ", Fail=" + $totalsAO.CoverNormalizedFail + ")")
+
+$namesWebpAO = Get-NamesAO $sAO.Webp
+Test-Assert (($namesWebpAO -ccontains 'cover.jpg') -and -not ($namesWebpAO -contains 'cover.webp')) ("cover.webp was converted to cover.jpg and the original removed (files: " + ($namesWebpAO -join ', ') + ")")
+Test-Assert ((Read-TextOrNullAO (Join-Path $sAO.Webp "cover.jpg")) -eq "webp cover pixels") "cover.jpg was produced from the webp (fake magick copies the source)"
+
+$namesJpegAO = Get-NamesAO $sAO.Jpeg
+Test-Assert (($namesJpegAO -ccontains 'cover.jpg') -and $namesJpegAO.Count -eq 1) ("Cover.JPEG was renamed to lower-case cover.jpg (files: " + ($namesJpegAO -join ', ') + ")")
+Test-Assert ((Read-TextOrNullAO (Join-Path $sAO.Jpeg "cover.jpg")) -eq "jpeg cover pixels") "the rename kept the original bytes - no re-encode"
+
+$namesJpgAO = Get-NamesAO $sAO.Jpg
+Test-Assert (($namesJpgAO -ccontains 'COVER.Jpg') -and $namesJpgAO.Count -eq 1) ("COVER.Jpg was left exactly as named (files: " + ($namesJpgAO -join ', ') + ")")
+Test-Assert ([System.IO.File]::GetLastWriteTimeUtc($jpgAO) -eq $jpgStampAO) "COVER.Jpg's timestamp is unchanged - not touched"
+
+$namesMixedAO = Get-NamesAO $sAO.MixedCase
+Test-Assert (($namesMixedAO -ccontains 'cover.jpg') -and $namesMixedAO.Count -eq 1) ("CoVeR.PNG was converted to lower-case cover.jpg (files: " + ($namesMixedAO -join ', ') + ")")
+
+$namesBothAO = Get-NamesAO $sAO.Both
+Test-Assert (($namesBothAO -contains 'cover.jpg') -and ($namesBothAO -contains 'cover.webp') -and $namesBothAO.Count -eq 2) ("a JPEG cover plus another cover: both left alone (files: " + ($namesBothAO -join ', ') + ")")
+Test-Assert (@($script:logEntriesAO | Where-Object { $_.Level -eq 'Warn' -and $_.Message -like "*more than one cover file*" -and $_.Message -like "*Both*" }).Count -eq 1) "and a warning was logged for it"
+
+$namesFailAO = Get-NamesAO $sAO.Fail
+Test-Assert (($namesFailAO -contains 'cover.webp') -and -not ($namesFailAO -contains 'cover.jpg')) ("a failed conversion leaves the original and removes the partial cover.jpg (files: " + ($namesFailAO -join ', ') + ")")
+Test-Assert (@($script:logEntriesAO | Where-Object { $_.Level -eq 'Error' -and $_.Message -like "*FAILED to convert series cover*Fail*" }).Count -eq 1) "and an error was logged for it"
+Test-Assert (Test-Path -LiteralPath (Join-Path $sAO.Fail "Ch1\p1.jxl")) "the failed cover's series still converted its chapter"
+
+Test-Assert (Test-Path -LiteralPath (Join-Path $sAO.ChapterCover "Ch1\cover.jxl")) "a cover.jpg inside a chapter folder is still converted as a page"
+Test-Assert (@($script:logEntriesAO | Where-Object { $_.Message -like "*series cover*" -and $_.Level -eq 'Info' }).Count -eq 3) "one log line per cover renamed or converted"
 Write-Host ""
 
 if ($script:failCount -eq 0) {
