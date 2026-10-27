@@ -1,13 +1,10 @@
 # Module reference
 
-How the tool is put together, one section per file. For what the tool does
-and how to use it, see [README.md](README.md).
+How the tool is put together, one section per file. For what the tool does and how to use it, see [README.md](README.md).
 
 ## The big picture
 
-`Conversion Script Main.ps1` loads every module in `Modules\` and hands over
-to `Controller.ps1`, which runs the menu. Each menu option is one entry
-point:
+`Conversion Script Main.ps1` loads every module in `Modules\` and hands over to `Controller.ps1`, which runs the menu. Each menu option is one entry point:
 
 | Menu option | Entry point | Module |
 |---|---|---|
@@ -20,56 +17,29 @@ point:
 
 The rest are shared building blocks:
 
-- **Running work in parallel:** `ChapterDispatch.ps1` runs external processes
-  (cjxl, magick) a bounded number at a time, chapter by chapter.
-  `ZipParallelProcessing.ps1` runs PowerShell worker scripts in parallel
-  runspaces (Zip Folders' zip workers, and Full Pipeline's two engines).
-- **Stopping cleanly:** `AbortPipeline.ps1` handles Ctrl+C and window close,
-  makes child processes die with the script, and keeps the PC awake during a
-  run.
-- **Files:** `LeafDirectoryDiscovery.ps1` finds series and chapter folders;
-  `FileDeletion.ps1` deletes (Recycle Bin or permanent); `ZipCreation.ps1`
-  and `ZipValidation.ps1` make and check zips.
-- **Output:** `Logging.ps1` writes the console and log files;
-  `CleanConsoleRendering.ps1` draws the optional live progress view;
-  `Summary.ps1` prints the end-of-run report.
-- **Setup:** `Config.ps1` (settings), `DependencyDetection.ps1` (finding
-  cjxl/magick).
+- **Running work in parallel:** `ChapterDispatch.ps1` runs external processes (cjxl, magick) a bounded number at a time, chapter by chapter. `ZipParallelProcessing.ps1` runs PowerShell worker scripts in parallel runspaces (Zip Folders' zip workers, and Full Pipeline's two engines).
+- **Stopping cleanly:** `AbortPipeline.ps1` handles Ctrl+C and window close, makes child processes die with the script, and keeps the PC awake during a run.
+- **Files:** `LeafDirectoryDiscovery.ps1` finds series and chapter folders; `FileDeletion.ps1` deletes (Recycle Bin or permanent); `ZipCreation.ps1` and `ZipValidation.ps1` make and check zips.
+- **Output:** `Logging.ps1` writes the console and log files; `CleanConsoleRendering.ps1` draws the optional live progress view; `Summary.ps1` prints the end-of-run report.
+- **Setup:** `Config.ps1` (settings), `DependencyDetection.ps1` (finding cjxl/magick).
 
-Every module is a file of function (and type) definitions with no side
-effects when loaded, and each has a test suite in `Modules\_Harness\`.
+Every module is a file of function (and type) definitions with no side effects when loaded, and each has a test suite in `Modules\_Harness\`.
 
 ## Rules for code that runs in worker runspaces
 
-Zip Folders' workers and Full Pipeline's two engines run in separate
-PowerShell runspaces, and anything they call must follow three rules. Each
-module's section says which of its functions run there.
+Zip Folders' workers and Full Pipeline's two engines run in separate PowerShell runspaces, and anything they call must follow three rules. Each module's section says which of its functions run there.
 
-1. **Don't read `$script:` variables directly.** A function copied into a
-   runspace can resolve `$script:` to an empty scope (inside a
-   `.GetNewClosure()` block, for example), and the read silently comes back
-   empty. Workers get their state as parameters, or through
-   `Get-WorkerRunspaceValue` (`Logging.ps1`).
-2. **Don't call cmdlets; use .NET calls.** Two fresh runspaces calling the
-   same cmdlet for the first time at the same moment can deadlock in
-   Windows PowerShell 5.1.
-3. **Don't hand a scriptblock to .NET as a delegate** (`[Func[...]]{ }`, or a
-   scriptblock passed to a .NET method such as
-   `ConcurrentDictionary.GetOrAdd`). Nested, these deadlock.
+1. **Don't read `$script:` variables directly.** A function copied into a runspace can resolve `$script:` to an empty scope (inside a `.GetNewClosure()` block, for example), and the read silently comes back empty. Workers get their state as parameters, or through `Get-WorkerRunspaceValue` (`Logging.ps1`).
+2. **Don't call cmdlets; use .NET calls.** Two fresh runspaces calling the same cmdlet for the first time at the same moment can deadlock in Windows PowerShell 5.1.
+3. **Don't hand a scriptblock to .NET as a delegate** (`[Func[...]]{ }`, or a scriptblock passed to a .NET method such as `ConcurrentDictionary.GetOrAdd`). Nested, these deadlock.
 
-A runspace starts with only the functions it's given, so a function a
-worker calls must be in its caller's `-SharedFunctionNames` list (built from
-each module's `Get-...SharedFunctionNames`). `Modules\_Harness\Lint.Harness.ps1`
-checks all of this.
+A runspace starts with only the functions it's given, so a function a worker calls must be in its caller's `-SharedFunctionNames` list (built from each module's `Get-...SharedFunctionNames`). `Modules\_Harness\Lint.Harness.ps1` checks all of this.
 
 ---
 
 ## Conversion Script Main.ps1
 
-The entry point. It holds no conversion logic of its own: it finds the
-`Modules` folder, loads every module, loads settings, locates `cjxl` and
-`magick`, and hands over to `Controller.ps1`'s `Invoke-MainLoop`, which runs
-the menu.
+The entry point. It holds no conversion logic of its own: it finds the `Modules` folder, loads every module, loads settings, locates `cjxl` and `magick`, and hands over to `Controller.ps1`'s `Invoke-MainLoop`, which runs the menu.
 
 **Parameters**
 
@@ -82,47 +52,17 @@ the menu.
 
 **How it works**
 
-- **Finding `Modules\`:** the module-finding functions (`Resolve-ModulesPath`,
-  `Test-ModulesFolderCandidate`, `Get-ExpectedModuleFileNames`) live in this
-  file, not in a module, since they're what finds the modules. A candidate
-  folder only counts if every file in `Get-ExpectedModuleFileNames` is in it.
-  The order tried is: `-ModulesPathOverride`; the `Modules` folder next to
-  the script; a path remembered in `settings.json` (read directly here,
-  before `Config.ps1` is loaded); and finally a prompt. If input is
-  redirected and there's nothing to prompt with, it fails with a message
-  saying to pass `-ModulesPathOverride`.
-- **Loading:** every module is dot-sourced into the script's own scope, in a
-  fixed order (`Config`, `Logging`, `FileDeletion`, `AbortPipeline`, ... ,
-  `Menu`, `Controller`). Modules only define functions and types, so loading
-  has no side effects beyond those.
-- **Start-up:** after settings are loaded it registers the Ctrl+C /
-  window-close handler, raises the thread-pool minimum, sets up the Job
-  Object that ends child processes with the script, resolves `-Path`, sets up
-  logging, Clean Console Output and the delete mode from settings, and finds
-  `cjxl` (required) and `magick` (optional at start-up; the modes that need it
-  check for it themselves).
-- **Finding the tools:** `Find-ExeCached` (`DependencyDetection.ps1`) tries
-  the path given on the command line, then the path remembered in settings,
-  then `PATH`, then a few usual install locations (including the winget
-  links folder for `cjxl` and `C:\Program Files\ImageMagick-*` for `magick`).
-  Whatever it finds is saved back to settings.
-- **Errors:** the whole start-up is in one `try`/`catch`. Once
-  `AbortPipeline.ps1` is loaded, failures go through
-  `Invoke-AbortOrFatalHandler` (which stays quiet for an abort the user
-  asked for); before that, a plain message is printed. Either way the window
-  waits for a key before closing, unless input is redirected, so the error
-  can be read.
+- **Finding `Modules\`:** the module-finding functions (`Resolve-ModulesPath`, `Test-ModulesFolderCandidate`, `Get-ExpectedModuleFileNames`) live in this file, not in a module, since they're what finds the modules. A candidate folder only counts if every file in `Get-ExpectedModuleFileNames` is in it. The order tried is: `-ModulesPathOverride`; the `Modules` folder next to the script; a path remembered in `settings.json` (read directly here, before `Config.ps1` is loaded); and finally a prompt. If input is redirected and there's nothing to prompt with, it fails with a message saying to pass `-ModulesPathOverride`.
+- **Loading:** every module is dot-sourced into the script's own scope, in a fixed order (`Config`, `Logging`, `FileDeletion`, `AbortPipeline`, ... , `Menu`, `Controller`). Modules only define functions and types, so loading has no side effects beyond those.
+- **Start-up:** after settings are loaded it registers the Ctrl+C / window-close handler, raises the thread-pool minimum, sets up the Job Object that ends child processes with the script, resolves `-Path`, sets up logging, Clean Console Output and the delete mode from settings, and finds `cjxl` (required) and `magick` (optional at start-up; the modes that need it check for it themselves).
+- **Finding the tools:** `Find-ExeCached` (`DependencyDetection.ps1`) tries the path given on the command line, then the path remembered in settings, then `PATH`, then a few usual install locations (including the winget links folder for `cjxl` and `C:\Program Files\ImageMagick-*` for `magick`). Whatever it finds is saved back to settings.
+- **Errors:** the whole start-up is in one `try`/`catch`. Once `AbortPipeline.ps1` is loaded, failures go through `Invoke-AbortOrFatalHandler` (which stays quiet for an abort the user asked for); before that, a plain message is printed. Either way the window waits for a key before closing, unless input is redirected, so the error can be read.
 
 **Things to watch out for**
 
-- A new module has to be added in two places here: the dot-source list and
-  `Get-ExpectedModuleFileNames`. Without the second, a `Modules` folder
-  missing the new file would still be accepted.
-- The dot-source order matters: a module's functions can be called from
-  modules loaded before it only at run time, never while loading. Keep
-  `Controller.ps1` last.
-- `#Requires -Version 5.1` is at the top. The project targets Windows
-  PowerShell 5.1; nothing here relies on PowerShell 7.
+- A new module has to be added in two places here: the dot-source list and `Get-ExpectedModuleFileNames`. Without the second, a `Modules` folder missing the new file would still be accepted.
+- The dot-source order matters: a module's functions can be called from modules loaded before it only at run time, never while loading. Keep `Controller.ps1` last.
+- `#Requires -Version 5.1` is at the top. The project targets Windows PowerShell 5.1; nothing here relies on PowerShell 7.
 
 ---
 
