@@ -1,0 +1,34 @@
+name: Release zip
+
+# Attaches the install zip (the main script plus Modules\, nothing else) to a
+# release when it is published. Re-run by hand for an existing tag if needed.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build the zip for (e.g. v1.1)
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  zip:
+    name: Build and attach install zip
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - name: Build and upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          zip="Manga-Conversion-Script-${TAG}.zip"
+          git archive --format=zip --prefix="Manga Conversion Script/" -o "$zip" HEAD "Conversion Script Main.ps1" Modules
+          unzip -l "$zip"
+          gh release upload "$TAG" "$zip" --clobber

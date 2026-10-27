@@ -1,0 +1,42 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  harnesses:
+    name: Harnesses
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Windows PowerShell 5.1 (shell: powershell), the version the script targets.
+      # The harnesses build their own stand-in cjxl/magick, so no real tools are needed.
+      - name: Run every harness
+        shell: powershell
+        run: |
+          $failed = @()
+          foreach ($harness in Get-ChildItem -Path .\_Harness -Filter *.Harness.ps1 | Sort-Object Name) {
+              Write-Host ("::group::" + $harness.BaseName)
+              & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $harness.FullName
+              $code = $LASTEXITCODE
+              Write-Host "::endgroup::"
+              if ($code -eq 0) {
+                  Write-Host ("PASS  " + $harness.BaseName)
+              } else {
+                  Write-Host ("::error title=" + $harness.BaseName + "::exited with code " + $code)
+                  $failed += $harness.BaseName
+              }
+          }
+          if ($failed.Count -gt 0) {
+              Write-Host ("Failed: " + ($failed -join ", "))
+              exit 1
+          }
+          Write-Host "All harnesses passed."
