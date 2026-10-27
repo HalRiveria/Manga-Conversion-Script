@@ -1895,6 +1895,37 @@ Test-Assert (Test-Path -LiteralPath (Join-Path $sAO.ChapterCover "Ch1\cover.jxl"
 Test-Assert (@($script:logEntriesAO | Where-Object { $_.Message -like "*series cover*" -and $_.Level -eq 'Info' }).Count -eq 3) "one log line per cover renamed or converted"
 Write-Host ""
 
+# ==============================================================================
+#  Scenario AO2: a non-image cover.* (cover.json, cover.txt) sitting next to
+#  the real cover isn't counted as a second cover.
+# ==============================================================================
+Write-Host "=== Scenario AO2: non-image cover.* files don't block normalisation ===" -ForegroundColor Cyan
+$seriesAO2 = New-Dir "scenario-ao2\Series"
+[System.IO.File]::WriteAllText((Join-Path $seriesAO2 "cover.webp"), "webp cover pixels")
+[System.IO.File]::WriteAllText((Join-Path $seriesAO2 "cover.json"), "{}")
+[System.IO.File]::WriteAllText((Join-Path $seriesAO2 "Cover.TXT"), "notes")
+$resultAO2 = Invoke-SeriesCoverNormalization -SeriesPath $seriesAO2 -MagickExe $fakeMagickExe
+$namesAO2 = @([System.IO.Directory]::GetFiles($seriesAO2) | ForEach-Object { [System.IO.Path]::GetFileName($_) })
+Test-Assert ($resultAO2.Success -eq 1 -and $resultAO2.Fail -eq 0) ("the webp cover was converted (got Success=" + $resultAO2.Success + ", Fail=" + $resultAO2.Fail + ")")
+Test-Assert (($namesAO2 -ccontains 'cover.jpg') -and -not ($namesAO2 -contains 'cover.webp') -and ($namesAO2 -contains 'cover.json') -and ($namesAO2 -contains 'Cover.TXT')) ("cover.jpg made, the json/txt left alone (files: " + ($namesAO2 -join ', ') + ")")
+Write-Host ""
+
+# ==============================================================================
+#  Scenario AO3: Invoke-BoundedProcess (ChapterDispatch.ps1), the shared
+#  bounded run behind the cover conversion, ICC-strip retry and AVIF probe.
+# ==============================================================================
+Write-Host "=== Scenario AO3: Invoke-BoundedProcess ===" -ForegroundColor Cyan
+$cmdAO3 = Join-Path $env:SystemRoot "System32\cmd.exe"
+$okAO3 = Invoke-BoundedProcess -FilePath $cmdAO3 -Arguments "/c echo out-text& echo err-text 1>&2& exit 3" -ExitTimeoutMs 30000
+Test-Assert ($null -eq $okAO3.StartError -and -not $okAO3.TimedOut -and -not $okAO3.StreamTimedOut) "a quick process finishes cleanly"
+Test-Assert ($okAO3.ExitCode -eq 3) ("its exit code comes back (got " + $okAO3.ExitCode + ")")
+Test-Assert (($okAO3.Stdout -like "*out-text*") -and ($okAO3.Stderr -like "*err-text*")) "stdout and stderr are both captured"
+$slowAO3 = Invoke-BoundedProcess -FilePath $cmdAO3 -Arguments "/c ping -n 30 127.0.0.1 >nul" -ExitTimeoutMs 500
+Test-Assert ($slowAO3.TimedOut -and $null -eq $slowAO3.ExitCode) "a process past its exit timeout is reported as timed out"
+$missingAO3 = Invoke-BoundedProcess -FilePath (Join-Path $scratchDir "no-such.exe") -Arguments "x" -ExitTimeoutMs 1000
+Test-Assert ($null -ne $missingAO3.StartError) "a missing executable comes back as StartError, not a throw"
+Write-Host ""
+
 if ($script:failCount -eq 0) {
     Write-Host ("ALL PASSED  (" + $script:passCount + " assertions)") -ForegroundColor Green
     exit 0

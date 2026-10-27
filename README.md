@@ -23,7 +23,7 @@ Everything runs from one interactive menu.
   turn it into a lower-case `cover.jpg` (the name readers look for) once per
   series: a `.jpg` is left alone, a `.jpeg` is renamed, and any other image
   format is converted with ImageMagick (first frame, quality 95) before the
-  original is deleted. If a series has more than one cover file, all of them
+  original is deleted. If a series has more than one cover image, all of them
   are left alone with a warning.
 - **Cover Deletion:** finds and deletes images you've taught it to recognise
   (by size, dimensions and file hash), with a dry-run mode and a report of

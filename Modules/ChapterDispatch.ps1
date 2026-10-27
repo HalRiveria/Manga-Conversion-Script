@@ -384,6 +384,70 @@ function Initialize-ChildProcessReadThreadPool {
     return [System.Threading.ThreadPool]::SetMinThreads($MinimumWorkerThreads, $io)
 }
 
+function Invoke-BoundedProcess {
+    param(
+        [Parameter(Mandatory)]
+        [string]$FilePath,
+        [Parameter(Mandatory)]
+        [string]$Arguments,
+        [Parameter(Mandatory)]
+        [int]$ExitTimeoutMs,
+        [int]$StreamTimeoutMs = 15000
+    )
+    $result = @{ StartError = $null; TimedOut = $false; StreamTimedOut = $false; ExitCode = $null; Stdout = $null; Stderr = $null }
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName               = $FilePath
+    $psi.Arguments              = $Arguments
+    $psi.UseShellExecute        = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $psi.CreateNoWindow         = $true
+
+    try {
+        $proc = [System.Diagnostics.Process]::Start($psi)
+    } catch {
+        $result.StartError = $_
+        return $result
+    }
+    try {
+        $null = [ChildProcessJob]::Assign($proc)  # see AbortPipeline.ps1's ChildProcessJob
+        $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+        $stderrTask = $proc.StandardError.ReadToEndAsync()
+        $waitHandle = [System.Threading.ManualResetEvent]::new($false)
+        $origHandle = $waitHandle.SafeWaitHandle
+        $waitHandle.SafeWaitHandle = (
+            [Microsoft.Win32.SafeHandles.SafeWaitHandle]::new(
+                $proc.Handle, $false
+            )
+        )
+        try {
+            $exited = $waitHandle.WaitOne($ExitTimeoutMs)
+        } finally {
+            $waitHandle.SafeWaitHandle = $origHandle
+            $waitHandle.Dispose()
+        }
+        if (-not $exited) {
+            try { $proc.Kill() } catch { }   # already exited or access denied; the caller reports the timeout either way
+            [System.Threading.Thread]::Sleep(200)
+            $result.TimedOut = $true
+            return $result
+        }
+        # Exiting doesn't prove the pipes reached EOF (a child magick spawned
+        # can hold them open), so the reads are bounded too.
+        if (-not [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), $StreamTimeoutMs)) {
+            $result.StreamTimedOut = $true
+            return $result
+        }
+        $result.Stdout   = $stdoutTask.Result
+        $result.Stderr   = $stderrTask.Result
+        $result.ExitCode = $proc.ExitCode
+    } finally {
+        $proc.Dispose()
+    }
+    return $result
+}
+
 function Get-ChapterDispatchSharedFunctionNames {
-    return @('New-LibraryChapterProvider', 'Invoke-ChapterDispatch')
+    return @('New-LibraryChapterProvider', 'Invoke-ChapterDispatch', 'Invoke-BoundedProcess')
 }

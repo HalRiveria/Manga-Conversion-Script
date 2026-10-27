@@ -66,9 +66,6 @@ function Get-OrCreateFullPipelineSeriesBundle {
     )
 
     $factory = {
-        # Before the candidate scan, so a converted cover is never seen as a loose image.
-        $coverResult = Invoke-SeriesCoverNormalization -SeriesPath $Series.FullName -MagickExe $MagickExe
-
         $chapters = Get-SeriesChapters -SeriesPath $Series.FullName -QualifyingExtensions $FolderQualifyingExtensions `
             -ExcludeStagingDirs $FolderExcludeStagingDirs -ForceRezip $false
 
@@ -144,7 +141,6 @@ function Get-OrCreateFullPipelineSeriesBundle {
         $EventQueue.Enqueue(@{
             Kind = 'SeriesReady'; SeriesName = $Series.Name; TotalChapters = $chapterEntries.Count
             InspectFailedCount = $inspectFailedCount
-            CoverNormalizedSuccess = $coverResult.Success; CoverNormalizedFail = $coverResult.Fail
         })
 
         return @{ ChapterEntries = $chapterEntries }
@@ -405,6 +401,15 @@ $script:fullPipelineEngineWorker = {
                 -EventQueue $EventQueue -ZipBlockReasons $ZipBlockReasons
 
             foreach ($entry in $bundle.ChapterEntries) { $chapterQueue.Enqueue($entry) }
+
+            # Outside the bundle lock, so the Animated engine isn't held up
+            # behind a slow cover conversion. The Image engine always runs,
+            # so it alone does this, once per series. The candidate scan
+            # already skips series-root covers, so order doesn't matter.
+            if ($EngineType -eq 'Image') {
+                $coverResult = Invoke-SeriesCoverNormalization -SeriesPath $series.FullName -MagickExe $MagickExe
+                $EventQueue.Enqueue(@{ Kind = 'CoverNormalized'; Success = $coverResult.Success; Fail = $coverResult.Fail })
+            }
         }
         if ($chapterQueue.Count -gt 0) { return $chapterQueue.Dequeue() }
         return $null
@@ -593,8 +598,8 @@ $script:fullPipelineEngineWorker = {
                         $magickProcLocal = $null
                         throw ("magick pre-conversion did not exit within 120s - killed")
                     }
-                    # Bounded the same way Test-AvifAnimated/
-                    # Invoke-IccStripRetryOrFail are. The WaitOne above only
+                    # Bounded the same way ChapterDispatch.ps1's
+                    # Invoke-BoundedProcess is. The WaitOne above only
                     # proves the PROCESS exited, not that its redirected
                     # stdout/stderr pipes reached EOF - a process tree where
                     # something else inherited the handle could still hang
@@ -1052,8 +1057,6 @@ function Invoke-FullPipeline {
                     'SeriesReady' {
                         $totals.SeriesCount++
                         $totals.InspectFailedCount += $evt.InspectFailedCount
-                        $totals.CoverNormalizedSuccess += $evt.CoverNormalizedSuccess
-                        $totals.CoverNormalizedFail    += $evt.CoverNormalizedFail
                         # Record the total only; Start-SeriesProgress is deferred to $ensureSeriesStarted.
                         if ($evt.TotalChapters -gt 0) {
                             $seriesChapterTotals[$evt.SeriesName] = $evt.TotalChapters
@@ -1061,6 +1064,10 @@ function Invoke-FullPipeline {
                     }
                     'ChapterInspectFailed' {
                         $totals.InspectFailedCount += $evt.Count
+                    }
+                    'CoverNormalized' {
+                        $totals.CoverNormalizedSuccess += $evt.Success
+                        $totals.CoverNormalizedFail    += $evt.Fail
                     }
                     'ChapterStaleCleanup' {
                         $totals.StaleImageCleanedSuccess += $evt.Success

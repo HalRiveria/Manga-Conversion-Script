@@ -18,72 +18,16 @@ function Test-AvifAnimated {
     # output path - see Complete-AnimatedDispatchJob's own jobStarter for
     # where the escaping belongs). Escaping this read path would break it
     # (magick would look for a literal %% that doesn't exist on disk).
-    $psi = [System.Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName               = $MagickExe
-    $psi.Arguments              = "identify -ping -format `"%T\n`" `"" + $AvifPath + "[0]`""
-    $psi.UseShellExecute        = $false
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError  = $true
-    $psi.CreateNoWindow         = $true
-
-    # DOCUMENTED DUPLICATE: Invoke-IccStripRetryOrFail and
-    # Invoke-SeriesCoverNormalization in ImageConversionPipeline.ps1 use the
-    # identical raw-handle-wait pattern below - keep all three in sync.
-    $proc = [System.Diagnostics.Process]::Start($psi)
-    $null = [ChildProcessJob]::Assign($proc)  # see AbortPipeline.ps1's ChildProcessJob
-    try {
-        $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
-        $stderrTask = $proc.StandardError.ReadToEndAsync()
-        $procWaitHandle = [System.Threading.ManualResetEvent]::new($false)
-        $origSafeHandle = $procWaitHandle.SafeWaitHandle
-        $procWaitHandle.SafeWaitHandle = (
-            [Microsoft.Win32.SafeHandles.SafeWaitHandle]::new(
-                $proc.Handle, $false
-            )
-        )
-        try {
-            $exited = $procWaitHandle.WaitOne(30000)
-        } finally {
-            $procWaitHandle.SafeWaitHandle = $origSafeHandle
-            $procWaitHandle.Dispose()
-        }
-
-        if (-not $exited) {
-            try { $proc.Kill() } catch { }
-            [System.Threading.Thread]::Sleep(200)
-            throw "magick identify did not exit within 30s - killed"
-        }
-
-        # DOCUMENTED DUPLICATE: Invoke-IccStripRetryOrFail and
-        # Invoke-SeriesCoverNormalization in ImageConversionPipeline.ps1 use
-        # the identical bounded-stream-read pattern below - keep all three
-        # in sync.
-        # 15s gives margin; the usual cause of slow reads is thread-pool
-        # starvation, not a CPU-starved process (see ChapterDispatch.ps1's
-        # Initialize-ChildProcessReadThreadPool).
-        # DOCUMENTED DUPLICATE: keep in sync
-        # with ImageConversionPipeline.ps1's Invoke-IccStripRetryOrFail and
-        # its own pre-conversion detour, and Controller.ps1's matching
-        # pre-conversion detour - all four bumped together.
-        if (-not [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 15000)) {
-            # The process handle above only proves the
-            # PROCESS exited, not that its redirected stdout/stderr pipes
-            # reached EOF - an inherited handle in the process tree (a
-            # delegate ImageMagick can spawn) could keep a pipe open after
-            # the process itself is gone, and an un-timed GetResult() below
-            # would then wait forever. Bounded the same way the process-exit
-            # wait above already is.
-            throw "magick identify exited but its output streams did not finish reading within 15s."
-        }
-        $stdout = $stdoutTask.Result
-        $stderr = $stderrTask.Result
-        $code = $proc.ExitCode
-    } finally {
-        $proc.Dispose()
-    }
-
-    if ($code -ne 0) {
-        throw ("magick identify exited " + $code + ". Stderr: " + $stderr.Trim())
+    # Invoke-BoundedProcess's 15s stream bound: keep in sync with
+    # ImageConversionPipeline.ps1's and Controller.ps1's pre-conversion
+    # detours.
+    $run = Invoke-BoundedProcess -FilePath $MagickExe -Arguments ("identify -ping -format `"%T\n`" `"" + $AvifPath + "[0]`"") -ExitTimeoutMs 30000
+    if ($null -ne $run.StartError) { throw $run.StartError }
+    if ($run.TimedOut) { throw "magick identify did not exit within 30s - killed" }
+    if ($run.StreamTimedOut) { throw "magick identify exited but its output streams did not finish reading within 15s." }
+    $stdout = $run.Stdout
+    if ($run.ExitCode -ne 0) {
+        throw ("magick identify exited " + $run.ExitCode + ". Stderr: " + $run.Stderr.Trim())
     }
 
     $firstLine = $null
@@ -198,8 +142,8 @@ function Complete-AnimatedDispatchJob {
 
     # DOCUMENTED DUPLICATE of ImageConversionPipeline.ps1's Complete-ImageDispatchJob
     # (same bounded, failure-tolerant read of the finished process's output) -
-    # keep both in sync. The 15s default is the same bound Test-AvifAnimated,
-    # Invoke-IccStripRetryOrFail and both pre-conversion detours use - all
+    # keep both in sync. The 15s default is the same bound ChapterDispatch.ps1's
+    # Invoke-BoundedProcess and both pre-conversion detours use - all
     # bumped together.
     $streamText = @{ Stdout = ""; Stderr = "" }
     if ($Job.StdoutTask -and $Job.StderrTask) {
@@ -632,5 +576,5 @@ function Invoke-LooseAnimatedConversionPipeline {
 }
 
 function Get-AnimatedConversionSharedFunctionNames {
-    return @('Test-AvifAnimated')
+    return @('Test-AvifAnimated', 'Invoke-BoundedProcess')
 }

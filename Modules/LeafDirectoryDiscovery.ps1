@@ -41,6 +41,13 @@ function Test-ZippableLeafDirCandidate {
         return $null
     }
     if ($qualifyingFiles.Count -eq 0) { return $null }
+    # A folder whose only images are cover.* is a series folder holding its
+    # cover, not a chapter.
+    $hasPage = $false
+    foreach ($f in $qualifyingFiles) {
+        if ([System.IO.Path]::GetFileNameWithoutExtension($f.Name) -ine 'cover') { $hasPage = $true; break }
+    }
+    if (-not $hasPage) { return $null }
 
     $zipOut = [System.IO.Path]::Combine($Dir.Parent.FullName, $Dir.Name + ".zip")
 

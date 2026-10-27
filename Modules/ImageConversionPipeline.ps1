@@ -35,11 +35,13 @@ function Invoke-SeriesCoverNormalization {
     )
     $result = @{ Success = 0; Fail = 0 }
 
+    # Only image covers count; a cover.json or cover.txt is not a second cover.
+    $imageExts = @('.jpg', '.jpeg', '.gif') + @(Get-SeriesCoverConvertibleExtensions)
     $covers = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
     try {
         foreach ($f in [System.IO.Directory]::EnumerateFiles($SeriesPath, "*")) {
             $fi = [System.IO.FileInfo]::new($f)
-            if ([System.IO.Path]::GetFileNameWithoutExtension($fi.Name) -ieq 'cover') { $covers.Add($fi) }
+            if ([System.IO.Path]::GetFileNameWithoutExtension($fi.Name) -ieq 'cover' -and $imageExts -icontains $fi.Extension) { $covers.Add($fi) }
         }
     } catch {
         Write-Log ("Could not list series folder '" + $SeriesPath + "' to check for a cover - leaving any cover as it is: " + $_) -Level Warn
@@ -84,61 +86,27 @@ function Invoke-SeriesCoverNormalization {
     }
     if (Test-AbortSignal) { return $result }
 
-    $psi = [System.Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName               = $MagickExe
     # %% on the output path only, as in Invoke-IccStripRetryOrFail.
-    $psi.Arguments              = "`"" + $cover.FullName + "[0]`" -background white -alpha remove -alpha off -quality 95 `"" + $target.Replace('%', '%%') + "`""
-    $psi.UseShellExecute        = $false
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError  = $true
-    $psi.CreateNoWindow         = $true
-
     $failure = $null
-    $proc = $null
     try {
-        $proc = [System.Diagnostics.Process]::Start($psi)
-        $null = [ChildProcessJob]::Assign($proc)  # see AbortPipeline.ps1's ChildProcessJob
-        $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
-        $stderrTask = $proc.StandardError.ReadToEndAsync()
-        # DOCUMENTED DUPLICATE: the same raw-handle wait and bounded stream
-        # read as Invoke-IccStripRetryOrFail in this module and
-        # Test-AvifAnimated in AnimatedConversionPipeline.ps1 - keep all
-        # three in sync.
-        $waitHandle = [System.Threading.ManualResetEvent]::new($false)
-        $origHandle = $waitHandle.SafeWaitHandle
-        $waitHandle.SafeWaitHandle = (
-            [Microsoft.Win32.SafeHandles.SafeWaitHandle]::new(
-                $proc.Handle, $false
-            )
-        )
-        try {
-            $exited = $waitHandle.WaitOne(120000)
-        } finally {
-            $waitHandle.SafeWaitHandle = $origHandle
-            $waitHandle.Dispose()
-        }
-        if (-not $exited) {
-            try { $proc.Kill() } catch { }   # already exited or access denied; the failure is reported either way
-            [System.Threading.Thread]::Sleep(200)
+        $run = Invoke-BoundedProcess -FilePath $MagickExe -Arguments ("`"" + $cover.FullName + "[0]`" -background white -alpha remove -alpha off -quality 95 `"" + $target.Replace('%', '%%') + "`"") -ExitTimeoutMs 120000
+        if ($null -ne $run.StartError) {
+            $failure = "could not run magick: " + $run.StartError
+        } elseif ($run.TimedOut) {
             $failure = "magick did not exit within 120s - killed"
-        } elseif (-not [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 15000)) {
+        } elseif ($run.StreamTimedOut) {
             $failure = "magick exited but its output streams did not finish reading within 15s"
+        } elseif ($run.ExitCode -ne 0) {
+            $failure = "magick exited " + $run.ExitCode
+            if ($run.Stderr) { $failure += ": " + $run.Stderr.Trim() }
         } else {
-            $null = $stdoutTask.Result
-            $stderrText = $stderrTask.Result
-            $exitCode = $proc.ExitCode
             $outInfo = [System.IO.FileInfo]::new($target)
-            if ($exitCode -ne 0) {
-                $failure = "magick exited " + $exitCode
-                if ($stderrText) { $failure += ": " + $stderrText.Trim() }
-            } elseif (-not $outInfo.Exists -or $outInfo.Length -eq 0) {
+            if (-not $outInfo.Exists -or $outInfo.Length -eq 0) {
                 $failure = "magick reported success but cover.jpg is missing or empty"
             }
         }
     } catch {
         $failure = "could not run magick: " + $_
-    } finally {
-        if ($null -ne $proc) { $proc.Dispose() }
     }
 
     if ($null -ne $failure) {
@@ -178,73 +146,26 @@ function Invoke-IccStripRetryOrFail {
         [System.IO.Path]::GetFileNameWithoutExtension($Job.SrcPath) + "_tmp_iccstrip.png"
     )
     Write-Log ("ICC profile mismatch on '" + $Job.SrcPath + "' - stripping profile and retrying.") -Level Warn
-    $stripPsi = [System.Diagnostics.ProcessStartInfo]::new()
-    $stripPsi.FileName               = $MagickExe
     # %% on the OUTPUT path only - see AnimatedConversionPipeline.ps1's jobStarter own
     # comment for the full story. The SOURCE does NOT need this - reading
     # an existing file with a literal % works fine unescaped, and escaping
     # it would break it (magick would look for a literal %% that doesn't
     # exist on disk).
     $escapedStrippedPng  = $strippedPng.Replace('%', '%%')
-    $stripPsi.Arguments              = "`"" + $Job.SrcPath + "`" -strip `"" + $escapedStrippedPng + "`""
-    $stripPsi.UseShellExecute        = $false
-    $stripPsi.RedirectStandardOutput = $true
-    $stripPsi.RedirectStandardError  = $true
-    $stripPsi.CreateNoWindow         = $true
-    try {
-        $stripProc = [System.Diagnostics.Process]::Start($stripPsi)
-        $null = [ChildProcessJob]::Assign($stripProc)  # see AbortPipeline.ps1's ChildProcessJob
-    } catch {
-        Write-Log ("Could not start ICC-strip retry process for '" + $Job.SrcPath + "': " + $_) -Level Error
+    $strip = Invoke-BoundedProcess -FilePath $MagickExe -Arguments ("`"" + $Job.SrcPath + "`" -strip `"" + $escapedStrippedPng + "`"") -ExitTimeoutMs 60000
+    if ($null -ne $strip.StartError) {
+        Write-Log ("Could not start ICC-strip retry process for '" + $Job.SrcPath + "': " + $strip.StartError) -Level Error
         return $false
     }
-    # DOCUMENTED DUPLICATE: Test-AvifAnimated in
-    # AnimatedConversionPipeline.ps1 and Invoke-SeriesCoverNormalization in
-    # this module use the identical raw-handle-wait pattern below - keep all
-    # three in sync.
-    try {
-        $stripStdoutTask = $stripProc.StandardOutput.ReadToEndAsync()
-        $stripStderrTask = $stripProc.StandardError.ReadToEndAsync()
-        $stripWaitHandle = [System.Threading.ManualResetEvent]::new($false)
-        $stripOrigHandle = $stripWaitHandle.SafeWaitHandle
-        $stripWaitHandle.SafeWaitHandle = (
-            [Microsoft.Win32.SafeHandles.SafeWaitHandle]::new(
-                $stripProc.Handle, $false
-            )
-        )
-        try {
-            $stripExited = $stripWaitHandle.WaitOne(60000)
-        } finally {
-            $stripWaitHandle.SafeWaitHandle = $stripOrigHandle
-            $stripWaitHandle.Dispose()
-        }
-
-        if (-not $stripExited) {
-            try { $stripProc.Kill() } catch { }
-            [System.Threading.Thread]::Sleep(200)
-            Write-Log ("ICC-strip retry process for '" + $Job.SrcPath + "' did not exit within 60s - killed, counting as conversion failure.") -Level Error
-            return $false
-        }
-
-        # DOCUMENTED DUPLICATE: Test-AvifAnimated in
-        # AnimatedConversionPipeline.ps1 and Invoke-SeriesCoverNormalization
-        # in this module use the identical bounded-stream-read pattern
-        # below - keep all three in sync. 15s gives
-        # margin (see that module's own matching comment).
-        if (-not [System.Threading.Tasks.Task]::WaitAll(@($stripStdoutTask, $stripStderrTask), 15000)) {
-            # Same reasoning as Test-AvifAnimated's own
-            # matching comment - the process handle above only proves the
-            # PROCESS exited, not that its redirected stdout/stderr pipes
-            # reached EOF.
-            Write-Log ("ICC-strip retry process for '" + $Job.SrcPath + "' exited but its output streams did not finish reading within 15s - counting as conversion failure.") -Level Error
-            return $false
-        }
-        $null = $stripStdoutTask.Result
-        $null = $stripStderrTask.Result
-        $stripExitCode = $stripProc.ExitCode
-    } finally {
-        $stripProc.Dispose()
+    if ($strip.TimedOut) {
+        Write-Log ("ICC-strip retry process for '" + $Job.SrcPath + "' did not exit within 60s - killed, counting as conversion failure.") -Level Error
+        return $false
     }
+    if ($strip.StreamTimedOut) {
+        Write-Log ("ICC-strip retry process for '" + $Job.SrcPath + "' exited but its output streams did not finish reading within 15s - counting as conversion failure.") -Level Error
+        return $false
+    }
+    $stripExitCode = $strip.ExitCode
 
     if ($stripExitCode -eq 0 -and [System.IO.File]::Exists($strippedPng)) {
         if ([System.IO.File]::Exists($Job.JxlPath)) { try { [System.IO.File]::Delete($Job.JxlPath) } catch { } }
@@ -281,8 +202,8 @@ function Complete-ImageDispatchJob {
 
     # DOCUMENTED DUPLICATE of AnimatedConversionPipeline.ps1's Complete-AnimatedDispatchJob
     # (same bounded, failure-tolerant read of the finished process's output) -
-    # keep both in sync. The 15s default is the same bound Test-AvifAnimated,
-    # Invoke-IccStripRetryOrFail and both pre-conversion detours use - all
+    # keep both in sync. The 15s default is the same bound ChapterDispatch.ps1's
+    # Invoke-BoundedProcess and both pre-conversion detours use - all
     # bumped together.
     $streamText = @{ Stdout = ""; Stderr = "" }
     if ($Job.StdoutTask -and $Job.StderrTask) {
@@ -842,8 +763,8 @@ function Invoke-LooseImageConversionPipeline {
                         if ([System.IO.File]::Exists($tempPng)) { try { [System.IO.File]::Delete($tempPng) } catch { } }
                         throw ($formatLabel + "->PNG pre-conversion did not exit within 120s - killed")
                     }
-                    # Bounded the same way Test-AvifAnimated/
-                    # Invoke-IccStripRetryOrFail already are (this pre-conversion
+                    # Bounded the same way ChapterDispatch.ps1's
+                    # Invoke-BoundedProcess is (this pre-conversion
                     # detour and Controller.ps1's own documented-duplicate
                     # copy above follow the same rule). The
                     # WaitOne above only proves the PROCESS exited, not that
@@ -1003,5 +924,5 @@ function Invoke-LooseImageConversionPipeline {
 
 function Get-ImageConversionSharedFunctionNames {
     return @('Invoke-IccStripRetryOrFail', 'Test-AvifAnimated', 'Get-NeverConvertedExtensions', 'Test-WebPAnimated',
-             'Invoke-SeriesCoverNormalization', 'Get-SeriesCoverConvertibleExtensions')
+             'Invoke-SeriesCoverNormalization', 'Get-SeriesCoverConvertibleExtensions', 'Invoke-BoundedProcess')
 }

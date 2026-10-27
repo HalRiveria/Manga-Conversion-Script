@@ -896,6 +896,29 @@ if (-not $junctionOkX) {
 Write-Host ""
 
 # ==============================================================================
+#  Scenario CO: a folder whose only images are cover.* (a series folder after
+#  all its chapters were zipped and the chapter zips moved elsewhere, or a
+#  brand-new series with just its cover) is not a zip candidate. A chapter
+#  folder holding pages plus a cover.jpg page still is.
+# ==============================================================================
+Write-Host "=== Scenario CO: a cover-only folder is not a leaf ===" -ForegroundColor Cyan
+$rootCO = New-Dir "scenario-co"
+$coverOnlyCO = New-Dir "scenario-co\Series A"
+New-FileIn -DirPath $coverOnlyCO -Name "cover.jpg" | Out-Null
+New-FileIn -DirPath $coverOnlyCO -Name "COVER.png" | Out-Null
+New-FileIn -DirPath $coverOnlyCO -Name "notes.txt" | Out-Null
+$chapterCO = New-Dir "scenario-co\Series B\Chapter 1"
+New-FileIn -DirPath $chapterCO -Name "cover.jpg" | Out-Null
+New-FileIn -DirPath $chapterCO -Name "page1.jpg" | Out-Null
+
+$resultCO = @(Get-ZippableLeafDirs -ScanPath $rootCO -QualifyingExtensions $imgExts)
+Test-Assert (@($resultCO | Where-Object { $_.Dir.FullName -eq $coverOnlyCO }).Count -eq 0) "the cover-only folder is not a zip candidate"
+Test-Assert (@($resultCO | Where-Object { $_.Dir.FullName -eq $chapterCO }).Count -eq 1) "a chapter folder with pages and a cover.jpg page still is"
+$chaptersCO = Get-SeriesChapters -SeriesPath $coverOnlyCO -QualifyingExtensions $imgExts
+Test-Assert ($chaptersCO.Count -eq 0) ("Get-SeriesChapters agrees: no chapters in the cover-only series (got " + $chaptersCO.Count + ")")
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="
