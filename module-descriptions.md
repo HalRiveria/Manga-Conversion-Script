@@ -750,7 +750,7 @@ Builds the end-of-run summary. It covers three things: the counter hashtable tha
 - `Get-SummaryLines` adds sections based on the mode flags: `RunImageConversion` adds four rows (the fourth is "Covers Normalised", shown even at zero like the others), `RunAnimatedConversion` adds two, and `RunZip` and `RunZipOnly` add two each. The "Inspect Failed" row appears when either conversion flag is set. It is kept apart from the Fail counts because it means the file could not be checked for animation, not that a conversion failed. A missing flag counts as off.
 - Every report then has a `Time taken` line. If `Stats.Aborted` is true, it adds a "Run was ABORTED" line with the `ForceKilledCount` value and ends with `=== Processing ABORTED ===`. Otherwise it ends with `=== Processing complete ===`.
 - `Get-SummaryLines` returns with `return ,` so the array reaches the caller intact.
-- `Format-ElapsedTime` uses the `Hours`, `Minutes` and `Seconds` parts of the TimeSpan, not total hours. A run longer than 24 hours wraps, so 25 hours shows as `01h`, and days are not shown.
+- `Format-ElapsedTime` uses the total hours, so a run longer than a day shows as `25h 05m 09s` rather than wrapping.
 - `Write-SummaryReport` writes a blank line first. Each report line goes through `Write-Log -Level Summary -ForceConsole`, so the summary still appears when Clean Console Output is on. When `FullLogging` is false, the same lines are also written as one block by `Write-SummaryLog`. When it is true, that file write is skipped and the lines reach the log only through `Write-Log`.
 
 **Things to watch out for**
