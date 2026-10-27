@@ -55,6 +55,7 @@ Everything runs from one interactive menu.
    ```
 
 The script looks for `cjxl` and `magick` on your `PATH` and in the usual install folders. If it can't find one, pass the path once with `-CjxlPath` or `-MagickPath`. It remembers the location after that.
+
 5. Drop the `Modules` folder wherever you want it to live. Conversion Script Main can live anywhere and be run on a directory using a file path or search recursively down from the folder it's placed in.
 
 ## Usage
