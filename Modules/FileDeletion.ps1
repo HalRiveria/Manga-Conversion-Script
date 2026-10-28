@@ -209,13 +209,7 @@ function Resolve-ItemPathOrNull {
         # Rooted paths (every real caller here passes $file.FullName)
         # short-circuit to a raw .NET call instead of
         # $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath
-        # - that call is reachable from both of Full
-        # Pipeline's concurrent engine runspaces via Move-ToRecycleBin/
-        # Remove-ItemPermanently, and touches the same PowerShell provider/
-        # SessionState machinery that causes PS 5.1 concurrent-runspace
-        # cmdlet races - never proven to hit that exact race
-        # itself, but pointless SessionState work for an already-rooted
-        # path either way.
+        # - pointless SessionState work for an already-rooted path.
         if ([System.IO.Path]::IsPathRooted($ItemPath)) {
             return [System.IO.Path]::GetFullPath($ItemPath)
         }

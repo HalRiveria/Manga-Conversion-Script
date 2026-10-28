@@ -249,12 +249,7 @@ function Complete-MergedFullPipelineChapter {
             # - this runs on the MAIN thread, concurrently
             # with both engine worker runspaces still processing later
             # chapters (called from $pollCallback/$finalizeChapterEntry
-            # above). Not known to hit the PS 5.1 concurrent-runspace
-            # cmdlet-race (that class needs two FRESH runspaces racing on
-            # their own first invocation - the main thread's own
-            # Get-ChildItem/Where-Object use is not "fresh" by the time a
-            # real run gets here), but it reuses already-tested,
-            # .NET-only infrastructure either way, and a raw Get-ChildItem
+            # above). It reuses already-tested infrastructure, and a raw Get-ChildItem
             # call has no reparse-point guard, unlike every other
             # recursive tree walk in this codebase (see
             # LeafDirectoryDiscovery.ps1's junction-cycle handling).
