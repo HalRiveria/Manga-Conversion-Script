@@ -1,23 +1,46 @@
 # See module-descriptions.md for this module's full description.
 
+function Test-ZipJobValueIsMaterializedCollection {
+    param($Value)
+    if ($Value -is [System.Collections.ICollection]) { return $true }
+    foreach ($i in $Value.GetType().GetInterfaces()) {
+        if ($i.IsGenericType) {
+            $def = $i.GetGenericTypeDefinition()
+            if ($def -eq [System.Collections.Generic.ICollection`1] -or $def -eq [System.Collections.Generic.IReadOnlyCollection`1]) { return $true }
+        }
+    }
+    return $false
+}
+
 function Test-ZipJobValueHasScriptBlock {
     param($Value, [System.Collections.Generic.HashSet[object]]$Seen, [int]$Depth)
     if ($null -eq $Value) { return $false }
     if ($Value -is [scriptblock]) { return $true }
-    if ($Depth -ge 4 -or $Value -is [string] -or $Value -is [System.ValueType]) { return $false }
-    $isCustomObject = $Value -is [System.Management.Automation.PSCustomObject]
-    if (-not $isCustomObject -and $Value -isnot [System.Collections.IEnumerable]) { return $false }
-    if (-not $isCustomObject -and -not $Seen.Add($Value)) { return $false }
+    if ($Depth -ge 4 -or $Value -is [string]) { return $false }
+    $type = $Value.GetType()
+    $itemsAreProperties = $false
+    if ($Value -is [System.Collections.DictionaryEntry] -or
+        ($type.IsGenericType -and $type.GetGenericTypeDefinition() -eq [System.Collections.Generic.KeyValuePair`2])) {
+        $items = @($Value.Key, $Value.Value)
+    } elseif ($Value -is [System.Management.Automation.PSCustomObject]) {
+        if (-not $Seen.Add($Value)) { return $false }
+        $items = $Value.PSObject.Properties
+        $itemsAreProperties = $true
+    } elseif ($Value -is [System.Collections.IEnumerable] -and (Test-ZipJobValueIsMaterializedCollection -Value $Value)) {
+        if (-not $type.IsValueType -and -not $Seen.Add($Value)) { return $false }
+        if ($Value -is [System.Collections.IDictionary]) { $items = $Value.Values } else { $items = $Value }
+    } else {
+        return $false
+    }
     try {
-        if ($isCustomObject) { $items = foreach ($p in $Value.PSObject.Properties) { $p.Value } }
-        elseif ($Value -is [System.Collections.IDictionary]) { $items = $Value.Values }
-        else { $items = $Value }
         foreach ($item in $items) {
+            if ($itemsAreProperties) { $item = $item.Value }
             if (Test-ZipJobValueHasScriptBlock -Value $item -Seen $Seen -Depth ($Depth + 1)) { return $true }
         }
-    } catch {
-        # A collection something else is writing to right now can't be read
-        # safely; let it through unchecked rather than fail the run over it.
+    } catch [System.InvalidOperationException] {
+        # "Collection was modified": something else is writing to it right
+        # now, so it can't be read safely. Let it through unchecked rather
+        # than fail the run over it.
     }
     return $false
 }
@@ -25,7 +48,12 @@ function Test-ZipJobValueHasScriptBlock {
 function Get-ZipJobScriptBlockKey {
     param([hashtable]$Job, [System.Collections.Generic.HashSet[object]]$Seen)
     foreach ($key in $Job.Keys) {
-        if (Test-ZipJobValueHasScriptBlock -Value $Job[$key] -Seen $Seen -Depth 0) { return [string]$key }
+        try {
+            $found = Test-ZipJobValueHasScriptBlock -Value $Job[$key] -Seen $Seen -Depth 0
+        } catch {
+            throw ("Invoke-ZipParallelProcessing: couldn't check job parameter '" + $key + "' for scriptblocks - reading it failed: " + $_)
+        }
+        if ($found) { return [string]$key }
     }
     return $null
 }

@@ -581,20 +581,64 @@ Test-Assert ($null -ne $h6.Error -and $h6.Error -match "'Steps'") "a scriptblock
 $h7 = Invoke-ScenarioHJobs -Job (New-ScenarioHJob @{ Config = [pscustomobject]@{ Name = 'x'; OnDone = { 7 } } })
 Test-Assert ($null -ne $h7.Error -and $h7.Error -match "'Config'") "a scriptblock held in a [pscustomobject] property is refused"
 
+# Test doubles as PowerShell classes (built in memory - no Add-Type compile).
+class ZppCountingCollection : System.Collections.ICollection {
+    [int]$Enumerations
+    [int] get_Count() { return 2 }
+    [bool] get_IsSynchronized() { return $false }
+    [object] get_SyncRoot() { return $this }
+    [void] CopyTo([System.Array]$array, [int]$index) { }
+    [System.Collections.IEnumerator] GetEnumerator() { $this.Enumerations++; return @('a', 'b').GetEnumerator() }
+}
+class ZppThrowingCollection : System.Collections.ICollection {
+    [bool]$AsModified
+    ZppThrowingCollection([bool]$asModified) { $this.AsModified = $asModified }
+    [int] get_Count() { return 1 }
+    [bool] get_IsSynchronized() { return $false }
+    [object] get_SyncRoot() { return $this }
+    [void] CopyTo([System.Array]$array, [int]$index) { }
+    [System.Collections.IEnumerator] GetEnumerator() {
+        if ($this.AsModified) { throw [System.InvalidOperationException]::new('Collection was modified; enumeration operation may not execute.') }
+        throw [System.UnauthorizedAccessException]::new('simulated read failure')
+    }
+}
+
 # A collection shared by reference across jobs is read once per run, not
 # once per job: later jobs may run while workers are writing to it.
-if (-not ([System.Management.Automation.PSTypeName]'ZppEnumerationCounter').Type) {
-    Add-Type -TypeDefinition @'
-public class ZppEnumerationCounter : System.Collections.IEnumerable {
-    public int Enumerations;
-    public System.Collections.IEnumerator GetEnumerator() { Enumerations++; return new object[] { "a", "b" }.GetEnumerator(); }
-}
-'@
-}
-$counterH = [ZppEnumerationCounter]::new()
+$counterH = [ZppCountingCollection]::new()
 $seenH = [System.Collections.Generic.HashSet[object]]::new()
 $keysH = @(@(foreach ($i in 1..3) { Get-ZipJobScriptBlockKey -Job @{ JobId = $i; Shared = $counterH } -Seen $seenH }) | Where-Object { $null -ne $_ })
 Test-Assert ($keysH.Count -eq 0 -and $counterH.Enumerations -eq 1) ("a collection shared by three jobs is enumerated once, not per job (enumerated " + $counterH.Enumerations + " times)")
+
+# Same for a shared [pscustomobject]: its properties are read once.
+$probeH = @{ Reads = 0 }
+$sharedObjH = [pscustomobject]@{ Name = 'shared' }
+$sharedObjH | Add-Member -MemberType ScriptProperty -Name Probe -Value { $probeH.Reads++; 'x' }.GetNewClosure()
+$seenH2 = [System.Collections.Generic.HashSet[object]]::new()
+foreach ($i in 1..3) { $null = Get-ZipJobScriptBlockKey -Job @{ JobId = $i; State = $sharedObjH } -Seen $seenH2 }
+Test-Assert ($probeH.Reads -eq 1) ("a [pscustomobject] shared by three jobs is read once, not per job (read " + $probeH.Reads + " times)")
+
+# A consuming enumerable is left alone - reading it would take the items
+# the worker is meant to get.
+$queueH = [System.Collections.Concurrent.BlockingCollection[object]]::new()
+$queueH.Add('first'); $queueH.Add('second'); $queueH.CompleteAdding()
+$null = Get-ZipJobScriptBlockKey -Job @{ JobId = 1; Work = $queueH.GetConsumingEnumerable() } -Seen ([System.Collections.Generic.HashSet[object]]::new())
+Test-Assert ($queueH.Count -eq 2) ("checking a job doesn't consume a GetConsumingEnumerable() value (" + $queueH.Count + " of 2 items left)")
+
+# Scriptblocks inside struct entries (KeyValuePair) are found.
+$pairsH = [System.Collections.Generic.List[System.Collections.Generic.KeyValuePair[string,object]]]::new()
+$pairsH.Add([System.Collections.Generic.KeyValuePair[string,object]]::new('plain', 1))
+$pairsH.Add([System.Collections.Generic.KeyValuePair[string,object]]::new('hook', { 10 }))
+$kvpKeyH = Get-ZipJobScriptBlockKey -Job @{ JobId = 1; Pairs = $pairsH } -Seen ([System.Collections.Generic.HashSet[object]]::new())
+Test-Assert ($kvpKeyH -eq 'Pairs') ("a scriptblock in a KeyValuePair's value is found (got: " + $kvpKeyH + ")")
+
+# A collection being modified is let through; any other read failure is
+# reported, naming the key, instead of silently passing.
+$modifiedKeyH = Get-ZipJobScriptBlockKey -Job @{ JobId = 1; Busy = [ZppThrowingCollection]::new($true) } -Seen ([System.Collections.Generic.HashSet[object]]::new())
+Test-Assert ($null -eq $modifiedKeyH) "a collection that's being modified (InvalidOperationException) is let through"
+$readErrH = $null
+try { $null = Get-ZipJobScriptBlockKey -Job @{ JobId = 1; Broken = [ZppThrowingCollection]::new($false) } -Seen ([System.Collections.Generic.HashSet[object]]::new()) } catch { $readErrH = $_.ToString() }
+Test-Assert ($null -ne $readErrH -and $readErrH -match "'Broken'" -and $readErrH -match 'simulated read failure') ("any other read failure is reported with the key and the cause (got: " + $readErrH + ")")
 
 # A provider job refused mid-run lets the jobs already running finish
 # normally, then throws - it doesn't stop them or cancel the caller's token.

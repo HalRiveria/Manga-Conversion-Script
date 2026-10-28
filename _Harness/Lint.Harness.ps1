@@ -361,24 +361,29 @@ function Get-MissingSharedFunctionNames {
     return ,@($missing | Select-Object -Unique)
 }
 
+# The scriptblock literal an assignment's right-hand side holds - a bare
+# { ... }, or { ... }.GetNewClosure(), which parses as an
+# InvokeMemberExpressionAst wrapping it - or $null. The one place this is
+# decided; Rule 5's worker-body lookup below and Rule 7 both call it.
+function Get-AssignedScriptBlockLiteral {
+    param($Right)
+    if ($Right -isnot [System.Management.Automation.Language.CommandExpressionAst]) { return $null }
+    $expr = $Right.Expression
+    if ($expr -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $expr.Member.Extent.Text -eq 'GetNewClosure') { $expr = $expr.Expression }
+    if ($expr -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) { return $expr }
+    return $null
+}
+
 # Every $script:XXX = { ... } scriptblock assignment, so a -WorkerScript/
 # -NextJobProvider $script:XXX argument can be resolved to its real body.
-# Also unwraps $script:XXX = { ... }.GetNewClosure() - that shape parses
-# as an InvokeMemberExpressionAst wrapping the ScriptBlockExpressionAst,
-# not a bare ScriptBlockExpressionAst, and this codebase's own
-# ResultHandler callbacks already use .GetNewClosure() elsewhere.
 $scriptBlockVars = @{}
 $scriptBlockVarFile = @{}
 foreach ($name in $fileText.Keys) {
     foreach ($assign in $fileAsts[$name].FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
-        if ($assign.Right -is [System.Management.Automation.Language.CommandExpressionAst] -and
-            $assign.Left -is [System.Management.Automation.Language.VariableExpressionAst]) {
-            $rhsExpr = $assign.Right.Expression
-            if ($rhsExpr -is [System.Management.Automation.Language.InvokeMemberExpressionAst]) {
-                $rhsExpr = $rhsExpr.Expression
-            }
-            if ($rhsExpr -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
-                $scriptBlockVars[$assign.Left.VariablePath.UserPath] = $rhsExpr.ScriptBlock
+        if ($assign.Left -is [System.Management.Automation.Language.VariableExpressionAst]) {
+            $literal = Get-AssignedScriptBlockLiteral -Right $assign.Right
+            if ($null -ne $literal) {
+                $scriptBlockVars[$assign.Left.VariablePath.UserPath] = $literal.ScriptBlock
                 $scriptBlockVarFile[$assign.Left.VariablePath.UserPath] = $name
             }
         }
@@ -572,10 +577,8 @@ function Get-ScriptBlockVariableNames {
     $names = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($assign in $AstNode.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
         if ($assign.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
-            $assign.Right -is [System.Management.Automation.Language.CommandExpressionAst]) {
-            $rhsExpr = $assign.Right.Expression
-            if ($rhsExpr -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $rhsExpr.Member.Extent.Text -eq 'GetNewClosure') { $rhsExpr = $rhsExpr.Expression }
-            if ($rhsExpr -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) { $null = $names.Add($assign.Left.VariablePath.UserPath) }
+            $null -ne (Get-AssignedScriptBlockLiteral -Right $assign.Right)) {
+            $null = $names.Add($assign.Left.VariablePath.UserPath)
         }
     }
     foreach ($p in $AstNode.FindAll({ param($n) $n -is [System.Management.Automation.Language.ParameterAst] }, $true)) {
@@ -604,27 +607,47 @@ $scriptBlockArgFinder = {
             }
         }
     }
-    # Stores: $x[...] = <scriptblock> / $x.Prop = <scriptblock>, where $x
-    # isn't a variable this code assigns itself (a local container is fine).
-    $localNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($assign in $AstNode.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
-        if ($assign.Left -is [System.Management.Automation.Language.VariableExpressionAst]) { $null = $localNames.Add($assign.Left.VariablePath.UserPath) }
+    # Stores: $x[...] = <scriptblock> / $x.Prop = <scriptblock>, unless $x
+    # is a container this code built itself - every assignment to it creates
+    # a new one (@{}, @(), [Type]::new(), New-Object) and it isn't a
+    # parameter. An alias of something else ($c = $SharedCache), a parameter
+    # or a loop variable could be shared, so those count.
+    $assignments = @($AstNode.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true))
+    $freshNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $otherNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($p in $AstNode.FindAll({ param($n) $n -is [System.Management.Automation.Language.ParameterAst] }, $true)) { $null = $otherNames.Add($p.Name.VariablePath.UserPath) }
+    foreach ($assign in $assignments) {
+        if ($assign.Left -isnot [System.Management.Automation.Language.VariableExpressionAst]) { continue }
+        $rhs = $assign.Right
+        $isFresh = $false
+        if ($rhs -is [System.Management.Automation.Language.CommandExpressionAst]) {
+            $expr = $rhs.Expression
+            if ($expr -is [System.Management.Automation.Language.ConvertExpressionAst]) { $expr = $expr.Child }
+            $isFresh = ($expr -is [System.Management.Automation.Language.HashtableAst]) -or
+                ($expr -is [System.Management.Automation.Language.ArrayExpressionAst]) -or
+                ($expr -is [System.Management.Automation.Language.ArrayLiteralAst]) -or
+                ($expr -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $expr.Static -and $expr.Member.Extent.Text -eq 'new')
+        } elseif ($rhs -is [System.Management.Automation.Language.PipelineAst] -and $rhs.PipelineElements.Count -eq 1 -and
+                  $rhs.PipelineElements[0] -is [System.Management.Automation.Language.CommandAst] -and $rhs.PipelineElements[0].GetCommandName() -eq 'New-Object') {
+            $isFresh = $true
+        }
+        if ($isFresh) { $null = $freshNames.Add($assign.Left.VariablePath.UserPath) } else { $null = $otherNames.Add($assign.Left.VariablePath.UserPath) }
     }
-    foreach ($assign in $AstNode.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
+    foreach ($assign in $assignments) {
         $target = $assign.Left
         if ($target -isnot [System.Management.Automation.Language.IndexExpressionAst] -and
             $target -isnot [System.Management.Automation.Language.MemberExpressionAst]) { continue }
-        if ($assign.Right -isnot [System.Management.Automation.Language.CommandExpressionAst]) { continue }
-        $value = $assign.Right.Expression
-        if ($value -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $value.Member.Extent.Text -eq 'GetNewClosure') { $value = $value.Expression }
-        $isScriptBlock = ($value -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) -or
+        $value = $null
+        if ($assign.Right -is [System.Management.Automation.Language.CommandExpressionAst]) { $value = $assign.Right.Expression }
+        $isScriptBlock = ($null -ne (Get-AssignedScriptBlockLiteral -Right $assign.Right)) -or
             ($value -is [System.Management.Automation.Language.VariableExpressionAst] -and $sbVarNames.Contains($value.VariablePath.UserPath))
         if (-not $isScriptBlock) { continue }
         $root = $target
         while ($root -is [System.Management.Automation.Language.IndexExpressionAst] -or $root -is [System.Management.Automation.Language.MemberExpressionAst]) {
             if ($root -is [System.Management.Automation.Language.IndexExpressionAst]) { $root = $root.Target } else { $root = $root.Expression }
         }
-        if ($root -is [System.Management.Automation.Language.VariableExpressionAst] -and $localNames.Contains($root.VariablePath.UserPath)) { continue }
+        if ($root -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            $freshNames.Contains($root.VariablePath.UserPath) -and -not $otherNames.Contains($root.VariablePath.UserPath)) { continue }
         if ($assign.Extent.StartScriptPosition.Line -match '#\s*lint:ignore') { continue }
         $found.Add(@{ Line = $assign.Extent.StartLineNumber; What = ("stores a scriptblock into " + $target.Extent.Text + ", which it didn't create") })
     }
@@ -648,6 +671,9 @@ function Sample-Worker {
     $local = @{}
     $local['k'] = $built
     $Cache['n'] = $Name
+    $alias = $Cache
+    $alias['a'] = $built
+    foreach ($slot in $Cache.Values) { $slot.Factory = $Factory }
 }
 '@
 $rule7SampleAst = [System.Management.Automation.Language.Parser]::ParseInput($rule7SampleText, [ref]$null, [ref]$null)
@@ -657,7 +683,8 @@ Test-Assert ($rule7SampleLines -contains 5) "Rule 7 flags a [scriptblock] parame
 Test-Assert ($rule7SampleLines -contains 6) "Rule 7 flags a .GetNewClosure()'d scriptblock variable stored through a .NET method (TryAdd)"
 Test-Assert ($rule7SampleLines -contains 11) "Rule 7 flags a scriptblock stored through an indexer on a container it didn't create (`$Cache['k'] = `$Factory)"
 Test-Assert ($rule7SampleLines -contains 12) "Rule 7 flags a scriptblock literal stored into a property of a container it didn't create (`$Cache.Hook = { }.GetNewClosure())"
-Test-Assert ($rule7Sample.Count -eq 4) ("Rule 7 leaves a plain parameter, a scriptblock's .Invoke() result, .Where(), a lint:ignore'd line, a local container and a plain stored value alone (flagged " + $rule7Sample.Count + ", expected 4)")
+Test-Assert (($rule7SampleLines -contains 17) -and ($rule7SampleLines -contains 18)) "Rule 7 flags a store through a local alias of a shared container, and through a loop variable"
+Test-Assert ($rule7Sample.Count -eq 6) ("Rule 7 leaves a plain parameter, a scriptblock's .Invoke() result, .Where(), a lint:ignore'd line, a container it built itself and a plain stored value alone (flagged " + $rule7Sample.Count + ", expected 6)")
 
 $rule7 = Get-RunspaceReachableFindings -Finder $scriptBlockArgFinder
 Test-Assert (@($rule7).Count -eq 0) "no runspace-reachable function or worker body passes a scriptblock to .NET or stores one into a container it didn't create"
@@ -761,8 +788,10 @@ $hostCmdletFinder = {
     $hits = [System.Collections.Generic.List[object]]::new()
     foreach ($c in $AstNode.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
         $cmdName = $c.GetCommandName()
-        if (-not $cmdName -or -not $hostCmdletByName.ContainsKey($cmdName)) { continue }
-        $hits.Add(@{ Ast = $c; Name = $hostCmdletByName[$cmdName]; What = ("calls host cmdlet " + $cmdName) })
+        if (-not $cmdName) { continue }
+        $bareName = $cmdName -replace '^[^\\]+\\', ''   # Microsoft.PowerShell.Utility\Write-Host -> Write-Host
+        if (-not $hostCmdletByName.ContainsKey($bareName)) { continue }
+        $hits.Add(@{ Ast = $c; Name = $hostCmdletByName[$bareName]; What = ("calls host cmdlet " + $cmdName) })
     }
     foreach ($m in $AstNode.FindAll({ param($n) $n -is [System.Management.Automation.Language.MemberExpressionAst] }, $true)) {
         if ($m.Static -and $m.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
@@ -789,12 +818,13 @@ function Sample-Worker {
     [Console]::WriteLine('z')
     $Host.UI.WriteLine('w')
     $width = $Host.Name
+    Microsoft.PowerShell.Utility\Write-Host 'q'
 }
 '@
 $rule9SampleAst = [System.Management.Automation.Language.Parser]::ParseInput($rule9SampleText, [ref]$null, [ref]$null)
 $rule9Sample = & $hostCmdletFinder $rule9SampleAst 'Sample-Worker'
 $rule9SampleLines = @($rule9Sample | ForEach-Object { $_.Line } | Sort-Object)
-Test-Assert (($rule9SampleLines -join ',') -eq '2,3,5,6,7') ("Rule 9 flags Write-Host, Read-Host, an alias (cls), [Console]:: and `$Host.UI, and leaves Write-Output and other `$Host members alone (flagged lines " + ($rule9SampleLines -join ',') + ", expected 2,3,5,6,7)")
+Test-Assert (($rule9SampleLines -join ',') -eq '2,3,5,6,7,9') ("Rule 9 flags Write-Host, Read-Host, an alias (cls), [Console]::, `$Host.UI and a module-qualified name, and leaves Write-Output and other `$Host members alone (flagged lines " + ($rule9SampleLines -join ',') + ", expected 2,3,5,6,7,9)")
 
 $rule9 = Get-RunspaceReachableFindings -Finder $hostCmdletFinder
 Test-Assert (@($rule9).Count -eq 0) "no runspace-reachable function or worker body calls a host cmdlet"
