@@ -27,11 +27,12 @@ Every module is a file of function (and type) definitions with no side effects w
 
 ## Rules for code that runs in worker runspaces
 
-Zip Folders' workers and Full Pipeline's two engines run in separate PowerShell runspaces, and anything they call must follow three rules. Each module's section says which of its functions run there.
+Zip Folders' workers and Full Pipeline's two engines run in separate PowerShell runspaces, and anything they call must follow two rules. Each module's section says which of its functions run there.
 
 1. **Don't read `$script:` variables directly.** A function copied into a runspace can resolve `$script:` to an empty scope (inside a `.GetNewClosure()` block, for example), and the read silently comes back empty. Workers get their state as parameters, or through `Get-WorkerRunspaceValue` (`Logging.ps1`).
-2. **Don't call cmdlets; use .NET calls.** Two fresh runspaces calling the same cmdlet for the first time at the same moment can deadlock in Windows PowerShell 5.1.
-3. **Don't hand a scriptblock to .NET as a delegate** (`[Func[...]]{ }`, or a scriptblock passed to a .NET method such as `ConcurrentDictionary.GetOrAdd`). Nested, these deadlock.
+2. **Never run a scriptblock in a runspace other than the one that created it.** Workers get plain data, not scriptblocks, as job parameters and through shared caches, and no scriptblock is handed to .NET as a delegate (`[Func[...]]{ }`, a `System.Lazy` factory, or a scriptblock passed to a method such as `ConcurrentDictionary.GetOrAdd`), since .NET can then call it from another engine's thread. A scriptblock running on another runspace's thread queues every scriptblock it calls (a `Where-Object` filter, a nested delegate) back to the runspace it came from and waits. If that runspace is waiting on the first thread, both hang; if it's idle, the process can crash.
+
+Cmdlets are fine in worker code. The code uses .NET calls in many of those places for historical reasons, not because a cmdlet would break.
 
 A runspace starts with only the functions it's given, so a function a worker calls must be in its caller's `-SharedFunctionNames` list (built from each module's `Get-...SharedFunctionNames`). `_Harness\Lint.Harness.ps1` checks all of this.
 
@@ -198,7 +199,7 @@ Deletes original files and folders after they've been converted or zipped. It se
 
 **Things to watch out for**
 
-- Several runspaces run these functions at once, so keep them on plain .NET calls. That is why `Resolve-ItemPathOrNull` skips the PowerShell path-resolution cmdlets for rooted paths.
+- Several runspaces run these functions at once. `Resolve-ItemPathOrNull` resolves rooted paths with a plain .NET call and only uses PowerShell's session-state path resolution for relative ones.
 - If you add a helper that a worker-run function calls, add it to `Get-FileDeletionSharedFunctionNames`.
 - The `Add-Type` for `RecycleBinProbe` is guarded by a `PSTypeName` check so the file can be dot-sourced more than once in a process without a duplicate-type error. Keep any similar `Add-Type` guarded.
 - Call `Initialize-FileDeletion` again whenever the setting changes (the Controller does it before each run, and `Menu.ps1` does it before Cover Deletion).
@@ -835,7 +836,7 @@ The top of the tool. It holds Full Pipeline (convert images, convert animated AV
 
 **Things to watch out for**
 
-- **Worker-runspace rules.** The engine worker and everything it calls run in a runspace with only the functions listed in `$engineWorkerSharedFunctionNames` (built from each module's `Get-...SharedFunctionNames` plus a hand-written list of Controller and helper functions). So worker code must not read the main script's `$script:` state (the worker sets its own `$script:workerConsoleQueue` and `$script:PermanentDelete` at the top and reads them through `Get-WorkerRunspaceValue`), must not call anything not in that list, and must not call cmdlets that are unsafe to run for the first time concurrently in two fresh runspaces; the code uses .NET calls (`[System.IO.File]::Delete`, `Get-FilesRecursiveSafe` and so on) instead. Don't pass a scriptblock into a .NET API as a delegate (for example as a callback to a task or event); use the process and task APIs the way the existing code does.
+- **Worker-runspace rules.** The engine worker and everything it calls run in a runspace with only the functions listed in `$engineWorkerSharedFunctionNames` (built from each module's `Get-...SharedFunctionNames` plus a hand-written list of Controller and helper functions). So worker code must not read the main script's `$script:` state (the worker sets its own `$script:workerConsoleQueue` and `$script:PermanentDelete` at the top and reads them through `Get-WorkerRunspaceValue`), must not call anything not in that list, and must never run a scriptblock the other engine (or the main thread) created. Job parameters and the shared caches hold plain data only, and no scriptblock goes to a .NET API as a delegate (a `Lazy` factory, or a task or event callback). That is why `Get-OrCreateFullPipelineCacheEntry` runs each cache factory with `&` on the calling engine's own thread, behind a plain lock.
 - A new function that the worker calls directly or indirectly must be added to `$engineWorkerSharedFunctionNames` (or its module's getter). `Lint.Harness.ps1` checks this. It has one known exception: `Write-GatedConsoleMessage` is deliberately left off the Controller list (its calls sit in main-thread-only branches).
 - **Closures and state.** The worker's scriptblocks use `.GetNewClosure()`. A plain variable assigned inside one doesn't persist between calls and `$script:` reads inside one don't see the real script scope, so the code keeps changing state in hashtables (`$totals`, `$abortState`, `$chapterProviderState`) and reads settings through handler functions. Mutating a captured hashtable works; rebinding a captured scalar doesn't.
 - **Main thread vs worker.** Totals, console output, Clean Console Output calls, zipping and deleting folders happen only on the main thread (in the poll callback and the post-run loop). Workers only produce events and per-chapter result hashtables.

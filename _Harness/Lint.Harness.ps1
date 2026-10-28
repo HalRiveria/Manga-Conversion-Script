@@ -63,15 +63,6 @@ $script:LintScriptVarAllowed = @(
        Why       = 'Only read after Test-AbortSignal''s own worker early-return (returns [ConsoleCtrl]::AbortRequested, never announces), i.e. main thread only.' }
 )
 
-# Rule 7 only: specific (function, cmdlet) pairs reviewed as safe on a
-# runspace-reachable path. Same bar as Rule 6's list - each entry must say
-# why the cmdlet can't actually run inside a worker.
-$script:LintCmdletAllowed = @(
-    @{ Function = 'Write-LogLineToHost'
-       Cmdlets  = @('Write-Host')
-       Why      = 'Only called from Write-Log past its worker early-return (worker lines go through the console queue) and from Flush-ConsoleQueue (main thread). Listed in Get-LoggingSharedFunctionNames only because Rule 5 walks Write-Log''s callees statically.' }
-)
-
 $script:passCount = 0
 $script:failCount = 0
 
@@ -79,14 +70,6 @@ function Test-IsScriptVarAllowed {
     param([string]$Function, [string]$Variable)
     foreach ($a in $script:LintScriptVarAllowed) {
         if ($a.Function -eq $Function -and ($a.Variables -contains $Variable)) { return $true }
-    }
-    return $false
-}
-
-function Test-IsCmdletAllowed {
-    param([string]$Function, [string]$Cmdlet)
-    foreach ($a in $script:LintCmdletAllowed) {
-        if ($a.Function -eq $Function -and ($a.Cmdlets -contains $Cmdlet)) { return $true }
     }
     return $false
 }
@@ -519,46 +502,190 @@ Show-Findings -Findings @($rule6)
 Write-Host ""
 
 # ------------------------------------------------------------------------
-#  Rule 7: cmdlet call on a runspace-reachable path
+#  Rule 7: a scriptblock crossing into a worker runspace
 # ------------------------------------------------------------------------
-# PS 5.1's cmdlet-first-invocation race: two fresh runspaces calling the
-# same cmdlet for the first time at the same moment can deadlock both
-# Runspace code paths use raw .NET
-# only. Same reachable set as Rule 6 (propagated functions + worker
-# bodies); any command name that isn't a user function defined in the scan
-# is a cmdlet. Deliberate, reviewed exceptions go in
-# $script:LintCmdletAllowed below with a reason.
-Write-Host "=== Lint: cmdlet call on a runspace-reachable path ===" -ForegroundColor Cyan
+# A scriptblock belongs to the runspace that created it. Run on another
+# runspace's thread - as a delegate (Rule 8), or because it was handed
+# over as a job parameter or through shared state and called with & -
+# every scriptblock PowerShell runs inside it (a Where-Object filter, a
+# nested delegate) gets queued back to the owning runspace, and the
+# calling thread waits. If the owner is itself waiting on that thread (a
+# lock, a Lazy), both hang for good; if the owner is idle, the queued
+# block can run against the owner's scope stack and crash the process.
+# Workers get plain data only.
+#
+# Two shapes, both flagged:
+#   - a job-parameter hashtable handed to Invoke-ZipParallelProcessing (a
+#     -JobParams entry, or what -NextJobProvider returns) with a
+#     scriptblock value
+#   - runspace-reachable code passing a variable that holds a scriptblock
+#     to a .NET method or constructor ($dict.TryAdd($k, $sb),
+#     [System.Lazy[object]]::new($factory)) - .NET receives a delegate,
+#     or stores it where another runspace can run it. Rule 8 covers the
+#     literal and cast forms of the same thing.
+# Add "# lint:ignore" on the line for a deliberate exception.
+Write-Host "=== Lint: scriptblock crossing into a worker runspace ===" -ForegroundColor Cyan
 
-$rule7 = @()
-$cmdletFinder = {
+function Get-ScriptBlockVariableNames {
     param($AstNode)
+    $names = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($assign in $AstNode.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
+        if ($assign.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            $assign.Right -is [System.Management.Automation.Language.CommandExpressionAst]) {
+            $rhsExpr = $assign.Right.Expression
+            if ($rhsExpr -is [System.Management.Automation.Language.InvokeMemberExpressionAst]) { $rhsExpr = $rhsExpr.Expression }
+            if ($rhsExpr -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) { $null = $names.Add($assign.Left.VariablePath.UserPath) }
+        }
+    }
+    return ,$names
+}
+
+function Test-IsScriptBlockValue {
+    param($Expr, $ScriptBlockVarNames)
+    if ($Expr -is [System.Management.Automation.Language.PipelineAst] -and $Expr.PipelineElements.Count -eq 1) { $Expr = $Expr.PipelineElements[0] }
+    if ($Expr -is [System.Management.Automation.Language.CommandExpressionAst]) { $Expr = $Expr.Expression }
+    if ($Expr -is [System.Management.Automation.Language.InvokeMemberExpressionAst]) { $Expr = $Expr.Expression }
+    if ($Expr -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) { return $true }
+    return ($Expr -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            $ScriptBlockVarNames.Contains($Expr.VariablePath.UserPath))
+}
+
+# Job-parameter hashtables for every Invoke-ZipParallelProcessing call
+# under $RootAst: hashtables .Add()ed to (or assigned to) the -JobParams
+# variable, and hashtables the -NextJobProvider scriptblock returns.
+$jobParamScriptBlockFinder = {
+    param($RootAst)
     $found = [System.Collections.Generic.List[object]]::new()
-    foreach ($c in $AstNode.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
-        $cmdName = $c.GetCommandName()
-        if ($cmdName -and -not $allFnNames.Contains($cmdName)) { $found.Add($c) }
+    foreach ($call in $RootAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Invoke-ZipParallelProcessing' }, $true)) {
+        $scope = $call.Parent
+        while ($scope -and -not ($scope -is [System.Management.Automation.Language.FunctionDefinitionAst])) { $scope = $scope.Parent }
+        if (-not $scope) { $scope = $RootAst }
+        $sbVarNames = Get-ScriptBlockVariableNames -AstNode $scope
+
+        $jobParamsVar = $null; $providerVar = $null
+        for ($i = 0; ($i + 1) -lt $call.CommandElements.Count; $i++) {
+            $el = $call.CommandElements[$i]; $valEl = $call.CommandElements[$i + 1]
+            if ($el -isnot [System.Management.Automation.Language.CommandParameterAst] -or
+                $valEl -isnot [System.Management.Automation.Language.VariableExpressionAst]) { continue }
+            if ($el.ParameterName -eq 'JobParams') { $jobParamsVar = $valEl.VariablePath.UserPath }
+            if ($el.ParameterName -eq 'NextJobProvider') { $providerVar = $valEl.VariablePath.UserPath }
+        }
+
+        $tables = [System.Collections.Generic.List[object]]::new()
+        if ($jobParamsVar) {
+            foreach ($m in $scope.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)) {
+                if ($m.Expression -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                    $m.Expression.VariablePath.UserPath -eq $jobParamsVar -and $m.Member.Extent.Text -eq 'Add' -and $m.Arguments) {
+                    foreach ($argument in $m.Arguments) {
+                        foreach ($h in $argument.FindAll({ param($n) $n -is [System.Management.Automation.Language.HashtableAst] }, $true)) { $tables.Add($h) }
+                    }
+                }
+            }
+        }
+        foreach ($assign in $scope.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
+            if ($assign.Left -isnot [System.Management.Automation.Language.VariableExpressionAst]) { continue }
+            $assignedName = $assign.Left.VariablePath.UserPath
+            if ($jobParamsVar -and $assignedName -eq $jobParamsVar) {
+                foreach ($h in $assign.Right.FindAll({ param($n) $n -is [System.Management.Automation.Language.HashtableAst] }, $true)) { $tables.Add($h) }
+            }
+            if ($providerVar -and $assignedName -eq $providerVar) {
+                foreach ($ret in $assign.Right.FindAll({ param($n) $n -is [System.Management.Automation.Language.ReturnStatementAst] }, $true)) {
+                    if ($null -eq $ret.Pipeline) { continue }
+                    foreach ($h in $ret.Pipeline.FindAll({ param($n) $n -is [System.Management.Automation.Language.HashtableAst] }, $true)) { $tables.Add($h) }
+                }
+            }
+        }
+
+        foreach ($h in $tables) {
+            foreach ($pair in $h.KeyValuePairs) {
+                if ($pair.Item2.Extent.StartScriptPosition.Line -match '#\s*lint:ignore') { continue }
+                if (Test-IsScriptBlockValue -Expr $pair.Item2 -ScriptBlockVarNames $sbVarNames) {
+                    $found.Add(@{ Line = $pair.Item2.Extent.StartLineNumber; What = ("job parameter '" + $pair.Item1.Extent.Text + "' is a scriptblock") })
+                }
+            }
+        }
     }
     return ,$found
+}
+
+# A scriptblock-holding variable passed to a .NET method or constructor.
+$scriptBlockArgFinder = {
+    param($AstNode)
+    $found = [System.Collections.Generic.List[object]]::new()
+    $sbVarNames = Get-ScriptBlockVariableNames -AstNode $AstNode
+    if ($sbVarNames.Count -eq 0) { return ,$found }
+    foreach ($call in $AstNode.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)) {
+        if ($null -eq $call.Arguments) { continue }
+        $memberName = [string]$call.Member.Extent.Text
+        if ($memberName -in @('ForEach', 'Where')) { continue }
+        if ($call.Extent.StartScriptPosition.Line -match '#\s*lint:ignore') { continue }
+        foreach ($argument in $call.Arguments) {
+            if ($argument -is [System.Management.Automation.Language.VariableExpressionAst] -and $sbVarNames.Contains($argument.VariablePath.UserPath)) {
+                $found.Add(@{ Line = $call.Extent.StartLineNumber; What = ("passes scriptblock `$" + $argument.VariablePath.UserPath + " to ." + $memberName + "()") })
+            }
+        }
+    }
+    return ,$found
+}
+
+# Proves both finders fire, since nothing in the real code trips them.
+$rule7SampleText = @'
+function Sample-Caller {
+    $cb = { param($x) $x }
+    $plain = 'value'
+    $jobs = [System.Collections.Generic.List[hashtable]]::new()
+    $jobs.Add(@{ Name = $plain; Callback = $cb; Inline = { 1 }; Closure = { 2 }.GetNewClosure() })
+    $provider = {
+        return @{ Path = $plain; Hook = $cb }
+    }.GetNewClosure()
+    $jobs.Add(@{ Skipped = $cb })   # lint:ignore - sample
+    Invoke-ZipParallelProcessing -WorkerScript $w -JobParams $jobs -NextJobProvider $provider
+}
+function Sample-Worker {
+    $factory = { 3 }.GetNewClosure()
+    $lazy = [System.Lazy[object]]::new($factory)
+    $null = $dict.TryAdd('k', $factory)
+    $null = $dict.TryAdd('k', $plain)
+    $e = @(1, 2).Where($factory)
+}
+'@
+$rule7SampleAst = [System.Management.Automation.Language.Parser]::ParseInput($rule7SampleText, [ref]$null, [ref]$null)
+$rule7JobSample = & $jobParamScriptBlockFinder $rule7SampleAst
+$rule7JobSampleText = @($rule7JobSample | ForEach-Object { $_.What })
+Test-Assert ($rule7JobSampleText -contains "job parameter 'Callback' is a scriptblock") "Rule 7 flags a scriptblock variable in a -JobParams hashtable"
+Test-Assert (($rule7JobSampleText -contains "job parameter 'Inline' is a scriptblock") -and ($rule7JobSampleText -contains "job parameter 'Closure' is a scriptblock")) "Rule 7 flags a scriptblock literal (bare or .GetNewClosure()'d) in a -JobParams hashtable"
+Test-Assert ($rule7JobSampleText -contains "job parameter 'Hook' is a scriptblock") "Rule 7 flags a scriptblock in a hashtable the -NextJobProvider returns"
+Test-Assert ($rule7JobSample.Count -eq 4) ("Rule 7 leaves plain job-parameter values and a lint:ignore'd line alone (flagged " + $rule7JobSample.Count + ", expected 4)")
+$rule7ArgSample = & $scriptBlockArgFinder $rule7SampleAst.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Sample-Worker' }, $true)
+$rule7ArgSampleLines = @($rule7ArgSample | ForEach-Object { $_.Line })
+Test-Assert ($rule7ArgSampleLines -contains 14) "Rule 7 flags a scriptblock variable passed to a constructor ([System.Lazy]::new(`$factory))"
+Test-Assert ($rule7ArgSampleLines -contains 15) "Rule 7 flags a scriptblock variable stored through a .NET method (TryAdd)"
+Test-Assert ($rule7ArgSample.Count -eq 2) ("Rule 7 leaves a plain value and .Where() alone (flagged " + $rule7ArgSample.Count + ", expected 2)")
+
+$rule7 = @()
+foreach ($name in $fileAsts.Keys) {
+    foreach ($hit in (& $jobParamScriptBlockFinder $fileAsts[$name])) {
+        $rule7 += @{ File = $name; Line = $hit.Line; Text = $hit.What }
+    }
 }
 foreach ($fname in $runspaceReachable) {
     if (-not $fnAstByName.ContainsKey($fname)) { continue }
     $fnAst = $fnAstByName[$fname]
     $fnFile = $null
     foreach ($name in $fileAsts.Keys) { if ($fileText[$name].Contains($fnAst.Extent.Text)) { $fnFile = $name; break } }
-    foreach ($c in (& $cmdletFinder $fnAst)) {
-        if (Test-IsCmdletAllowed -Function $fname -Cmdlet $c.GetCommandName()) { continue }
-        $rule7 += @{ File = $fnFile; Line = $c.Extent.StartLineNumber; Text = ($fname + " (runspace-reachable) calls cmdlet " + $c.GetCommandName()) }
+    foreach ($hit in (& $scriptBlockArgFinder $fnAst)) {
+        $rule7 += @{ File = $fnFile; Line = $hit.Line; Text = ($fname + " (runspace-reachable) " + $hit.What) }
     }
 }
 foreach ($workerVar in $runspaceWorkerBodies) {
     $body = $scriptBlockVars[$workerVar]
     $workerFile = $null
     foreach ($name in $fileAsts.Keys) { if ($fileText[$name].Contains($body.Extent.Text)) { $workerFile = $name; break } }
-    foreach ($c in (& $cmdletFinder $body)) {
-        $rule7 += @{ File = $workerFile; Line = $c.Extent.StartLineNumber; Text = ("worker `$" + $workerVar + " calls cmdlet " + $c.GetCommandName()) }
+    foreach ($hit in (& $scriptBlockArgFinder $body)) {
+        $rule7 += @{ File = $workerFile; Line = $hit.Line; Text = ("worker `$" + $workerVar + " " + $hit.What) }
     }
 }
-Test-Assert (@($rule7).Count -eq 0) "no runspace-reachable function or worker body calls a cmdlet"
+Test-Assert (@($rule7).Count -eq 0) "no scriptblock is handed to a worker runspace as a job parameter or passed to .NET from runspace-reachable code"
 Show-Findings -Findings @($rule7)
 Write-Host ""
 
@@ -566,12 +693,12 @@ Write-Host ""
 #  Rule 8: scriptblock converted to a delegate on a runspace-reachable path
 # ------------------------------------------------------------------------
 # A PowerShell scriptblock cast to a .NET delegate ([Func[...]], [Action[...]],
-# ...) and invoked by .NET code is routed through its home runspace's event
-# manager. Nested inside another such invocation (a [System.Lazy] factory
-# calling ConcurrentDictionary.AddOrUpdate with a scriptblock update
-# function), it waits for an event only its own, already-busy thread can
-# process - and the other engine then blocks on the lock the first one
-# holds. Runspace code uses plain loops/locks instead.
+# ...) runs on whichever thread .NET calls it from. On a shared object (a
+# [System.Lazy] factory in a cache both engines read), that can be the
+# other engine's thread - the Rule 7 problem: any scriptblock it runs inside
+# (a Where-Object filter, a nested AddOrUpdate delegate) is queued back to
+# the owning engine, which is blocked on the Lazy lock, and both hang.
+# Runspace code uses plain loops/locks instead.
 #
 # Two shapes, both flagged:
 #   - the written cast: [Func[...]]{ ... }
