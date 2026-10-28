@@ -1,5 +1,20 @@
 # See module-descriptions.md for this module's full description.
 
+function Get-ZipJobScriptBlockKey {
+    param([hashtable]$Job)
+    foreach ($key in $Job.Keys) {
+        $value = $Job[$key]
+        if ($value -is [scriptblock]) { return [string]$key }
+        $inner = $null
+        if ($value -is [System.Collections.IDictionary]) { $inner = $value.Values }
+        elseif ($value -is [System.Collections.IEnumerable] -and $value -isnot [string]) { $inner = $value }
+        if ($null -ne $inner) {
+            foreach ($item in $inner) { if ($item -is [scriptblock]) { return [string]$key } }
+        }
+    }
+    return $null
+}
+
 function Invoke-ZipParallelProcessing {
     param(
         [Parameter(Mandatory)]
@@ -26,6 +41,14 @@ function Invoke-ZipParallelProcessing {
     }
 
     if ($null -ne $JobParams -and $JobParams.Count -eq 0) { return @{ ForceStoppedCount = 0 } }
+
+    $scriptBlockJobError = "Invoke-ZipParallelProcessing: job parameter '{0}' is (or contains) a scriptblock. A scriptblock belongs to the runspace that created it, and run inside a worker it can deadlock or crash the process. Pass plain data instead, or pass the code as a string and build it inside the worker with [scriptblock]::Create()."
+    if ($null -ne $JobParams) {
+        foreach ($job in $JobParams) {
+            $badKey = Get-ZipJobScriptBlockKey -Job $job
+            if ($null -ne $badKey) { throw ($scriptBlockJobError -f $badKey) }
+        }
+    }
 
     $fixedListIndex = 0
 
@@ -68,6 +91,10 @@ function Invoke-ZipParallelProcessing {
                     }
                 } else {
                     $nextJob = & $NextJobProvider
+                    if ($null -ne $nextJob) {
+                        $badKey = Get-ZipJobScriptBlockKey -Job $nextJob
+                        if ($null -ne $badKey) { throw ($scriptBlockJobError -f $badKey) }
+                    }
                 }
                 if ($null -eq $nextJob) { $scanExhausted = $true; break }
 

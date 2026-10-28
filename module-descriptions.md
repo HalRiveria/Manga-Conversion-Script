@@ -30,7 +30,7 @@ Every module is a file of function (and type) definitions with no side effects w
 Zip Folders' workers and Full Pipeline's two engines run in separate PowerShell runspaces, and anything they call must follow two rules. Each module's section says which of its functions run there.
 
 1. **Don't read `$script:` variables directly.** A function copied into a runspace can resolve `$script:` to an empty scope (inside a `.GetNewClosure()` block, for example), and the read silently comes back empty. Workers get their state as parameters, or through `Get-WorkerRunspaceValue` (`Logging.ps1`).
-2. **Never run a scriptblock in a runspace other than the one that created it.** Workers get plain data, not scriptblocks, as job parameters and through shared caches, and no scriptblock is handed to .NET as a delegate (`[Func[...]]{ }`, a `System.Lazy` factory, or a scriptblock passed to a method such as `ConcurrentDictionary.GetOrAdd`), since .NET can then call it from another engine's thread. A scriptblock running on another runspace's thread queues every scriptblock it calls (a `Where-Object` filter, a nested delegate) back to the runspace it came from and waits. If that runspace is waiting on the first thread, both hang; if it's idle, the process can crash.
+2. **Never run a scriptblock in a runspace other than the one that created it.** Workers get plain data, not scriptblocks, as job parameters (`Invoke-ZipParallelProcessing` refuses a scriptblock job value) and through shared caches, and no scriptblock is handed to .NET as a delegate (`[Func[...]]{ }`, a `System.Lazy` factory, or a scriptblock passed to a method such as `ConcurrentDictionary.GetOrAdd`), since .NET can then call it from another engine's thread. A scriptblock running on another runspace's thread queues every scriptblock it calls (a `Where-Object` filter, a nested delegate) back to the runspace it came from and waits. If that runspace is waiting on the first thread, both hang; if it's idle, the process can crash.
 
 Cmdlets are fine in worker code. The code uses .NET calls in many of those places for historical reasons, not because a cmdlet would break.
 
@@ -489,12 +489,14 @@ A shared runspace-pool dispatcher. It runs a worker scriptblock once per job in 
 
 | Function | What it does |
 |---|---|
+| `Get-ZipJobScriptBlockKey` | Returns the first key in a job hashtable whose value is a scriptblock, or an array, list or hashtable directly holding one; `$null` if there is none. |
 | `Invoke-ZipParallelProcessing` | Runs `-WorkerScript` for each job in a runspace pool of at most `-MaxParallel`, feeds every result to `-ResultHandler` on the main thread, and returns `@{ ForceStoppedCount = n }`. |
 
 **How it works**
 
 - Jobs come from exactly one of two sources: `-JobParams` (a fixed list of parameter hashtables) or `-NextJobProvider` (a scriptblock called on the main thread that returns the next hashtable, or `$null` when finished). Supplying both or neither throws. An empty `-JobParams` list returns immediately.
 - Each job's hashtable keys are passed to the worker as named parameters. The function adds three more: `CancelToken` (from `-Cts`), `LogMutex` and `ConsoleQueue`. A worker script must declare those parameters.
+- Every job is checked before it starts: a scriptblock value, or one directly inside an array, list or hashtable value, throws a message naming the key (see the worker-runspace rules above). A `-JobParams` list is checked whole before anything runs; a `-NextJobProvider` job is checked as it is produced. To hand a worker code, pass it as a string and build it inside the worker with `[scriptblock]::Create()`.
 - The pool is built from a fresh `InitialSessionState`. Only the functions named in `-SharedFunctionNames` are copied into it (by reading each function's definition and adding a function entry). A name that doesn't resolve throws a message naming the entry. Nothing else from the calling script exists inside a worker.
 - Each run creates its own log mutex (`Initialize-LogMutex`) and a `ConcurrentQueue` for console output. The previous `$script:logMutex` is restored, and the new mutex disposed, when the call ends.
 - The main loop keeps the pool filled up to `-MaxParallel`, then on each pass: checks `Test-AbortSignal`, flushes the console queue (`Flush-ConsoleQueue`), calls `-PollCallback` if given, and harvests completed jobs. It sleeps 100 ms only when it has nothing to start.

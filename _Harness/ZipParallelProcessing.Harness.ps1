@@ -534,6 +534,52 @@ Test-Assert ($outcomeG -is [hashtable] -and $outcomeG.ForceStoppedCount -eq 0) "
 Write-Host ""
 
 # ==============================================================================
+#  Scenario H: a scriptblock job value is refused before any worker runs.
+#  A scriptblock belongs to the runspace that created it; run inside a worker
+#  it can deadlock or crash the process.
+# ==============================================================================
+Write-Host "=== Scenario H: scriptblock job values are refused ===" -ForegroundColor Cyan
+Reset-HarnessAbortState
+$sharedH = @(Get-LoggingSharedFunctionNames)
+function Invoke-ScenarioHJobs {
+    param($Job, [switch]$UseProvider)
+    $results = [System.Collections.Generic.List[hashtable]]::new()
+    $cts = [System.Threading.CancellationTokenSource]::new()
+    $err = $null
+    try {
+        if ($UseProvider) {
+            $state = @{ Given = $false }
+            $provider = { if ($state.Given) { return $null }; $state.Given = $true; return $Job }.GetNewClosure()
+            $null = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -NextJobProvider $provider -SharedFunctionNames $sharedH `
+                -MaxParallel 1 -Cts $cts -ResultHandler { param($r) $results.Add($r) }.GetNewClosure()
+        } else {
+            $list = [System.Collections.Generic.List[hashtable]]::new()
+            $list.Add($Job)
+            $null = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -JobParams $list -SharedFunctionNames $sharedH `
+                -MaxParallel 1 -Cts $cts -ResultHandler { param($r) $results.Add($r) }.GetNewClosure()
+        }
+    } catch { $err = $_.ToString() }
+    $cts.Dispose()
+    return @{ Error = $err; Results = $results.Count }
+}
+$baseH = @{ JobId = 1; DelayMs = 0; DoFullLogging = $FullLogging; LogFile = $logFile; LogErrorFile = $logErrorFile; LogWarnFile = $logWarnFile }
+function New-ScenarioHJob { param([hashtable]$Extra) $j = $baseH.Clone(); foreach ($k in $Extra.Keys) { $j[$k] = $Extra[$k] }; return $j }
+
+$h1 = Invoke-ScenarioHJobs -Job (New-ScenarioHJob @{ Callback = { 1 } })
+Test-Assert ($null -ne $h1.Error -and $h1.Error -match "'Callback'" -and $h1.Error -match '\[scriptblock\]::Create') ("a -JobParams scriptblock value throws, naming the key and the workaround (got: " + $h1.Error + ")")
+Test-Assert ($h1.Results -eq 0) "no worker ran for the refused -JobParams list"
+$h2 = Invoke-ScenarioHJobs -Job (New-ScenarioHJob @{ Steps = @('a', { 2 }) })
+Test-Assert ($null -ne $h2.Error -and $h2.Error -match "'Steps'") "a scriptblock inside an array job value is refused"
+$h3 = Invoke-ScenarioHJobs -Job (New-ScenarioHJob @{ Options = @{ OnDone = { 3 } } })
+Test-Assert ($null -ne $h3.Error -and $h3.Error -match "'Options'") "a scriptblock inside a hashtable job value is refused"
+$h4 = Invoke-ScenarioHJobs -Job (New-ScenarioHJob @{ Hook = { 4 } }) -UseProvider
+Test-Assert ($null -ne $h4.Error -and $h4.Error -match "'Hook'" -and $h4.Results -eq 0) "a scriptblock in a -NextJobProvider job is refused before that job runs"
+$h5 = Invoke-ScenarioHJobs -Job (New-ScenarioHJob @{ Code = '{ 5 }'; Names = @('x', 'y'); Map = @{ K = 'v' } })
+Test-Assert ($null -eq $h5.Error -and $h5.Results -eq 1) ("plain data, including code passed as a string, still runs (error: " + $h5.Error + ", results: " + $h5.Results + ")")
+Reset-HarnessAbortState
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="
