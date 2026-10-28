@@ -534,6 +534,135 @@ Test-Assert ($outcomeG -is [hashtable] -and $outcomeG.ForceStoppedCount -eq 0) "
 Write-Host ""
 
 # ==============================================================================
+#  Scenario H: a scriptblock job value is refused before any worker runs.
+#  A scriptblock belongs to the runspace that created it; run inside a worker
+#  it can deadlock or crash the process.
+# ==============================================================================
+Write-Host "=== Scenario H: scriptblock job values are refused ===" -ForegroundColor Cyan
+Reset-HarnessAbortState
+$sharedH = @(Get-LoggingSharedFunctionNames)
+function Invoke-ScenarioHJobs {
+    param($Job, [switch]$UseProvider)
+    $results = [System.Collections.Generic.List[hashtable]]::new()
+    $cts = [System.Threading.CancellationTokenSource]::new()
+    $err = $null
+    try {
+        if ($UseProvider) {
+            $state = @{ Given = $false }
+            $provider = { if ($state.Given) { return $null }; $state.Given = $true; return $Job }.GetNewClosure()
+            $null = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -NextJobProvider $provider -SharedFunctionNames $sharedH `
+                -MaxParallel 1 -Cts $cts -ResultHandler { param($r) $results.Add($r) }.GetNewClosure()
+        } else {
+            $list = [System.Collections.Generic.List[hashtable]]::new()
+            $list.Add($Job)
+            $null = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -JobParams $list -SharedFunctionNames $sharedH `
+                -MaxParallel 1 -Cts $cts -ResultHandler { param($r) $results.Add($r) }.GetNewClosure()
+        }
+    } catch { $err = $_.ToString() }
+    $cts.Dispose()
+    return @{ Error = $err; Results = $results.Count }
+}
+$baseH = @{ JobId = 1; DelayMs = 0; DoFullLogging = $FullLogging; LogFile = $logFile; LogErrorFile = $logErrorFile; LogWarnFile = $logWarnFile }
+function New-ScenarioHJob { param([hashtable]$Extra) $j = $baseH.Clone(); foreach ($k in $Extra.Keys) { $j[$k] = $Extra[$k] }; return $j }
+
+$h1 = Invoke-ScenarioHJobs -Job (New-ScenarioHJob @{ Callback = { 1 } })
+Test-Assert ($null -ne $h1.Error -and $h1.Error -match "'Callback'" -and $h1.Error -match '\[scriptblock\]::Create') ("a -JobParams scriptblock value throws, naming the key and the workaround (got: " + $h1.Error + ")")
+Test-Assert ($h1.Results -eq 0) "no worker ran for the refused -JobParams list"
+$h2 = Invoke-ScenarioHJobs -Job (New-ScenarioHJob @{ Steps = @('a', { 2 }) })
+Test-Assert ($null -ne $h2.Error -and $h2.Error -match "'Steps'") "a scriptblock inside an array job value is refused"
+$h3 = Invoke-ScenarioHJobs -Job (New-ScenarioHJob @{ Options = @{ OnDone = { 3 } } })
+Test-Assert ($null -ne $h3.Error -and $h3.Error -match "'Options'") "a scriptblock inside a hashtable job value is refused"
+$h4 = Invoke-ScenarioHJobs -Job (New-ScenarioHJob @{ Hook = { 4 } }) -UseProvider
+Test-Assert ($null -ne $h4.Error -and $h4.Error -match "'Hook'" -and $h4.Results -eq 0) "a scriptblock in a -NextJobProvider job is refused before that job runs"
+$h5 = Invoke-ScenarioHJobs -Job (New-ScenarioHJob @{ Code = '{ 5 }'; Names = @('x', 'y'); Map = @{ K = 'v' } })
+Test-Assert ($null -eq $h5.Error -and $h5.Results -eq 1) ("plain data, including code passed as a string, still runs (error: " + $h5.Error + ", results: " + $h5.Results + ")")
+$h6 = Invoke-ScenarioHJobs -Job (New-ScenarioHJob @{ Steps = @(@{ Run = { 6 } }) })
+Test-Assert ($null -ne $h6.Error -and $h6.Error -match "'Steps'") "a scriptblock two levels down (an array of hashtables) is refused"
+$h7 = Invoke-ScenarioHJobs -Job (New-ScenarioHJob @{ Config = [pscustomobject]@{ Name = 'x'; OnDone = { 7 } } })
+Test-Assert ($null -ne $h7.Error -and $h7.Error -match "'Config'") "a scriptblock held in a [pscustomobject] property is refused"
+
+# Test doubles as PowerShell classes (built in memory - no Add-Type compile).
+class ZppCountingCollection : System.Collections.ICollection {
+    [int]$Enumerations
+    [int] get_Count() { return 2 }
+    [bool] get_IsSynchronized() { return $false }
+    [object] get_SyncRoot() { return $this }
+    [void] CopyTo([System.Array]$array, [int]$index) { }
+    [System.Collections.IEnumerator] GetEnumerator() { $this.Enumerations++; return @('a', 'b').GetEnumerator() }
+}
+class ZppThrowingCollection : System.Collections.ICollection {
+    [bool]$AsModified
+    ZppThrowingCollection([bool]$asModified) { $this.AsModified = $asModified }
+    [int] get_Count() { return 1 }
+    [bool] get_IsSynchronized() { return $false }
+    [object] get_SyncRoot() { return $this }
+    [void] CopyTo([System.Array]$array, [int]$index) { }
+    [System.Collections.IEnumerator] GetEnumerator() {
+        if ($this.AsModified) { throw [System.InvalidOperationException]::new('Collection was modified; enumeration operation may not execute.') }
+        throw [System.UnauthorizedAccessException]::new('simulated read failure')
+    }
+}
+
+# A collection shared by reference across jobs is read once per run, not
+# once per job: later jobs may run while workers are writing to it.
+$counterH = [ZppCountingCollection]::new()
+$seenH = [System.Collections.Generic.HashSet[object]]::new()
+$keysH = @(@(foreach ($i in 1..3) { Get-ZipJobScriptBlockKey -Job @{ JobId = $i; Shared = $counterH } -Seen $seenH }) | Where-Object { $null -ne $_ })
+Test-Assert ($keysH.Count -eq 0 -and $counterH.Enumerations -eq 1) ("a collection shared by three jobs is enumerated once, not per job (enumerated " + $counterH.Enumerations + " times)")
+
+# Same for a shared [pscustomobject]: its properties are read once.
+$probeH = @{ Reads = 0 }
+$sharedObjH = [pscustomobject]@{ Name = 'shared' }
+$sharedObjH | Add-Member -MemberType ScriptProperty -Name Probe -Value { $probeH.Reads++; 'x' }.GetNewClosure()
+$seenH2 = [System.Collections.Generic.HashSet[object]]::new()
+foreach ($i in 1..3) { $null = Get-ZipJobScriptBlockKey -Job @{ JobId = $i; State = $sharedObjH } -Seen $seenH2 }
+Test-Assert ($probeH.Reads -eq 1) ("a [pscustomobject] shared by three jobs is read once, not per job (read " + $probeH.Reads + " times)")
+
+# A consuming enumerable is left alone - reading it would take the items
+# the worker is meant to get.
+$queueH = [System.Collections.Concurrent.BlockingCollection[object]]::new()
+$queueH.Add('first'); $queueH.Add('second'); $queueH.CompleteAdding()
+$null = Get-ZipJobScriptBlockKey -Job @{ JobId = 1; Work = $queueH.GetConsumingEnumerable() } -Seen ([System.Collections.Generic.HashSet[object]]::new())
+Test-Assert ($queueH.Count -eq 2) ("checking a job doesn't consume a GetConsumingEnumerable() value (" + $queueH.Count + " of 2 items left)")
+
+# Scriptblocks inside struct entries (KeyValuePair) are found.
+$pairsH = [System.Collections.Generic.List[System.Collections.Generic.KeyValuePair[string,object]]]::new()
+$pairsH.Add([System.Collections.Generic.KeyValuePair[string,object]]::new('plain', 1))
+$pairsH.Add([System.Collections.Generic.KeyValuePair[string,object]]::new('hook', { 10 }))
+$kvpKeyH = Get-ZipJobScriptBlockKey -Job @{ JobId = 1; Pairs = $pairsH } -Seen ([System.Collections.Generic.HashSet[object]]::new())
+Test-Assert ($kvpKeyH -eq 'Pairs') ("a scriptblock in a KeyValuePair's value is found (got: " + $kvpKeyH + ")")
+
+# A collection being modified is let through; any other read failure is
+# reported, naming the key, instead of silently passing.
+$modifiedKeyH = Get-ZipJobScriptBlockKey -Job @{ JobId = 1; Busy = [ZppThrowingCollection]::new($true) } -Seen ([System.Collections.Generic.HashSet[object]]::new())
+Test-Assert ($null -eq $modifiedKeyH) "a collection that's being modified (InvalidOperationException) is let through"
+$readErrH = $null
+try { $null = Get-ZipJobScriptBlockKey -Job @{ JobId = 1; Broken = [ZppThrowingCollection]::new($false) } -Seen ([System.Collections.Generic.HashSet[object]]::new()) } catch { $readErrH = $_.ToString() }
+Test-Assert ($null -ne $readErrH -and $readErrH -match "'Broken'" -and $readErrH -match 'simulated read failure') ("any other read failure is reported with the key and the cause (got: " + $readErrH + ")")
+
+# A provider job refused mid-run lets the jobs already running finish
+# normally, then throws - it doesn't stop them or cancel the caller's token.
+$resultsH9 = [System.Collections.Generic.List[hashtable]]::new()
+$ctsH9 = [System.Threading.CancellationTokenSource]::new()
+$stateH9 = @{ N = 0 }
+$providerH9 = {
+    $stateH9.N++
+    if ($stateH9.N -eq 1) { return (New-ScenarioHJob @{ JobId = 1; DelayMs = 800 }) }
+    if ($stateH9.N -eq 2) { return (New-ScenarioHJob @{ JobId = 2; Hook = { 9 } }) }
+    return $null
+}
+$errH9 = $null
+try {
+    $null = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -NextJobProvider $providerH9 -SharedFunctionNames $sharedH `
+        -MaxParallel 2 -Cts $ctsH9 -ResultHandler { param($r) $resultsH9.Add($r) }
+} catch { $errH9 = $_.ToString() }
+Test-Assert ($null -ne $errH9 -and $errH9 -match "'Hook'") "a provider job refused mid-run still makes the call throw"
+Test-Assert ($resultsH9.Count -eq 1 -and -not $ctsH9.Token.IsCancellationRequested) ("the job already running finished and reported, and the caller's token wasn't cancelled (results " + $resultsH9.Count + ", cancelled " + $ctsH9.Token.IsCancellationRequested + ")")
+$ctsH9.Dispose()
+Reset-HarnessAbortState
+Write-Host ""
+
+# ==============================================================================
 #  Summary
 # ==============================================================================
 Write-Host "==============================================="

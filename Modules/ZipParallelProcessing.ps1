@@ -1,5 +1,63 @@
 # See module-descriptions.md for this module's full description.
 
+function Test-ZipJobValueIsMaterializedCollection {
+    param($Value)
+    if ($Value -is [System.Collections.ICollection]) { return $true }
+    foreach ($i in $Value.GetType().GetInterfaces()) {
+        if ($i.IsGenericType) {
+            $def = $i.GetGenericTypeDefinition()
+            if ($def -eq [System.Collections.Generic.ICollection`1] -or $def -eq [System.Collections.Generic.IReadOnlyCollection`1]) { return $true }
+        }
+    }
+    return $false
+}
+
+function Test-ZipJobValueHasScriptBlock {
+    param($Value, [System.Collections.Generic.HashSet[object]]$Seen, [int]$Depth)
+    if ($null -eq $Value) { return $false }
+    if ($Value -is [scriptblock]) { return $true }
+    if ($Depth -ge 4 -or $Value -is [string]) { return $false }
+    $type = $Value.GetType()
+    $itemsAreProperties = $false
+    if ($Value -is [System.Collections.DictionaryEntry] -or
+        ($type.IsGenericType -and $type.GetGenericTypeDefinition() -eq [System.Collections.Generic.KeyValuePair`2])) {
+        $items = @($Value.Key, $Value.Value)
+    } elseif ($Value -is [System.Management.Automation.PSCustomObject]) {
+        if (-not $Seen.Add($Value)) { return $false }
+        $items = $Value.PSObject.Properties
+        $itemsAreProperties = $true
+    } elseif ($Value -is [System.Collections.IEnumerable] -and (Test-ZipJobValueIsMaterializedCollection -Value $Value)) {
+        if (-not $type.IsValueType -and -not $Seen.Add($Value)) { return $false }
+        if ($Value -is [System.Collections.IDictionary]) { $items = $Value.Values } else { $items = $Value }
+    } else {
+        return $false
+    }
+    try {
+        foreach ($item in $items) {
+            if ($itemsAreProperties) { $item = $item.Value }
+            if (Test-ZipJobValueHasScriptBlock -Value $item -Seen $Seen -Depth ($Depth + 1)) { return $true }
+        }
+    } catch [System.InvalidOperationException] {
+        # "Collection was modified": something else is writing to it right
+        # now, so it can't be read safely. Let it through unchecked rather
+        # than fail the run over it.
+    }
+    return $false
+}
+
+function Get-ZipJobScriptBlockKey {
+    param([hashtable]$Job, [System.Collections.Generic.HashSet[object]]$Seen)
+    foreach ($key in $Job.Keys) {
+        try {
+            $found = Test-ZipJobValueHasScriptBlock -Value $Job[$key] -Seen $Seen -Depth 0
+        } catch {
+            throw ("Invoke-ZipParallelProcessing: couldn't check job parameter '" + $key + "' for scriptblocks - reading it failed: " + $_)
+        }
+        if ($found) { return [string]$key }
+    }
+    return $null
+}
+
 function Invoke-ZipParallelProcessing {
     param(
         [Parameter(Mandatory)]
@@ -26,6 +84,16 @@ function Invoke-ZipParallelProcessing {
     }
 
     if ($null -ne $JobParams -and $JobParams.Count -eq 0) { return @{ ForceStoppedCount = 0 } }
+
+    $scriptBlockJobError = "Invoke-ZipParallelProcessing: job parameter '{0}' is (or contains) a scriptblock. A scriptblock belongs to the runspace that created it, and run inside a worker it can deadlock or crash the process. Pass plain data instead, or pass the code as a string and build it inside the worker with [scriptblock]::Create()."
+    $checkedJobValues = [System.Collections.Generic.HashSet[object]]::new()
+    $refusedJobError = $null
+    if ($null -ne $JobParams) {
+        foreach ($job in $JobParams) {
+            $badKey = Get-ZipJobScriptBlockKey -Job $job -Seen $checkedJobValues
+            if ($null -ne $badKey) { throw ($scriptBlockJobError -f $badKey) }
+        }
+    }
 
     $fixedListIndex = 0
 
@@ -68,6 +136,10 @@ function Invoke-ZipParallelProcessing {
                     }
                 } else {
                     $nextJob = & $NextJobProvider
+                    if ($null -ne $nextJob) {
+                        $badKey = Get-ZipJobScriptBlockKey -Job $nextJob -Seen $checkedJobValues
+                        if ($null -ne $badKey) { $refusedJobError = $scriptBlockJobError -f $badKey; $nextJob = $null }
+                    }
                 }
                 if ($null -eq $nextJob) { $scanExhausted = $true; break }
 
@@ -131,6 +203,7 @@ function Invoke-ZipParallelProcessing {
 
         Flush-ConsoleQueue -Queue $localConsoleQueue
         if ($null -ne $PollCallback) { $null = & $PollCallback }
+        if ($null -ne $refusedJobError) { throw $refusedJobError }
     } finally {
         # A worker stuck inside a .NET call can't be stopped, and Stop()/
         # Dispose()/Close() would all sit and wait for it, so an abandoned worker may keep running.
