@@ -541,7 +541,7 @@ Show-Findings -Findings @($rule6)
 Write-Host ""
 
 # ------------------------------------------------------------------------
-#  Rule 7: a scriptblock variable handed to .NET on a runspace-reachable path
+#  Rule 7: a scriptblock handed to .NET or stored into shared state on a runspace-reachable path
 # ------------------------------------------------------------------------
 # A scriptblock belongs to the runspace that created it. Run on another
 # runspace's thread, every scriptblock PowerShell runs inside it (a
@@ -555,15 +555,17 @@ Write-Host ""
 #   - as a job parameter. Invoke-ZipParallelProcessing refuses those at
 #     runtime (Get-ZipJobScriptBlockKey), so every harness or real run
 #     that dispatches a job already catches it - no static check here.
-#   - through .NET: runspace-reachable code passing a scriptblock to a .NET
-#     method or constructor ($dict.TryAdd($k, $sb),
-#     [System.Lazy[object]]::new($Factory)). .NET receives a delegate, or
-#     stores it where another runspace can run it. This rule flags a
-#     variable holding one - assigned a scriptblock literal, or a
-#     [scriptblock]-typed parameter. Rule 8 covers the literal and cast
-#     forms of the same thing.
+#   - through .NET or shared state: runspace-reachable code passing a
+#     scriptblock to a .NET method or constructor ($dict.TryAdd($k, $sb),
+#     [System.Lazy[object]]::new($Factory)), or storing one into a
+#     collection or object it didn't create itself ($Cache[$k] = $sb,
+#     $Slot.Factory = { ... }) - a parameter or outer variable, so
+#     possibly shared with the other engine. This rule flags a variable
+#     holding a scriptblock (assigned a scriptblock literal, or a
+#     [scriptblock]-typed parameter) passed to .NET, and any scriptblock
+#     value stored that way. Rule 8 covers literals and casts passed to .NET.
 # Add "# lint:ignore" on the line for a deliberate exception.
-Write-Host "=== Lint: scriptblock variable handed to .NET on a runspace-reachable path ===" -ForegroundColor Cyan
+Write-Host "=== Lint: scriptblock handed to .NET or stored into shared state on a runspace-reachable path ===" -ForegroundColor Cyan
 
 function Get-ScriptBlockVariableNames {
     param($AstNode)
@@ -591,7 +593,6 @@ $scriptBlockArgFinder = {
     param($AstNode)
     $found = [System.Collections.Generic.List[object]]::new()
     $sbVarNames = Get-ScriptBlockVariableNames -AstNode $AstNode
-    if ($sbVarNames.Count -eq 0) { return ,$found }
     foreach ($call in $AstNode.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)) {
         if ($null -eq $call.Arguments) { continue }
         $memberName = [string]$call.Member.Extent.Text
@@ -603,13 +604,37 @@ $scriptBlockArgFinder = {
             }
         }
     }
+    # Stores: $x[...] = <scriptblock> / $x.Prop = <scriptblock>, where $x
+    # isn't a variable this code assigns itself (a local container is fine).
+    $localNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($assign in $AstNode.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
+        if ($assign.Left -is [System.Management.Automation.Language.VariableExpressionAst]) { $null = $localNames.Add($assign.Left.VariablePath.UserPath) }
+    }
+    foreach ($assign in $AstNode.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
+        $target = $assign.Left
+        if ($target -isnot [System.Management.Automation.Language.IndexExpressionAst] -and
+            $target -isnot [System.Management.Automation.Language.MemberExpressionAst]) { continue }
+        if ($assign.Right -isnot [System.Management.Automation.Language.CommandExpressionAst]) { continue }
+        $value = $assign.Right.Expression
+        if ($value -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $value.Member.Extent.Text -eq 'GetNewClosure') { $value = $value.Expression }
+        $isScriptBlock = ($value -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) -or
+            ($value -is [System.Management.Automation.Language.VariableExpressionAst] -and $sbVarNames.Contains($value.VariablePath.UserPath))
+        if (-not $isScriptBlock) { continue }
+        $root = $target
+        while ($root -is [System.Management.Automation.Language.IndexExpressionAst] -or $root -is [System.Management.Automation.Language.MemberExpressionAst]) {
+            if ($root -is [System.Management.Automation.Language.IndexExpressionAst]) { $root = $root.Target } else { $root = $root.Expression }
+        }
+        if ($root -is [System.Management.Automation.Language.VariableExpressionAst] -and $localNames.Contains($root.VariablePath.UserPath)) { continue }
+        if ($assign.Extent.StartScriptPosition.Line -match '#\s*lint:ignore') { continue }
+        $found.Add(@{ Line = $assign.Extent.StartLineNumber; What = ("stores a scriptblock into " + $target.Extent.Text + ", which it didn't create") })
+    }
     return ,$found
 }
 
 # Proves the finder fires, since nothing in the real code trips it.
 $rule7SampleText = @'
 function Sample-Worker {
-    param([scriptblock]$Factory, [string]$Name)
+    param([scriptblock]$Factory, [string]$Name, $Cache)
     $built = { 3 }.GetNewClosure()
     $result = { 4 }.Invoke()
     $lazy = [System.Lazy[object]]::new($Factory)
@@ -618,6 +643,11 @@ function Sample-Worker {
     $null = $dict.TryAdd('k', $result)
     $e = @(1, 2).Where($built)
     $null = $dict.TryAdd('k', $built)   # lint:ignore - sample
+    $Cache['k'] = $Factory
+    $Cache.Hook = { 5 }.GetNewClosure()
+    $local = @{}
+    $local['k'] = $built
+    $Cache['n'] = $Name
 }
 '@
 $rule7SampleAst = [System.Management.Automation.Language.Parser]::ParseInput($rule7SampleText, [ref]$null, [ref]$null)
@@ -625,10 +655,12 @@ $rule7Sample = & $scriptBlockArgFinder $rule7SampleAst
 $rule7SampleLines = @($rule7Sample | ForEach-Object { $_.Line })
 Test-Assert ($rule7SampleLines -contains 5) "Rule 7 flags a [scriptblock] parameter passed to a constructor ([System.Lazy]::new(`$Factory))"
 Test-Assert ($rule7SampleLines -contains 6) "Rule 7 flags a .GetNewClosure()'d scriptblock variable stored through a .NET method (TryAdd)"
-Test-Assert ($rule7Sample.Count -eq 2) ("Rule 7 leaves a plain parameter, a scriptblock's .Invoke() result, .Where() and a lint:ignore'd line alone (flagged " + $rule7Sample.Count + ", expected 2)")
+Test-Assert ($rule7SampleLines -contains 11) "Rule 7 flags a scriptblock stored through an indexer on a container it didn't create (`$Cache['k'] = `$Factory)"
+Test-Assert ($rule7SampleLines -contains 12) "Rule 7 flags a scriptblock literal stored into a property of a container it didn't create (`$Cache.Hook = { }.GetNewClosure())"
+Test-Assert ($rule7Sample.Count -eq 4) ("Rule 7 leaves a plain parameter, a scriptblock's .Invoke() result, .Where(), a lint:ignore'd line, a local container and a plain stored value alone (flagged " + $rule7Sample.Count + ", expected 4)")
 
 $rule7 = Get-RunspaceReachableFindings -Finder $scriptBlockArgFinder
-Test-Assert (@($rule7).Count -eq 0) "no runspace-reachable function or worker body passes a scriptblock variable to .NET"
+Test-Assert (@($rule7).Count -eq 0) "no runspace-reachable function or worker body passes a scriptblock to .NET or stores one into a container it didn't create"
 Show-Findings -Findings @($rule7)
 Write-Host ""
 
@@ -716,22 +748,53 @@ Write-Host ""
 # a reason.
 Write-Host "=== Lint: host cmdlet on a runspace-reachable path ===" -ForegroundColor Cyan
 
+# The same goes for writing to the console directly: [Console]::... and
+# $Host.UI. Those go in the allow-list as '[Console]' and '$Host.UI'.
 $hostCmdletNames = @('Write-Host', 'Read-Host', 'Out-Host', 'Clear-Host', 'Get-Credential', 'Out-GridView')
+# Aliases (cls, clear, oh, ogv, ...) resolve to the cmdlet they stand for.
+$hostCmdletByName = @{}
+foreach ($n in $hostCmdletNames) { $hostCmdletByName[$n] = $n }
+foreach ($a in @(Get-Alias -Definition $hostCmdletNames -ErrorAction SilentlyContinue)) { $hostCmdletByName[$a.Name] = $a.Definition }
 $hostCmdletFinder = {
     param($AstNode, $FunctionName)
     $found = [System.Collections.Generic.List[object]]::new()
+    $hits = [System.Collections.Generic.List[object]]::new()
     foreach ($c in $AstNode.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
         $cmdName = $c.GetCommandName()
-        if (-not $cmdName -or $hostCmdletNames -notcontains $cmdName) { continue }
-        if ($FunctionName -and (Test-IsHostCmdletAllowed -Function $FunctionName -Cmdlet $cmdName)) { continue }
-        if ($c.Extent.StartScriptPosition.Line -match '#\s*lint:ignore') { continue }
-        $found.Add(@{ Line = $c.Extent.StartLineNumber; What = ("calls host cmdlet " + $cmdName) })
+        if (-not $cmdName -or -not $hostCmdletByName.ContainsKey($cmdName)) { continue }
+        $hits.Add(@{ Ast = $c; Name = $hostCmdletByName[$cmdName]; What = ("calls host cmdlet " + $cmdName) })
+    }
+    foreach ($m in $AstNode.FindAll({ param($n) $n -is [System.Management.Automation.Language.MemberExpressionAst] }, $true)) {
+        if ($m.Static -and $m.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
+            $m.Expression.TypeName.FullName -match '^(System\.)?Console$') {
+            $hits.Add(@{ Ast = $m; Name = '[Console]'; What = ("uses [Console]::" + $m.Member.Extent.Text) })
+        } elseif ($m.Expression -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                  $m.Expression.VariablePath.UserPath -match '^(global:)?Host$' -and $m.Member.Extent.Text -eq 'UI') {
+            $hits.Add(@{ Ast = $m; Name = '$Host.UI'; What = "uses `$Host.UI" })
+        }
+    }
+    foreach ($h in $hits) {
+        if ($FunctionName -and (Test-IsHostCmdletAllowed -Function $FunctionName -Cmdlet $h.Name)) { continue }
+        if ($h.Ast.Extent.StartScriptPosition.Line -match '#\s*lint:ignore') { continue }
+        $found.Add(@{ Line = $h.Ast.Extent.StartLineNumber; What = $h.What })
     }
     return ,$found
 }
-$rule9SampleAst = [System.Management.Automation.Language.Parser]::ParseInput("function Sample-Worker {`n    Write-Host 'x'`n    `$a = Read-Host`n    Write-Output 'y'`n}", [ref]$null, [ref]$null)
+$rule9SampleText = @'
+function Sample-Worker {
+    Write-Host 'x'
+    $a = Read-Host
+    Write-Output 'y'
+    cls
+    [Console]::WriteLine('z')
+    $Host.UI.WriteLine('w')
+    $width = $Host.Name
+}
+'@
+$rule9SampleAst = [System.Management.Automation.Language.Parser]::ParseInput($rule9SampleText, [ref]$null, [ref]$null)
 $rule9Sample = & $hostCmdletFinder $rule9SampleAst 'Sample-Worker'
-Test-Assert ((@($rule9Sample | ForEach-Object { $_.Line }) -join ',') -eq '2,3') "Rule 9 flags Write-Host and Read-Host, and leaves Write-Output alone"
+$rule9SampleLines = @($rule9Sample | ForEach-Object { $_.Line } | Sort-Object)
+Test-Assert (($rule9SampleLines -join ',') -eq '2,3,5,6,7') ("Rule 9 flags Write-Host, Read-Host, an alias (cls), [Console]:: and `$Host.UI, and leaves Write-Output and other `$Host members alone (flagged lines " + ($rule9SampleLines -join ',') + ", expected 2,3,5,6,7)")
 
 $rule9 = Get-RunspaceReachableFindings -Finder $hostCmdletFinder
 Test-Assert (@($rule9).Count -eq 0) "no runspace-reachable function or worker body calls a host cmdlet"

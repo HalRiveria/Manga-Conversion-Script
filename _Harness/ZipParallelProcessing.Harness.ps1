@@ -576,6 +576,45 @@ $h4 = Invoke-ScenarioHJobs -Job (New-ScenarioHJob @{ Hook = { 4 } }) -UseProvide
 Test-Assert ($null -ne $h4.Error -and $h4.Error -match "'Hook'" -and $h4.Results -eq 0) "a scriptblock in a -NextJobProvider job is refused before that job runs"
 $h5 = Invoke-ScenarioHJobs -Job (New-ScenarioHJob @{ Code = '{ 5 }'; Names = @('x', 'y'); Map = @{ K = 'v' } })
 Test-Assert ($null -eq $h5.Error -and $h5.Results -eq 1) ("plain data, including code passed as a string, still runs (error: " + $h5.Error + ", results: " + $h5.Results + ")")
+$h6 = Invoke-ScenarioHJobs -Job (New-ScenarioHJob @{ Steps = @(@{ Run = { 6 } }) })
+Test-Assert ($null -ne $h6.Error -and $h6.Error -match "'Steps'") "a scriptblock two levels down (an array of hashtables) is refused"
+$h7 = Invoke-ScenarioHJobs -Job (New-ScenarioHJob @{ Config = [pscustomobject]@{ Name = 'x'; OnDone = { 7 } } })
+Test-Assert ($null -ne $h7.Error -and $h7.Error -match "'Config'") "a scriptblock held in a [pscustomobject] property is refused"
+
+# A collection shared by reference across jobs is read once per run, not
+# once per job: later jobs may run while workers are writing to it.
+if (-not ([System.Management.Automation.PSTypeName]'ZppEnumerationCounter').Type) {
+    Add-Type -TypeDefinition @'
+public class ZppEnumerationCounter : System.Collections.IEnumerable {
+    public int Enumerations;
+    public System.Collections.IEnumerator GetEnumerator() { Enumerations++; return new object[] { "a", "b" }.GetEnumerator(); }
+}
+'@
+}
+$counterH = [ZppEnumerationCounter]::new()
+$seenH = [System.Collections.Generic.HashSet[object]]::new()
+$keysH = @(@(foreach ($i in 1..3) { Get-ZipJobScriptBlockKey -Job @{ JobId = $i; Shared = $counterH } -Seen $seenH }) | Where-Object { $null -ne $_ })
+Test-Assert ($keysH.Count -eq 0 -and $counterH.Enumerations -eq 1) ("a collection shared by three jobs is enumerated once, not per job (enumerated " + $counterH.Enumerations + " times)")
+
+# A provider job refused mid-run lets the jobs already running finish
+# normally, then throws - it doesn't stop them or cancel the caller's token.
+$resultsH9 = [System.Collections.Generic.List[hashtable]]::new()
+$ctsH9 = [System.Threading.CancellationTokenSource]::new()
+$stateH9 = @{ N = 0 }
+$providerH9 = {
+    $stateH9.N++
+    if ($stateH9.N -eq 1) { return (New-ScenarioHJob @{ JobId = 1; DelayMs = 800 }) }
+    if ($stateH9.N -eq 2) { return (New-ScenarioHJob @{ JobId = 2; Hook = { 9 } }) }
+    return $null
+}
+$errH9 = $null
+try {
+    $null = Invoke-ZipParallelProcessing -WorkerScript $fakeWorkerOk -NextJobProvider $providerH9 -SharedFunctionNames $sharedH `
+        -MaxParallel 2 -Cts $ctsH9 -ResultHandler { param($r) $resultsH9.Add($r) }
+} catch { $errH9 = $_.ToString() }
+Test-Assert ($null -ne $errH9 -and $errH9 -match "'Hook'") "a provider job refused mid-run still makes the call throw"
+Test-Assert ($resultsH9.Count -eq 1 -and -not $ctsH9.Token.IsCancellationRequested) ("the job already running finished and reported, and the caller's token wasn't cancelled (results " + $resultsH9.Count + ", cancelled " + $ctsH9.Token.IsCancellationRequested + ")")
+$ctsH9.Dispose()
 Reset-HarnessAbortState
 Write-Host ""
 

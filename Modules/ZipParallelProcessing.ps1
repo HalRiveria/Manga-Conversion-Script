@@ -1,16 +1,31 @@
 # See module-descriptions.md for this module's full description.
 
-function Get-ZipJobScriptBlockKey {
-    param([hashtable]$Job)
-    foreach ($key in $Job.Keys) {
-        $value = $Job[$key]
-        if ($value -is [scriptblock]) { return [string]$key }
-        $inner = $null
-        if ($value -is [System.Collections.IDictionary]) { $inner = $value.Values }
-        elseif ($value -is [System.Collections.IEnumerable] -and $value -isnot [string]) { $inner = $value }
-        if ($null -ne $inner) {
-            foreach ($item in $inner) { if ($item -is [scriptblock]) { return [string]$key } }
+function Test-ZipJobValueHasScriptBlock {
+    param($Value, [System.Collections.Generic.HashSet[object]]$Seen, [int]$Depth)
+    if ($null -eq $Value) { return $false }
+    if ($Value -is [scriptblock]) { return $true }
+    if ($Depth -ge 4 -or $Value -is [string] -or $Value -is [System.ValueType]) { return $false }
+    $isCustomObject = $Value -is [System.Management.Automation.PSCustomObject]
+    if (-not $isCustomObject -and $Value -isnot [System.Collections.IEnumerable]) { return $false }
+    if (-not $isCustomObject -and -not $Seen.Add($Value)) { return $false }
+    try {
+        if ($isCustomObject) { $items = foreach ($p in $Value.PSObject.Properties) { $p.Value } }
+        elseif ($Value -is [System.Collections.IDictionary]) { $items = $Value.Values }
+        else { $items = $Value }
+        foreach ($item in $items) {
+            if (Test-ZipJobValueHasScriptBlock -Value $item -Seen $Seen -Depth ($Depth + 1)) { return $true }
         }
+    } catch {
+        # A collection something else is writing to right now can't be read
+        # safely; let it through unchecked rather than fail the run over it.
+    }
+    return $false
+}
+
+function Get-ZipJobScriptBlockKey {
+    param([hashtable]$Job, [System.Collections.Generic.HashSet[object]]$Seen)
+    foreach ($key in $Job.Keys) {
+        if (Test-ZipJobValueHasScriptBlock -Value $Job[$key] -Seen $Seen -Depth 0) { return [string]$key }
     }
     return $null
 }
@@ -43,9 +58,11 @@ function Invoke-ZipParallelProcessing {
     if ($null -ne $JobParams -and $JobParams.Count -eq 0) { return @{ ForceStoppedCount = 0 } }
 
     $scriptBlockJobError = "Invoke-ZipParallelProcessing: job parameter '{0}' is (or contains) a scriptblock. A scriptblock belongs to the runspace that created it, and run inside a worker it can deadlock or crash the process. Pass plain data instead, or pass the code as a string and build it inside the worker with [scriptblock]::Create()."
+    $checkedJobValues = [System.Collections.Generic.HashSet[object]]::new()
+    $refusedJobError = $null
     if ($null -ne $JobParams) {
         foreach ($job in $JobParams) {
-            $badKey = Get-ZipJobScriptBlockKey -Job $job
+            $badKey = Get-ZipJobScriptBlockKey -Job $job -Seen $checkedJobValues
             if ($null -ne $badKey) { throw ($scriptBlockJobError -f $badKey) }
         }
     }
@@ -92,8 +109,8 @@ function Invoke-ZipParallelProcessing {
                 } else {
                     $nextJob = & $NextJobProvider
                     if ($null -ne $nextJob) {
-                        $badKey = Get-ZipJobScriptBlockKey -Job $nextJob
-                        if ($null -ne $badKey) { throw ($scriptBlockJobError -f $badKey) }
+                        $badKey = Get-ZipJobScriptBlockKey -Job $nextJob -Seen $checkedJobValues
+                        if ($null -ne $badKey) { $refusedJobError = $scriptBlockJobError -f $badKey; $nextJob = $null }
                     }
                 }
                 if ($null -eq $nextJob) { $scanExhausted = $true; break }
@@ -158,6 +175,7 @@ function Invoke-ZipParallelProcessing {
 
         Flush-ConsoleQueue -Queue $localConsoleQueue
         if ($null -ne $PollCallback) { $null = & $PollCallback }
+        if ($null -ne $refusedJobError) { throw $refusedJobError }
     } finally {
         # A worker stuck inside a .NET call can't be stopped, and Stop()/
         # Dispose()/Close() would all sit and wait for it, so an abandoned worker may keep running.
